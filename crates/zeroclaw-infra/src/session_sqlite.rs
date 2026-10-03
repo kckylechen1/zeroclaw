@@ -10,6 +10,8 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use zeroclaw_api::model_provider::ChatMessage;
 
+mod delegation;
+
 /// Request receipts kept per session (see `record_request`).
 const REQUEST_RECEIPTS_PER_SESSION: i64 = 256;
 /// Hard bound on the whole `session_requests` table. Session keys are
@@ -31,12 +33,13 @@ impl SqliteSessionBackend {
         std::fs::create_dir_all(&sessions_dir).context("Failed to create sessions directory")?;
         let db_path = sessions_dir.join("sessions.db");
 
-        let conn = Connection::open(&db_path)
+        let mut conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open session DB: {}", db_path.display()))?;
 
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;
              PRAGMA temp_store = MEMORY;
              PRAGMA mmap_size = 4194304;",
         )?;
@@ -69,6 +72,15 @@ impl SqliteSessionBackend {
                 PRIMARY KEY (session_key, request_id)
              );
 
+             CREATE TABLE IF NOT EXISTS session_delegations (
+                agent_alias    TEXT NOT NULL,
+                request_id     TEXT NOT NULL,
+                request_digest TEXT NOT NULL,
+                dispatch_id    TEXT,
+                route_digest   TEXT,
+                PRIMARY KEY (agent_alias, request_id)
+             );
+
              CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
                 session_key, content, content=sessions, content_rowid=id
              );
@@ -89,6 +101,8 @@ impl SqliteSessionBackend {
              END;",
         )
         .context("Failed to initialize session schema")?;
+
+        delegation::migrate_route_provenance(&mut conn)?;
 
         // Migration: add name column to existing databases
         let has_name: bool = conn
@@ -184,6 +198,7 @@ impl SqliteSessionBackend {
             [],
         );
 
+        crate::sqlite_perms::harden_sqlite_owner_only(&db_path);
         Ok(Self {
             conn: Mutex::new(conn),
         })

@@ -135,3 +135,12 @@ Before moving any tool out of core, the replacement must answer:
 If code proof is needed for a future slice, choose one low-blast-radius
 candidate from the Externalize later table and prove the replacement path
 without deleting the built-in tool in the same PR.
+
+## Tachi delegated work
+
+`tachi_start`, `tachi_status`, `tachi_result`, `tachi_cancel` and `tachi_watch`
+are built-in L2 control tools. They use Tachi profiles and the existing session
+request-binding store, with no local worker launch. They remain closed under
+`[tachi]` defaults and are excluded from L1 profiles. See
+[external work through Tachi](../agents/delegation.md#external-work-through-tachi)
+for their request, polling and recovery contract.

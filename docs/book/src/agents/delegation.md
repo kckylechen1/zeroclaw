@@ -4,6 +4,97 @@ A SubAgent is an **ephemeral child run** spawned by a parent agent. Under the fr
 
 There is no `[subagents.*]` block in the schema (the daemon-wide `[subagents]` coordinator-limit section retired with the control-plane migration wall); SubAgents are not a separate configuration concept.
 
+## External work through Tachi
+
+L2 work uses the thin `tachi_start`, `tachi_status`, `tachi_result`,
+`tachi_cancel`, and `tachi_watch` tools. Their execution settings come from
+owner-admitted `[tachi.harnesses]` profiles. They are included in minimal
+composition, but `[tachi]` stays disabled and its harness map empty by default.
+There is no local external-worker fallback; ordinary tools and L1 reasoning
+continue without Tachi.
+
+A start requires task-specific text, a harness alias, a truthful staffing
+reason, and a stable `request_id`. For example:
+
+```json
+{"request_id":"adapter-review-1","harness":"codex","task":"Review the Codex adapter on GitHub","staffing_reason":"explicit_user_request"}
+```
+
+Acceptance returns a canonical dispatch reference; it does not mean the work
+finished. Later operations use the same local request ID. `tachi_cancel`
+also requires the exact last-observed `expected_status_revision`.
+`tachi_watch` polls for 1–30 seconds; a nonterminal answer at its deadline is
+still running or waiting. It is not a push stream or a background notification.
+Use immediate status reads to keep chat and voice responsive.
+Status and watch preserve Tachi's `read_projection`: a canonical working receipt
+can coexist with orphaned execution, unavailable control, and unknown outcome.
+These recovery facts do not imply completion or trigger a replacement launch.
+
+For a successful MCP response, the first `content` block is Tachi's canonical
+JSON payload and must be a text block containing one complete JSON value.
+Tachi may append independent call diagnostics, including stuck warnings on
+cached reads; these later blocks never extend or replace the payload. Missing,
+non-text or malformed first blocks fail closed, including trailing garbage
+inside that block. Tool-error and JSON-RPC refusals remain failures; tool-error
+diagnostics retain all text blocks even when a block looks like a valid receipt.
+
+The existing SQLite session owner stores a request payload digest, immutable
+route fingerprint and dispatch reference in `sessions/sessions.db`; Tachi
+still owns execution state. The primary key is the true local agent alias plus
+`request_id`, regardless of endpoint, caller identity or project changes. The
+payload digest covers admitted arguments and their resolved harness profile;
+the separate route fingerprint records endpoint, protocol caller identity and
+project at admission. A claim is committed before a start is sent. Concurrent
+and repeated requests cannot resend that claim, including when the process
+restarts before the response is recorded. A known reference is replayed; reuse
+with changed arguments or route fails. A claim with no known reference
+is **unresolved**, not proof that the worker failed or never started. It is
+retained independently of chat history cleanup. Do not bypass it with a new ID;
+reconcile the dispatch with the owner in Tachi. Automatic reconciliation is
+unsupported because the current Staff facade has no request idempotency key.
+If session setup fails before any start is transmitted, its matching pending
+claim is released and the same request ID may safely retry. After transmission,
+an ambiguous outcome always retains the claim; a crash also remains conservative.
+SQLite WAL/NORMAL preserves process-crash safety, not a stronger power-loss
+guarantee. Delegation requires the SQLite session backend; JSONL chat remains
+supported without this capability.
+
+Existing route-hashed claim keys survive schema upgrade unchanged. A unique
+legacy row can be read or replayed only on its recorded route; unresolved rows
+never authorize another start. Multiple legacy claims for one agent/request
+require owner reconciliation. No legacy row is deleted, copied into a new claim,
+or merged with another agent's row. A legacy row without route evidence fails
+closed. Downgrading to a writer that keys claims by route is unsafe; a code revert
+does not restore the previous request-identity contract.
+
+The registry's runtime-selected data directory also owns its session stores.
+Live `data_dir` changes are refused before opening another ledger or sending a
+request. Restoring that directory preserves pending claims and accepted
+references. An operator storage move requires a stopped runtime, migration of
+the existing sessions database (including delegation claims), and restart;
+creating an empty ledger or scanning unrelated databases is not migration.
+
+Live Tachi routing and agent/card permissions are rechecked on each operation.
+A changed route cannot forward an old dispatch ID for read, result, watch or
+cancel: restore its admitted route or reconcile it with the owner in Tachi.
+Tasks and references leave the body with protocol caller identity and configured
+profile/project routing metadata. The tool never adds owner/persona identity,
+Soul, User Model, parent history, credentials, local tool handles or raw execution
+settings.
+Task and reference text pass through the same admission engine as typed intent
+composition, rejecting credential, command, placement and private-Dyad content
+before claims or transport. Ordinary harness and vendor mentions are allowed.
+The `tachi_result` response retains canonical `run_status` separately from the
+task facade's inferred state and management projection. Its report is untrusted
+worker evidence, with secret patterns scrubbed; it is not body acceptance or
+permission to change identity, secrets or policy. L1 profiles cannot grant these
+L2/control tools.
+
+This is #381's production tool slice. Real DSH execution, one-then-two-harness
+proof, automatic completion delivery through #63/#377, harness advisors and
+retirement of the duplicate driver remain separate acceptance work. The driver
+stays compiling until the replacement is proven.
+
 ## Which spawn tools exist
 
 - **`reasoning_subagent`**: the V1 bounded SubAgent entrypoint and the single spawn surface on every composition. Profile-admitted, typed `SubAgentReportV1` result, no ambient parent inheritance, no detached/background mode, no tool execution in the v1 child. See the [Tools overview](../tools/overview.md).

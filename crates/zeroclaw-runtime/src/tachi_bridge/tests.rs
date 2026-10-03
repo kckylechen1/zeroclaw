@@ -1365,9 +1365,19 @@ fn module_source_scans_hold() {
         "tachi_bridge/in_memory.rs",
         "tachi_bridge/staff.rs",
     ];
-    for file in module_files {
-        let source = std::fs::read_to_string(format!("{manifest_dir}/src/{file}"))
-            .unwrap_or_else(|error| panic!("read {file}: {error}"));
+    let sources = module_files
+        .into_iter()
+        .map(|file| format!("{manifest_dir}/src/{file}"))
+        .chain([
+            format!("{manifest_dir}/../zeroclaw-tools/src/tachi_staff.rs"),
+            format!("{manifest_dir}/../zeroclaw-tools/src/tachi_delegation.rs"),
+            format!("{manifest_dir}/../zeroclaw-tools/src/tachi_admission.rs"),
+            format!("{manifest_dir}/../zeroclaw-api/src/delegation_admission.rs"),
+            format!("{manifest_dir}/../zeroclaw-api/src/tachi_staff.rs"),
+        ]);
+    for file in sources {
+        let source =
+            std::fs::read_to_string(&file).unwrap_or_else(|error| panic!("read {file}: {error}"));
         for banned in [
             "std::process",
             "tokio::process",

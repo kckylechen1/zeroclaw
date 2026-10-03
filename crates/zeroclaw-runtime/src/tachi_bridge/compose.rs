@@ -23,10 +23,9 @@
 use std::collections::BTreeSet;
 
 use zeroclaw_api::taskintent::{
-    ApprovalRequirement, ArtifactExpectation, AttemptRef, BoundedText, Capability,
-    CapabilityRequest, EvaluationRequirement, ParentRunRef, PrivacyClass, RoutingPreference,
-    SCHEMA_TAG, SourceRef, SubAgentRunRef, TaskConstraint, TaskIntentV1, TaskRef, Timestamp,
-    WorkspaceSourceRef,
+    ApprovalRequirement, ArtifactExpectation, BoundedText, Capability, CapabilityRequest,
+    EvaluationRequirement, ParentRunRef, PrivacyClass, RoutingPreference, SCHEMA_TAG, SourceRef,
+    SubAgentRunRef, TaskConstraint, TaskIntentV1, TaskRef, Timestamp, WorkspaceSourceRef,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -115,36 +114,7 @@ pub enum ComposeRejection {
     SchemaTagMismatch,
 }
 
-/// TB-4 forbidden-content categories (mirrors the tachi host's
-/// `ForbiddenCategory` one-for-one so client pre-flight and host
-/// admission cannot disagree on vocabulary).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum ForbiddenCategory {
-    /// Raw credential-shaped value (API keys, tokens, private keys).
-    #[error("credential-shaped value")]
-    Credential,
-    /// Shell/SSH/tmux/container command text.
-    #[error("cli/shell command text")]
-    Command,
-    /// Worktree/filesystem path used as execution authority.
-    #[error("worktree-shaped path")]
-    WorktreePath,
-    /// Private-Dyad-labeled value.
-    #[error("private-dyad-labeled value")]
-    PrivateDyad,
-    /// Caller-minted task/attempt id smuggled as content.
-    #[error("caller-minted task/attempt id")]
-    CallerMintedRef,
-    /// Execution detail named as PROSE in a text-bearing value — a
-    /// worktree, cwd, tmux/SSH, sandbox, or CLI-flag token anywhere in the
-    /// text (vertical V2b discrimination list).
-    /// Client-side strict superset of the mirrored host categories: the
-    /// host law stays authoritative host-side; this layer exists so the
-    /// watershed dimensions are rejected before transport even when they
-    /// are not shaped like commands or paths.
-    #[error("execution detail named in text")]
-    ExecutionDetail,
-}
+pub use zeroclaw_api::delegation_admission::ForbiddenCategory;
 
 /// Compose failure that is not a policy/content rejection.
 #[derive(Debug, thiserror::Error)]
@@ -200,145 +170,16 @@ pub fn compose_intent(
 // Encode-side admission scan (TB-4 mirror of the tachi host law)
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Substrings whose presence in any text-bearing value is
-/// credential-shaped (TB-4 category 1). Byte-identical list to the tachi
-/// host's `CREDENTIAL_MARKERS`.
-const CREDENTIAL_MARKERS: &[&str] = &[
-    "-----BEGIN OPENSSH PRIVATE KEY",
-    "-----BEGIN RSA PRIVATE KEY",
-    "-----BEGIN PRIVATE KEY",
-    "-----BEGIN EC PRIVATE KEY",
-    "sk-ant-",
-    "sk-proj-",
-    "ghp_",
-    "github_pat_",
-    "gho_",
-    "xoxb-",
-    "xoxp-",
-    "AKIA",
-    "api_key=",
-    "apikey:",
-    "password=",
-    "bearer ",
-];
+pub use zeroclaw_tools::tachi_admission::WATERSHED_PLACEMENT_TOKENS;
 
-/// Leading tokens that make a value a shell/SSH/tmux/container command
-/// (TB-4 category 2; includes the harness CLI names the Parent must
-/// never place in an intent). Byte-identical list to the tachi host's
-/// `COMMAND_LEAD_TOKENS`.
-const COMMAND_LEAD_TOKENS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "ksh", "exec", "eval", "source", "sudo", "su", "ssh", "scp",
-    "sftp", "mosh", "telnet", "tmux", "screen", "docker", "podman", "kubectl", "nerdctl", "git",
-    "cargo", "npm", "pnpm", "yarn", "python", "python3", "node", "ruby", "codex", "claude",
-    "gemini", "opencode", "aider", "grok", "rm", "mv", "cp", "chmod", "chown", "curl", "wget",
-    "nc",
-];
-
-/// Markers that make a value a worktree/filesystem path (TB-4 category
-/// 3). Byte-identical list to the tachi host's `WORKTREE_MARKERS`.
-const WORKTREE_MARKERS: &[&str] = &[
-    "/worktrees/",
-    "worktree_path",
-    ".git/",
-    "/Users/",
-    "/home/",
-    "/tmp/",
-    "/var/folders/",
-    "\\.git\\",
-];
-
-/// Markers for Private-Dyad-labeled content (TB-4 category 4).
-const PRIVATE_DYAD_MARKERS: &[&str] = &["private dyad", "private_dyad", "private-dyad"];
-
-/// Execution-placement tokens banned ANYWHERE in a text-bearing value
-/// (vertical V2b discrimination list: worktree, tmux/SSH, sandbox flags,
-/// cwd — TB-4/TB-1). Word-boundary matched; `working directory` is
-/// phrase-matched because it is two words.
-pub(crate) const WATERSHED_PLACEMENT_TOKENS: &[&str] =
-    &["worktree", "tmux", "ssh", "sandbox", "cwd"];
-const WATERSHED_PLACEMENT_PHRASES: &[&str] = &["working directory"];
-
-/// Scan one text-bearing value against every forbidden category. Returns
-/// the first match by category order (same order as the host).
+/// Scan one typed value through the shared production delegation admission.
 pub fn scan_text(field: &'static str, value: &BoundedText) -> Result<(), ComposeRejection> {
     scan_str(field, value.as_str())
 }
 
-/// Category scan over a raw string (shared engine for [`scan_text`] and
-/// the ref-wire hardening below).
 fn scan_str(field: &'static str, text: &str) -> Result<(), ComposeRejection> {
-    let lower = text.to_ascii_lowercase();
-
-    for marker in CREDENTIAL_MARKERS {
-        if text.contains(marker) || lower.contains(&marker.to_ascii_lowercase()) {
-            return Err(forbid(ForbiddenCategory::Credential, field));
-        }
-    }
-    let first_token = lower.split_whitespace().next().unwrap_or("");
-    if COMMAND_LEAD_TOKENS.contains(&first_token) {
-        return Err(forbid(ForbiddenCategory::Command, field));
-    }
-    if lower.starts_with("./") || lower.starts_with('/') || lower.starts_with('~') {
-        return Err(forbid(ForbiddenCategory::WorktreePath, field));
-    }
-    for marker in WORKTREE_MARKERS {
-        if lower.contains(&marker.to_ascii_lowercase()) {
-            return Err(forbid(ForbiddenCategory::WorktreePath, field));
-        }
-    }
-    for marker in PRIVATE_DYAD_MARKERS {
-        if lower.contains(marker) {
-            return Err(forbid(ForbiddenCategory::PrivateDyad, field));
-        }
-    }
-    if text.contains(TaskRef::WIRE_PREFIX) || text.contains(AttemptRef::WIRE_PREFIX) {
-        return Err(forbid(ForbiddenCategory::CallerMintedRef, field));
-    }
-
-    // Client-side watershed layer (vertical V2b discrimination list).
-    // This is a deliberate STRICT SUPERSET of the mirrored host law:
-    // the host's five categories stay byte-identical above; this layer
-    // exists because the watershed dimensions are semantic, not
-    // shape-based — `name the model`, `use a worktree`, `pass --flag`
-    // are forbidden as PROSE, wherever they appear. The client may
-    // reject more than the host; it may never reject less.
-    //
-    // Vendor, model, and harness NAMES are deliberately not in this layer
-    // (ADR-017 §3): task text that mentions a harness is ordinary content.
-    // What a task may not do is choose its own execution placement, so the
-    // placement vocabulary and flags below stay banned.
-    for word in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
-        if WATERSHED_PLACEMENT_TOKENS.contains(&word) {
-            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
-        }
-    }
-    for phrase in WATERSHED_PLACEMENT_PHRASES {
-        if lower.contains(phrase) {
-            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
-        }
-    }
-    // Mid-string relative paths (`worktree ../feature-v2b`, `see
-    // ./docs/x`) — the prefix checks above only catch leading paths.
-    if lower.contains("../") || lower.contains(" ./") || lower.contains(" ~/") {
-        return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
-    }
-    // CLI flags (`--fast`, `-rf`, including parenthesized/quoted forms
-    // like `(--full-auto)`): any `--` run in the text is flag-shaped;
-    // beyond that, whitespace tokens with leading punctuation stripped
-    // that begin with `-` followed by a letter/digit are flag-shaped.
-    if lower.contains("--") {
-        return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
-    }
-    for token in lower.split_whitespace() {
-        let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
-        let stripped = trimmed.trim_start_matches('-');
-        if stripped.len() != trimmed.len()
-            && stripped.chars().next().is_some_and(char::is_alphanumeric)
-        {
-            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
-        }
-    }
-    Ok(())
+    zeroclaw_tools::tachi_admission::scan_text(text)
+        .map_err(|category| ComposeRejection::ForbiddenContent { category, field })
 }
 
 /// Scan EVERY text-bearing value of an intent (TB-4: "over every
@@ -369,10 +210,6 @@ pub fn scan_intent(intent: &TaskIntentV1) -> Result<(), ComposeRejection> {
         }
     }
     Ok(())
-}
-
-fn forbid(category: ForbiddenCategory, field: &'static str) -> ComposeRejection {
-    ComposeRejection::ForbiddenContent { category, field }
 }
 
 /// ZeroClaw-side hardening BEYOND the mirrored host law: scan the wire

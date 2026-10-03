@@ -65,8 +65,8 @@ impl Agent {
         .await
     }
 
-    /// Build a daemon-backed ACP/WS Agent whose structured-history cap follows
-    /// the shared config after reloads.
+    /// Build a daemon-backed ACP/WS Agent whose live tool policy and
+    /// structured-history cap follow the shared config after reloads.
     pub async fn from_live_config_with_session_cwd_and_mcp_backchannel(
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
@@ -229,7 +229,7 @@ impl Agent {
             config,
             false,
             tui_env,
-            None,
+            live_config.clone(),
             // Daemon direct-turn construction is a top-level origin: no
             // inherited lineage; the run mints its own root.
             None,
