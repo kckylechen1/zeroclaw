@@ -170,5 +170,6 @@ such as DSH, is configured or has passed an end-to-end run.
 
 Network proxy connection logic belongs to `zeroclaw-channels`, and SQLite memory
 schema migrations belong to `zeroclaw-memory`. Keeping these implementations out
-of `zeroclaw-config` removes its direct TLS, WebSocket, and SQLite dependencies;
-subsystems that use them still compile their own dependencies.
+of `zeroclaw-config` removes its explicit `rustls`, `tokio-rustls`, WebSocket, and
+SQLite dependency edges. The config crate's `reqwest` dependency still enables
+TLS transitively, and other subsystems retain the dependencies they use.
