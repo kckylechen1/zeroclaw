@@ -76,7 +76,7 @@ impl SqliteMemory {
              PRAGMA temp_store   = MEMORY;",
         )?;
         Self::init_schema(&conn)?;
-        zeroclaw_config::schema::v2::migrate_sqlite_memory_to_v3(&db_path, &conn)?;
+        crate::migration::migrate_sqlite_memory_to_v3(&db_path, &conn)?;
         Self::init_schema(&conn)?;
         Ok(Self {
             alias: alias.to_string(),
@@ -118,7 +118,7 @@ impl SqliteMemory {
         )?;
 
         Self::init_schema(&conn)?;
-        zeroclaw_config::schema::v2::migrate_sqlite_memory_to_v3(&db_path, &conn)?;
+        crate::migration::migrate_sqlite_memory_to_v3(&db_path, &conn)?;
         Self::init_schema(&conn)?;
 
         Ok(Self {
@@ -236,7 +236,7 @@ impl SqliteMemory {
         execute_batch_retry(
             conn,
             "-- Core memories table. This is an intermediate shape; the V3
-            -- migration in `zeroclaw_config::schema::v2::migrate_sqlite_memory_to_v3`
+            -- migration in `crate::migration::migrate_sqlite_memory_to_v3`
             -- rebuilds it with the `agent_id` column and a composite
             -- `UNIQUE (agent_id, key)` constraint immediately after init.
             CREATE TABLE IF NOT EXISTS memories (
@@ -2397,7 +2397,7 @@ impl Memory for SqliteMemory {
         let alias = alias.to_string();
         tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             let conn = conn.lock();
-            zeroclaw_config::schema::v2::sqlite_ensure_agent_uuid(&conn, &alias)
+            crate::migration::sqlite_ensure_agent_uuid(&conn, &alias)
         })
         .await?
     }

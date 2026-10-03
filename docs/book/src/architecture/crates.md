@@ -138,8 +138,37 @@ Derive macros for config schema, tool registration, and channel registration. Sa
 The microkernel roadmap (RFC #5574) defines a feature-flag taxonomy. The practical upshot for a user:
 
 - `default`: a sensible core build
+- `slim-control`: an opt-in personal-agent build with the agent runtime, gateway,
+  ACP server, webhook, WeChat, WeCom, and WeCom WebSocket channels
 - `ci-all`: everything on, for CI
 - `channel-<name>`: opt-in per channel (e.g. `channel-matrix`, `channel-discord`)
 - `gateway`, `whatsapp-web`: opt-in capability groups
 
 Providers are not feature-gated; they all compile in. Channel selection is the main per-build knob. Read the top-level `Cargo.toml` `[features]` table for the full list.
+
+Build the slim profile with defaults disabled:
+
+```sh
+cargo build --release --locked --no-default-features --features slim-control
+```
+
+Enabling `slim-control` without `--no-default-features` adds it to the standard
+build. The profile leaves the standard defaults and distribution feature policy
+unchanged. It omits SaaS integration families, schema export, and channels outside
+the selected set; configuration for uncompiled channels remains readable and is
+preserved when saved.
+
+The slim build keeps the body's conversation, context, local tools, and permission
+checks. External harness delegation uses the Tachi MCP client included in the
+agent runtime, following [ADR-017](./decisions/ADR-017-personal-agent-body-edges-and-delegation.md).
+The profile adds no local harness launcher or execution ledger. Delegation does
+not require the separate `memory-tachi` feature, which selects a memory backend.
+An enabled Tachi endpoint and admitted harness-to-profile mappings are still
+required. The production delegation entry point and watcher remain separate
+integration work. Building this profile does not prove that a particular harness,
+such as DSH, is configured or has passed an end-to-end run.
+
+Network proxy connection logic belongs to `zeroclaw-channels`, and SQLite memory
+schema migrations belong to `zeroclaw-memory`. Keeping these implementations out
+of `zeroclaw-config` removes its direct TLS, WebSocket, and SQLite dependencies;
+subsystems that use them still compile their own dependencies.

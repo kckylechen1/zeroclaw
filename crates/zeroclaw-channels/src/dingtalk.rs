@@ -212,7 +212,7 @@ impl Channel for DingTalkChannel {
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
             "connecting to stream WebSocket..."
         );
-        let (ws_stream, _) = zeroclaw_config::schema::ws_connect_with_proxy(
+        let (ws_stream, _) = crate::ws_proxy::ws_connect_with_proxy(
             &ws_url,
             "channel.dingtalk",
             self.proxy_url.as_deref(),
