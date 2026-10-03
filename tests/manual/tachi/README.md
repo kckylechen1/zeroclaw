@@ -22,7 +22,7 @@ python3 tests/manual/tachi/test_dsh_delegation.py \
 The fresh ZeroClaw config uses `composition = "minimal"`, memory `none`, one
 synthetic body provider, and only the five Tachi delegation tools. The scripted
 body calls start, replays the same request id, watches to terminal, then reads
-status and result. It verifies model visibility of all five tools; cancellation
+status and result. It requires exactly those five tools to be model-visible; cancellation
 is not exercised. The replay must return the same dispatch and create no second
 worker. A 300-second CLI deadline bounds the check; timeout does not cancel a
 separate Tachi worker, so the operator must inspect the retained dispatch receipt.
@@ -43,7 +43,9 @@ DSH delegation. The default mode always requires success.
 
 The script prints a private, retained temporary evidence directory containing
 the generated config, CLI stdout/stderr, and `proof.json` with observed tool
-receipts. Tachi's receipt directory must resolve inside `--tachi-home`; canonical
+receipts, including at most 8 KiB of each synthetic tool result before JSON
+parsing, so a production refusal remains inspectable. Tachi's receipt directory
+must resolve inside `--tachi-home`; canonical
 `status.json`, `trajectory.jsonl`, `result.md`, and `dsh-events.jsonl` stay there.
 It reads only these artifacts and status-directory names under that dedicated
 home. Review both directories when reporting the result. No user credential,

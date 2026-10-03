@@ -32,15 +32,17 @@ class Probe:
 
     def reply(self, request):
         visible = {item["function"]["name"] for item in request.get("tools", [])}
-        require(set(TOOLS) <= visible, "five Tachi tools are not model-visible")
+        require(set(TOOLS) == visible, "unexpected model-visible tool surface: " + json.dumps(sorted(visible)))
         if self.calls:
             messages = [m for m in request["messages"] if m["role"] == "tool"]
             require(messages, "production Agent returned no tool result")
             latest = messages[-1]
             require(latest["tool_call_id"] == self.calls[-1]["id"], "tool result id mismatch")
+            receipt = {"tool": self.calls[-1]["function"]["name"], "content": latest["content"][:8192]}
+            self.receipts.append(receipt)
             value = json.loads(latest["content"])
             require(value.get("request_id") == self.request_id, "request id mismatch")
-            self.receipts.append({"tool": self.calls[-1]["function"]["name"], "value": value})
+            receipt["value"] = value
         else:
             value = None
         if self.phase == 0:
