@@ -1383,7 +1383,7 @@ impl Channel for QQChannel {
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
             "connecting to gateway WebSocket..."
         );
-        let (ws_stream, _) = zeroclaw_config::schema::ws_connect_with_proxy(
+        let (ws_stream, _) = crate::ws_proxy::ws_connect_with_proxy(
             &gw_url,
             "channel.qq",
             self.proxy_url.as_deref(),

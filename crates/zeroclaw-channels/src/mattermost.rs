@@ -955,7 +955,7 @@ impl MattermostChannel {
         );
 
         let ws_url = self.ws_url();
-        let (ws_stream, _) = zeroclaw_config::schema::ws_connect_with_proxy(
+        let (ws_stream, _) = crate::ws_proxy::ws_connect_with_proxy(
             &ws_url,
             "channel.mattermost",
             self.proxy_url.as_deref(),

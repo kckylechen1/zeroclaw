@@ -3425,7 +3425,7 @@ impl SlackChannel {
                 }
             };
 
-            let (ws_stream, _) = match zeroclaw_config::schema::ws_connect_with_proxy(
+            let (ws_stream, _) = match crate::ws_proxy::ws_connect_with_proxy(
                 &ws_url,
                 "channel.slack",
                 self.proxy_url.as_deref(),

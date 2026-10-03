@@ -26,6 +26,9 @@ pub mod link_enricher;
 pub mod transcription;
 pub mod tts;
 pub mod voice;
+pub mod ws_proxy;
+
+pub use ws_proxy::{ProxiedWsStream, ws_connect_with_proxy};
 
 // Feature-gated channels
 #[cfg(feature = "channel-amqp")]

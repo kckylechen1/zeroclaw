@@ -1551,7 +1551,7 @@ impl Channel for WeComWsChannel {
         loop {
             wecom_log_info!("[wecom_ws] connecting to {WECOM_WS_URL}");
 
-            let ws_stream = match zeroclaw_config::schema::ws_connect_with_proxy(
+            let ws_stream = match crate::ws_proxy::ws_connect_with_proxy(
                 WECOM_WS_URL,
                 "channel.wecom_ws",
                 self.cfg.proxy_url.as_deref(),

@@ -1113,7 +1113,7 @@ impl LarkChannel {
             "connecting to"
         );
 
-        let (ws_stream, _) = zeroclaw_config::schema::ws_connect_with_proxy(
+        let (ws_stream, _) = crate::ws_proxy::ws_connect_with_proxy(
             &wss_url,
             "channel.lark",
             self.proxy_url.as_deref(),

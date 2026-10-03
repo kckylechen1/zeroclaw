@@ -25,6 +25,7 @@ pub mod knowledge_graph;
 pub mod lucid;
 pub mod markdown;
 pub mod merge;
+pub mod migration;
 pub mod none;
 pub mod normalize;
 pub mod policy;

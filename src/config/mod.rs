@@ -30,7 +30,6 @@ pub use schema::{
     build_channel_proxy_client, build_channel_proxy_client_with_timeouts,
     build_runtime_proxy_client, build_runtime_proxy_client_with_timeouts,
     read_persisted_proxy_for_boot, runtime_proxy_config, set_runtime_proxy_config,
-    ws_connect_with_proxy,
 };
 
 pub use schema::ModelProviderConfig;
