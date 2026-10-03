@@ -47,7 +47,7 @@ build-slim: toolchain
 
 # Check slim personal-agent profile
 check-slim: toolchain
-    cargo check --locked -p zeroclawlabs --bin zeroclaw --no-default-features --features slim-control
+    cargo check --locked -p zeroclawlabs --all-targets --no-default-features --features slim-control
 
 # Test slim personal-agent profile
 test-slim: toolchain
