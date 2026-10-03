@@ -17,6 +17,10 @@ use zeroclaw_config::policy::ToolOperation;
 use zeroclaw_config::tachi::TachiConfig;
 use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
 
+/// Runtime refusal code for changing the process-selected request ledger.
+/// Live authorization/routing stays separate from this storage identity.
+pub const STORAGE_ROOT_CHANGED: &str = "delegation_storage_root_changed";
+
 /// The runtime rechecks live agent/card policy and returns ephemeral config.
 type DelegationResolver =
     Arc<dyn Fn(&str, ToolOperation) -> Result<(TachiConfig, PathBuf), String> + Send + Sync>;
@@ -207,24 +211,27 @@ impl Tool for TachiDelegationTool {
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let (tachi, data_dir) = match (self.service.resolve)(self.name(), self.action.operation()) {
             Ok(value) => value,
+            Err(detail) if detail == STORAGE_ROOT_CHANGED => {
+                return Ok(failure(
+                    "storage_root_changed",
+                    &text("tool-tachi-storage-root-changed"),
+                ));
+            }
             Err(detail) => return Ok(failure("denied", &detail)),
         };
         let client = match TachiStaffClient::from_config(&tachi, &self.service.agent_alias) {
             Ok(client) => client,
             Err(error) => return Ok(staff_failure(error)),
         };
-        // A route/actor/project change cannot read or cancel an old binding on
-        // a different daemon. This scope is provenance of the local request,
-        // not a snapshot of live authorization.
-        let scope = format!(
-            "{}:{}",
-            self.service.agent_alias,
-            hash(&json!({
-                "endpoint": tachi.endpoint.trim(),
-                "identity": tachi.resolved_agent_identity(&self.service.agent_alias),
-                "project":tachi.project.as_deref().map(str::trim),
-            }))
-        );
+        // Agent/request identity stays stable across routing changes. This
+        // fingerprint becomes immutable provenance only when a claim is made;
+        // live policy and routing are still resolved afresh on every operation.
+        let scope = self.service.agent_alias.clone();
+        let route_digest = hash(&json!({
+            "endpoint": tachi.endpoint.trim(),
+            "identity": tachi.resolved_agent_identity(&self.service.agent_alias),
+            "project":tachi.project.as_deref().map(str::trim),
+        }));
         let start: Option<StartArgs> = if self.action == DelegationAction::Start {
             match serde_json::from_value(args.clone()) {
                 Ok(value) => Some(value),
@@ -277,14 +284,15 @@ impl Tool for TachiDelegationTool {
             let digest =
                 hash(&json!({"profile":client.profile_for(&start.harness)?, "arguments":args}));
             let claim = {
-                let (db, scope, request_id, digest) = (
+                let (db, scope, request_id, digest, route_digest) = (
                     db.clone(),
                     scope.clone(),
                     request_id.clone(),
                     digest.clone(),
+                    route_digest.clone(),
                 );
                 tokio::task::spawn_blocking(move || {
-                    db.claim_delegation_request(&scope, &request_id, &digest)
+                    db.claim_delegation_request(&scope, &request_id, &digest, &route_digest)
                 })
                 .await?
             };
@@ -322,7 +330,12 @@ impl Tool for TachiDelegationTool {
                     // start's Unavailable contract proves tools/call was never
                     // sent. Other failures never release a durable claim.
                     let release = tokio::task::spawn_blocking(move || {
-                        db.release_unsent_delegation_request(&scope, &request_id, &digest)
+                        db.release_unsent_delegation_request(
+                            &scope,
+                            &request_id,
+                            &digest,
+                            &route_digest,
+                        )
                     })
                     .await?;
                     if let Err(storage) = release {
@@ -335,7 +348,7 @@ impl Tool for TachiDelegationTool {
             let id = receipt.dispatch_id.clone();
             let output_request_id = request_id.clone();
             let stored = tokio::task::spawn_blocking(move || {
-                db.bind_delegation_request(&scope, &request_id, &digest, &id)
+                db.bind_delegation_request(&scope, &request_id, &digest, &route_digest, &id)
             })
             .await?;
             if let Err(error) = stored {
@@ -360,6 +373,12 @@ impl Tool for TachiDelegationTool {
                 .await?
         };
         let dispatch_id = match binding {
+            Ok(Some(binding)) if binding.route_digest.as_deref() != Some(route_digest.as_str()) => {
+                return Ok(failure(
+                    "route_conflict",
+                    &text("tool-tachi-route-conflict"),
+                ));
+            }
             Ok(Some(binding)) => match binding.dispatch_id {
                 Some(id) => id,
                 None => {

@@ -33,7 +33,7 @@ impl SqliteSessionBackend {
         std::fs::create_dir_all(&sessions_dir).context("Failed to create sessions directory")?;
         let db_path = sessions_dir.join("sessions.db");
 
-        let conn = Connection::open(&db_path)
+        let mut conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open session DB: {}", db_path.display()))?;
 
         conn.execute_batch(
@@ -77,6 +77,7 @@ impl SqliteSessionBackend {
                 request_id     TEXT NOT NULL,
                 request_digest TEXT NOT NULL,
                 dispatch_id    TEXT,
+                route_digest   TEXT,
                 PRIMARY KEY (agent_alias, request_id)
              );
 
@@ -100,6 +101,8 @@ impl SqliteSessionBackend {
              END;",
         )
         .context("Failed to initialize session schema")?;
+
+        delegation::migrate_route_provenance(&mut conn)?;
 
         // Migration: add name column to existing databases
         let has_name: bool = conn

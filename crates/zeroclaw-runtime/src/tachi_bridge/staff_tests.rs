@@ -1297,6 +1297,173 @@ async fn production_unknown_submit_survives_registry_restart_and_is_never_reissu
 }
 
 #[tokio::test]
+async fn production_unresolved_claim_blocks_live_route_changes_and_registry_restart() {
+    assert_route_changes_keep_one_claim(false, &["endpoint", "identity", "project"]).await;
+}
+
+#[tokio::test]
+async fn production_bound_claim_blocks_wrong_route_reads_controls_and_resubmission() {
+    assert_route_changes_keep_one_claim(true, &["endpoint", "identity", "project"]).await;
+}
+
+#[tokio::test]
+async fn production_live_storage_root_change_refuses_before_claim_or_transport() {
+    for accepted in [false, true] {
+        assert_route_changes_keep_one_claim(accepted, &["data_dir"]).await;
+    }
+}
+
+async fn assert_route_changes_keep_one_claim(accepted: bool, changes: &[&str]) {
+    for &change in changes {
+        let (old, endpoint) = serve(move |_, args| match args["action"].as_str() {
+            Some("start") if accepted => Reply::Ok(working_receipt("d-route-original")),
+            Some("start") => Reply::Http(StatusCode::NOT_FOUND),
+            Some("status") => Reply::Ok(json!({"dispatch_id":"d-route-original", "state":"TASK_STATE_COMPLETED", "status_revision":4})),
+            _ => panic!("unexpected original-route call"),
+        }).await;
+        let (other, other_endpoint) =
+            serve(|_, _| Reply::Ok(working_receipt("wrong-daemon"))).await;
+        let temp = tempfile::TempDir::new().unwrap();
+        let cfg = production_config(&temp, &endpoint);
+        let foreign_root = temp.path().join("must-not-adopt-live-root");
+        let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+        let mut tools = production_tools(&cfg, live.clone());
+        let first = invoke(&tools, "tachi_start", start_args("route-stable-id")).await;
+        if accepted {
+            assert_eq!(
+                first.output.data().unwrap()["receipt"]["dispatch_id"],
+                "d-route-original"
+            );
+        } else {
+            assert_eq!(first.output.data().unwrap()["code"], "submission_unknown");
+        }
+        assert_eq!(old.calls().len(), 1);
+        {
+            let mut config = live.write();
+            match change {
+                "endpoint" => config.tachi.endpoint = other_endpoint,
+                "identity" => config.tachi.agent_identity = Some("zeroclaw:other-route".into()),
+                "project" => config.tachi.project = Some("other-project".into()),
+                "data_dir" => config.data_dir = foreign_root.clone(),
+                _ => panic!("unknown fixture transition"),
+            }
+        }
+        for recreated in [false, true] {
+            if recreated {
+                drop(tools);
+                tools = production_tools(&cfg, live.clone());
+            }
+            let start = invoke(&tools, "tachi_start", start_args("route-stable-id")).await;
+            assert!(!start.success, "{change}/{recreated}: {start:?}");
+            assert_eq!(
+                start.output.data().unwrap()["code"],
+                if change == "data_dir" {
+                    "storage_root_changed"
+                } else {
+                    "request_conflict"
+                }
+            );
+            for name in [
+                "tachi_status",
+                "tachi_result",
+                "tachi_watch",
+                "tachi_cancel",
+            ] {
+                let args = match name {
+                    "tachi_watch" => json!({"request_id":"route-stable-id","max_wait_secs":1}),
+                    "tachi_cancel" => {
+                        json!({"request_id":"route-stable-id","expected_status_revision":4})
+                    }
+                    _ => json!({"request_id":"route-stable-id"}),
+                };
+                let result = invoke(&tools, name, args).await;
+                assert!(!result.success, "{change}/{recreated}/{name}: {result:?}");
+                assert_eq!(
+                    result.output.data().unwrap()["code"],
+                    if change == "data_dir" {
+                        "storage_root_changed"
+                    } else {
+                        "route_conflict"
+                    }
+                );
+            }
+            assert_eq!(
+                old.calls().len(),
+                1,
+                "no old reference forwarded after {change}"
+            );
+            assert!(
+                other.calls().is_empty(),
+                "no duplicate submission to changed route"
+            );
+            assert_eq!(old.sessions_opened.load(Ordering::SeqCst), 1);
+            assert_eq!(other.sessions_opened.load(Ordering::SeqCst), 0);
+            assert!(
+                !foreign_root.exists(),
+                "live ledger switch must fail before DB creation"
+            );
+        }
+        *live.write() = cfg.clone();
+        let restored = invoke(&tools, "tachi_start", start_args("route-stable-id")).await;
+        if accepted {
+            assert_eq!(restored.output.data().unwrap()["replayed"], true);
+            assert_eq!(
+                restored.output.data().unwrap()["dispatch_id"],
+                "d-route-original"
+            );
+            let status = invoke(
+                &tools,
+                "tachi_status",
+                json!({"request_id":"route-stable-id"}),
+            )
+            .await;
+            assert_eq!(
+                status.output.data().unwrap()["status"]["dispatch_id"],
+                "d-route-original"
+            );
+            assert_eq!(
+                old.calls().len(),
+                2,
+                "only original-route status positive control"
+            );
+        } else {
+            assert_eq!(
+                restored.output.data().unwrap()["code"],
+                "submission_unresolved"
+            );
+            let status = invoke(
+                &tools,
+                "tachi_status",
+                json!({"request_id":"route-stable-id"}),
+            )
+            .await;
+            assert_eq!(
+                status.output.data().unwrap()["code"],
+                "submission_unresolved"
+            );
+            assert_eq!(old.calls().len(), 1);
+        }
+        assert!(other.calls().is_empty());
+        let conn = rusqlite::Connection::open(cfg.data_dir.join("sessions/sessions.db")).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM session_delegations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1, "route changes cannot create a second claim");
+        let alias: String = conn
+            .query_row("SELECT agent_alias FROM session_delegations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            alias, "home",
+            "stable local agent identity owns request uniqueness"
+        );
+    }
+}
+
+#[tokio::test]
 async fn production_closed_unknown_harness_and_raw_authority_have_zero_external_side_effects() {
     let (fake, endpoint) = serve(|_, _| panic!("must not reach Tachi")).await;
     let temp = tempfile::TempDir::new().unwrap();

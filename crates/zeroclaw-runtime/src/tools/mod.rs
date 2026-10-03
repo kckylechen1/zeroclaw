@@ -741,6 +741,12 @@ pub fn all_tools_with_runtime(
         agent_alias,
         move |name, operation| {
             let resolve = |current: &Config| {
+                // The runtime-selected storage context also owns session and
+                // approval stores. Live policy must not switch this registry
+                // to an empty request ledger and lose an unresolved claim.
+                if current.data_dir != delegation_config.data_dir {
+                    return Err(zeroclaw_tools::tachi_delegation::STORAGE_ROOT_CHANGED.to_string());
+                }
                 if current.tachi.enabled {
                     let mut policy = SecurityPolicy::for_agent(current, &delegation_agent)
                         .map_err(|error| error.to_string())?;
@@ -759,7 +765,7 @@ pub fn all_tools_with_runtime(
                         );
                     }
                 }
-                Ok((current.tachi.clone(), current.data_dir.clone()))
+                Ok((current.tachi.clone(), delegation_config.data_dir.clone()))
             };
             match &delegation_live {
                 Some(live) => resolve(&live.read()),

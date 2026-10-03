@@ -30,11 +30,16 @@ Status and watch preserve Tachi's `read_projection`: a canonical working receipt
 can coexist with orphaned execution, unavailable control, and unknown outcome.
 These recovery facts do not imply completion or trigger a replacement launch.
 
-The existing SQLite session owner stores only a request digest and dispatch
-reference in `sessions/sessions.db`. A claim is committed before a start is
-sent. Concurrent and repeated requests cannot resend that claim, including
-when the process restarts before the response is recorded. A known reference
-is replayed; reuse with changed arguments fails. A claim with no known reference
+The existing SQLite session owner stores a request payload digest, immutable
+route fingerprint and dispatch reference in `sessions/sessions.db`; Tachi
+still owns execution state. The primary key is the true local agent alias plus
+`request_id`, regardless of endpoint, caller identity or project changes. The
+payload digest covers admitted arguments and their resolved harness profile;
+the separate route fingerprint records endpoint, protocol caller identity and
+project at admission. A claim is committed before a start is sent. Concurrent
+and repeated requests cannot resend that claim, including when the process
+restarts before the response is recorded. A known reference is replayed; reuse
+with changed arguments or route fails. A claim with no known reference
 is **unresolved**, not proof that the worker failed or never started. It is
 retained independently of chat history cleanup. Do not bypass it with a new ID;
 reconcile the dispatch with the owner in Tachi. Automatic reconciliation is
@@ -46,7 +51,24 @@ SQLite WAL/NORMAL preserves process-crash safety, not a stronger power-loss
 guarantee. Delegation requires the SQLite session backend; JSONL chat remains
 supported without this capability.
 
+Existing route-hashed claim keys survive schema upgrade unchanged. A unique
+legacy row can be read or replayed only on its recorded route; unresolved rows
+never authorize another start. Multiple legacy claims for one agent/request
+require owner reconciliation. No legacy row is deleted, copied into a new claim,
+or merged with another agent's row. A legacy row without route evidence fails
+closed. Downgrading to a writer that keys claims by route is unsafe; a code revert
+does not restore the previous request-identity contract.
+
+The registry's runtime-selected data directory also owns its session stores.
+Live `data_dir` changes are refused before opening another ledger or sending a
+request. Restoring that directory preserves pending claims and accepted
+references. An operator storage move requires a stopped runtime, migration of
+the existing sessions database (including delegation claims), and restart;
+creating an empty ledger or scanning unrelated databases is not migration.
+
 Live Tachi routing and agent/card permissions are rechecked on each operation.
+A changed route cannot forward an old dispatch ID for read, result, watch or
+cancel: restore its admitted route or reconcile it with the owner in Tachi.
 Tasks and references leave the body with protocol caller identity and configured
 profile/project routing metadata. The tool never adds owner/persona identity,
 Soul, User Model, parent history, credentials, local tool handles or raw execution
