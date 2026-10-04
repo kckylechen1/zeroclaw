@@ -5,7 +5,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
@@ -108,6 +108,7 @@ pub async fn run(config: BridgeConfig) -> Result<()> {
         backoff: Backoff::new(BACKOFF_INITIAL, BACKOFF_MAX),
         reconnect_at: Instant::now(),
         unacked: VecDeque::new(),
+        upload: None,
         stream: None,
         typing_at: None,
         keys: ApprovalKeys::default(),
@@ -183,13 +184,37 @@ struct Bridge {
     /// Messages sent (or waiting to be sent) without an `ack` yet, with
     /// their request ids. After a reconnect they go again under the same
     /// id, so the gateway runs each at most once.
-    unacked: VecDeque<(String, String)>,
+    unacked: VecDeque<PendingMessage>,
+    upload: Option<tokio::task::JoinHandle<Result<PendingMessage>>>,
     stream: Option<Stream>,
     /// When to next show "typing"; set while a turn runs.
     typing_at: Option<Instant>,
     keys: ApprovalKeys,
     // Platform reply mapping only. The Gateway owns acceptance/expiry.
     questions: HashMap<i64, QuestionReply>,
+}
+
+#[derive(Clone)]
+struct PendingMessage {
+    id: String,
+    text: String,
+    attachments: Vec<String>,
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        if let Some(upload) = self.upload.take() {
+            upload.abort();
+        }
+    }
+}
+async fn next_upload(
+    upload: &mut Option<tokio::task::JoinHandle<Result<PendingMessage>>>,
+) -> Result<PendingMessage> {
+    match upload {
+        Some(h) => h.await.context("attachment upload task failed")?,
+        None => std::future::pending().await,
+    }
 }
 
 struct QuestionReply {
@@ -227,6 +252,10 @@ impl Bridge {
                         bail!("the Telegram poller stopped");
                     };
                     self.on_update(update).await;
+                }
+                uploaded = next_upload(&mut self.upload) => {
+                    self.upload.take();
+                    match uploaded { Ok(message)=>self.queue_message(message).await,Err(_)=>self.reply("Attachment could not be uploaded; it was not sent to the agent").await }
                 }
                 frame = next_frame(&mut self.client) => match frame {
                     Ok(Some(frame)) => self.on_frame(frame).await,
@@ -288,11 +317,14 @@ impl Bridge {
 
     async fn resend_unacked(&mut self) {
         let pending: Vec<_> = self.unacked.iter().cloned().collect();
-        for (id, content) in pending {
+        for message in pending {
             let Some(client) = &mut self.client else {
                 return;
             };
-            if let Err(e) = client.send_message_with_id(&id, &content).await {
+            if let Err(e) = client
+                .send_message_with_attachments(&message.id, &message.text, &message.attachments)
+                .await
+            {
                 self.disconnected(format!("{e:#}"));
                 return;
             }
@@ -338,6 +370,23 @@ impl Bridge {
                 );
             }
             Inbound::Text { text, .. } => self.on_text(text).await,
+            Inbound::Attachment { file, caption } => {
+                if self.upload.is_some() {
+                    self.reply("An attachment is already uploading; retry shortly")
+                        .await;
+                    return;
+                }
+                let api = self.api.clone();
+                let options = self.options.clone();
+                self.upload = Some(zeroclaw_spawn::spawn!(async move {
+                    let handle = crate::attachments::upload(&api, &options, &file).await?;
+                    Ok(PendingMessage {
+                        id: new_request_id(),
+                        text: caption,
+                        attachments: vec![handle],
+                    })
+                }));
+            }
             Inbound::Reply {
                 message_id,
                 text,
@@ -487,13 +536,24 @@ impl Bridge {
             }
             _ => {}
         }
-        let id = new_request_id();
-        self.unacked.push_back((id.clone(), text.clone()));
+        self.queue_message(PendingMessage {
+            id: new_request_id(),
+            text,
+            attachments: Vec::new(),
+        })
+        .await;
+    }
+
+    async fn queue_message(&mut self, message: PendingMessage) {
+        self.unacked.push_back(message.clone());
         let Some(client) = &mut self.client else {
             self.reply(text::OFFLINE_QUEUED).await;
             return;
         };
-        match client.send_message_with_id(&id, &text).await {
+        match client
+            .send_message_with_attachments(&message.id, &message.text, &message.attachments)
+            .await
+        {
             Ok(()) => {
                 // Show typing inline instead of arming the timer: the
                 // gateway can stream the whole turn (ack through done)
@@ -585,7 +645,7 @@ impl Bridge {
             Frame::Ack {
                 id, status, turn, ..
             } => {
-                self.unacked.retain(|(pending, _)| *pending != id);
+                self.unacked.retain(|message| message.id != id);
                 if status == "duplicate" {
                     record!(
                         DEBUG,

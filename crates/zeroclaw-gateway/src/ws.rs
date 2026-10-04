@@ -1032,8 +1032,51 @@ fn handle_message_frame(
         (Some(frame), None)
     };
 
-    let content = parsed["content"].as_str().unwrap_or("").to_string();
-    if content.is_empty() {
+    let mut content = parsed["content"].as_str().unwrap_or("").to_string();
+    let ids = match parsed.get("attachments") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(ids))
+            if ids.len() <= crate::api_attachments::MAX_MESSAGE_ITEMS =>
+        {
+            let Some(ids) = ids
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return reject(
+                    &zeroclaw_runtime::i18n::get_required_cli_string(
+                        "gateway-attachment-invalid-ids",
+                    ),
+                    "INVALID_ATTACHMENTS",
+                );
+            };
+            let unique: std::collections::HashSet<_> = ids.iter().collect();
+            if unique.len() != ids.len() {
+                return reject(
+                    &zeroclaw_runtime::i18n::get_required_cli_string("gateway-attachment-repeated"),
+                    "INVALID_ATTACHMENTS",
+                );
+            }
+            ids
+        }
+        Some(_) => {
+            return reject(
+                &zeroclaw_runtime::i18n::get_required_cli_string("gateway-attachment-count"),
+                "INVALID_ATTACHMENTS",
+            );
+        }
+    };
+    if !ids.is_empty() && !question_answer_authorized(state, scope) {
+        return reject(
+            &zeroclaw_runtime::i18n::get_required_cli_string("gateway-attachment-unauthorized"),
+            "UNAUTHORIZED_ATTACHMENTS",
+        );
+    }
+    if content.is_empty() && ids.is_empty() {
         return reject("Message content cannot be empty", "EMPTY_CONTENT");
     }
 
@@ -1070,6 +1113,47 @@ fn handle_message_frame(
             }
         },
     };
+    if !ids.is_empty() {
+        let Some((_, agent)) = conversation.key().rsplit_once('\u{1f}') else {
+            return reject(
+                &zeroclaw_runtime::i18n::get_required_cli_string("gateway-attachment-unavailable"),
+                "ATTACHMENT_UNAVAILABLE",
+            );
+        };
+        let payload_scope = crate::api_attachments::Scope {
+            subject: scope.auth_subject.clone().unwrap_or_default(),
+            session: scope.session_id.clone(),
+            agent: agent.to_string(),
+        };
+        if !crate::api_attachments::scope_authorized(state, &payload_scope) {
+            if let Some(id) = request_id {
+                set_request_state(state, conversation, &scope.session_key, id, "rejected");
+            }
+            return reject(
+                &zeroclaw_runtime::i18n::get_required_cli_string("gateway-attachment-unauthorized"),
+                "UNAUTHORIZED_ATTACHMENTS",
+            );
+        }
+        content =
+            match state
+                .ws_conversations
+                .attachments
+                .materialize(&payload_scope, &ids, &content)
+            {
+                Ok(content) => content,
+                Err(_) => {
+                    if let Some(id) = request_id {
+                        set_request_state(state, conversation, &scope.session_key, id, "rejected");
+                    }
+                    return reject(
+                        &zeroclaw_runtime::i18n::get_required_cli_string(
+                            "gateway-attachment-unavailable",
+                        ),
+                        "ATTACHMENT_UNAVAILABLE",
+                    );
+                }
+            };
+    }
     let ack = |turn: &str| {
         request_id.map(|id| {
             serde_json::json!({
@@ -2514,6 +2598,7 @@ mod tests {
     /// Answers every call with `reply N`, recording how many messages the
     /// request carried. Holds each call until `gate` has a permit.
     struct ScriptedProvider {
+        vision: bool,
         gate: Arc<tokio::sync::Semaphore>,
         seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
         systems: Arc<parking_lot::Mutex<Vec<String>>>,
@@ -2521,6 +2606,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl zeroclaw_api::model_provider::ModelProvider for ScriptedProvider {
+        fn supports_vision(&self) -> bool {
+            self.vision
+        }
         async fn chat_with_system(
             &self,
             _system_prompt: Option<&str>,
@@ -2583,6 +2671,7 @@ mod tests {
     }
 
     struct SharedChat {
+        vision: bool,
         state: AppState,
         scope: WsTurnScope,
         gate: Arc<tokio::sync::Semaphore>,
@@ -2599,6 +2688,7 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap();
             let state = crate::tests::admin_paircode_state(&tmp, false, false);
             Self {
+                vision: false,
                 state,
                 scope: WsTurnScope {
                     session_key: "gw_shared".into(),
@@ -2619,6 +2709,7 @@ mod tests {
                 .ws_conversations
                 .attach(&self.scope.session_key, |_seed| {
                     let provider = ScriptedProvider {
+                        vision: self.vision,
                         gate: Arc::clone(&self.gate),
                         seen: Arc::clone(&self.seen),
                         systems: Arc::clone(&self.systems),
@@ -3067,6 +3158,95 @@ mod tests {
 
     fn message_with_id(content: &str, id: &str) -> serde_json::Value {
         serde_json::json!({ "type": "message", "content": content, "id": id })
+    }
+
+    #[tokio::test]
+    async fn attachment_message_reaches_one_real_turn_and_retries_do_not_run_it_again() {
+        let mut chat = SharedChat::new();
+        chat.vision = true;
+        chat.state.config.write().agents.insert(
+            "web".into(),
+            zeroclaw_config::schema::AliasedAgentConfig::default(),
+        );
+        chat.scope.session_key = "gw_shared\u{1f}web".into();
+        let subject = zeroclaw_config::pairing::PairingGuard::token_hash("synthetic-file-token");
+        chat.scope.auth_subject = Some(subject.clone());
+        chat.state.config.write().gateway.bridges.insert(
+            "files".into(),
+            zeroclaw_config::schema::GatewayBridgeConfig {
+                token_hash: subject.clone(),
+                sessions: vec!["shared".into()],
+                ..Default::default()
+            },
+        );
+        let scope = crate::api_attachments::Scope {
+            subject,
+            session: "shared".into(),
+            agent: "web".into(),
+        };
+        let id = chat
+            .state
+            .ws_conversations
+            .attachments
+            .insert(
+                scope.clone(),
+                "note.txt".into(),
+                "text/plain".into(),
+                axum::body::Bytes::from_static(b"attachment contents"),
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut a = chat.attach().await;
+        chat.gate.add_permits(2);
+        let frame =
+            serde_json::json!({"type":"message","id":"with-file","content":"","attachments":[id]});
+        assert_eq!(chat.send(&a, frame.clone()).unwrap()["status"], "accepted");
+        assert_eq!(
+            frames_until_end(&mut a).await.pop().unwrap()["type"],
+            "done"
+        );
+        assert!(
+            chat.seen.lock()[0]
+                .iter()
+                .any(|s| s.contains("attachment contents"))
+        );
+        assert_eq!(chat.send(&a, frame).unwrap()["status"], "duplicate");
+        assert_eq!(chat.seen.lock().len(), 1);
+        let invalid = serde_json::json!({"type":"message","id":"unknown-file","content":"read","attachments":[uuid::Uuid::new_v4().to_string()]});
+        assert_eq!(
+            chat.send(&a, invalid).unwrap()["code"],
+            "ATTACHMENT_UNAVAILABLE"
+        );
+        assert!(!a.conversation.is_running());
+        let image = chat
+            .state
+            .ws_conversations
+            .attachments
+            .insert(
+                scope,
+                "photo.png".into(),
+                "image/png".into(),
+                axum::body::Bytes::from_static(b"\x89PNG\r\n\x1a\nfixture"),
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(chat.send(&a,serde_json::json!({"type":"message","id":"image","content":"describe","attachments":[image]})).unwrap()["status"],"accepted");
+        assert_eq!(
+            frames_until_end(&mut a).await.pop().unwrap()["type"],
+            "done"
+        );
+        assert!(
+            chat.seen.lock()[1]
+                .iter()
+                .any(|s| s.contains("[IMAGE:data:image/png;base64,"))
+        );
+        chat.state.config.write().gateway.bridges.clear();
+        assert_eq!(chat.send(&a,serde_json::json!({"type":"message","id":"revoked","content":"read","attachments":[image]})).unwrap()["code"],"UNAUTHORIZED_ATTACHMENTS");
+        assert!(!a.conversation.is_running());
     }
 
     #[tokio::test]

@@ -336,6 +336,17 @@ impl Client {
         .await
     }
 
+    /// Send HTTP-uploaded handles only; attachment bytes never enter the socket.
+    /// The Gateway's application ACK remains the acceptance authority.
+    pub async fn send_message_with_attachments(
+        &mut self,
+        id: &str,
+        content: &str,
+        attachments: &[String],
+    ) -> Result<()> {
+        send_json(&mut self.socket,&serde_json::json!({"type":"message","id":id,"content":content,"attachments":attachments})).await
+    }
+
     /// Ask the gateway to stop the session's running turn.
     pub async fn cancel(&mut self) -> Result<()> {
         send_json(&mut self.socket, &serde_json::json!({ "type": "cancel" })).await

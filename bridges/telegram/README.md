@@ -124,7 +124,32 @@ owner retry is enabled. Transient question delivery errors receive at most
 three attempts within the question deadline; exhausted/permanent errors drop
 the chat socket so an invisible question cannot hold its sole subscriber.
 This is not a durable source-update handoff or an exactly-once delivery claim;
-#377's intake/cursor recovery and real-bot acceptance remain separate work.
+Issue #377 intake/cursor recovery and real-bot acceptance remain separate work.
 
-Not yet: groups and attachments. A turn's frames that
+## Attachments
+
+In the configured owner's private chat, send a photo or an image/UTF-8 document
+with an optional caption. The bridge calls Telegram `getFile`, downloads from
+the configured Bot API origin without redirects, uploads bytes to the Gateway's
+HTTP attachment endpoint, and sends the caption with the returned opaque ID.
+Unauthorized sender/group updates never reach the download step. A Gateway token
+and an explicit session are required. HTTP 201 is payload storage; only the
+message ACK confirms Agent acceptance.
+
+Downloads are capped at 2 MiB on both advertised and actual bytes and have a
+20-second timeout per HTTP request. The Gateway also limits text to 64 KiB,
+validates MIME/image signatures and scopes handles to the token, session and
+agent. Handles expire after 15 minutes and do not survive Gateway restart.
+Upload failures are shown to the owner and start no turn. One file transfer may
+be active at a time; Gateway events and `/cancel` remain serviced while it runs.
+An unacknowledged message retains its original request ID and attachment handles
+on reconnect; files are not automatically reuploaded under new handles.
+
+Supported documents are plain text, Markdown, CSV and JSON; supported images
+are PNG/JPEG/WebP/GIF. The caption is message content, not a question answer or
+approval decision. Audio transcription, PDF/binary parsing and automatic outbound
+Telegram file delivery remain follow-ups. Authorized clients can use the matching
+HTTP fetch route to download a stored attachment.
+
+Not yet: groups or durable attachment/intake recovery. A turn's frames that
 arrive while the chat socket is down are not replayed.

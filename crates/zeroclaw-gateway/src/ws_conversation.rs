@@ -263,6 +263,8 @@ type Slot<A> = Arc<OnceCell<Arc<Conversation<A>>>>;
 
 /// Live conversations keyed by session key.
 pub struct ConversationHub<A> {
+    /// Canonical bounded ephemeral payload bytes for this gateway.
+    pub(crate) attachments: crate::api_attachments::Store,
     slots: parking_lot::Mutex<HashMap<String, Slot<A>>>,
 }
 
@@ -270,6 +272,7 @@ impl<A> Default for ConversationHub<A> {
     fn default() -> Self {
         Self {
             slots: parking_lot::Mutex::new(HashMap::new()),
+            attachments: crate::api_attachments::Store::default(),
         }
     }
 }
