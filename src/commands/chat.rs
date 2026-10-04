@@ -34,19 +34,21 @@ enum Input<'a> {
 
 fn parse_input(line: &str) -> Input<'_> {
     let line = line.trim();
-    if line == "/answer" {
-        return Input::InvalidAnswer;
-    }
-    if let Some(rest) = line.strip_prefix("/answer ") {
-        return match rest.trim_start().split_once(' ') {
-            Some((request_id, text)) if !request_id.is_empty() && !text.trim().is_empty() => {
-                Input::Answer {
-                    request_id,
-                    text: text.trim(),
+    if let Some(rest) = line.strip_prefix("/answer") {
+        if rest.is_empty() {
+            return Input::InvalidAnswer;
+        }
+        if rest.starts_with(char::is_whitespace) {
+            return match rest.trim_start().split_once(char::is_whitespace) {
+                Some((request_id, text)) if !request_id.is_empty() && !text.trim().is_empty() => {
+                    Input::Answer {
+                        request_id,
+                        text: text.trim(),
+                    }
                 }
-            }
-            _ => Input::InvalidAnswer,
-        };
+                _ => Input::InvalidAnswer,
+            };
+        }
     }
     match line {
         "/quit" | "/exit" => Input::Quit,
@@ -336,7 +338,7 @@ mod tests {
 
     #[test]
     fn invalid_answer_controls_never_become_messages() {
-        for line in ["/answer", "/answer q1", "/answer q1   "] {
+        for line in ["/answer", "/answer q1", "/answer q1   ", "/answer\tq1"] {
             assert_eq!(parse_input(line), Input::InvalidAnswer);
         }
         assert_eq!(
@@ -408,6 +410,14 @@ mod tests {
     fn typed_lines_map_to_commands_and_messages() {
         assert_eq!(parse_input("/quit"), Input::Quit);
         assert_eq!(parse_input(" /exit "), Input::Quit);
+        assert_eq!(parse_input("/answerx"), Input::Message("/answerx"));
+        assert_eq!(
+            parse_input("/answer\tq1\tyes"),
+            Input::Answer {
+                request_id: "q1",
+                text: "yes"
+            }
+        );
         assert_eq!(parse_input("/cancel"), Input::Cancel);
         assert_eq!(parse_input("   "), Input::Nothing);
         assert_eq!(parse_input(" hello "), Input::Message("hello"));

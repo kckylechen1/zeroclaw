@@ -104,10 +104,14 @@ scoped to this session, including when pairing is disabled. Tokenless chat
 can display a prompt but cannot answer it. Questions use Telegram ForceReply. Reply to that specific bot
 message with free text, an exact choice, or its number; ordinary chat and replies to ordinary bot text remain
 ordinary Gateway messages. Question messages carry a reserved `[ZeroClaw question]`
-marker so unknown or expired question replies can be refused after mapping loss. The bridge checks the owner and private chat
+marker so unknown or expired question replies can be refused after mapping loss.
+Ordinary model/proactive text beginning with this reserved marker uses a fullwidth
+opening bracket when rendered, so it remains ordinary text when replied to. The bridge checks the owner and private chat
 before forwarding the correlated answer. It reports `Answer: accepted` only
 on the Gateway's `answer_ack`, never just because the socket write succeeded.
-An invalid answer can be retried on the same question. Unknown, expired and
+An invalid answer can be retried on the same question. An authorization refusal
+also preserves the question mapping; retry requires restored Gateway authority
+before the original deadline. Unknown, expired and
 already answered replies are refused without starting a turn or approving a
 tool. Mappings are bounded to 16 and live only for the question timeout.
 

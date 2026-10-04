@@ -28,7 +28,6 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Replies the bridge writes itself. English only: the bridge carries no
 /// Fluent catalogue (it does not link the runtime).
 mod text {
-    pub const QUESTION_MARKER: &str = "[ZeroClaw question]";
     pub const STEERED: &str = "(added to the current turn)";
     pub const ABORTED: &str = "(cancelled)";
     pub const OFFLINE_QUEUED: &str =
@@ -364,7 +363,8 @@ impl Bridge {
     async fn on_answer(&mut self, message_id: i64, answer: &str, original_text: Option<&str>) {
         self.questions.retain(|_, q| q.deadline > Instant::now());
         let Some(question) = self.questions.get_mut(&message_id) else {
-            if original_text.is_some_and(|text| !text.starts_with(text::QUESTION_MARKER)) {
+            if original_text.is_some_and(|text| !text.starts_with(crate::telegram::QUESTION_MARKER))
+            {
                 self.on_text(answer.to_owned()).await;
             } else {
                 self.reply(text::EXPIRED).await;
@@ -420,7 +420,7 @@ impl Bridge {
         if self.questions.len() >= 16 {
             return;
         }
-        let mut shown = format!("{}\n{prompt}", text::QUESTION_MARKER);
+        let mut shown = format!("{}\n{prompt}", crate::telegram::QUESTION_MARKER);
         for (n, choice) in choices.iter().enumerate() {
             shown.push_str(&format!("\n{}. {}", n + 1, choice));
         }
@@ -569,7 +569,7 @@ impl Bridge {
                 self.questions.retain(|_, q| q.request_id != request_id);
             }
             Frame::AnswerAck { request_id, status } => {
-                if status == "invalid" {
+                if matches!(status.as_str(), "invalid" | "unauthorized") {
                     for q in self
                         .questions
                         .values_mut()

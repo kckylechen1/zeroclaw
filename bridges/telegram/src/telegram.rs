@@ -10,6 +10,18 @@ use serde_json::{Value, json};
 /// Telegram's limit on one message's text.
 pub const MESSAGE_LIMIT: usize = 4096;
 
+/// Reserved bridge-owned question prefix. Ordinary sends escape its first
+/// bracket, preserving Telegram's UTF-16 length and preventing spoofed UI.
+pub const QUESTION_MARKER: &str = "[ZeroClaw question]";
+
+fn ordinary_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.starts_with(QUESTION_MARKER) {
+        std::borrow::Cow::Owned(format!("［{}", &text[1..]))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Update {
     pub update_id: i64,
@@ -183,7 +195,15 @@ impl Api {
         text: &str,
         keyboard: Option<Value>,
     ) -> Result<i64> {
-        let mut body = json!({ "chat_id": chat_id, "text": text });
+        let question = keyboard
+            .as_ref()
+            .is_some_and(|markup| markup["force_reply"] == true);
+        let shown = if question {
+            std::borrow::Cow::Borrowed(text)
+        } else {
+            ordinary_text(text)
+        };
+        let mut body = json!({ "chat_id": chat_id, "text": shown });
         if let Some(keyboard) = keyboard {
             body["reply_markup"] = keyboard;
         }
@@ -199,7 +219,7 @@ impl Api {
         thread_id: Option<i64>,
         text: &str,
     ) -> Result<i64> {
-        let mut body = json!({ "chat_id": chat_id, "text": text });
+        let mut body = json!({ "chat_id": chat_id, "text": ordinary_text(text) });
         if let Some(thread_id) = thread_id {
             body["message_thread_id"] = json!(thread_id);
         }
@@ -210,7 +230,8 @@ impl Api {
     /// Replace a message's text. Without a keyboard, any inline keyboard on
     /// the message is removed.
     pub async fn edit_message_text(&self, chat_id: i64, message_id: i64, text: &str) -> Result<()> {
-        let body = json!({ "chat_id": chat_id, "message_id": message_id, "text": text });
+        let body =
+            json!({ "chat_id": chat_id, "message_id": message_id, "text": ordinary_text(text) });
         self.call::<Value>("editMessageText", body, SHORT).await?;
         Ok(())
     }

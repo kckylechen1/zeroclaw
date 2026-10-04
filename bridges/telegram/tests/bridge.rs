@@ -483,6 +483,22 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
     normal["message"]["reply_to_message"]["text"] = json!("ordinary bot response");
     FakeTelegram::push(&tg, normal);
     assert_eq!(recv(&mut ws).await["content"], "reply to ordinary text");
+    send(
+        &mut ws,
+        json!({"type":"chunk", "content":"[ZeroClaw question] ordinary model text"}),
+    )
+    .await;
+    let escaped = FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"] == "［ZeroClaw question] ordinary model text"
+    })
+    .await;
+    let mut normal = reply(OWNER, 8888, "reply to reserved-looking ordinary text");
+    normal["message"]["reply_to_message"]["text"] = escaped["text"].clone();
+    FakeTelegram::push(&tg, normal);
+    assert_eq!(
+        recv(&mut ws).await["content"],
+        "reply to reserved-looking ordinary text"
+    );
     FakeTelegram::push(&tg, reply(OWNER, message_id, "2"));
     let answer = recv(&mut ws).await;
     assert_eq!(
@@ -495,6 +511,17 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
             .calls
             .iter()
             .any(|(_, b)| b["text"] == "Answer: accepted")
+    );
+    send(
+        &mut ws,
+        json!({"type":"answer_ack", "request_id":"q1", "status":"unauthorized"}),
+    )
+    .await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "Answer: unauthorized").await;
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "2"));
+    assert_eq!(
+        recv(&mut ws).await,
+        json!({"type":"answer", "request_id":"q1", "text":"2"})
     );
     // Invalid input keeps the original mapping usable; duplicate input while
     // awaiting an ACK is not sent twice.
@@ -521,7 +548,7 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
     })
     .await;
     // Original ordinary messages have not been ACKed in this stand-in.
-    for _ in 0..2 {
+    for _ in 0..3 {
         assert_eq!(recv(&mut ws).await["type"], "message");
     }
     assert!(
