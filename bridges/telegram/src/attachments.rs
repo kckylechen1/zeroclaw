@@ -21,7 +21,7 @@ pub async fn upload(api: &Api, options: &ConnectOptions, file: &File) -> Result<
         _ => bail!("unsupported Gateway URL scheme"),
     };
     url.set_scheme(scheme)
-        .map_err(|_| anyhow::anyhow!("invalid Gateway scheme"))?;
+        .map_err(|_| anyhow::Error::msg("invalid Gateway scheme"))?;
     if !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
