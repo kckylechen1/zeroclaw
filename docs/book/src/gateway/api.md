@@ -89,8 +89,8 @@ the sending socket first:
   the running one.
 - `durable` is `true` when the receipt is in the session store (the default
   SQLite backend) and survives a restart. It is `false` with the JSONL
-  backend or with persistence off; the receipt then lasts only while the
-  conversation is live.
+  backend or with persistence off; bounded in-memory receipts survive idle
+  conversation release for 16 minutes from first acceptance, but not restart.
 - The ACK means accepted for processing, not finished. The turn's `done`,
   `aborted` or `error` frame carries the same `id`.
 - Sending an `id` again, for example after a lost ACK, runs nothing and
@@ -100,7 +100,12 @@ the sending socket first:
   outcome is unknown; the request is not replayed.
 - If the receipt cannot be recorded, the message is refused with
   `REQUEST_NOT_RECORDED` and nothing runs.
-- Each session keeps its most recent 256 receipts. The stale-session sweep
+- Each session admits at most 256 receipts. SQLite also caps the whole table
+  at 16,384 receipts. Capacity reclamation only deletes receipts accepted more
+  than 16 minutes ago; if all receipts are protected, new input is refused.
+  Duplicate IDs still resolve while full. Beyond that window capacity reclamation
+  may remove a receipt, so deduplication is bounded rather than permanent.
+  The stale-session sweep
   (`session_ttl_hours`) deletes a swept session's receipts, and receipts
   older than the TTL whose session no longer exists.
 

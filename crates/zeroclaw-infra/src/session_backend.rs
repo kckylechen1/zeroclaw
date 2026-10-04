@@ -3,6 +3,10 @@
 use chrono::{DateTime, Utc};
 use zeroclaw_api::model_provider::ChatMessage;
 
+/// Minimum retry protection shared by durable and in-memory receipts. Longer
+/// than the Gateway's attachment handle lifetime; state changes do not renew it.
+pub const REQUEST_RECEIPT_PROTECTION_MINUTES: u16 = 16;
+
 /// Metadata about a persisted session.
 #[derive(Debug, Clone)]
 pub struct SessionMetadata {

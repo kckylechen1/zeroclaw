@@ -3275,6 +3275,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_attachment_receipt_survives_capacity_pressure_and_reconnect() {
+        let mut chat = SharedChat::new();
+        chat.state.session_backend = Some(Arc::new(
+            zeroclaw_infra::session_sqlite::SqliteSessionBackend::new(chat._tmp.path()).unwrap(),
+        ));
+        chat.state.config.write().agents.insert(
+            "web".into(),
+            zeroclaw_config::schema::AliasedAgentConfig::default(),
+        );
+        chat.scope.session_key = "gw_shared\u{1f}web".into();
+        let subject = zeroclaw_config::pairing::PairingGuard::token_hash("synthetic-file-token");
+        chat.scope.auth_subject = Some(subject.clone());
+        chat.state.config.write().gateway.bridges.insert(
+            "files".into(),
+            zeroclaw_config::schema::GatewayBridgeConfig {
+                token_hash: subject.clone(),
+                sessions: vec!["shared".into()],
+                ..Default::default()
+            },
+        );
+        let handle = chat
+            .state
+            .ws_conversations
+            .attachments
+            .insert(
+                crate::api_attachments::Scope {
+                    subject,
+                    session: "shared".into(),
+                    agent: "web".into(),
+                },
+                "note.txt".into(),
+                "text/plain".into(),
+                axum::body::Bytes::from_static(b"capacity attachment"),
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        chat.gate.add_permits(1);
+        let mut a = chat.attach().await;
+        let frame = serde_json::json!({"type":"message","id":"lost-file-ack","content":"read","attachments":[handle]});
+        assert_eq!(chat.send(&a, frame.clone()).unwrap()["durable"], true);
+        assert_eq!(
+            frames_until_end(&mut a).await.pop().unwrap()["type"],
+            "done"
+        );
+        let backend = chat.state.session_backend.as_ref().unwrap();
+        for i in 0..255 {
+            backend
+                .record_request(&chat.scope.session_key, &format!("other-{i}"), "rejected")
+                .unwrap();
+        }
+        assert!(
+            backend
+                .record_request(&chat.scope.session_key, "overflow", "accepted")
+                .is_err()
+        );
+        let old = a.conversation.clone();
+        drop(a);
+        chat.state.ws_conversations.release_if_unused(&old);
+        let a = chat.attach().await;
+        assert!(!Arc::ptr_eq(&old, &a.conversation));
+        assert_eq!(chat.send(&a, frame).unwrap()["status"], "duplicate");
+        assert_eq!(chat.seen.lock().len(), 1);
+        assert!(!a.conversation.is_running());
+    }
+
+    #[tokio::test]
     async fn a_message_id_is_acked_and_a_resend_is_not_run_again() {
         let chat = SharedChat::new();
         let mut a = chat.attach().await;

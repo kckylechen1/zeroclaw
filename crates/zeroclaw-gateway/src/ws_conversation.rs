@@ -41,7 +41,9 @@ const STEERING_BUFFER: usize = 32;
 const RECENT_REQUESTS: usize = 256;
 
 const RECENT_SESSIONS: usize = 1024;
-const RECEIPT_TTL: std::time::Duration = std::time::Duration::from_secs(16 * 60);
+const RECEIPT_TTL: std::time::Duration = std::time::Duration::from_secs(
+    zeroclaw_infra::session_backend::REQUEST_RECEIPT_PROTECTION_MINUTES as u64 * 60,
+);
 
 /// Recently accepted client request ids and their last state, in arrival
 /// order. The in-memory stand-in for the session store's receipts: it
