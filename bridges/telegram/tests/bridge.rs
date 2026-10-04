@@ -432,3 +432,151 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
     assert!(!bridge.is_finished(), "the bridge keeps running");
     bridge.abort();
 }
+
+#[tokio::test]
+async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
+    let tg: Shared = Arc::default();
+    tg.lock().unwrap().fail_sends = 1;
+    let tg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tg_addr = tg_listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/{bot}/{method}", post(bot_api))
+        .with_state(tg.clone());
+    tokio::spawn(async move { axum::serve(tg_listener, app).await.unwrap() });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_url = format!("ws://{}", listener.local_addr().unwrap());
+    let mut gateway = fake_gateway(listener);
+    let bridge = tokio::spawn(run(BridgeConfig {
+        telegram_api: format!("http://{tg_addr}"),
+        telegram_token: "TEST".into(),
+        owner_id: OWNER,
+        gateway: ConnectOptions {
+            gateway: gateway_url,
+            agent: "assistant".into(),
+            session_id: Some("main".into()),
+            token: Some("zc_token".into()),
+        },
+        poll_wait: Duration::from_secs(1),
+    }));
+    let mut ws = attach(&mut gateway).await;
+    let _control = control(&mut gateway).await;
+    send(&mut ws, json!({"type":"question", "request_id":"q1", "prompt":"Which?", "choices":["alpha", "beta"], "timeout_secs":30})).await;
+    let shown = FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["reply_markup"]["force_reply"] == true
+    })
+    .await;
+    assert!(shown["text"].as_str().unwrap().contains("2. beta"));
+    let message_id = tg.lock().unwrap().next_message;
+    let reply = |from, reply_id, text| {
+        json!({"message":{
+            "message_id":1001, "from":{"id":from}, "chat":{"id":from,"type":"private"}, "text":text,
+            "reply_to_message":{"message_id":reply_id,"text":"[ZeroClaw question] fixture"}
+        }})
+    };
+    FakeTelegram::push(&tg, reply(STRANGER, message_id, "intruder"));
+    FakeTelegram::push(&tg, reply(OWNER, message_id + 999, "wrong question"));
+    FakeTelegram::text(&tg, OWNER, "ordinary chat");
+    let ordinary = recv(&mut ws).await;
+    assert_eq!(ordinary["type"], "message");
+    assert_eq!(ordinary["content"], "ordinary chat");
+    let mut normal = reply(OWNER, 9999, "reply to ordinary text");
+    normal["message"]["reply_to_message"]["text"] = json!("ordinary bot response");
+    FakeTelegram::push(&tg, normal);
+    assert_eq!(recv(&mut ws).await["content"], "reply to ordinary text");
+    send(
+        &mut ws,
+        json!({"type":"chunk", "content":"[ZeroClaw question] ordinary model text"}),
+    )
+    .await;
+    let escaped = FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"] == "［ZeroClaw question] ordinary model text"
+    })
+    .await;
+    let mut normal = reply(OWNER, 8888, "reply to reserved-looking ordinary text");
+    normal["message"]["reply_to_message"]["text"] = escaped["text"].clone();
+    FakeTelegram::push(&tg, normal);
+    assert_eq!(
+        recv(&mut ws).await["content"],
+        "reply to reserved-looking ordinary text"
+    );
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "2"));
+    let answer = recv(&mut ws).await;
+    assert_eq!(
+        answer,
+        json!({"type":"answer", "request_id":"q1", "text":"2"})
+    );
+    assert!(
+        !tg.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(_, b)| b["text"] == "Answer: accepted")
+    );
+    send(
+        &mut ws,
+        json!({"type":"answer_ack", "request_id":"q1", "status":"unauthorized"}),
+    )
+    .await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "Answer: unauthorized").await;
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "2"));
+    assert_eq!(
+        recv(&mut ws).await,
+        json!({"type":"answer", "request_id":"q1", "text":"2"})
+    );
+    // Invalid input keeps the original mapping usable; duplicate input while
+    // awaiting an ACK is not sent twice.
+    send(
+        &mut ws,
+        json!({"type":"answer_ack", "request_id":"q1", "status":"invalid"}),
+    )
+    .await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "Answer: invalid").await;
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
+    assert_eq!(recv(&mut ws).await["text"], "1");
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"] == "The previous answer is awaiting confirmation"
+    })
+    .await;
+    // The Gateway has not consumed the answer. Lost ACK/disconnection alone
+    // must not replay it; a pending-question replay permits an explicit retry.
+    ws.close(None).await.unwrap();
+    let mut ws = attach(&mut gateway).await;
+    send(&mut ws, json!({"type":"question", "request_id":"q1", "prompt":"Which?", "choices":["alpha", "beta"], "timeout_secs":20})).await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"] == "The question is still pending; reply to it again"
+    })
+    .await;
+    // Original ordinary messages have not been ACKed in this stand-in.
+    for _ in 0..3 {
+        assert_eq!(recv(&mut ws).await["type"], "message");
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), ws.next())
+            .await
+            .is_err(),
+        "no automatic answer replay"
+    );
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
+    assert_eq!(
+        recv(&mut ws).await,
+        json!({"type":"answer", "request_id":"q1", "text":"1"})
+    );
+    send(
+        &mut ws,
+        json!({"type":"answer_ack", "request_id":"q1", "status":"accepted"}),
+    )
+    .await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "Answer: accepted").await;
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "late"));
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"] == "This request is no longer known"
+    })
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), ws.next())
+            .await
+            .is_err()
+    );
+    bridge.abort();
+}

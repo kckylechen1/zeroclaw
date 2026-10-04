@@ -941,6 +941,21 @@ pub trait Channel: Send + Sync + crate::attribution::Attributable {
         Ok(None)
     }
 
+    /// A correlated question transport handles both choices and free text.
+    /// Unlike request_choice, None means timeout/unreachable, never fallback.
+    fn supports_correlated_questions(&self) -> bool {
+        false
+    }
+
+    async fn request_question(
+        &self,
+        _question: &str,
+        _choices: &[String],
+        _timeout: std::time::Duration,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+
     async fn request_multi_choice(
         &self,
         _question: &str,

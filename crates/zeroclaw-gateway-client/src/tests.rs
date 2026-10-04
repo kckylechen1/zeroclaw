@@ -115,6 +115,9 @@ async fn fake_gateway(listener: TcpListener) -> Vec<serde_json::Value> {
                     ws.send(send(reply)).await.unwrap();
                 }
             }
+            "answer" => {
+                ws.send(send(serde_json::json!({"type":"answer_ack", "request_id":frame["request_id"], "status":"accepted"}))).await.unwrap();
+            }
             "approval_response" | "cancel" => {}
             other => panic!("unexpected client frame {other}"),
         }
@@ -227,4 +230,35 @@ fn the_bridge_socket_lives_next_to_the_chat_socket() {
     }))
     .unwrap();
     assert_eq!(deliver.thread_id, None);
+}
+
+#[tokio::test]
+async fn question_answers_use_a_separate_correlated_protocol() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(fake_gateway(listener));
+    let mut client = Client::connect(&ConnectOptions {
+        gateway: format!("ws://{addr}"),
+        agent: "main".into(),
+        session_id: None,
+        token: Some("zc_token".into()),
+    })
+    .await
+    .unwrap();
+    client.answer_question("q1", "hello").await.unwrap();
+    let ack = client.next_frame().await.unwrap().unwrap();
+    assert_eq!(
+        ack,
+        Frame::AnswerAck {
+            request_id: "q1".into(),
+            status: "accepted".into()
+        }
+    );
+    assert!(!ack.is_terminal());
+    client.cancel().await.unwrap();
+    let frames = server.await.unwrap();
+    assert_eq!(
+        frames[1],
+        serde_json::json!({"type":"answer", "request_id":"q1", "text":"hello"})
+    );
 }

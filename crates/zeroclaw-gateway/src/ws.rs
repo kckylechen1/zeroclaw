@@ -166,7 +166,7 @@ pub async fn handle_ws_chat(
     // success derive a STABLE transport-authenticated subject (the paired-token
     // hash) so a required-group approval policy can be satisfied over WS; an
     // operator grants approval rights to this paired device via a `ws:<token-hash>`
-    // group member. `None` when pairing is not required (no auth identity).
+    // group member. Pairing-off anonymous sockets have no auth identity.
     //
     // A bridge token (`[gateway.bridges.<name>]`) also authenticates, but only
     // for the sessions its entry scopes it to. Its subject is its token hash,
@@ -215,7 +215,11 @@ pub async fn handle_ws_chat(
             }
         }
     } else {
-        None
+        // Pairing-off permits anonymous chat, not anonymous answers. The
+        // guard's authenticate_and_hash deliberately allows everyone in
+        // that mode, so check actual stored device membership instead.
+        let hash = zeroclaw_config::pairing::PairingGuard::token_hash(presented);
+        (!presented.is_empty() && state.pairing.tokens().contains(&hash)).then_some(hash)
     };
     let bridge_scope = bridge_scope.map(|(_, scope)| scope);
 
@@ -487,6 +491,14 @@ async fn handle_socket(
         let _ = sender.send(Message::Text(frame.to_string().into())).await;
     }
 
+    let question_frames = subscription
+        .conversation
+        .questions
+        .frames(&state.config.read());
+    for frame in question_frames {
+        let _ = sender.send(Message::Text(frame.to_string().into())).await;
+    }
+
     let scope = WsTurnScope {
         session_key,
         session_id,
@@ -651,15 +663,23 @@ async fn build_ws_session(
 
     let Seed {
         pending_approvals,
+        questions,
         frames,
     } = seed;
     let (approval_event_tx, approval_event_rx) =
         tokio::sync::mpsc::channel::<zeroclaw_api::agent::TurnEvent>(8);
-    let approval_channel = Arc::new(WsApprovalChannel::new(
-        approval_event_tx,
-        pending_approvals.clone(),
-        Duration::from_secs(WS_APPROVAL_TIMEOUT_SECS),
-    ));
+    let approval_channel = Arc::new(
+        WsApprovalChannel::new(
+            approval_event_tx,
+            pending_approvals.clone(),
+            Duration::from_secs(WS_APPROVAL_TIMEOUT_SECS),
+        )
+        .with_questions(super::ws_question::QuestionPort {
+            questions,
+            frames: frames.clone(),
+            config: Arc::clone(&state.config),
+        }),
+    );
     agent
         .channel_handles()
         .register_channel(WS_CHANNEL_KEY, approval_channel);
@@ -740,7 +760,7 @@ async fn relay_approval_requests(
 /// `sanitize_outbound_response` this strips nothing: thinking deltas, tool
 /// arguments/results, approval summaries, plan entries and trim reasons must
 /// keep their shape, only credential-shaped values are masked.
-fn redact_frame_text(
+pub(super) fn redact_frame_text(
     text: &str,
     leak_detection: &zeroclaw_config::schema::LeakDetectionConfig,
 ) -> String {
@@ -879,6 +899,31 @@ fn handle_client_text(
         Err(e) => return error(format!("Invalid JSON: {e}"), "INVALID_JSON"),
     };
     match parsed["type"].as_str().unwrap_or("") {
+        "answer" => {
+            let id = parsed["request_id"].as_str().unwrap_or("");
+            let status = if !question_answer_authorized(state, scope) {
+                "unauthorized"
+            } else if id.is_empty() || id.len() > 128 {
+                "invalid"
+            } else if let Some(text) = parsed["text"].as_str() {
+                conversation.questions.answer(id, text)
+            } else {
+                "invalid"
+            };
+            if status == "accepted" {
+                conversation.publish(
+                    &serde_json::json!({"type":"answer_ack", "request_id":id, "status":status}),
+                );
+                (None, None)
+            } else {
+                (
+                    Some(
+                        serde_json::json!({"type":"answer_ack", "request_id":id, "status":status}),
+                    ),
+                    None,
+                )
+            }
+        }
         // ── approval_response (operator answered a tool prompt) ──
         "approval_response" => {
             let request_id = parsed["request_id"].as_str().unwrap_or("");
@@ -927,6 +972,24 @@ fn handle_client_text(
             "UNKNOWN_MESSAGE_TYPE",
         ),
     }
+}
+
+/// Resolve current device/bridge authority at answer time, including revocation.
+fn question_answer_authorized(state: &AppState, scope: &WsTurnScope) -> bool {
+    let Some(subject) = &scope.auth_subject else {
+        return false;
+    };
+    if state.pairing.tokens().contains(subject) {
+        return true;
+    }
+    let config = state.config.read();
+    config.gateway.bridges.values().any(|bridge| {
+        bridge.allows_session(&scope.session_id)
+            && zeroclaw_config::pairing::constant_time_eq(
+                subject,
+                &bridge.token_hash.to_ascii_lowercase(),
+            )
+    })
 }
 
 /// The longest client request id accepted on a `message` frame.
@@ -2622,6 +2685,70 @@ mod tests {
             }
             reply
         }
+    }
+
+    #[tokio::test]
+    async fn question_answers_require_live_authority_and_the_same_conversation() {
+        let mut chat = SharedChat::new();
+        let mut a = chat.attach().await;
+        let owner_hash =
+            zeroclaw_config::pairing::PairingGuard::token_hash("question-owner-fixture");
+        chat.state.config.write().gateway.bridges.insert(
+            "telegram".into(),
+            zeroclaw_config::schema::GatewayBridgeConfig {
+                token_hash: owner_hash.clone(),
+                sessions: vec!["shared".into()],
+                session_prefix: None,
+            },
+        );
+        let port = super::super::ws_question::QuestionPort {
+            questions: a.conversation.questions.clone(),
+            frames: a.conversation.frame_sink(),
+            config: chat.state.config.clone(),
+        };
+        let task = zeroclaw_spawn::spawn!(async move {
+            port.ask("Name?", &[], Duration::from_secs(5))
+                .await
+                .unwrap()
+        });
+        let frame = a.frames.recv().await.unwrap();
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let id = frame["request_id"].as_str().unwrap();
+        let answer = serde_json::json!({"type":"answer", "request_id":id, "text":"owner answer"});
+        assert_eq!(
+            chat.send(&a, answer.clone()).unwrap()["status"],
+            "unauthorized"
+        );
+        chat.scope.auth_subject = Some(owner_hash);
+        chat.scope.session_key = "gw_other".into();
+        let other = chat.attach().await;
+        assert_eq!(
+            chat.send(&other, answer.clone()).unwrap()["status"],
+            "stale"
+        );
+        chat.state.config.write().gateway.bridges.clear();
+        assert_eq!(
+            chat.send(&a, answer.clone()).unwrap()["status"],
+            "unauthorized"
+        );
+        chat.state.config.write().gateway.bridges.insert(
+            "telegram".into(),
+            zeroclaw_config::schema::GatewayBridgeConfig {
+                token_hash: chat.scope.auth_subject.clone().unwrap(),
+                sessions: vec!["shared".into()],
+                session_prefix: None,
+            },
+        );
+        assert!(chat.send(&a, answer.clone()).is_none());
+        assert_eq!(task.await.unwrap().as_deref(), Some("owner answer"));
+        assert_eq!(chat.send(&a, answer).unwrap()["status"], "stale");
+        let mut accepted = false;
+        for _ in 0..2 {
+            let frame = a.frames.recv().await.unwrap();
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            accepted |= frame["type"] == "answer_ack" && frame["status"] == "accepted";
+        }
+        assert!(accepted);
     }
 
     /// Frames up to and including the first terminal one.

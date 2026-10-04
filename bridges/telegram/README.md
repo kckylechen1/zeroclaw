@@ -97,5 +97,34 @@ messages in the gateway's outbox, and the gateway sends them here as
   a paired token, not a bridge token), the bridge logs an error and keeps
   relaying chat without proactive messages.
 
-Not yet: groups, attachments and `ask_user` questions. A turn's frames that
+## Questions
+
+`ask_user` questions require a valid paired Gateway token or a bridge token
+scoped to this session, including when pairing is disabled. Tokenless chat
+can display a prompt but cannot answer it. Questions use Telegram ForceReply. Reply to that specific bot
+message with free text, an exact choice, or its number; ordinary chat and replies to ordinary bot text remain
+ordinary Gateway messages. Question messages carry a reserved `[ZeroClaw question]`
+marker so unknown or expired question replies can be refused after mapping loss.
+Ordinary model/proactive text beginning with this reserved marker uses a fullwidth
+opening bracket when rendered, so it remains ordinary text when replied to. The bridge checks the owner and private chat
+before forwarding the correlated answer. It reports `Answer: accepted` only
+on the Gateway's `answer_ack`, never just because the socket write succeeded.
+An invalid answer can be retried on the same question. An authorization refusal
+also preserves the question mapping; retry requires restored Gateway authority
+before the original deadline. Unknown, expired and
+already answered replies are refused without starting a turn or approving a
+tool. Mappings are bounded to 16 and live only for the question timeout.
+
+Outstanding questions can be shown to newly attached clients while another
+subscriber keeps the conversation live. Losing the last subscriber releases
+the waiter. Questions and mappings do not survive a process restart. An answer
+with a lost ACK has an unknown outcome and is never automatically replayed. If
+the Gateway replays that still-pending question after reconnect, an explicit
+owner retry is enabled. Transient question delivery errors receive at most
+three attempts within the question deadline; exhausted/permanent errors drop
+the chat socket so an invisible question cannot hold its sole subscriber.
+This is not a durable source-update handoff or an exactly-once delivery claim;
+#377's intake/cursor recovery and real-bot acceptance remain separate work.
+
+Not yet: groups and attachments. A turn's frames that
 arrive while the chat socket is down are not replayed.

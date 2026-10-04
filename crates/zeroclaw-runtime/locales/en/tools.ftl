@@ -175,3 +175,6 @@ tool-tachi-route-conflict = This request belongs to a different Tachi endpoint, 
 tool-tachi-storage-root-changed = The runtime request ledger cannot move while this registry is active. Restore the selected data directory. An operator storage move requires restart and migration of the existing sessions database, including unresolved claims.
 tool-tachi-unknown = No delegated request is bound for this agent.
 tool-tachi-binding-failed = Tachi accepted the attached receipt, but recording its local reference failed: { $detail }. Preserve the dispatch ID and do not resubmit.
+
+tool-ask-user-unanswered = The question expired or no client could answer it. Retry ask_user if needed.
+tool-ask-user-question-failed = The question could not be delivered. Check its size, choices and timeout (1–300 seconds).

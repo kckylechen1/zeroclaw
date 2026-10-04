@@ -1038,3 +1038,8 @@ cli-chat-steered = (added to the running turn)
 cli-chat-closed = The gateway closed the connection.
 cli-chat-event = [{$kind}] {$text}
 cli-chat-usage = [context {$context}] {$cost}
+
+cli-chat-question = Answer using /answer { $id } <text or choice number>
+cli-chat-answer-ack = Answer { $id }: { $status }
+cli-chat-question-closed = Question { $id } is closed.
+cli-chat-answer-usage = Usage: /answer <request_id> <text or choice number>
