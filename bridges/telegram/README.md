@@ -153,3 +153,8 @@ HTTP fetch route to download a stored attachment.
 
 Not yet: groups or durable attachment/intake recovery. A turn's frames that
 arrive while the chat socket is down are not replayed.
+
+While a file uploads, up to 32 subsequent owner text inputs wait behind it in
+arrival order. Gateway events and `/cancel` remain responsive; additional files
+or text beyond that bound receive a retry response. A definitive Gateway input
+rejection ends reconnect retries for that request.

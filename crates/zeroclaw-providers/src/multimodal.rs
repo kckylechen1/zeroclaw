@@ -454,8 +454,9 @@ pub fn quote_attachment_media_markers(text: &str) -> String {
         .map(|(i, c)| {
             if c == '['
                 && MEDIA_MARKER_KINDS.iter().any(|kind| {
-                    text.get(i + 1..i + kind.len() + 2)
-                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&format!("{kind}:")))
+                    text.get(i + 1..i + kind.len() + 1)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(kind))
+                        && text.as_bytes().get(i + kind.len() + 1) == Some(&b':')
                 })
             {
                 '［'

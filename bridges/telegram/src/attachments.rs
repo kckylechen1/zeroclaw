@@ -80,10 +80,7 @@ pub async fn upload(api: &Api, options: &ConnectOptions, file: &File) -> Result<
             response.status().as_u16()
         );
     }
-    let body = crate::telegram::bounded_bytes(response).await?;
-    if body.len() > 4096 {
-        bail!("Gateway attachment receipt is oversized");
-    }
+    let body = crate::telegram::bounded_bytes(response, 4096).await?;
     let info: Value = serde_json::from_slice(&body).context("invalid attachment receipt")?;
     let id = info["id"]
         .as_str()
@@ -262,6 +259,8 @@ mod tests {
             "cancel",
             "upload must not block controls"
         );
+        tg.updates.lock().unwrap().push_back(json!({"update_id":3,"message":{"message_id":11,"from":{"id":42},"chat":{"id":42,"type":"private"},"text":"follow-up after file"}}));
+        tokio::time::sleep(Duration::from_millis(50)).await;
         tg.gate.add_permits(1);
         let frame = value(&mut ws).await;
         assert_eq!(frame["content"], "read this");
@@ -270,6 +269,13 @@ mod tests {
             "a0000000-0000-4000-8000-000000000001"
         );
         assert!(!frame.to_string().contains("hello attachment"));
+        let following = value(&mut ws).await;
+        assert_eq!(following["content"], "follow-up after file");
+        send(
+            &mut ws,
+            json!({"type":"ack","id":following["id"],"status":"accepted"}),
+        )
+        .await;
         // Lose the ACK: reconnect must retain both request identity and
         // the exact HTTP handles, without downloading/uploading again.
         ws.send(Message::Close(None)).await.unwrap();
@@ -290,9 +296,31 @@ mod tests {
         assert_eq!(tg.downloads.load(std::sync::atomic::Ordering::Relaxed), 1);
         send(
             &mut again,
-            json!({"type":"ack","id":frame["id"],"status":"duplicate","state":"done"}),
+            json!({"type":"error","id":frame["id"],"code":"UNAUTHORIZED_ATTACHMENTS","message":"fixture rejection"}),
         )
         .await;
+        // A definitive rejection ends retries. Reconnecting after permission
+        // restoration must not silently submit that refused attachment again.
+        again.send(Message::Close(None)).await.unwrap();
+        drop(again);
+        let mut third = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        send(
+            &mut third,
+            json!({"type":"session_start","session_id":"main"}),
+        )
+        .await;
+        assert_eq!(value(&mut third).await["type"], "connect");
+        send(&mut third, json!({"type":"connected"})).await;
+        push(&tg, 42, false);
+        assert_eq!(
+            value(&mut third).await["type"],
+            "cancel",
+            "definitively rejected requests must not be replayed"
+        );
+        assert_eq!(tg.downloads.load(std::sync::atomic::Ordering::Relaxed), 1);
         running.abort();
         bot_server.abort();
         gw_server.abort();

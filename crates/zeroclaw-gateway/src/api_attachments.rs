@@ -168,13 +168,7 @@ fn subject(
     headers: &HeaderMap,
     query: &AttachmentQuery,
 ) -> Result<Scope, StatusCode> {
-    if query.session_id.is_empty()
-        || query.session_id.len() > 128
-        || !query
-            .session_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
-    {
+    if query.session_id.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
     let token = headers
@@ -293,6 +287,7 @@ async fn fetch(
         Err(e) => return failure(e),
     };
     match state.ws_conversations.attachments.get(&scope, &id) {
+        Ok(_) if !scope_authorized(&state, &scope) => failure(StatusCode::UNAUTHORIZED),
         Ok(a) => (
             [
                 (header::CONTENT_TYPE, a.mime),
@@ -492,7 +487,7 @@ mod tests {
             "tg".into(),
             zeroclaw_config::schema::GatewayBridgeConfig {
                 token_hash: zeroclaw_config::pairing::PairingGuard::token_hash("synthetic-token"),
-                sessions: vec!["main".into()],
+                sessions: vec!["main".into(), "owner/用户 space".into()],
                 ..Default::default()
             },
         );
@@ -551,6 +546,13 @@ mod tests {
                 .unwrap()
                 .status(),
             StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.clone().oneshot(req("POST",
+                "/api/attachments?session_id=owner%2F%E7%94%A8%E6%88%B7%20space&agent=assistant&file_name=note.txt",
+                Some("synthetic-token"), Body::from("hello"))).await.unwrap().status(),
+            StatusCode::CREATED,
+            "attachment scopes preserve the existing session grammar"
         );
         state.config.write().gateway.bridges.clear();
         assert_eq!(

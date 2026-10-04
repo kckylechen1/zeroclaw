@@ -109,6 +109,7 @@ pub async fn run(config: BridgeConfig) -> Result<()> {
         reconnect_at: Instant::now(),
         unacked: VecDeque::new(),
         upload: None,
+        after_upload: VecDeque::new(),
         stream: None,
         typing_at: None,
         keys: ApprovalKeys::default(),
@@ -186,6 +187,8 @@ struct Bridge {
     /// id, so the gateway runs each at most once.
     unacked: VecDeque<PendingMessage>,
     upload: Option<tokio::task::JoinHandle<Result<PendingMessage>>>,
+    // Inputs that arrived after the uploading file, preserving owner order.
+    after_upload: VecDeque<PendingMessage>,
     stream: Option<Stream>,
     /// When to next show "typing"; set while a turn runs.
     typing_at: Option<Instant>,
@@ -256,6 +259,9 @@ impl Bridge {
                 uploaded = next_upload(&mut self.upload) => {
                     self.upload.take();
                     match uploaded { Ok(message)=>self.queue_message(message).await,Err(_)=>self.reply("Attachment could not be uploaded; it was not sent to the agent").await }
+                    while let Some(message) = self.after_upload.pop_front() {
+                        self.queue_message(message).await;
+                    }
                 }
                 frame = next_frame(&mut self.client) => match frame {
                     Ok(Some(frame)) => self.on_frame(frame).await,
@@ -536,12 +542,21 @@ impl Bridge {
             }
             _ => {}
         }
-        self.queue_message(PendingMessage {
+        let message = PendingMessage {
             id: new_request_id(),
             text,
             attachments: Vec::new(),
-        })
-        .await;
+        };
+        if self.upload.is_some() {
+            if self.after_upload.len() >= 32 {
+                self.reply("Inputs waiting for the attachment are full; retry shortly")
+                    .await;
+            } else {
+                self.after_upload.push_back(message);
+            }
+        } else {
+            self.queue_message(message).await;
+        }
     }
 
     async fn queue_message(&mut self, message: PendingMessage) {
@@ -700,7 +715,26 @@ impl Bridge {
                 self.end_turn().await;
                 self.reply(text::ABORTED).await;
             }
-            Frame::Error { message, .. } => {
+            Frame::Error { message, id, code } => {
+                // These Gateway responses explicitly say no input was run.
+                // Keep unknown outcomes (including no-id/runtime errors) for
+                // deduplicated reconnect replay rather than losing input.
+                if let Some(id) = id.filter(|_| {
+                    matches!(
+                        code.as_deref(),
+                        Some(
+                            "INVALID_ATTACHMENTS"
+                                | "UNAUTHORIZED_ATTACHMENTS"
+                                | "ATTACHMENT_UNAVAILABLE"
+                                | "EMPTY_CONTENT"
+                                | "REQUEST_NOT_RECORDED"
+                                | "STEERING_QUEUE_FULL"
+                                | "STEERING_CLOSED"
+                        )
+                    )
+                }) {
+                    self.unacked.retain(|message| message.id != id);
+                }
                 self.end_turn().await;
                 self.reply(&text::error(&message)).await;
             }

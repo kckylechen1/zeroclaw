@@ -241,7 +241,7 @@ impl Api {
             .send()
             .await
             .map_err(reqwest::Error::without_url)?;
-        bounded_bytes(response).await
+        bounded_bytes(response, DOWNLOAD_LIMIT).await
     }
 
     /// Long-poll for updates after `offset`, waiting up to `wait`.
@@ -318,17 +318,17 @@ impl Api {
     }
 }
 
-pub(crate) async fn bounded_bytes(mut response: reqwest::Response) -> Result<Vec<u8>> {
+pub(crate) async fn bounded_bytes(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>> {
     if !response.status().is_success() {
         bail!(
             "attachment HTTP request refused ({})",
             response.status().as_u16()
         );
     }
-    if response
-        .content_length()
-        .is_some_and(|n| n > DOWNLOAD_LIMIT as u64)
-    {
+    if response.content_length().is_some_and(|n| n > limit as u64) {
         bail!("attachment exceeds the bridge download limit");
     }
     let mut data = Vec::new();
@@ -337,7 +337,7 @@ pub(crate) async fn bounded_bytes(mut response: reqwest::Response) -> Result<Vec
         .await
         .map_err(reqwest::Error::without_url)?
     {
-        if chunk.len() > DOWNLOAD_LIMIT - data.len() {
+        if chunk.len() > limit - data.len() {
             bail!("attachment exceeds the bridge download limit");
         }
         data.extend_from_slice(&chunk);

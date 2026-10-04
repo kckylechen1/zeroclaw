@@ -40,31 +40,37 @@ const STEERING_BUFFER: usize = 32;
 /// no receipts. Mirrors the SQLite backend's per-session bound.
 const RECENT_REQUESTS: usize = 256;
 
+const RECENT_SESSIONS: usize = 1024;
+const RECEIPT_TTL: std::time::Duration = std::time::Duration::from_secs(16 * 60);
+
 /// Recently accepted client request ids and their last state, in arrival
 /// order. The in-memory stand-in for the session store's receipts: it
-/// catches a retry on a live conversation, not one after a restart.
+/// catches a retry across conversation recreation, not one after a restart.
 #[derive(Default)]
 struct RecentRequests {
-    entries: std::collections::VecDeque<(String, String)>,
+    entries: std::collections::VecDeque<(String, String, std::time::Instant)>,
 }
 
 impl RecentRequests {
-    fn record(&mut self, request_id: &str, state: &str) -> RequestReceipt {
-        if let Some((_, known)) = self.entries.iter().find(|(id, _)| id == request_id) {
-            return RequestReceipt::Duplicate {
+    fn record(&mut self, request_id: &str, state: &str) -> std::io::Result<RequestReceipt> {
+        if let Some((_, known, _)) = self.entries.iter().find(|(id, _, _)| id == request_id) {
+            return Ok(RequestReceipt::Duplicate {
                 state: known.clone(),
-            };
+            });
         }
         if self.entries.len() == RECENT_REQUESTS {
-            self.entries.pop_front();
+            return Err(std::io::Error::other("recent request capacity exhausted"));
         }
-        self.entries
-            .push_back((request_id.to_string(), state.to_string()));
-        RequestReceipt::Recorded
+        self.entries.push_back((
+            request_id.to_string(),
+            state.to_string(),
+            std::time::Instant::now(),
+        ));
+        Ok(RequestReceipt::Recorded)
     }
 
     fn set_state(&mut self, request_id: &str, state: &str) {
-        if let Some((_, known)) = self.entries.iter_mut().find(|(id, _)| id == request_id) {
+        if let Some((_, known, _)) = self.entries.iter_mut().find(|(id, _, _)| id == request_id) {
             *known = state.to_string();
         }
     }
@@ -134,7 +140,6 @@ pub(crate) struct Conversation<A> {
     pub(crate) questions: Arc<super::ws_question::Questions>,
     turn: parking_lot::Mutex<Option<ActiveTurn>>,
     next_generation: AtomicU64,
-    requests: parking_lot::Mutex<RecentRequests>,
 }
 
 impl<A> Conversation<A> {
@@ -152,7 +157,6 @@ impl<A> Conversation<A> {
             questions,
             turn: parking_lot::Mutex::new(None),
             next_generation: AtomicU64::new(1),
-            requests: parking_lot::Mutex::default(),
         }
     }
 
@@ -244,16 +248,6 @@ impl<A> Conversation<A> {
         drop(drained);
     }
 
-    /// Remember a client request id in memory. For sessions whose store
-    /// keeps no receipts; see [`RecentRequests`].
-    pub(crate) fn record_request(&self, request_id: &str, state: &str) -> RequestReceipt {
-        self.requests.lock().record(request_id, state)
-    }
-
-    pub(crate) fn set_request_state(&self, request_id: &str, state: &str) {
-        self.requests.lock().set_state(request_id, state);
-    }
-
     pub(crate) fn subscriber_count(&self) -> usize {
         self.frames.subscribers.load(Ordering::Acquire)
     }
@@ -266,6 +260,9 @@ pub struct ConversationHub<A> {
     /// Canonical bounded ephemeral payload bytes for this gateway.
     pub(crate) attachments: crate::api_attachments::Store,
     slots: parking_lot::Mutex<HashMap<String, Slot<A>>>,
+    // Canonical fallback receipts outlive idle conversations. No second copy
+    // in Conversation and no agent/history retention for reconnect dedup.
+    requests: parking_lot::Mutex<HashMap<String, RecentRequests>>,
 }
 
 impl<A> Default for ConversationHub<A> {
@@ -273,11 +270,43 @@ impl<A> Default for ConversationHub<A> {
         Self {
             slots: parking_lot::Mutex::new(HashMap::new()),
             attachments: crate::api_attachments::Store::default(),
+            requests: parking_lot::Mutex::default(),
         }
     }
 }
 
 impl<A> ConversationHub<A> {
+    pub(crate) fn record_request(
+        &self,
+        key: &str,
+        id: &str,
+        state: &str,
+    ) -> std::io::Result<RequestReceipt> {
+        let now = std::time::Instant::now();
+        let mut requests = self.requests.lock();
+        requests.retain(|_, receipts| {
+            receipts
+                .entries
+                .retain(|(_, _, recorded)| now.duration_since(*recorded) < RECEIPT_TTL);
+            !receipts.entries.is_empty()
+        });
+        if requests.len() >= RECENT_SESSIONS && !requests.contains_key(key) {
+            return Err(std::io::Error::other(
+                "recent request session capacity exhausted",
+            ));
+        }
+        requests
+            .entry(key.to_string())
+            .or_default()
+            .record(id, state)
+    }
+
+    pub(crate) fn set_request_state(&self, key: &str, id: &str, state: &str) {
+        if let Some(receipts) = self.requests.lock().get_mut(key) {
+            receipts.set_state(id, state);
+        }
+    }
+
     /// Attach to the conversation for `key`, building it with `create` if no
     /// socket holds it. `create` returns the agent state plus a value for
     /// the caller; the caller gets that value back only when this call built
@@ -601,24 +630,51 @@ mod tests {
     async fn remembered_requests_report_duplicates_and_stay_bounded() {
         let hub = Arc::new(ConversationHub::<()>::default());
         let (a, _) = attach(&hub, "gw_s1").await;
-        let conv = &a.conversation;
+        let key = a.conversation.key();
         assert_eq!(
-            conv.record_request("r1", "accepted"),
+            hub.record_request(key, "r1", "accepted").unwrap(),
             RequestReceipt::Recorded
         );
-        conv.set_request_state("r1", "done");
+        hub.set_request_state(key, "r1", "done");
         assert_eq!(
-            conv.record_request("r1", "accepted"),
+            hub.record_request(key, "r1", "accepted").unwrap(),
             RequestReceipt::Duplicate {
                 state: "done".into()
             }
         );
-        for i in 2..=RECENT_REQUESTS + 1 {
-            conv.record_request(&format!("r{i}"), "accepted");
+        for i in 2..=RECENT_REQUESTS {
+            hub.record_request(key, &format!("r{i}"), "accepted")
+                .unwrap();
         }
+        assert!(hub.record_request(key, "overflow", "accepted").is_err());
         assert_eq!(
-            conv.record_request("r1", "accepted"),
+            hub.record_request(key, "r1", "accepted").unwrap(),
+            RequestReceipt::Duplicate {
+                state: "done".into()
+            }
+        );
+    }
+
+    #[test]
+    fn receipt_expiry_and_session_capacity_do_not_evict_live_ids() {
+        let hub = ConversationHub::<()>::default();
+        for i in 0..RECENT_SESSIONS {
+            hub.record_request(&format!("s{i}"), "r", "accepted")
+                .unwrap();
+        }
+        assert!(hub.record_request("overflow", "r", "accepted").is_err());
+        assert!(matches!(
+            hub.record_request("s0", "r", "accepted").unwrap(),
+            RequestReceipt::Duplicate { .. }
+        ));
+        hub.requests.lock().get_mut("s0").unwrap().entries[0].2 =
+            std::time::Instant::now() - RECEIPT_TTL;
+        // Updating terminal state must not renew the receipt's expiry.
+        hub.set_request_state("s0", "r", "done");
+        assert_eq!(
+            hub.record_request("overflow", "r", "accepted").unwrap(),
             RequestReceipt::Recorded
         );
+        assert!(!hub.requests.lock().contains_key("s0"));
     }
 }

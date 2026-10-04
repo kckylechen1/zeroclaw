@@ -422,7 +422,6 @@ identifiers present on the event payload rather than assuming each
 buffer, oldest first. It is a reconnect window for subscribers, not a separate
 canonical lifecycle store.
 
-
 ## HTTP attachments
 
 Attachments use HTTP bytes and opaque IDs; file bytes never travel in client
@@ -480,3 +479,9 @@ Scope protection of the HTTP bytes does not change shared conversation visibilit
 This leaf supplies bounded HTTP upload/download and inbound text/image mapping.
 It does not supply automatic outbound Telegram file delivery, audio transcription,
 PDF/binary parsing, PWA upload UI or durable Telegram intake/cursor recovery.
+
+Without a durable session backend, request receipts survive idle conversation
+release for 16 minutes from their first acceptance. The Gateway admits at most
+256 unexpired IDs per session and 1024 such recent sessions; new inputs are
+refused when either receipt bound is full rather than evicting live IDs. This does not provide
+restart recovery. Attachment handles expire after 15 minutes regardless.

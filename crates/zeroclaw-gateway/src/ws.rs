@@ -1153,6 +1153,17 @@ fn handle_message_frame(
                     );
                 }
             };
+        // Resolving/encoding bytes can race a live revoke or agent disable.
+        // Consult canonical policy again at the input submission boundary.
+        if !crate::api_attachments::scope_authorized(state, &payload_scope) {
+            if let Some(id) = request_id {
+                set_request_state(state, conversation, &scope.session_key, id, "rejected");
+            }
+            return reject(
+                &zeroclaw_runtime::i18n::get_required_cli_string("gateway-attachment-unauthorized"),
+                "UNAUTHORIZED_ATTACHMENTS",
+            );
+        }
     }
     let ack = |turn: &str| {
         request_id.map(|id| {
@@ -1199,11 +1210,11 @@ fn handle_message_frame(
 }
 
 /// Record a client request as accepted: in the session store when it keeps
-/// receipts, otherwise in the conversation's memory. The flag says whether
+/// receipts, otherwise in the hub's bounded reconnect memory. The flag says whether
 /// the record survives a restart.
 fn accept_request(
     state: &AppState,
-    conversation: &Conversation<WsSession>,
+    _conversation: &Conversation<WsSession>,
     session_key: &str,
     request_id: &str,
 ) -> std::io::Result<(RequestReceipt, bool)> {
@@ -1212,18 +1223,25 @@ fn accept_request(
     {
         return Ok((receipt, true));
     }
-    Ok((conversation.record_request(request_id, "accepted"), false))
+    Ok((
+        state
+            .ws_conversations
+            .record_request(session_key, request_id, "accepted")?,
+        false,
+    ))
 }
 
 /// Move a recorded request to `request_state`, wherever it was recorded.
 fn set_request_state(
     state: &AppState,
-    conversation: &Conversation<WsSession>,
+    _conversation: &Conversation<WsSession>,
     session_key: &str,
     request_id: &str,
     request_state: &str,
 ) {
-    conversation.set_request_state(request_id, request_state);
+    state
+        .ws_conversations
+        .set_request_state(session_key, request_id, request_state);
     if let Some(backend) = &state.session_backend
         && let Err(e) = backend.set_request_state(session_key, request_id, request_state)
     {
@@ -3212,6 +3230,13 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("attachment contents"))
         );
+        // Lose the ACK and release the idle conversation with no backend.
+        assert!(chat.state.session_backend.is_none());
+        let old = a.conversation.clone();
+        drop(a);
+        chat.state.ws_conversations.release_if_unused(&old);
+        let mut a = chat.attach().await;
+        assert!(!Arc::ptr_eq(&old, &a.conversation));
         assert_eq!(chat.send(&a, frame).unwrap()["status"], "duplicate");
         assert_eq!(chat.seen.lock().len(), 1);
         let invalid = serde_json::json!({"type":"message","id":"unknown-file","content":"read","attachments":[uuid::Uuid::new_v4().to_string()]});
