@@ -351,6 +351,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // Tungstenite fixes the handshake callback's error type to an HTTP response.
+    #[allow(clippy::result_large_err)]
     async fn one_shot_keeps_reading_gateway_frames_while_stdin_is_idle() {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
