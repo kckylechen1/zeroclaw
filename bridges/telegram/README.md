@@ -97,5 +97,23 @@ messages in the gateway's outbox, and the gateway sends them here as
   a paired token, not a bridge token), the bridge logs an error and keeps
   relaying chat without proactive messages.
 
-Not yet: groups, attachments and `ask_user` questions. A turn's frames that
+## Questions
+
+`ask_user` questions use Telegram ForceReply. Reply to that specific bot
+message with free text, an exact choice, or its number; ordinary chat remains
+an ordinary Gateway message. The bridge checks the owner and private chat
+before forwarding the correlated answer. It reports `Answer: accepted` only
+on the Gateway's `answer_ack`, never just because the socket write succeeded.
+An invalid answer can be retried on the same question. Unknown, expired and
+already answered replies are refused without starting a turn or approving a
+tool. Mappings are bounded to 16 and live only for the question timeout.
+
+Outstanding questions can be shown to newly attached clients while another
+subscriber keeps the conversation live. Losing the last subscriber releases
+the waiter. Questions and mappings do not survive a process restart. An answer
+with a lost ACK has an unknown outcome and is never automatically replayed.
+This is not a durable source-update handoff or an exactly-once delivery claim;
+#377's intake/cursor recovery and real-bot acceptance remain separate work.
+
+Not yet: groups and attachments. A turn's frames that
 arrive while the chat socket is down are not replayed.

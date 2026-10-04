@@ -35,6 +35,7 @@ pub mod ws;
 pub mod ws_approval;
 pub mod ws_bridge;
 pub mod ws_conversation;
+mod ws_question;
 
 use anyhow::{Context, Result};
 use axum::{

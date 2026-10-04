@@ -106,6 +106,44 @@ the sending socket first:
 
 Messages without an `id` behave as before: no ACK and no deduplication.
 
+### Questions and answers
+
+`ask_user` on `wss` emits a session-bound question to every attached client:
+
+```json
+{"type":"question","request_id":"<opaque UUID>","prompt":"Which?","choices":["alpha","beta"],"timeout_secs":120}
+{"type":"answer","request_id":"<same UUID>","text":"2"}
+{"type":"answer_ack","request_id":"<same UUID>","status":"accepted"}
+```
+
+An empty `choices` array accepts free text. Otherwise use the exact choice
+text or its one-based number. An answer never approves a tool. The Gateway
+checks current paired-device or scoped bridge authority before consuming the
+answer; anonymous sockets, including with pairing disabled, cannot answer.
+A bridge removed or moved outside the session scope cannot answer on an old
+socket. All paired devices belong to the single owner.
+
+The shared Conversation owns pending questions in memory, separate from
+message receipts and approval decisions. Only the first valid answer counts.
+`answer_ack` is the authority: `accepted` is broadcast to the session;
+`invalid`, `stale` and `unauthorized` go only to the sending socket. Invalid
+text leaves the question open. These frames do not end the turn. An accepted
+answer means handed to the live waiter, not that subsequent effects finished,
+and is not a durable receipt across a process restart.
+
+The limit is 16 pending questions, 32 choices, 3000 UTF-8 bytes across the
+prompt and choices, 4096 bytes per answer, and a timeout of 1–300 seconds.
+Cancelling/finishing the turn, dropping the waiting call, or losing the last
+subscriber removes pending questions. The turn itself survives disconnection.
+`question_closed` retires a question's UI controls. A new subscriber receives
+still-pending questions with their original IDs and remaining timeout; prompts
+and choices use the current outbound redaction policy at send/replay time.
+
+Clients must not automatically replay answers after a lost ACK: an interrupted
+answer has an unknown outcome. Questions do not survive a Gateway restart.
+Older clients tolerate the additive frames but cannot answer; the request then
+expires. `zeroclaw chat` supports `/answer <request_id> <text or choice number>`.
+
 ## Channel bridges
 
 A bridge is a channel that runs as its own process, for example

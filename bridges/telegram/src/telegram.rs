@@ -27,6 +27,14 @@ pub struct Message {
     pub chat: Chat,
     #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub reply_to_message: Option<ReplyToMessage>,
+}
+
+/// Only the correlation field is needed, not a recursive message history.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplyToMessage {
+    pub message_id: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -226,6 +234,11 @@ const SHORT: Duration = Duration::from_secs(20);
 pub enum Inbound {
     /// Text the owner typed in their private chat with the bot.
     Text { chat_id: i64, text: String },
+    Reply {
+        chat_id: i64,
+        message_id: i64,
+        text: String,
+    },
     /// The owner pressed an inline button.
     Callback {
         id: String,
@@ -259,11 +272,20 @@ pub fn classify(update: &Update, owner_id: i64) -> Inbound {
     let Some(message) = &update.message else {
         return Inbound::Ignored("update kind the bridge does not handle");
     };
-    if message.chat.kind != "private" {
+    if message.chat.kind != "private" || message.chat.id != owner_id {
         return Inbound::Ignored("message outside a private chat");
     }
     if message.from.as_ref().map(|user| user.id) != Some(owner_id) {
         return Inbound::Ignored("message from someone other than the owner");
+    }
+    if let (Some(reply), Some(text)) = (&message.reply_to_message, &message.text)
+        && !text.trim().is_empty()
+    {
+        return Inbound::Reply {
+            chat_id: message.chat.id,
+            message_id: reply.message_id,
+            text: text.clone(),
+        };
     }
     match &message.text {
         Some(text) if !text.trim().is_empty() => Inbound::Text {

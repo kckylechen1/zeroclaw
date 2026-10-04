@@ -31,6 +31,7 @@ pub struct WsApprovalChannel {
     event_tx: mpsc::Sender<TurnEvent>,
     pending: PendingApprovals,
     timeout: Duration,
+    questions: Option<super::ws_question::QuestionPort>,
 }
 
 impl WsApprovalChannel {
@@ -43,7 +44,12 @@ impl WsApprovalChannel {
             event_tx,
             pending,
             timeout,
+            questions: None,
         }
+    }
+    pub(crate) fn with_questions(mut self, port: super::ws_question::QuestionPort) -> Self {
+        self.questions = Some(port);
+        self
     }
 }
 
@@ -85,6 +91,22 @@ impl Channel for WsApprovalChannel {
         // channel orchestrator; turns are driven directly by the WS
         // handler loop. Listen is a no-op for this transport.
         Ok(())
+    }
+
+    fn supports_correlated_questions(&self) -> bool {
+        self.questions.is_some()
+    }
+
+    async fn request_question(
+        &self,
+        question: &str,
+        choices: &[String],
+        timeout: Duration,
+    ) -> anyhow::Result<Option<String>> {
+        match &self.questions {
+            Some(port) => port.ask(question, choices, timeout).await,
+            None => Ok(None),
+        }
     }
 
     fn supports_free_form_ask(&self) -> bool {

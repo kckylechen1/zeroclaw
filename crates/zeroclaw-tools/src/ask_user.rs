@@ -180,6 +180,33 @@ impl Tool for AskUserTool {
 
         let timeout = std::time::Duration::from_secs(timeout_secs);
 
+        if channel.supports_correlated_questions() {
+            let answer = channel
+                .request_question(&question, choices.as_deref().unwrap_or(&[]), timeout)
+                .await;
+            return Ok(match answer {
+                Ok(Some(answer)) => ToolResult {
+                    success: true,
+                    output: answer.into(),
+                    error: None,
+                },
+                Ok(None) => ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(crate::i18n::get_required_tool_string(
+                        "tool-ask-user-unanswered",
+                    )),
+                },
+                Err(_) => ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(crate::i18n::get_required_tool_string(
+                        "tool-ask-user-question-failed",
+                    )),
+                },
+            });
+        }
+
         // Prefer the channel's native structured-choice flow when choices are
         // present (e.g. ACP `session/request_permission` / `elicitation/create`,
         // Telegram inline keyboard).

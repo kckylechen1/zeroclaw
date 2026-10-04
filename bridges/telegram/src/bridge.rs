@@ -2,7 +2,7 @@
 //! socket kept open for the owner's session. Proactive messages come in on
 //! a separate control socket (see `control`).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -111,6 +111,7 @@ pub async fn run(config: BridgeConfig) -> Result<()> {
         stream: None,
         typing_at: None,
         keys: ApprovalKeys::default(),
+        questions: HashMap::new(),
     };
     let result = bridge.run(&mut updates).await;
     poller.abort();
@@ -187,6 +188,14 @@ struct Bridge {
     /// When to next show "typing"; set while a turn runs.
     typing_at: Option<Instant>,
     keys: ApprovalKeys,
+    // Platform reply mapping only. The Gateway owns acceptance/expiry.
+    questions: HashMap<i64, QuestionReply>,
+}
+
+struct QuestionReply {
+    request_id: String,
+    deadline: Instant,
+    submitted: bool,
 }
 
 async fn next_frame(client: &mut Option<Client>) -> Result<Option<Frame>> {
@@ -329,6 +338,9 @@ impl Bridge {
                 );
             }
             Inbound::Text { text, .. } => self.on_text(text).await,
+            Inbound::Reply {
+                message_id, text, ..
+            } => self.on_answer(message_id, &text).await,
             Inbound::Callback {
                 id,
                 chat_id,
@@ -339,6 +351,72 @@ impl Bridge {
                 self.on_callback(&id, chat_id, message_id, &message_text, &data)
                     .await;
             }
+        }
+    }
+
+    async fn on_answer(&mut self, message_id: i64, answer: &str) {
+        self.questions.retain(|_, q| q.deadline > Instant::now());
+        let Some(question) = self.questions.get_mut(&message_id) else {
+            self.reply(text::EXPIRED).await;
+            return;
+        };
+        if question.submitted {
+            self.reply("The previous answer is awaiting confirmation")
+                .await;
+            return;
+        }
+        let Some(client) = &mut self.client else {
+            self.reply(text::OFFLINE).await;
+            return;
+        };
+        question.submitted = true;
+        if let Err(e) = client.answer_question(&question.request_id, answer).await {
+            self.disconnected(format!("{e:#}"));
+            self.reply("Answer delivery is unconfirmed; it will not be replayed")
+                .await;
+        }
+    }
+
+    async fn ask_question(
+        &mut self,
+        request_id: String,
+        prompt: String,
+        choices: Vec<String>,
+        timeout_secs: u64,
+    ) {
+        self.questions.retain(|_, q| q.deadline > Instant::now());
+        if self.questions.values().any(|q| q.request_id == request_id) {
+            return;
+        }
+        if self.questions.len() >= 16 || !(1..=300).contains(&timeout_secs) {
+            return;
+        }
+        let mut shown = prompt;
+        for (n, choice) in choices.iter().enumerate() {
+            shown.push_str(&format!("\n{}. {}", n + 1, choice));
+        }
+        shown.push_str("\n\nReply to this message with your answer (a choice number also works).");
+        if shown.chars().count() > MESSAGE_LIMIT {
+            self.reply("The question is too long to display").await;
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        match self
+            .api
+            .send_message(self.owner_id, &shown, Some(json!({"force_reply":true})))
+            .await
+        {
+            Ok(id) => {
+                self.questions.insert(
+                    id,
+                    QuestionReply {
+                        request_id,
+                        deadline,
+                        submitted: false,
+                    },
+                );
+            }
+            Err(e) => log_send_failure("sendMessage", &e),
         }
     }
 
@@ -426,6 +504,32 @@ impl Bridge {
 
     async fn on_frame(&mut self, frame: Frame) {
         match frame {
+            Frame::Question {
+                request_id,
+                prompt,
+                choices,
+                timeout_secs,
+            } => {
+                self.ask_question(request_id, prompt, choices, timeout_secs)
+                    .await;
+            }
+            Frame::QuestionClosed { request_id } => {
+                self.questions.retain(|_, q| q.request_id != request_id);
+            }
+            Frame::AnswerAck { request_id, status } => {
+                if status == "invalid" {
+                    for q in self
+                        .questions
+                        .values_mut()
+                        .filter(|q| q.request_id == request_id)
+                    {
+                        q.submitted = false;
+                    }
+                } else {
+                    self.questions.retain(|_, q| q.request_id != request_id);
+                }
+                self.reply(&format!("Answer: {status}")).await;
+            }
             Frame::Ack {
                 id, status, turn, ..
             } => {
@@ -496,6 +600,7 @@ impl Bridge {
         self.flush().await;
         self.stream = None;
         self.typing_at = None;
+        self.questions.clear();
     }
 
     /// Bring Telegram up to date with the streamed text: edit the messages

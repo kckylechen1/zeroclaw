@@ -161,6 +161,22 @@ pub enum Frame {
         #[serde(default)]
         timeout_secs: u64,
     },
+    /// A question on this shared session. Reply using its opaque request id.
+    Question {
+        request_id: String,
+        prompt: String,
+        #[serde(default)]
+        choices: Vec<String>,
+        timeout_secs: u64,
+    },
+    /// Authoritative result of an answer, separate from message/approval acks.
+    AnswerAck {
+        request_id: String,
+        status: String,
+    },
+    QuestionClosed {
+        request_id: String,
+    },
     /// The turn finished.
     Done {
         #[serde(default)]
@@ -326,6 +342,20 @@ impl Client {
     }
 
     /// Answer an `approval_request`.
+    /// Send an answer; only AnswerAck(status=accepted) confirms consumption.
+    pub async fn answer_question(&mut self, request_id: &str, text: &str) -> Result<()> {
+        self.socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type":"answer", "request_id":request_id, "text":text
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .context("sending the question answer")
+    }
+
     pub async fn answer_approval(&mut self, request_id: &str, decision: Decision) -> Result<()> {
         send_json(
             &mut self.socket,

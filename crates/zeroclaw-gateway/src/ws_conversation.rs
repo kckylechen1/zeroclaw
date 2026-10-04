@@ -74,6 +74,7 @@ impl RecentRequests {
 #[derive(Clone)]
 pub(crate) struct FrameSink {
     frames: broadcast::Sender<Frame>,
+    subscribers: Arc<AtomicUsize>,
 }
 
 impl FrameSink {
@@ -83,13 +84,14 @@ impl FrameSink {
 
     /// Whether any socket is currently subscribed.
     pub(crate) fn has_subscribers(&self) -> bool {
-        self.frames.receiver_count() > 0
+        self.subscribers.load(Ordering::Acquire) > 0
     }
 }
 
 /// What the agent factory gets to wire the agent into its conversation.
 pub(crate) struct Seed {
     pub(crate) pending_approvals: PendingApprovals,
+    pub(crate) questions: Arc<super::ws_question::Questions>,
     pub(crate) frames: FrameSink,
 }
 
@@ -129,9 +131,9 @@ pub(crate) struct Conversation<A> {
     pub(crate) agent: tokio::sync::Mutex<A>,
     frames: FrameSink,
     pub(crate) pending_approvals: PendingApprovals,
+    pub(crate) questions: Arc<super::ws_question::Questions>,
     turn: parking_lot::Mutex<Option<ActiveTurn>>,
     next_generation: AtomicU64,
-    subscribers: AtomicUsize,
     requests: parking_lot::Mutex<RecentRequests>,
 }
 
@@ -139,6 +141,7 @@ impl<A> Conversation<A> {
     fn new(key: String, agent: A, seed: Seed) -> Self {
         let Seed {
             pending_approvals,
+            questions,
             frames,
         } = seed;
         Self {
@@ -146,15 +149,20 @@ impl<A> Conversation<A> {
             agent: tokio::sync::Mutex::new(agent),
             frames,
             pending_approvals,
+            questions,
             turn: parking_lot::Mutex::new(None),
             next_generation: AtomicU64::new(1),
-            subscribers: AtomicUsize::new(0),
             requests: parking_lot::Mutex::default(),
         }
     }
 
     pub(crate) fn key(&self) -> &str {
         &self.key
+    }
+
+    #[cfg(test)]
+    pub(crate) fn frame_sink(&self) -> FrameSink {
+        self.frames.clone()
     }
 
     /// Send a frame to every current subscriber.
@@ -195,6 +203,7 @@ impl<A> Conversation<A> {
     pub(crate) fn finish_turn(&self, generation: u64) {
         let mut turn = self.turn.lock();
         if turn.as_ref().is_some_and(|t| t.generation == generation) {
+            self.questions.drain();
             *turn = None;
         }
     }
@@ -204,6 +213,7 @@ impl<A> Conversation<A> {
         match self.turn.lock().as_ref() {
             Some(active) => {
                 active.cancel.cancel();
+                self.questions.drain();
                 true
             }
             None => false,
@@ -245,7 +255,7 @@ impl<A> Conversation<A> {
     }
 
     pub(crate) fn subscriber_count(&self) -> usize {
-        self.subscribers.load(Ordering::Acquire)
+        self.frames.subscribers.load(Ordering::Acquire)
     }
 }
 
@@ -289,10 +299,15 @@ impl<A> ConversationHub<A> {
             let result = slot
                 .get_or_try_init(|| async {
                     let pending_approvals = new_pending_approvals();
+                    let questions = Arc::new(super::ws_question::Questions::default());
                     let (frames, _) = broadcast::channel(FRAME_BUFFER);
-                    let frames = FrameSink { frames };
+                    let frames = FrameSink {
+                        frames,
+                        subscribers: Arc::new(AtomicUsize::new(0)),
+                    };
                     let (agent, extra) = create(Seed {
                         pending_approvals: pending_approvals.clone(),
+                        questions: questions.clone(),
                         frames: frames.clone(),
                     })
                     .await?;
@@ -302,6 +317,7 @@ impl<A> ConversationHub<A> {
                         agent,
                         Seed {
                             pending_approvals,
+                            questions,
                             frames,
                         },
                     )))
@@ -328,7 +344,10 @@ impl<A> ConversationHub<A> {
                     slots.insert(key.to_string(), Arc::clone(&slot));
                 }
             }
-            conversation.subscribers.fetch_add(1, Ordering::AcqRel);
+            conversation
+                .frames
+                .subscribers
+                .fetch_add(1, Ordering::AcqRel);
             let frames = conversation.frames.frames.subscribe();
             drop(slots);
             return Ok((
@@ -381,11 +400,19 @@ pub(crate) struct Subscription<A> {
 
 impl<A> Drop for Subscription<A> {
     fn drop(&mut self) {
-        let remaining = self.conversation.subscribers.fetch_sub(1, Ordering::AcqRel) - 1;
-        if remaining == 0 && self.conversation.is_running() {
+        let remaining = self
+            .conversation
+            .frames
+            .subscribers
+            .fetch_sub(1, Ordering::AcqRel)
+            - 1;
+        if remaining == 0 {
             // Nobody is left to answer: a pending approval would otherwise
             // hold the turn until its timeout. The turn itself keeps going.
             self.conversation.drain_approvals();
+            self.conversation
+                .questions
+                .drain_if_offline(&self.conversation.frames);
         }
         self.hub.release_if_unused(&self.conversation);
     }

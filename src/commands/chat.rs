@@ -94,6 +94,12 @@ pub async fn run(
         client.send_message(&message).await?;
         let mut stdin = BufReader::new(tokio::io::stdin()).lines();
         while let Some(frame) = client.next_frame().await? {
+            if let Frame::Question { request_id, .. } = &frame {
+                render(&frame);
+                let line = stdin.next_line().await?.unwrap_or_default();
+                client.answer_question(request_id, &line).await?;
+                continue;
+            }
             if let Frame::ApprovalRequest { request_id, .. } = &frame {
                 render(&frame);
                 let line = stdin.next_line().await?.unwrap_or_default();
@@ -133,6 +139,11 @@ pub async fn run(
                 let Some(line) = line? else { break };
                 if let Some(request_id) = pending_approval.take() {
                     client.answer_approval(&request_id, parse_decision(&line)).await?;
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("/answer ")
+                    && let Some((id, text)) = rest.split_once(' ') {
+                    client.answer_question(id, text).await?;
                     continue;
                 }
                 match parse_input(&line) {
@@ -185,6 +196,41 @@ fn usage_line(
 /// Print one frame for the terminal.
 fn render(frame: &Frame) {
     match frame {
+        Frame::Question {
+            request_id,
+            prompt,
+            choices,
+            ..
+        } => {
+            println!("\n{prompt}");
+            for (n, choice) in choices.iter().enumerate() {
+                println!("{}. {choice}", n + 1);
+            }
+            println!(
+                "{}",
+                ta("cli-chat-question", &[("id", request_id)], "answer")
+            );
+        }
+        Frame::AnswerAck { request_id, status } => {
+            println!(
+                "{}",
+                ta(
+                    "cli-chat-answer-ack",
+                    &[("id", request_id), ("status", status)],
+                    "answer"
+                )
+            );
+        }
+        Frame::QuestionClosed { request_id } => {
+            println!(
+                "{}",
+                ta(
+                    "cli-chat-question-closed",
+                    &[("id", request_id)],
+                    "question closed"
+                )
+            );
+        }
         Frame::Chunk { content } => {
             print!("{content}");
             let _ = std::io::stdout().flush();
