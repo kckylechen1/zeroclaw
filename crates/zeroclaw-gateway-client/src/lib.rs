@@ -341,7 +341,6 @@ impl Client {
         send_json(&mut self.socket, &serde_json::json!({ "type": "cancel" })).await
     }
 
-    /// Answer an `approval_request`.
     /// Send an answer; only AnswerAck(status=accepted) confirms consumption.
     pub async fn answer_question(&mut self, request_id: &str, text: &str) -> Result<()> {
         self.socket
@@ -356,6 +355,7 @@ impl Client {
             .context("sending the question answer")
     }
 
+    /// Answer an `approval_request`.
     pub async fn answer_approval(&mut self, request_id: &str, decision: Decision) -> Result<()> {
         send_json(
             &mut self.socket,

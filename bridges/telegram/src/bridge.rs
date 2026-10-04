@@ -28,6 +28,7 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Replies the bridge writes itself. English only: the bridge carries no
 /// Fluent catalogue (it does not link the runtime).
 mod text {
+    pub const QUESTION_MARKER: &str = "[ZeroClaw question]";
     pub const STEERED: &str = "(added to the current turn)";
     pub const ABORTED: &str = "(cancelled)";
     pub const OFFLINE_QUEUED: &str =
@@ -339,8 +340,14 @@ impl Bridge {
             }
             Inbound::Text { text, .. } => self.on_text(text).await,
             Inbound::Reply {
-                message_id, text, ..
-            } => self.on_answer(message_id, &text).await,
+                message_id,
+                text,
+                original_text,
+                ..
+            } => {
+                self.on_answer(message_id, &text, original_text.as_deref())
+                    .await
+            }
             Inbound::Callback {
                 id,
                 chat_id,
@@ -354,10 +361,14 @@ impl Bridge {
         }
     }
 
-    async fn on_answer(&mut self, message_id: i64, answer: &str) {
+    async fn on_answer(&mut self, message_id: i64, answer: &str, original_text: Option<&str>) {
         self.questions.retain(|_, q| q.deadline > Instant::now());
         let Some(question) = self.questions.get_mut(&message_id) else {
-            self.reply(text::EXPIRED).await;
+            if original_text.is_some_and(|text| !text.starts_with(text::QUESTION_MARKER)) {
+                self.on_text(answer.to_owned()).await;
+            } else {
+                self.reply(text::EXPIRED).await;
+            }
             return;
         };
         if question.submitted {
@@ -385,39 +396,80 @@ impl Bridge {
         timeout_secs: u64,
     ) {
         self.questions.retain(|_, q| q.deadline > Instant::now());
-        if self.questions.values().any(|q| q.request_id == request_id) {
+        if !(1..=300).contains(&timeout_secs) {
             return;
         }
-        if self.questions.len() >= 16 || !(1..=300).contains(&timeout_secs) {
+        if let Some(question) = self
+            .questions
+            .values_mut()
+            .find(|q| q.request_id == request_id)
+        {
+            // Replay proves the original waiter is still pending. Enable a
+            // fresh owner retry; never automatically replay the prior answer.
+            let retry = question.submitted;
+            question.submitted = false;
+            question.deadline = question
+                .deadline
+                .min(Instant::now() + Duration::from_secs(timeout_secs));
+            if retry {
+                self.reply("The question is still pending; reply to it again")
+                    .await;
+            }
             return;
         }
-        let mut shown = prompt;
+        if self.questions.len() >= 16 {
+            return;
+        }
+        let mut shown = format!("{}\n{prompt}", text::QUESTION_MARKER);
         for (n, choice) in choices.iter().enumerate() {
             shown.push_str(&format!("\n{}. {}", n + 1, choice));
         }
         shown.push_str("\n\nReply to this message with your answer (a choice number also works).");
-        if shown.chars().count() > MESSAGE_LIMIT {
+        if shown.encode_utf16().count() > MESSAGE_LIMIT {
             self.reply("The question is too long to display").await;
             return;
         }
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        match self
-            .api
-            .send_message(self.owner_id, &shown, Some(json!({"force_reply":true})))
+        for attempt in 0..3 {
+            match timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                self.api
+                    .send_message(self.owner_id, &shown, Some(json!({"force_reply":true}))),
+            )
             .await
-        {
-            Ok(id) => {
-                self.questions.insert(
-                    id,
-                    QuestionReply {
-                        request_id,
-                        deadline,
-                        submitted: false,
-                    },
-                );
+            {
+                Ok(Ok(id)) => {
+                    self.questions.insert(
+                        id,
+                        QuestionReply {
+                            request_id,
+                            deadline,
+                            submitted: false,
+                        },
+                    );
+                    return;
+                }
+                Ok(Err(e)) => {
+                    log_send_failure("sendMessage", &e);
+                    if e.downcast_ref::<crate::telegram::Refused>()
+                        .is_some_and(crate::telegram::Refused::is_permanent)
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
             }
-            Err(e) => log_send_failure("sendMessage", &e),
+            if attempt < 2 {
+                let delay = Duration::from_millis(250 << attempt);
+                if Instant::now() + delay >= deadline {
+                    break;
+                }
+                sleep(delay).await;
+            }
         }
+        // Release this subscriber rather than park an invisible question.
+        // Other clients can still answer; reconnect can replay a live waiter.
+        self.disconnected("Telegram question delivery failed".into());
     }
 
     async fn on_text(&mut self, text: String) {

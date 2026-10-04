@@ -436,6 +436,7 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
 #[tokio::test]
 async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
     let tg: Shared = Arc::default();
+    tg.lock().unwrap().fail_sends = 1;
     let tg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let tg_addr = tg_listener.local_addr().unwrap();
     let app = Router::new()
@@ -469,7 +470,7 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
     let reply = |from, reply_id, text| {
         json!({"message":{
             "message_id":1001, "from":{"id":from}, "chat":{"id":from,"type":"private"}, "text":text,
-            "reply_to_message":{"message_id":reply_id}
+            "reply_to_message":{"message_id":reply_id,"text":"[ZeroClaw question] fixture"}
         }})
     };
     FakeTelegram::push(&tg, reply(STRANGER, message_id, "intruder"));
@@ -478,6 +479,10 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
     let ordinary = recv(&mut ws).await;
     assert_eq!(ordinary["type"], "message");
     assert_eq!(ordinary["content"], "ordinary chat");
+    let mut normal = reply(OWNER, 9999, "reply to ordinary text");
+    normal["message"]["reply_to_message"]["text"] = json!("ordinary bot response");
+    FakeTelegram::push(&tg, normal);
+    assert_eq!(recv(&mut ws).await["content"], "reply to ordinary text");
     FakeTelegram::push(&tg, reply(OWNER, message_id, "2"));
     let answer = recv(&mut ws).await;
     assert_eq!(
@@ -506,6 +511,30 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
         b["text"] == "The previous answer is awaiting confirmation"
     })
     .await;
+    // The Gateway has not consumed the answer. Lost ACK/disconnection alone
+    // must not replay it; a pending-question replay permits an explicit retry.
+    ws.close(None).await.unwrap();
+    let mut ws = attach(&mut gateway).await;
+    send(&mut ws, json!({"type":"question", "request_id":"q1", "prompt":"Which?", "choices":["alpha", "beta"], "timeout_secs":20})).await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"] == "The question is still pending; reply to it again"
+    })
+    .await;
+    // Original ordinary messages have not been ACKed in this stand-in.
+    for _ in 0..2 {
+        assert_eq!(recv(&mut ws).await["type"], "message");
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), ws.next())
+            .await
+            .is_err(),
+        "no automatic answer replay"
+    );
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
+    assert_eq!(
+        recv(&mut ws).await,
+        json!({"type":"answer", "request_id":"q1", "text":"1"})
+    );
     send(
         &mut ws,
         json!({"type":"answer_ack", "request_id":"q1", "status":"accepted"}),

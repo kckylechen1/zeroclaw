@@ -28,10 +28,27 @@ enum Input<'a> {
     Cancel,
     Nothing,
     Message(&'a str),
+    Answer { request_id: &'a str, text: &'a str },
+    InvalidAnswer,
 }
 
 fn parse_input(line: &str) -> Input<'_> {
-    match line.trim() {
+    let line = line.trim();
+    if line == "/answer" {
+        return Input::InvalidAnswer;
+    }
+    if let Some(rest) = line.strip_prefix("/answer ") {
+        return match rest.trim_start().split_once(' ') {
+            Some((request_id, text)) if !request_id.is_empty() && !text.trim().is_empty() => {
+                Input::Answer {
+                    request_id,
+                    text: text.trim(),
+                }
+            }
+            _ => Input::InvalidAnswer,
+        };
+    }
+    match line {
         "/quit" | "/exit" => Input::Quit,
         "/cancel" => Input::Cancel,
         "" => Input::Nothing,
@@ -90,66 +107,70 @@ pub async fn run(
         }
     };
 
+    let one_shot = message.is_some();
     if let Some(message) = message {
         client.send_message(&message).await?;
-        let mut stdin = BufReader::new(tokio::io::stdin()).lines();
-        while let Some(frame) = client.next_frame().await? {
-            if let Frame::Question { request_id, .. } = &frame {
-                render(&frame);
-                let line = stdin.next_line().await?.unwrap_or_default();
-                client.answer_question(request_id, &line).await?;
-                continue;
-            }
-            if let Frame::ApprovalRequest { request_id, .. } = &frame {
-                render(&frame);
-                let line = stdin.next_line().await?.unwrap_or_default();
-                client
-                    .answer_approval(request_id, parse_decision(&line))
-                    .await?;
-                continue;
-            }
-            render(&frame);
-            if frame.is_terminal() {
-                break;
-            }
-        }
-        return client.close().await;
     }
 
-    let history = client.session().message_count.to_string();
-    let session_id = client.session().session_id.clone();
-    println!(
-        "{}",
-        ta(
-            "cli-chat-attached",
-            &[
-                ("session", &session_id),
-                ("agent", &agent),
-                ("history", &history)
-            ],
-            "Attached",
-        )
-    );
+    if !one_shot {
+        let history = client.session().message_count.to_string();
+        let session_id = client.session().session_id.clone();
+        println!(
+            "{}",
+            ta(
+                "cli-chat-attached",
+                &[
+                    ("session", &session_id),
+                    ("agent", &agent),
+                    ("history", &history)
+                ],
+                "Attached",
+            )
+        );
+    }
+    chat_loop(&mut client, BufReader::new(tokio::io::stdin()), one_shot).await?;
+    client.close().await
+}
 
-    let mut stdin = BufReader::new(tokio::io::stdin()).lines();
+async fn chat_loop<R: tokio::io::AsyncBufRead + Unpin>(
+    client: &mut Client,
+    input: R,
+    one_shot: bool,
+) -> Result<()> {
+    let mut stdin = input.lines();
+    let mut stdin_active = true;
+
     let mut pending_approval: Option<String> = None;
     loop {
         tokio::select! {
-            line = stdin.next_line() => {
-                let Some(line) = line? else { break };
+            line = stdin.next_line(), if stdin_active => {
+                let Some(line) = line? else {
+                    if !one_shot { break; }
+                    stdin_active = false;
+                    if let Some(id) = pending_approval.take() {
+                        client.answer_approval(&id, Decision::Deny).await?;
+                    }
+                    continue;
+                };
+                match parse_input(&line) {
+                    Input::Answer { request_id, text } => {
+                        client.answer_question(request_id, text).await?;
+                        continue;
+                    }
+                    Input::InvalidAnswer => {
+                        println!("{}", ta("cli-chat-answer-usage", &[], "answer"));
+                        continue;
+                    }
+                    _ => {}
+                }
                 if let Some(request_id) = pending_approval.take() {
                     client.answer_approval(&request_id, parse_decision(&line)).await?;
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix("/answer ")
-                    && let Some((id, text)) = rest.split_once(' ') {
-                    client.answer_question(id, text).await?;
                     continue;
                 }
                 match parse_input(&line) {
                     Input::Quit => break,
                     Input::Cancel => client.cancel().await?,
-                    Input::Nothing => {}
+                    Input::Nothing | Input::InvalidAnswer | Input::Answer { .. } => {}
                     Input::Message(text) => {
                         client.send_message(text).await?;
                     }
@@ -161,16 +182,18 @@ pub async fn run(
                     return Ok(());
                 };
                 if let Frame::ApprovalRequest { request_id, .. } = &frame {
-                    pending_approval = Some(request_id.clone());
+                    if stdin_active { pending_approval = Some(request_id.clone()); }
+                    else { client.answer_approval(request_id, Decision::Deny).await?; }
                 }
                 render(&frame);
+                if one_shot && frame.is_terminal() { break; }
             }
             _ = tokio::signal::ctrl_c() => {
                 client.cancel().await?;
             }
         }
     }
-    client.close().await
+    Ok(())
 }
 
 /// A one-line context and cost summary for a finished turn, when the
@@ -310,6 +333,76 @@ fn render(frame: &Frame) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_answer_controls_never_become_messages() {
+        for line in ["/answer", "/answer q1", "/answer q1   "] {
+            assert_eq!(parse_input(line), Input::InvalidAnswer);
+        }
+        assert_eq!(
+            parse_input("/answer q1 hello world"),
+            Input::Answer {
+                request_id: "q1",
+                text: "hello world"
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn one_shot_keeps_reading_gateway_frames_while_stdin_is_idle() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = zeroclaw_spawn::spawn!(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_hdr_async(stream, |_req: &tokio_tungstenite::tungstenite::handshake::server::Request, mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                response.headers_mut().insert("sec-websocket-protocol", "zeroclaw.v1".parse().unwrap());
+                Ok(response)
+            }).await.unwrap();
+            ws.send(Message::Text(
+                serde_json::json!({"type":"session_start", "session_id":"s1"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            assert!(ws.next().await.is_some());
+            ws.send(Message::Text(
+                serde_json::json!({"type":"connected"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+            for frame in [
+                serde_json::json!({"type":"question", "request_id":"q1", "prompt":"Which?", "choices":[], "timeout_secs":1}),
+                serde_json::json!({"type":"question_closed", "request_id":"q1"}),
+                serde_json::json!({"type":"done", "full_response":"expired"}),
+            ] {
+                ws.send(Message::Text(frame.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            let _ = ws.next().await;
+        });
+        let mut client = Client::connect(&ConnectOptions {
+            gateway: format!("ws://{addr}"),
+            agent: "owner".into(),
+            session_id: None,
+            token: None,
+        })
+        .await
+        .unwrap();
+        let (_held_writer, read) = tokio::io::duplex(64);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            chat_loop(&mut client, BufReader::new(read), true),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        client.close().await.unwrap();
+        server.await.unwrap();
+    }
 
     #[test]
     fn typed_lines_map_to_commands_and_messages() {

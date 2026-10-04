@@ -117,7 +117,8 @@ Messages without an `id` behave as before: no ACK and no deduplication.
 ```
 
 An empty `choices` array accepts free text. Otherwise use the exact choice
-text or its one-based number. An answer never approves a tool. The Gateway
+text or its one-based number (valid numbers take precedence over matching
+choice text). An answer never approves a tool. The Gateway
 checks current paired-device or scoped bridge authority before consuming the
 answer; anonymous sockets, including with pairing disabled, cannot answer.
 A bridge removed or moved outside the session scope cannot answer on an old

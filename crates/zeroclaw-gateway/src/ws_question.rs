@@ -39,17 +39,17 @@ impl Questions {
         }
         let answer = if question.choices.is_empty() {
             text.to_owned()
-        } else if let Some(choice) = question
-            .choices
-            .iter()
-            .find(|choice| choice.as_str() == text)
-        {
-            choice.clone()
         } else if let Some(choice) = text
             .parse::<usize>()
             .ok()
             .and_then(|n| n.checked_sub(1))
             .and_then(|n| question.choices.get(n))
+        {
+            choice.clone()
+        } else if let Some(choice) = question
+            .choices
+            .iter()
+            .find(|choice| choice.as_str() == text)
         {
             choice.clone()
         } else {
@@ -237,7 +237,7 @@ mod tests {
             channels,
         );
         let task = zeroclaw_spawn::spawn!(async move {
-            tool.execute(json!({"channel":"wss", "question":"Which?", "choices":["alpha", "beta"], "timeout_secs":5})).await.unwrap()
+            tool.execute(json!({"channel":"wss", "question":"Which?", "choices":["2", "beta"], "timeout_secs":5})).await.unwrap()
         });
         let question = next_question(&mut sub).await;
         let id = question["request_id"].as_str().unwrap();

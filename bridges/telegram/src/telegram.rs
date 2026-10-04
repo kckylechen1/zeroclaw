@@ -35,6 +35,8 @@ pub struct Message {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReplyToMessage {
     pub message_id: i64,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -238,6 +240,7 @@ pub enum Inbound {
         chat_id: i64,
         message_id: i64,
         text: String,
+        original_text: Option<String>,
     },
     /// The owner pressed an inline button.
     Callback {
@@ -285,6 +288,7 @@ pub fn classify(update: &Update, owner_id: i64) -> Inbound {
             chat_id: message.chat.id,
             message_id: reply.message_id,
             text: text.clone(),
+            original_text: reply.text.clone(),
         };
     }
     match &message.text {
