@@ -17577,9 +17577,6 @@ fn mixed_reply_target_reflection_uses_each_ingress_source_after_reopen() {
         let key = conversation_history_key(&owner);
         assert_eq!(key, conversation_history_key(&stranger));
         store
-            .set_session_agent_alias(&key, &ctx.agent_alias)
-            .unwrap();
-        store
             .append(
                 &key,
                 &ChatMessage::user("unattributed historical channel input"),
@@ -17722,6 +17719,14 @@ async fn reflection_uses_raw_ingress_before_hooks_and_multiline_link_previews() 
         u64::MAX,
     );
     assert_eq!(collected.messages.len(), 2);
+    assert_eq!(
+        reopened
+            .get_session_metadata(&key)
+            .unwrap()
+            .agent_alias
+            .as_deref(),
+        Some(ctx.agent_alias.as_str())
+    );
     assert!(collected.messages.iter().all(|m| m.text == raw_text));
     assert_eq!(
         reopened

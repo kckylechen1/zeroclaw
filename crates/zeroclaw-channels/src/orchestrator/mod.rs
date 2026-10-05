@@ -2738,6 +2738,17 @@ fn stamp_session_routing_context(
                 Some(target)
             }
         });
+    if let Err(e) = store.set_session_agent_alias(history_key, &ctx.agent_alias) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(
+                    ::serde_json::json!({"history_key": history_key, "error": e.to_string()})
+                ),
+            "Failed to stamp session agent attribution"
+        );
+    }
     let context = zeroclaw_infra::session_backend::SessionContext {
         channel_id: channel_id.as_deref(),
         room_id,
