@@ -60,6 +60,7 @@
   - [Feature and support matrix](./reference/feature-matrix.md)
   - [API (rustdoc)](./api.md)
   - [Gateway HTTP API](./gateway/api.md)
+  - [Durable bridge intake](./gateway/durable-bridge-intake.md)
   - [Web dashboard (web_dist_dir)](./gateway/web-dashboard.md)
 - [Agents](./agents/overview.md)
   - [Anatomy of an agent](./agents/anatomy.md)
