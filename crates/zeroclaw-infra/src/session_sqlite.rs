@@ -1,7 +1,8 @@
 //! SQLite-backed session persistence with FTS5 search.
 
 use crate::session_backend::{
-    RequestReceipt, SessionBackend, SessionContext, SessionMetadata, SessionQuery, SessionState,
+    REQUEST_RECEIPT_PROTECTION_MINUTES, RequestReceipt, SessionBackend, SessionContext,
+    SessionMetadata, SessionQuery, SessionState,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -17,8 +18,8 @@ const REQUEST_RECEIPTS_PER_SESSION: i64 = 256;
 /// Hard bound on the whole `session_requests` table. Session keys are
 /// client-supplied, so the per-session cap alone cannot bound the table when
 /// `session_ttl_hours` is 0 (the default: no sweep ever runs). Under abuse the
-/// oldest receipts are evicted first — at-most-once dedup degrades to
-/// at-least-once for evicted ids; no session data is touched.
+/// receipts older than the protected retry window may be reclaimed. While
+/// all receipts are protected, new inputs fail closed; no session data is touched.
 const REQUEST_RECEIPTS_GLOBAL_CAP: i64 = 16384;
 
 /// SQLite-backed session store with FTS5 and WAL mode.
@@ -712,49 +713,56 @@ impl SessionBackend for SqliteSessionBackend {
         request_id: &str,
         state: &str,
     ) -> std::io::Result<Option<RequestReceipt>> {
-        let conn = self.conn.lock();
-        let now = Utc::now().to_rfc3339();
-        let inserted = conn
-            .execute(
-                "INSERT OR IGNORE INTO session_requests
-                    (session_key, request_id, state, accepted_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4)",
-                params![session_key, request_id, state, now],
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(std::io::Error::other)?;
+        let known = tx.query_row(
+            "SELECT state FROM session_requests WHERE session_key = ?1 AND request_id = ?2",
+            params![session_key, request_id],
+            |row| row.get::<_, String>(0),
+        );
+        match known {
+            Ok(state) => return Ok(Some(RequestReceipt::Duplicate { state })),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(e) => return Err(std::io::Error::other(e)),
+        }
+        let cutoff = (Utc::now()
+            - Duration::minutes(i64::from(REQUEST_RECEIPT_PROTECTION_MINUTES)))
+        .to_rfc3339();
+        let per_session: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM session_requests WHERE session_key = ?1",
+                params![session_key],
+                |r| r.get(0),
             )
             .map_err(std::io::Error::other)?;
-        if inserted == 0 {
-            let state: String = conn
-                .query_row(
-                    "SELECT state FROM session_requests
-                     WHERE session_key = ?1 AND request_id = ?2",
-                    params![session_key, request_id],
-                    |row| row.get(0),
-                )
-                .map_err(std::io::Error::other)?;
-            return Ok(Some(RequestReceipt::Duplicate { state }));
+        if per_session >= REQUEST_RECEIPTS_PER_SESSION {
+            tx.execute(
+                "DELETE FROM session_requests WHERE session_key = ?1 AND accepted_at < ?2",
+                params![session_key, cutoff],
+            )
+            .map_err(std::io::Error::other)?;
         }
-        // Keep only the most recent receipts per session: enough to catch a
-        // client retrying after a lost ACK, bounded for long sessions.
-        conn.execute(
-            "DELETE FROM session_requests
-             WHERE session_key = ?1 AND rowid NOT IN (
-                SELECT rowid FROM session_requests WHERE session_key = ?1
-                ORDER BY rowid DESC LIMIT ?2
-             )",
-            params![session_key, REQUEST_RECEIPTS_PER_SESSION],
-        )
-        .map_err(std::io::Error::other)?;
-        // Global bound: distinct session keys are client-supplied and the TTL
-        // sweep is opt-in, so cap the whole table or it grows without end.
-        conn.execute(
-            "DELETE FROM session_requests
-             WHERE rowid NOT IN (
-                SELECT rowid FROM session_requests
-                ORDER BY rowid DESC LIMIT ?1
-             )",
-            params![REQUEST_RECEIPTS_GLOBAL_CAP],
-        )
-        .map_err(std::io::Error::other)?;
+        let global: i64 = tx
+            .query_row("SELECT COUNT(*) FROM session_requests", [], |r| r.get(0))
+            .map_err(std::io::Error::other)?;
+        if global >= REQUEST_RECEIPTS_GLOBAL_CAP {
+            tx.execute(
+                "DELETE FROM session_requests WHERE accepted_at < ?1",
+                params![cutoff],
+            )
+            .map_err(std::io::Error::other)?;
+        }
+        let (per_session, global): (i64, i64) = tx.query_row(
+            "SELECT (SELECT COUNT(*) FROM session_requests WHERE session_key = ?1), (SELECT COUNT(*) FROM session_requests)",
+            params![session_key], |r| Ok((r.get(0)?, r.get(1)?))).map_err(std::io::Error::other)?;
+        if per_session >= REQUEST_RECEIPTS_PER_SESSION || global >= REQUEST_RECEIPTS_GLOBAL_CAP {
+            return Err(std::io::Error::other(
+                "protected request receipt capacity exhausted",
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        tx.execute("INSERT INTO session_requests (session_key, request_id, state, accepted_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)", params![session_key, request_id, state, now]).map_err(std::io::Error::other)?;
+        tx.commit().map_err(std::io::Error::other)?;
         Ok(Some(RequestReceipt::Recorded))
     }
 
@@ -1333,27 +1341,45 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
         backend.append("s1", &ChatMessage::user("hello")).unwrap();
-        for i in 0..=REQUEST_RECEIPTS_PER_SESSION {
+        for i in 0..REQUEST_RECEIPTS_PER_SESSION {
             backend
                 .record_request("s1", &format!("r{i}"), "accepted")
                 .unwrap();
         }
-        // The oldest receipt fell out; the newest is kept.
+        assert!(
+            backend
+                .record_request("s1", "overflow", "accepted")
+                .is_err()
+        );
         assert_eq!(
             backend.record_request("s1", "r0", "accepted").unwrap(),
+            Some(RequestReceipt::Duplicate {
+                state: "accepted".into()
+            })
+        );
+        // Capacity may reclaim receipts only after the protected retry window.
+        let old = (Utc::now()
+            - Duration::minutes(i64::from(REQUEST_RECEIPT_PROTECTION_MINUTES) + 1))
+        .to_rfc3339();
+        backend
+            .conn
+            .lock()
+            .execute(
+                "UPDATE session_requests SET accepted_at = ?1 WHERE request_id = 'r0'",
+                params![old],
+            )
+            .unwrap();
+        backend.set_request_state("s1", "r0", "done").unwrap();
+        assert_eq!(
+            backend
+                .record_request("s1", "overflow", "accepted")
+                .unwrap(),
             Some(RequestReceipt::Recorded)
         );
         assert!(matches!(
-            backend
-                .record_request(
-                    "s1",
-                    &format!("r{REQUEST_RECEIPTS_PER_SESSION}"),
-                    "accepted"
-                )
-                .unwrap(),
+            backend.record_request("s1", "r1", "accepted").unwrap(),
             Some(RequestReceipt::Duplicate { .. })
         ));
-
         assert!(backend.delete_session("s1").unwrap());
         assert_eq!(
             backend.record_request("s1", "r1", "accepted").unwrap(),
@@ -1365,30 +1391,47 @@ mod tests {
     fn request_receipts_are_globally_bounded_across_sessions() {
         let tmp = TempDir::new().unwrap();
         let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
-        // Session keys are client-supplied; without a global bound the table
-        // grows without end on installs that never enable the TTL sweep
-        // (`session_ttl_hours` defaults to 0).
-        for i in 0..(REQUEST_RECEIPTS_GLOBAL_CAP + 200) {
+        for i in 0..REQUEST_RECEIPTS_GLOBAL_CAP {
             backend
                 .record_request(&format!("gw_{i}"), "r1", "accepted")
                 .unwrap();
         }
-        let rows: i64 = {
-            let conn = backend.conn.lock();
-            conn.query_row("SELECT COUNT(*) FROM session_requests", [], |row| {
+        for i in 0..200 {
+            assert!(
+                backend
+                    .record_request(&format!("overflow_{i}"), "r1", "accepted")
+                    .is_err()
+            );
+        }
+        let rows: i64 = backend
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM session_requests", [], |row| {
                 row.get(0)
             })
-            .unwrap()
-        };
-        assert!(rows <= REQUEST_RECEIPTS_GLOBAL_CAP, "rows: {rows}");
-        // The most recent key's receipt survives the flood; the first key's
-        // was evicted (at-most-once dedup degrades under abuse, it does not
-        // corrupt).
-        let last = REQUEST_RECEIPTS_GLOBAL_CAP + 199;
+            .unwrap();
+        assert_eq!(rows, REQUEST_RECEIPTS_GLOBAL_CAP);
         assert!(matches!(
-            backend
-                .record_request(&format!("gw_{last}"), "r1", "accepted")
-                .unwrap(),
+            backend.record_request("gw_0", "r1", "accepted").unwrap(),
+            Some(RequestReceipt::Duplicate { .. })
+        ));
+        let old = (Utc::now()
+            - Duration::minutes(i64::from(REQUEST_RECEIPT_PROTECTION_MINUTES) + 1))
+        .to_rfc3339();
+        backend
+            .conn
+            .lock()
+            .execute(
+                "UPDATE session_requests SET accepted_at = ?1 WHERE session_key = 'gw_0'",
+                params![old],
+            )
+            .unwrap();
+        assert_eq!(
+            backend.record_request("new", "r1", "accepted").unwrap(),
+            Some(RequestReceipt::Recorded)
+        );
+        assert!(matches!(
+            backend.record_request("gw_1", "r1", "accepted").unwrap(),
             Some(RequestReceipt::Duplicate { .. })
         ));
     }

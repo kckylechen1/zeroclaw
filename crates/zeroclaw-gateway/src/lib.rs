@@ -6,6 +6,7 @@
 
 pub mod agent_owned_state;
 pub mod api;
+pub mod api_attachments;
 pub mod api_backup_retention;
 pub mod api_config;
 pub mod api_logs;
@@ -1599,14 +1600,19 @@ pub async fn run_gateway(
     let long_running_router: Router<AppState> =
         Router::new().route("/api/cron/{id}/run", post(api::handle_api_cron_run));
     let long_running_router: Router = long_running_router
-        .with_state(state)
+        .with_state(state.clone())
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(gateway_long_running_request_timeout_secs(&config.gateway)),
         ));
 
-    let inner = inner.merge(long_running_router);
+    let inner = inner
+        .merge(api_attachments::routes(
+            state.clone(),
+            gateway_request_timeout_secs(&config.gateway),
+        ))
+        .merge(long_running_router);
 
     // Nest under path prefix when configured (axum strips prefix before routing).
     // nest() at "/prefix" handles both "/prefix" and "/prefix/*" but not "/prefix/"

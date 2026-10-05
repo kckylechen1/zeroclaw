@@ -1043,3 +1043,10 @@ cli-chat-question = Answer using /answer { $id } <text or choice number>
 cli-chat-answer-ack = Answer { $id }: { $status }
 cli-chat-question-closed = Question { $id } is closed.
 cli-chat-answer-usage = Usage: /answer <request_id> <text or choice number>
+
+# Gateway HTTP attachment protocol
+gateway-attachment-invalid-ids = Attachments must be opaque upload IDs
+gateway-attachment-repeated = Repeated attachment IDs are not allowed
+gateway-attachment-count = At most four upload IDs may accompany a message
+gateway-attachment-unauthorized = Attachments require current device or bridge authority
+gateway-attachment-unavailable = Attachment is expired, unavailable or outside this session

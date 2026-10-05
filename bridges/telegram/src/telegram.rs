@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -41,7 +41,30 @@ pub struct Message {
     pub text: Option<String>,
     #[serde(default)]
     pub reply_to_message: Option<ReplyToMessage>,
+    #[serde(default)]
+    pub caption: Option<String>,
+    #[serde(default)]
+    pub document: Option<File>,
+    #[serde(default)]
+    pub photo: Vec<File>,
 }
+
+/// Telegram metadata remains bridge-owned; Gateway sees bytes and a safe label.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct File {
+    pub file_id: String,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+    #[serde(default)]
+    pub file_path: Option<String>,
+}
+
+/// Independent bridge download bound, enforced on advertised and actual bytes.
+pub const DOWNLOAD_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Only the correlation field is needed, not a recursive message history.
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +150,7 @@ impl Api {
     pub fn new(api_url: &str, token: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("building the Telegram HTTP client")?;
         Ok(Self {
@@ -174,6 +198,50 @@ impl Api {
             }
             .into()),
         }
+    }
+
+    /// Only owner-classified updates reach this method. Download from the
+    /// configured Bot API origin; file paths cannot redirect or carry URLs.
+    pub async fn download_file(&self, file: &File) -> Result<Vec<u8>> {
+        if file.file_size.is_some_and(|n| n > DOWNLOAD_LIMIT as u64) {
+            bail!("attachment exceeds the bridge download limit");
+        }
+        let resolved: File = self
+            .call("getFile", json!({"file_id":file.file_id}), SHORT)
+            .await?;
+        if resolved
+            .file_size
+            .is_some_and(|n| n > DOWNLOAD_LIMIT as u64)
+        {
+            bail!("attachment exceeds the bridge download limit");
+        }
+        let path = resolved
+            .file_path
+            .context("Telegram omitted the file path")?;
+        if path.is_empty()
+            || path.split('/').any(|s| {
+                s.is_empty()
+                    || s == "."
+                    || s == ".."
+                    || !s
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            })
+        {
+            bail!("Telegram returned an unsupported file path");
+        }
+        let (origin, token) = self
+            .base
+            .rsplit_once("/bot")
+            .context("invalid Bot API base")?;
+        let response = self
+            .http
+            .get(format!("{origin}/file/bot{token}/{path}"))
+            .timeout(SHORT)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
+        bounded_bytes(response, DOWNLOAD_LIMIT).await
     }
 
     /// Long-poll for updates after `offset`, waiting up to `wait`.
@@ -250,18 +318,55 @@ impl Api {
     }
 }
 
+pub(crate) async fn bounded_bytes(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    if !response.status().is_success() {
+        bail!(
+            "attachment HTTP request refused ({})",
+            response.status().as_u16()
+        );
+    }
+    if response.content_length().is_some_and(|n| n > limit as u64) {
+        bail!("attachment exceeds the bridge download limit");
+    }
+    let mut data = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(reqwest::Error::without_url)?
+    {
+        if chunk.len() > limit - data.len() {
+            bail!("attachment exceeds the bridge download limit");
+        }
+        data.extend_from_slice(&chunk);
+    }
+    if data.is_empty() {
+        bail!("attachment is empty");
+    }
+    Ok(data)
+}
+
 const SHORT: Duration = Duration::from_secs(20);
 
 /// What an update means to a bridge that serves one owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inbound {
     /// Text the owner typed in their private chat with the bot.
-    Text { chat_id: i64, text: String },
+    Text {
+        chat_id: i64,
+        text: String,
+    },
     Reply {
         chat_id: i64,
         message_id: i64,
         text: String,
         original_text: Option<String>,
+    },
+    Attachment {
+        file: File,
+        caption: String,
     },
     /// The owner pressed an inline button.
     Callback {
@@ -301,6 +406,22 @@ pub fn classify(update: &Update, owner_id: i64) -> Inbound {
     }
     if message.from.as_ref().map(|user| user.id) != Some(owner_id) {
         return Inbound::Ignored("message from someone other than the owner");
+    }
+    // Reject unauthorized updates above, before issuing any getFile call.
+    if let Some(file) = &message.document {
+        return Inbound::Attachment {
+            file: file.clone(),
+            caption: message.caption.clone().unwrap_or_default(),
+        };
+    }
+    if let Some(file) = message.photo.last() {
+        let mut file = file.clone();
+        file.file_name = Some("photo.jpg".into());
+        file.mime_type = Some("image/jpeg".into());
+        return Inbound::Attachment {
+            file,
+            caption: message.caption.clone().unwrap_or_default(),
+        };
     }
     if let (Some(reply), Some(text)) = (&message.reply_to_message, &message.text)
         && !text.trim().is_empty()

@@ -9,6 +9,11 @@ use zeroclaw_config::schema::{MultimodalConfig, build_runtime_proxy_client_with_
 const IMAGE_MARKER_PREFIX: &str = "[IMAGE:";
 const ALLOWED_IMAGE_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
 
+/// Encode already bounded caller-owned image bytes for the existing vision path.
+pub fn image_data_uri(mime: &str, bytes: &[u8]) -> String {
+    format!("data:{mime};base64,{}", STANDARD.encode(bytes))
+}
+
 /// Per-path cache for resolved local image data URIs. Keyed by absolute
 /// path; stores `(len, mtime)` for freshness checks (`(0, 0)` sentinel
 /// = immutable upload). LRU evicts by both entry count and total bytes.
@@ -441,6 +446,26 @@ const MEDIA_MARKER_KINDS: &[&str] = &[
 /// copy them into outbound reply markers), so stripping those would break
 /// document and file delivery.
 const AUDIO_MARKER_KINDS: &[&str] = &["VOICE", "AUDIO"];
+
+/// Quote media marker prefixes in an untrusted document, including unclosed
+/// markers. Ordinary brackets remain intact; text cannot become a file/URL read.
+pub fn quote_attachment_media_markers(text: &str) -> String {
+    text.char_indices()
+        .map(|(i, c)| {
+            if c == '['
+                && MEDIA_MARKER_KINDS.iter().any(|kind| {
+                    text.get(i + 1..i + kind.len() + 1)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(kind))
+                        && text.as_bytes().get(i + kind.len() + 1) == Some(&b':')
+                })
+            {
+                '［'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
 
 pub fn strip_media_markers(text: &str) -> String {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {

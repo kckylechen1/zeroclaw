@@ -8,6 +8,7 @@
 //! `/ws/bridge` control socket open and delivers proactive messages (cron
 //! output, heartbeat alerts, the `notify` tool) into the owner's chat.
 
+mod attachments;
 mod bridge;
 mod control;
 pub mod render;

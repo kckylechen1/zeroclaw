@@ -89,8 +89,8 @@ the sending socket first:
   the running one.
 - `durable` is `true` when the receipt is in the session store (the default
   SQLite backend) and survives a restart. It is `false` with the JSONL
-  backend or with persistence off; the receipt then lasts only while the
-  conversation is live.
+  backend or with persistence off; bounded in-memory receipts survive idle
+  conversation release for 16 minutes from first acceptance, but not restart.
 - The ACK means accepted for processing, not finished. The turn's `done`,
   `aborted` or `error` frame carries the same `id`.
 - Sending an `id` again, for example after a lost ACK, runs nothing and
@@ -100,7 +100,12 @@ the sending socket first:
   outcome is unknown; the request is not replayed.
 - If the receipt cannot be recorded, the message is refused with
   `REQUEST_NOT_RECORDED` and nothing runs.
-- Each session keeps its most recent 256 receipts. The stale-session sweep
+- Each session admits at most 256 receipts. SQLite also caps the whole table
+  at 16,384 receipts. Capacity reclamation only deletes receipts accepted more
+  than 16 minutes ago; if all receipts are protected, new input is refused.
+  Duplicate IDs still resolve while full. Beyond that window capacity reclamation
+  may remove a receipt, so deduplication is bounded rather than permanent.
+  The stale-session sweep
   (`session_ttl_hours`) deletes a swept session's receipts, and receipts
   older than the TTL whose session no longer exists.
 
@@ -421,3 +426,67 @@ identifiers present on the event payload rather than assuming each
 `GET /api/events/history` replays the retained recent events from the same
 buffer, oldest first. It is a reconnect window for subscribers, not a separate
 canonical lifecycle store.
+
+## HTTP attachments
+
+Attachments use HTTP bytes and opaque IDs; file bytes never travel in client
+WS frames. Both routes require an `Authorization: Bearer` header containing a
+current paired-device token or a bridge token scoped to `session_id`, even with
+pairing disabled. Query/subprotocol tokens are not accepted here. `agent` must
+name an enabled agent. An ID belongs to the exact token hash, session ID and
+agent that uploaded it. Another token, session or agent cannot fetch or submit
+that handle. Revocation and agent disablement apply to subsequent operations;
+a slow upload rechecks authority after its body has been read.
+
+- `POST /api/attachments?session_id=main&agent=assistant&file_name=note.txt`
+  takes a raw body and its `Content-Type`. It returns HTTP 201 with
+  `{id, file_name, mime_type, size, expires_in_secs}`. A filename is a display
+  label only; paths, control characters and media-marker delimiters are refused.
+- `GET /api/attachments/{id}?session_id=main&agent=assistant` returns those
+  bytes as a download, with `Cache-Control: no-store` and `nosniff`. An expired,
+  unknown or differently scoped handle returns 404 without revealing its owner.
+- Upload and reference requests reject invalid authority. Unsupported MIME or
+  image signatures return 415; invalid UTF-8 or oversized text returns 422;
+  bodies above the file limit return 413; exhausted capacity returns 429.
+  Redirects and remote URLs are not attachment inputs.
+
+Supported input is PNG/JPEG/WebP/GIF or UTF-8 plain text, Markdown, CSV and JSON.
+Each file is at most 2 MiB; a text file is at most 64 KiB. The canonical hub store
+holds at most 128 items and 32 MiB, with at most 16 items per token/session/agent
+scope. Four HTTP uploads may read bodies concurrently. Handles expire 15 minutes
+after upload; expired bytes are pruned lazily on store access. This is an
+in-memory payload store, with no new database or filesystem access. Handles and
+unreferenced bytes do not survive Gateway restart.
+
+Send at most four distinct IDs in a message:
+
+```json
+{"type":"message","id":"r-file-1","content":"Read this","attachments":["opaque-upload-id"]}
+```
+
+An attachment-only message may use empty `content`. The Gateway resolves every
+handle before starting or steering the turn, quotes text as user-provided file
+content, and turns image bytes into the existing inline vision representation.
+Media-marker prefixes inside a document are quoted, including unclosed markers,
+so file text cannot initiate a local-file or URL read. A vision-capable model or
+the existing vision route is still required for images. Text remains untrusted
+user content, not instructions or an approval decision.
+
+The usual message ACK confirms runtime acceptance; HTTP 201 only confirms
+payload storage. A repeated request ID returns its receipt without resolving
+expired handles again or running another turn. An unavailable attachment on a
+first request emits `ATTACHMENT_UNAVAILABLE`, starts no turn, and records that
+request as rejected; resubmitting corrected input needs a new request ID.
+Referenced content can enter the existing session history and provider context,
+whose retention and visibility policies remain in force after handle expiry.
+Scope protection of the HTTP bytes does not change shared conversation visibility.
+
+This leaf supplies bounded HTTP upload/download and inbound text/image mapping.
+It does not supply automatic outbound Telegram file delivery, audio transcription,
+PDF/binary parsing, PWA upload UI or durable Telegram intake/cursor recovery.
+
+Without a durable session backend, request receipts survive idle conversation
+release for 16 minutes from their first acceptance. The Gateway admits at most
+256 unexpired IDs per session and 1024 such recent sessions; new inputs are
+refused when either receipt bound is full rather than evicting live IDs. This does not provide
+restart recovery. Attachment handles expire after 15 minutes regardless.
