@@ -603,3 +603,75 @@ async fn ambiguous_bridge_credentials_cannot_choose_a_source_by_hashmap_order() 
     assert!(intake_snapshot(&chat).inputs.is_empty());
     assert!(chat.seen.lock().is_empty());
 }
+
+#[tokio::test]
+async fn deleting_an_unrun_intake_preserves_already_accepted_legacy_steering() {
+    let chat = intake_chat();
+    let a = intake_socket(&chat).await;
+    let (_, claim) = receive_intake(&chat, &a, source_message(10, 0, "deleted source body"));
+    let ack = chat
+        .send(
+            &a,
+            message_with_id("accepted legacy followup", "legacy-followup"),
+        )
+        .unwrap();
+    assert_eq!(ack["turn"], "steered");
+    chat.state
+        .session_backend
+        .as_ref()
+        .unwrap()
+        .delete_session(&chat.scope.session_key)
+        .unwrap();
+    chat.gate.add_permits(1);
+    run_intake(&chat, &a, claim.unwrap()).await;
+    assert_eq!(chat.seen.lock().len(), 1);
+    assert!(chat.seen.lock()[0][0].ends_with("accepted legacy followup"));
+    assert!(!chat.seen.lock()[0][0].contains("deleted source body"));
+    assert_eq!(intake_snapshot(&chat).inputs[0].state, "rejected");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_concurrent_socket_cannot_overtake_the_reserved_source_head() {
+    let chat = Arc::new(intake_chat());
+    let a = intake_socket(&chat).await;
+    let b = intake_socket(&chat).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release, wait) = std::sync::mpsc::channel();
+    let wait = std::sync::Mutex::new(wait);
+    let entered_hook = entered.clone();
+    *chat.state.ws_conversations.intake.reservation_hook.lock() = Some(Arc::new(move |id| {
+        if id == 10 {
+            entered_hook.notify_one();
+            wait.lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+        }
+    }));
+    let first_chat = chat.clone();
+    let first = tokio::task::spawn_blocking(move || {
+        receive_intake(&first_chat, &a, source_message(10, 0, "reserved first"))
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let (ack, overtaking) = receive_intake(
+        &chat,
+        &b,
+        source_message(11, 11, "second after reservation"),
+    );
+    // Release before asserting, so a failed assertion cannot strand a worker.
+    release.send(()).unwrap();
+    assert_eq!(ack["source"]["cursor"], 12);
+    assert!(
+        overtaking.is_none(),
+        "the reserved predecessor still owns source order"
+    );
+    let (_, first) = first.await.unwrap();
+    *chat.state.ws_conversations.intake.reservation_hook.lock() = None;
+    chat.gate.add_permits(2);
+    run_intake(&chat, &b, first.unwrap()).await;
+    assert_eq!(chat.seen.lock().len(), 2);
+    assert!(chat.seen.lock()[0][0].ends_with("reserved first"));
+    assert!(chat.seen.lock()[1][1].ends_with("second after reservation"));
+}

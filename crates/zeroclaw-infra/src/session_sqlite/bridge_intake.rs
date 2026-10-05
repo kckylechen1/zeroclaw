@@ -445,7 +445,7 @@ mod tests {
         let store = SqliteSessionBackend::new(tmp.path()).unwrap();
         let resumed = store.bridge_resume(&source).unwrap();
         assert_eq!(resumed.cursor, 42);
-        assert_eq!(resumed.inputs, [input.clone()]);
+        assert_eq!(resumed.inputs.as_slice(), std::slice::from_ref(&input));
         let duplicate = store.bridge_record(&source, &input).unwrap();
         assert!(duplicate.duplicate);
         assert_eq!(duplicate.state, "pending");

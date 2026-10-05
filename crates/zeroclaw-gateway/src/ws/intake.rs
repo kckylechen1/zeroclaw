@@ -24,6 +24,8 @@ pub(crate) struct Scheduling {
     // TurnClaim. It vanishes on restart, allowing only still-pending recovery.
     scheduled: Mutex<HashSet<(String, i64)>>,
     sources: Mutex<HashMap<String, (BridgeSource, WsTurnScope)>>,
+    #[cfg(test)]
+    pub(super) reservation_hook: Mutex<Option<std::sync::Arc<dyn Fn(i64) + Send + Sync>>>,
 }
 
 fn failure(id: Option<&str>, code: &str) -> Reply {
@@ -120,25 +122,16 @@ pub(super) fn resume(
     let Some(backend) = &state.session_backend else {
         return failure(None, "DURABLE_INTAKE_UNAVAILABLE");
     };
-    let Ok(snapshot) = backend.bridge_resume(&source) else {
+    if backend.bridge_resume(&source).is_err() {
         return failure(None, "SOURCE_UNAVAILABLE");
-    };
+    }
     if register(state, &source, scope).is_err() {
         return failure(None, "SOURCE_CAPACITY");
     }
-    let mut start = None;
-    for input in &snapshot.inputs {
-        if input.state == "pending" && input.update_id < snapshot.cursor {
-            match schedule(state, conversation, scope, &source, input) {
-                Ok(Some(claim)) => {
-                    start = Some(claim);
-                    break;
-                }
-                Ok(None) => {}
-                Err(_) => return failure(None, "SOURCE_RECOVERY_FAILED"),
-            }
-        }
-    }
+    let start = match next_pending(state, conversation, scope, &source) {
+        Ok(claim) => claim,
+        Err(_) => return failure(None, "SOURCE_RECOVERY_FAILED"),
+    };
     // Scheduling can reject missing attachment bytes. Report the owner's
     // current receipt rather than the pre-recovery snapshot.
     let snapshot = match backend.bridge_resume(&source) {
@@ -359,6 +352,18 @@ fn schedule(
         state.ws_conversations.intake.scheduled.lock().remove(&key);
         return Ok(None);
     }
+    #[cfg(test)]
+    {
+        let hook = state
+            .ws_conversations
+            .intake
+            .reservation_hook
+            .lock()
+            .clone();
+        if let Some(hook) = hook {
+            hook(input.update_id);
+        }
+    }
     let content = match materialize(state, source, scope, &input.payload) {
         Ok(content) => content,
         Err(_) => {
@@ -456,6 +461,15 @@ fn next_pending(
     {
         if let Some(claim) = schedule(state, conversation, scope, source, &input)? {
             return Ok(Some(claim));
+        }
+        // Another socket can own the head's reservation before it owns the
+        // turn slot. A still-pending head must never be overtaken. Continue
+        // only when materialization durably rejected that input.
+        if backend
+            .bridge_receipt(source, input.update_id)?
+            .is_none_or(|receipt| receipt.state != "rejected")
+        {
+            return Ok(None);
         }
     }
     Ok(None)

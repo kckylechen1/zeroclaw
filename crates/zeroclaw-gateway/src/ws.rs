@@ -1315,7 +1315,10 @@ async fn run_ws_turns(
                 allow_resume = admitted.is_ok();
                 if !admitted.is_ok_and(|started| started) {
                     conversation.finish_turn(generation);
-                    (Vec::new(), "error")
+                    // Legacy clients may already have received a steering
+                    // ACK while this durable claim awaited admission.
+                    let late = std::iter::from_fn(|| steering.try_recv().ok()).collect();
+                    (late, "error")
                 } else {
                     intake_started = true;
                     process_chat_message(
