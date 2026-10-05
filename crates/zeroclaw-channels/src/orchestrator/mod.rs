@@ -533,22 +533,6 @@ impl ChannelRuntimeContext {
     pub(crate) fn task_prefs(&self) -> &TaskPreferenceOverlay {
         &self.task_prefs
     }
-
-    fn persist_companion_capture(&self, msg: &ChannelMessage, session_id: &str, turn_id: &str) {
-        let Some(store) = self.companion_store.as_ref() else {
-            return;
-        };
-        let owner = self.prompt_config.companion_memory.owner.gate();
-        let _ = zeroclaw_memory::capture_channel_turn(
-            Some(store.as_ref()),
-            self.agent_alias.as_str(),
-            session_id,
-            turn_id,
-            msg.channel.as_str(),
-            msg.sender.as_str(),
-            &owner,
-        );
-    }
 }
 
 /// Acquire the per-conversation-history-key persistence lock so that

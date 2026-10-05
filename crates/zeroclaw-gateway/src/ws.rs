@@ -43,33 +43,6 @@ const WS_APPROVAL_TIMEOUT_SECS: u64 = 120;
 /// or, worse, tools route to an arbitrary seeded channel.
 const WS_CHANNEL_KEY: &str = "wss";
 
-/// Capture at turn settlement, before the outcome frame is transmitted.
-/// Delivery failure does not roll the receipt back: the turn already happened.
-fn persist_companion_capture(
-    state: &AppState,
-    agent_alias: &str,
-    session_id: &str,
-    turn_id: &str,
-    auth_subject: Option<&str>,
-) {
-    let Some(store) = state.companion_store.as_ref() else {
-        return;
-    };
-    let owner = state.config.read().companion_memory.owner.gate();
-    let identity = match auth_subject.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(subject) => format!("{WS_CHANNEL_KEY}:{subject}"),
-        None => WS_CHANNEL_KEY.to_string(),
-    };
-    let _ = zeroclaw_memory::capture_gateway_turn(
-        Some(store.as_ref()),
-        agent_alias,
-        session_id,
-        turn_id,
-        &identity,
-        &owner,
-    );
-}
-
 #[derive(Debug, Deserialize)]
 struct ConnectParams {
     #[serde(rename = "type")]
@@ -1580,8 +1553,6 @@ async fn process_chat_message(
 
     let WsSession { agent, ws_memory } = session;
     let session_key = scope.session_key.as_str();
-    let session_id = scope.session_id.as_str();
-    let auth_subject = scope.auth_subject.as_deref();
 
     let (turn_alias, turn_provider, turn_model) = agent.attribution_fields();
     let provider_label = turn_provider.clone();
@@ -1822,8 +1793,6 @@ async fn process_chat_message(
             }
         }
 
-        persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
-
         // Inform the client the turn was aborted
         let mut aborted = serde_json::json!({ "type": "aborted" });
         stamp_request_id(&mut aborted, request_id);
@@ -1869,8 +1838,6 @@ async fn process_chat_message(
             if let Some(ref backend) = state.session_backend {
                 persist_conversation_messages(backend.as_ref(), session_key, &outcome.new_messages);
             }
-
-            persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
 
             // Fire-and-forget curated-memory consolidation (sqlite Memory).
             // Companion capture is a separate seam and already ran above.
@@ -2005,8 +1972,6 @@ async fn process_chat_message(
             {
                 persist_conversation_messages(backend.as_ref(), session_key, &e.new_messages);
             }
-
-            persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
 
             // Set session state to error
             if let Some(ref backend) = state.session_backend {
@@ -2146,56 +2111,8 @@ mod tests {
     }
 
     #[test]
-    fn cancel_path_captures_before_aborted_frame() {
-        let src = process_chat_message_src();
-        let cancel = src.find("if was_cancelled").expect("cancel branch");
-        let match_result = src.find("match result").expect("match result");
-        let block = &src[cancel..match_result];
-        let capture = block
-            .find("persist_companion_capture")
-            .expect("cancel must call capture");
-        let transmit = block
-            .find("\"type\": \"aborted\"")
-            .expect("cancel must send aborted");
-        assert!(
-            capture < transmit,
-            "cancel must capture at settlement before transmitting aborted"
-        );
-    }
-
-    #[test]
-    fn error_path_captures_before_error_frame() {
-        let src = process_chat_message_src();
-        let err_arm = src.rfind("Err(e) =>").expect("error arm");
-        let block = &src[err_arm..];
-        let capture = block
-            .find("persist_companion_capture")
-            .expect("error must call capture");
-        let transmit = block
-            .find("\"type\": \"error\"")
-            .expect("error must send error frame");
-        assert!(
-            capture < transmit,
-            "error must capture at settlement before transmitting the error frame"
-        );
-    }
-
-    #[test]
-    fn success_path_captures_before_done_frame() {
-        let src = process_chat_message_src();
-        let ok_arm = src.find("Ok(outcome) =>").expect("success arm");
-        let err_arm = src.rfind("Err(e) =>").expect("error arm");
-        let block = &src[ok_arm..err_arm];
-        let capture = block
-            .find("persist_companion_capture")
-            .expect("success must call capture");
-        let transmit = block
-            .find("\"type\": \"done\"")
-            .expect("success must send done");
-        assert!(
-            capture < transmit,
-            "success must capture at settlement before transmitting done"
-        );
+    fn settled_turns_do_not_write_placeholder_capture_receipts() {
+        assert!(!process_chat_message_src().contains("persist_companion_capture"));
     }
 
     #[test]

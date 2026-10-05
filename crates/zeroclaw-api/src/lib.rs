@@ -22,6 +22,7 @@ pub mod plan;
 pub mod platform;
 pub mod principal;
 pub mod procedure_v1;
+pub mod review;
 pub mod runtime_status;
 pub mod runtime_traits;
 pub mod schema;

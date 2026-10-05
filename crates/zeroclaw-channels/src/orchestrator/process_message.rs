@@ -1349,8 +1349,6 @@ async fn process_channel_message_body(
                 ChatMessage::assistant(&history_response),
             );
 
-            ctx.persist_companion_capture(&msg, &history_key, &turn_id);
-
             // Fire-and-forget LLM-driven curated-memory consolidation.
             // Companion capture already ran at settlement, before send.
             // Passes the agent's resolved temperature through unchanged —

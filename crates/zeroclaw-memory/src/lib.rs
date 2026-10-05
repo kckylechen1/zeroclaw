@@ -58,10 +58,9 @@ pub use backend::{
     default_memory_backend_key, memory_backend_profile, selectable_memory_backends,
 };
 pub use companion::{
-    CompanionCapture, CompanionStore, OUTBOX_OBSERVE_INTERVAL_SECS, OUTBOX_PENDING_AGE_WARN_SECS,
-    capture_channel_turn, capture_gateway_turn, capture_turn_if_present, clone_for_subsystems,
-    companion_outbox_health, create_companion_store, probe_companion_outbox_health,
-    reload_companion_store,
+    CompanionStore, OUTBOX_OBSERVE_INTERVAL_SECS, OUTBOX_PENDING_AGE_WARN_SECS,
+    clone_for_subsystems, companion_outbox_health, create_companion_store,
+    probe_companion_outbox_health, reload_companion_store,
 };
 #[allow(unused_imports)]
 pub use embeddings::EmbeddingIdentity;
