@@ -1,9 +1,4 @@
-//! Companion-capture seam: turn context in, durable receipt out.
-//!
-//! Candidate evaluation is a later slice. This module always records a typed
-//! outcome — including negative ones — so an empty store cannot mean
-//! "capture never ran."
-
+//! Legacy capture receipt fixtures. Production placeholder writes were retired by U4.
 use zeroclaw_api::companion::{CaptureContext, CaptureOutcome, CaptureReceipt};
 
 use super::CompanionStore;

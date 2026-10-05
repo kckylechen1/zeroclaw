@@ -23,6 +23,22 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only;
 
+/// The shared User Model reflection queue is bounded independently of Soul.
+pub const USER_MODEL_MAX_OPEN_REFLECTION_CANDIDATES: usize = 3;
+pub const USER_MODEL_STATEMENT_MAX_BYTES: usize = 240;
+
+pub fn validate_review_text(text: &str) -> Result<(), rusqlite::Error> {
+    if text.trim().is_empty()
+        || text.len() > USER_MODEL_STATEMENT_MAX_BYTES
+        || text.chars().any(char::is_control)
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "statement must be a non-empty single line of at most 240 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// What kind of statement this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -297,6 +313,44 @@ impl UserModelStore {
         evidence: &str,
         now_unix: u64,
     ) -> Result<UserModelCandidate, rusqlite::Error> {
+        self.insert_observation(kind, statement, semantic_key, evidence, now_unix, false)?
+            .ok_or(rusqlite::Error::InvalidQuery)
+    }
+
+    /// Reflection observations remain pending. One transaction enforces the
+    /// queue bound and suppresses identical pending observations across writers.
+    pub fn record_reflection_observation(
+        &self,
+        kind: UserModelKind,
+        statement: &str,
+        semantic_key: &str,
+        evidence: &str,
+        now_unix: u64,
+    ) -> Result<Option<UserModelCandidate>, rusqlite::Error> {
+        validate_review_text(statement)?;
+        if semantic_key.is_empty()
+            || semantic_key.len() > 64
+            || !semantic_key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid semantic key".into(),
+            ));
+        }
+        self.insert_observation(kind, statement, semantic_key, evidence, now_unix, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_observation(
+        &self,
+        kind: UserModelKind,
+        statement: &str,
+        semantic_key: &str,
+        evidence: &str,
+        now_unix: u64,
+        bounded: bool,
+    ) -> Result<Option<UserModelCandidate>, rusqlite::Error> {
         let candidate = UserModelCandidate {
             id: uuid::Uuid::new_v4().to_string(),
             kind,
@@ -306,8 +360,16 @@ impl UserModelStore {
             evidence: evidence.to_string(),
             created_at_unix: now_unix,
         };
-        let conn = self.conn.lock();
-        conn.execute(
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if bounded {
+            let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM user_model_candidates c WHERE kind = ?1 AND semantic_key = ?2 AND statement = ?3 AND NOT EXISTS(SELECT 1 FROM user_model_review_receipts r WHERE r.candidate_id = c.id))", rusqlite::params![kind.as_str(), semantic_key, statement], |r| r.get(0))?;
+            let pending: usize = tx.query_row("SELECT COUNT(*) FROM user_model_candidates c WHERE NOT EXISTS(SELECT 1 FROM user_model_review_receipts r WHERE r.candidate_id = c.id)", [], |r| r.get(0))?;
+            if duplicate || pending >= USER_MODEL_MAX_OPEN_REFLECTION_CANDIDATES {
+                return Ok(None);
+            }
+        }
+        tx.execute(
             "INSERT INTO user_model_candidates
                  (id, kind, statement, semantic_key, scope, evidence, created_at_unix)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -321,7 +383,8 @@ impl UserModelStore {
                 candidate.created_at_unix,
             ],
         )?;
-        Ok(candidate)
+        tx.commit()?;
+        Ok(Some(candidate))
     }
 
     /// All candidates, newest first, with their evidence.
@@ -442,6 +505,38 @@ impl UserModelStore {
         narrowed_scope: Option<&str>,
         now_unix: u64,
     ) -> Result<UserModelReviewReceipt, rusqlite::Error> {
+        self.review_candidate_with_text(
+            candidate_id,
+            action,
+            reviewer,
+            note,
+            narrowed_scope,
+            None,
+            now_unix,
+        )
+    }
+
+    /// Rewording is an explicit owner submission. The original candidate and
+    /// evidence remain intact; the new revision owns the approved wording.
+    #[allow(clippy::too_many_arguments)]
+    pub fn review_candidate_with_text(
+        &self,
+        candidate_id: &str,
+        action: ReviewAction,
+        reviewer: &str,
+        note: Option<&str>,
+        narrowed_scope: Option<&str>,
+        final_text: Option<&str>,
+        now_unix: u64,
+    ) -> Result<UserModelReviewReceipt, rusqlite::Error> {
+        if let Some(text) = final_text {
+            if action == ReviewAction::Reject {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "reject does not accept final_text".into(),
+                ));
+            }
+            validate_review_text(text)?;
+        }
         let mut conn = self.conn.lock();
         // Acquire the database write slot before reading the decision so a
         // second store connection cannot act on the same pending snapshot.
@@ -537,7 +632,7 @@ impl UserModelStore {
                         uuid::Uuid::new_v4().to_string(),
                         candidate.2,
                         kind.as_str(),
-                        candidate.1,
+                        final_text.unwrap_or(&candidate.1),
                         scope,
                         AuthorityClass::OwnerRatified.as_str(),
                         now_unix,
@@ -1723,6 +1818,121 @@ mod tests {
         assert_eq!(
             store.active_heads(Some(202)).unwrap()[0].authority,
             AuthorityClass::OwnerRatified
+        );
+    }
+    #[test]
+    fn reflection_queue_bound_is_enforced_across_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let store = UserModelStore::open(dir.path()).unwrap();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .record_reflection_observation(
+                            UserModelKind::Preference,
+                            &format!("Preference {i}"),
+                            &format!("pref.{i}"),
+                            "[]",
+                            100,
+                        )
+                        .unwrap()
+                        .is_some()
+                })
+            })
+            .collect();
+        let created = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|created| *created)
+            .count();
+        assert_eq!(created, USER_MODEL_MAX_OPEN_REFLECTION_CANDIDATES);
+        let store = UserModelStore::open(dir.path()).unwrap();
+        assert_eq!(store.list_pending_candidates().unwrap().len(), 3);
+        assert!(store.active_heads(Some(101)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reword_is_atomic_preserves_original_and_invalid_text_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        let candidate = store
+            .record_observation(
+                UserModelKind::Preference,
+                "original",
+                "pref.original",
+                "[{\"session_id\":\"s1\"}]",
+                100,
+            )
+            .unwrap();
+        for text in [
+            "".to_string(),
+            "\ninvalid".to_string(),
+            "x".repeat(USER_MODEL_STATEMENT_MAX_BYTES + 1),
+        ] {
+            assert!(
+                store
+                    .review_candidate_with_text(
+                        &candidate.id,
+                        ReviewAction::Accept,
+                        "operator",
+                        None,
+                        None,
+                        Some(&text),
+                        101
+                    )
+                    .is_err()
+            );
+        }
+        let history = store.candidate_history(&candidate.id).unwrap().unwrap();
+        assert_eq!(history.0, candidate);
+        assert!(history.1.is_empty());
+        let conn = Connection::open(dir.path().join("user_model.db")).unwrap();
+        conn.execute_batch("CREATE TRIGGER reword_fault BEFORE INSERT ON user_model_revisions BEGIN SELECT RAISE(ABORT,'reword fault'); END;").unwrap();
+        assert!(
+            store
+                .review_candidate_with_text(
+                    &candidate.id,
+                    ReviewAction::Accept,
+                    "operator",
+                    None,
+                    None,
+                    Some("owner wording"),
+                    101
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .candidate_history(&candidate.id)
+                .unwrap()
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        assert!(store.active_heads(Some(102)).unwrap().is_empty());
+        conn.execute_batch("DROP TRIGGER reword_fault;").unwrap();
+        store
+            .review_candidate_with_text(
+                &candidate.id,
+                ReviewAction::Accept,
+                "operator",
+                None,
+                None,
+                Some("owner wording"),
+                101,
+            )
+            .unwrap();
+        let heads = UserModelStore::open(dir.path())
+            .unwrap()
+            .active_heads(Some(102))
+            .unwrap();
+        assert_eq!(heads[0].statement, "owner wording");
+        assert_eq!(
+            store.candidate_history(&candidate.id).unwrap().unwrap().0,
+            candidate
         );
     }
 }

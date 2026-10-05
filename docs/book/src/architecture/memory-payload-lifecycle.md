@@ -23,19 +23,18 @@ but "which surface owns this data, and how long does it live?"
 | Logs and observer events | `zeroclaw-log`, `ObserverEvent`, runtime trace | Optional runtime trace and live observers | Logs are evidence and diagnostics, not source-of-truth memory. Scrub or bound user/tool payloads before logging. |
 | Cost and usage records | Cost tracker and provider usage events | Cost ledger when enabled | Usage records describe model calls. They should not carry prompt bodies, tool outputs, or memory contents. |
 | Companion agent identity | `{companion_store_dir}/agent-identity.json` | Durable mint-once alias→UUID map | First sight of an alias mints a UUID and never rewrites that key. Renaming an `[agents.<alias>]` entry mints a new identity unless the operator copies the old UUID onto the new alias key before the new alias is captured. |
-| Companion capture receipts | Companion PortableKernel `memories` rows | Durable local receipt, including negative outcomes | Capture runs at turn settlement, before the outcome is transmitted. A failed delivery does not roll the receipt back. |
+| Companion capture receipts (legacy) | Existing Companion PortableKernel `memories` rows | Historical rows and pending outbox events retained | U4 retired turn-settlement `NotEvaluated` writes. Legacy fixtures retain decoding and outbox assertions; new reflection receipts live in `soul.db`. |
+| Reflection input | Original text and source captured at trusted ingress, stored atomically with the session row | SQLite message ingress; legacy or unsupported rows excluded | Enriched chat history is a derived context view. Hooks, media annotations and remote link text never become owner evidence. |
+| Owner review inbox | `soul.db` proposals/reflections and `user_model.db` candidates/revisions/receipts | Local canonical records; inbox is an on-demand view | Reflection proposes only. Operator review applies accepted wording atomically within the owning store and preserves original evidence. |
 
 This table complements [Runtime state and persistence](./runtime-state-and-persistence.md).
 That page says where state lives; this page says how user-facing payloads move
 through memory, history, tools, files, media, and provider requests.
 
-Companion receipts stamp `agent_identity_id` from
-`{companion_store_dir}/agent-identity.json`, never from the alias string. The
-file is host-owned so an operator can edit it: a rename of `[agents.<alias>]`
-defaults to a new UUID, and continuing the old identity is a manual copy of
-the existing UUID onto the new alias key before that alias is captured. If
-the map cannot be written, that turn skips the receipt rather than persisting
-a non-UUID.
+Historical companion receipts stamp `agent_identity_id` from the host-owned
+`agent-identity.json` alias mapping. U4 no longer mints that identity or writes
+placeholder receipts at turn settlement. Existing rows and their attribution
+are retained; the shared outbox observer still reports pending historical events.
 
 Reviewed AgentSoul is a separate protected domain. Its owner-selected minimum
 review and presentation contract is recorded in

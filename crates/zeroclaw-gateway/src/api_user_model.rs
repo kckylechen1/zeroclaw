@@ -174,6 +174,7 @@ struct ReviewBody {
     action: String,
     note: Option<String>,
     narrowed_scope: Option<String>,
+    final_text: Option<String>,
 }
 
 enum ReviewStoreError {
@@ -215,19 +216,29 @@ pub async fn review_candidate(
             "narrow requires a non-empty narrowed_scope",
         );
     }
+    if let Some(text) = body.final_text.as_deref() {
+        if action == ReviewAction::Reject {
+            return error_json(StatusCode::BAD_REQUEST, "reject does not accept final_text");
+        }
+        if let Err(err) = zeroclaw_memory::companion::validate_user_model_review_text(text) {
+            return error_json(StatusCode::BAD_REQUEST, &err.to_string());
+        }
+    }
     let data_dir = data_dir_of(&state);
     let candidate = candidate_id.clone();
     let note = body.note.clone();
     let narrowed = body.narrowed_scope.clone();
+    let final_text = body.final_text.clone();
     let result = tokio::task::spawn_blocking(move || {
         let store = cached_store(&data_dir).map_err(ReviewStoreError::Open)?;
         store
-            .review_candidate(
+            .review_candidate_with_text(
                 &candidate,
                 action,
                 "operator",
                 note.as_deref(),
                 narrowed.as_deref(),
+                final_text.as_deref(),
                 now_unix(),
             )
             .map_err(ReviewStoreError::Review)

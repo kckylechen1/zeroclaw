@@ -14,6 +14,7 @@ pub mod api_logs;
 pub mod api_node_identity;
 pub mod api_pairing;
 pub mod api_personality;
+pub mod api_review;
 pub mod api_sections;
 pub mod api_skills;
 pub mod api_soul;
@@ -1531,6 +1532,7 @@ pub async fn run_gateway(
         );
 
     let inner = inner
+        .merge(api_review::routes())
         // ── User Model operator review surface ──
         .route("/api/user-model/candidates", get(api_user_model::list_candidates))
         .route("/api/user-model/candidates/{id}", get(api_user_model::candidate_history))

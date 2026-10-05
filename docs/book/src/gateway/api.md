@@ -17,7 +17,7 @@ the live surface.
 | Events | `GET /api/events` (SSE), `GET /api/events/history` |
 | Sessions | `GET /api/sessions`, `GET /api/sessions/running`, `GET/POST /api/sessions/{id}/messages`, `PUT/DELETE /api/sessions/{id}`, `GET /api/sessions/{id}/state`, `POST /api/sessions/{id}/abort` |
 | Scheduling | `GET/POST /api/cron`, `GET/PATCH /api/cron/settings`, `PATCH/DELETE /api/cron/{id}`, `GET /api/cron/{id}/runs`, `POST /api/cron/{id}/run` |
-| Memory and review | `GET/POST /api/memory`, `DELETE /api/memory/{key}`, `/api/user-model/*`, `/api/soul*` |
+| Memory and review | `GET/POST /api/memory`, `DELETE /api/memory/{key}`, `/api/user-model/*`, `/api/soul*`, `/api/review/inbox` |
 | Personality and skills | `/api/personality*`, `/api/skills/*`, `GET /api/agents/{alias}/skills` |
 | Diagnostics | `GET /api/logs`, `GET /api/cost`, `GET /api/tools` |
 | Channels | `GET /api/channels`, `POST /api/channels/{channel}/relink` (until #378) |
@@ -306,6 +306,51 @@ placeholders. Neither config read surface returns the underlying secret value.
 `{populated: true}`; `DELETE` clears it and responds with
 `{populated: false}`. There is no HTTP path to retrieve a secret by any means.
 
+## Unified owner review inbox
+
+`GET /api/review/inbox` requires the operator bearer, even when pairing is
+optional. Node credentials, bridge identities and model tools grant no review
+authority. The view reads pending Soul proposals, pending User Model candidates,
+and the latest 20 reflection receipts per configured agent from their existing
+stores. No inbox database or copied queue exists. Store errors return 503 rather
+than a successful partial inbox.
+
+The response is `{ "items": [...], "total": N, "next_offset": N | null }`.
+Items carry a stable namespaced `id`, `kind` (`soul_proposal`,
+`user_model_candidate`, or `reflection_receipt`), `created_at_unix`, and the
+original `item`. Candidates appear oldest first, then receipts newest first.
+Use `limit=1..200` (default 100) and `offset` for bounded pages; these are live
+views, so concurrent review can change page positions. An optional `agent`
+filters Soul and reflection history. The owner's shared User Model candidates
+remain visible for every agent filter.
+
+Each candidate has `review_url` pointing to its existing operator endpoint:
+
+- Soul: submit `agent` and `resolution: "accepted"` or `"dismissed"`.
+  `final_text` rewords an accepted Growth entry or principle.
+- User Model: submit `action: "accept"`, `"narrow"` or `"reject"`.
+  `narrow` requires `narrowed_scope`; `final_text` optionally supplies the
+  owner's wording for an accepted/narrowed statement. Wording is a non-empty
+  single line of at most 240 UTF-8 bytes. Dismissal applies nothing. The
+  original candidate/evidence remains intact and the approved revision owns
+  the new wording. Repeated committed decisions return 409, except the one-time reject-to-narrow
+  follow-up documented below.
+- Reflection receipts have no review action: they report what ran and how many
+  proposals/candidates were created. They grant no approval authority.
+
+Reflection uses immutable original ingress text and its source on each SQLite message row, rather
+than the session's latest sender. Active and passive channel messages store
+their actual sender; the current owner identity list is checked when reflecting.
+Each ordinary paired operator WS turn marks its initial user input. Anonymous,
+bridge and steering inputs without bound owner origin are excluded. A late
+steering follow-up does not inherit the original socket's owner identity.
+Hooks, link previews and media annotations remain in chat history but cannot
+replace this original evidence. Historical rows and imported JSONL without this
+ingress record stay readable as chat
+history but are excluded from reflection; unknown origin is never guessed.
+
+The PWA consumes this API under #379; phone review remains a separate slice.
+
 ## User Model review history
 
 `GET /api/user-model/candidates/{id}` requires the operator identity used by
@@ -388,14 +433,27 @@ underneath it, the proposal stays pending. Dismissing applies nothing.
 
 Once every 7 days per agent, the daemon reflects: it reads only the owner's
 own `user` messages since the previous reflection (at most the latest 32 KiB),
-makes one model call with no tools, and stores at most three validated
-proposals. Nothing is applied. The owner's messages are those from operator
-surfaces (gateway chat, CLI, TUI) plus channel sessions whose sender is listed
-in `[companion_memory.owner].identities`; tool results, injected memory, and
-link previews are removed first. The first check only starts the clock, a
+makes one model call with no tools, and stores at most three validated Soul
+proposals plus three User Model candidates. Each domain has its own pending
+cap of three, so a full Soul queue does not block User Model suggestions.
+User Model suggestions carry runtime-bound owner-message/session evidence and
+remain global candidates until owner review; model-supplied evidence references
+outside the input are refused. Nothing is applied. Owner messages require
+the per-message ingress source described above: an operator origin or a
+channel sender listed in the current `[companion_memory.owner].identities`.
+The last sender of a shared session cannot authorize its other rows. Tool
+results and injected memory are removed first. Link previews and other derived
+annotations are never read from history. A `storage_write_failed` receipt retains
+already committed candidate counts and the original period, delays retry for
+six hours, and still propagates the storage error to the worker. The first check
+only starts the clock, a
 week with no owner messages makes no model call, and a failed call is retried
 after 6 hours. `last_reflection` reports the period, the number of messages
-read, the proposals created, and the outcome.
+read, the Soul proposals created, `user_model_candidates_created`, and the
+outcome. Older receipts expose zero for the new count. Reflection logic lives
+in `zeroclaw-memory`; the daemon only wires stores, providers and cadence.
+Turn settlement no longer writes `NotEvaluated` capture placeholders to the
+companion PortableKernel. Existing historical rows and outbox events are retained.
 
 ## Stable error codes
 

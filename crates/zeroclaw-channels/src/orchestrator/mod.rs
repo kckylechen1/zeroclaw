@@ -533,22 +533,6 @@ impl ChannelRuntimeContext {
     pub(crate) fn task_prefs(&self) -> &TaskPreferenceOverlay {
         &self.task_prefs
     }
-
-    fn persist_companion_capture(&self, msg: &ChannelMessage, session_id: &str, turn_id: &str) {
-        let Some(store) = self.companion_store.as_ref() else {
-            return;
-        };
-        let owner = self.prompt_config.companion_memory.owner.gate();
-        let _ = zeroclaw_memory::capture_channel_turn(
-            Some(store.as_ref()),
-            self.agent_alias.as_str(),
-            session_id,
-            turn_id,
-            msg.channel.as_str(),
-            msg.sender.as_str(),
-            &owner,
-        );
-    }
 }
 
 /// Acquire the per-conversation-history-key persistence lock so that
@@ -1417,6 +1401,33 @@ fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool
 /// when proactively trimming. The active exchange stays intact; only older
 /// tool results are shrunk to a bounded extract.
 fn append_sender_turn(ctx: &ChannelRuntimeContext, sender_key: &str, turn: ChatMessage) {
+    append_sender_turn_with_ingress(ctx, sender_key, turn, None);
+}
+
+fn append_channel_user_turn(
+    ctx: &ChannelRuntimeContext,
+    sender_key: &str,
+    ingress: &zeroclaw_api::review::UserMessageIngress,
+    turn: ChatMessage,
+) {
+    append_sender_turn_with_ingress(ctx, sender_key, turn, Some(ingress));
+}
+
+fn channel_user_ingress(msg: &ChannelMessage) -> zeroclaw_api::review::UserMessageIngress {
+    zeroclaw_api::review::UserMessageIngress {
+        source: zeroclaw_api::review::UserMessageSource::Channel {
+            sender_id: msg.sender.clone(),
+        },
+        text: msg.content.clone(),
+    }
+}
+
+fn append_sender_turn_with_ingress(
+    ctx: &ChannelRuntimeContext,
+    sender_key: &str,
+    turn: ChatMessage,
+    ingress: Option<&zeroclaw_api::review::UserMessageIngress>,
+) {
     // Serialize per-sender persistence to prevent interleaving across concurrent
     // workers that share the same conversation_history_key
     let persist_lock = acquire_persist_lock(ctx, sender_key);
@@ -1424,7 +1435,10 @@ fn append_sender_turn(ctx: &ChannelRuntimeContext, sender_key: &str, turn: ChatM
 
     // Persist to JSONL before adding to in-memory history.
     if let Some(ref store) = ctx.session_store
-        && let Err(e) = store.append(sender_key, &turn)
+        && let Err(e) = match ingress {
+            Some(ingress) => store.append_with_ingress(sender_key, &turn, ingress),
+            None => store.append(sender_key, &turn),
+        }
     {
         ::zeroclaw_log::record!(
             WARN,
@@ -2724,6 +2738,17 @@ fn stamp_session_routing_context(
                 Some(target)
             }
         });
+    if let Err(e) = store.set_session_agent_alias(history_key, &ctx.agent_alias) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(
+                    ::serde_json::json!({"history_key": history_key, "error": e.to_string()})
+                ),
+            "Failed to stamp session agent attribution"
+        );
+    }
     let context = zeroclaw_infra::session_backend::SessionContext {
         channel_id: channel_id.as_deref(),
         room_id,
@@ -2740,10 +2765,20 @@ fn stamp_session_routing_context(
     }
 }
 
-fn record_passive_context(ctx: &ChannelRuntimeContext, msg: &ChannelMessage, history_key: &str) {
+fn record_passive_context(
+    ctx: &ChannelRuntimeContext,
+    msg: &ChannelMessage,
+    history_key: &str,
+    ingress: &zeroclaw_api::review::UserMessageIngress,
+) {
     let timestamped_content =
         timestamped_channel_user_history_content(msg, WHATSAPP_OBSERVED_GROUP_MESSAGE_LABEL);
-    append_sender_turn(ctx, history_key, ChatMessage::user(&timestamped_content));
+    append_channel_user_turn(
+        ctx,
+        history_key,
+        ingress,
+        ChatMessage::user(&timestamped_content),
+    );
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(

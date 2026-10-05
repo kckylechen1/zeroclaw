@@ -18,17 +18,21 @@ mod stub;
 #[cfg(not(feature = "tachi"))]
 pub use stub::CompanionStore;
 
-mod capture;
 mod identity;
+#[cfg(test)]
+#[path = "tests/legacy_capture.rs"]
+mod legacy_capture;
 mod outbox;
+pub mod reflection;
 mod soul_profile;
 mod user_model;
 mod user_model_scope;
-pub use capture::{
-    CompanionCapture, capture_channel_turn, capture_gateway_turn, capture_turn_if_present,
-};
 pub use identity::{
     peek as peek_agent_identity, resolve_or_mint as resolve_or_mint_agent_identity,
+};
+#[cfg(test)]
+pub use legacy_capture::{
+    CompanionCapture, capture_channel_turn, capture_gateway_turn, capture_turn_if_present,
 };
 pub use outbox::{
     OUTBOX_OBSERVE_INTERVAL_SECS, OUTBOX_PENDING_AGE_WARN_SECS, companion_outbox_health,
@@ -44,8 +48,10 @@ pub use soul_profile::{
     SoulProposalLayer, SoulProposalOutcome, SoulProposalResolution, SoulReflectionReceipt,
     SoulRevision, SoulSource, SoulVoice, seed_name_for_agent,
 };
+pub use user_model::validate_review_text as validate_user_model_review_text;
 pub use user_model::{
-    AuthorityClass, ReviewAction, USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS, UserModelCandidate,
+    AuthorityClass, ReviewAction, USER_MODEL_MAX_OPEN_REFLECTION_CANDIDATES,
+    USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS, USER_MODEL_STATEMENT_MAX_BYTES, UserModelCandidate,
     UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStateProjection,
     UserModelStore, is_candidate_already_reviewed, project_active_heads, project_applicable_heads,
 };

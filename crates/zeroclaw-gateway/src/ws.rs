@@ -43,33 +43,6 @@ const WS_APPROVAL_TIMEOUT_SECS: u64 = 120;
 /// or, worse, tools route to an arbitrary seeded channel.
 const WS_CHANNEL_KEY: &str = "wss";
 
-/// Capture at turn settlement, before the outcome frame is transmitted.
-/// Delivery failure does not roll the receipt back: the turn already happened.
-fn persist_companion_capture(
-    state: &AppState,
-    agent_alias: &str,
-    session_id: &str,
-    turn_id: &str,
-    auth_subject: Option<&str>,
-) {
-    let Some(store) = state.companion_store.as_ref() else {
-        return;
-    };
-    let owner = state.config.read().companion_memory.owner.gate();
-    let identity = match auth_subject.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(subject) => format!("{WS_CHANNEL_KEY}:{subject}"),
-        None => WS_CHANNEL_KEY.to_string(),
-    };
-    let _ = zeroclaw_memory::capture_gateway_turn(
-        Some(store.as_ref()),
-        agent_alias,
-        session_id,
-        turn_id,
-        &identity,
-        &owner,
-    );
-}
-
 #[derive(Debug, Deserialize)]
 struct ConnectParams {
     #[serde(rename = "type")]
@@ -1297,6 +1270,9 @@ async fn run_ws_turns(
     claim: TurnClaim,
 ) {
     let mut next = Some(claim);
+    // Each idle socket submission starts its own invocation with that
+    // socket's scope. Joined late steering does not inherit its authorship.
+    let mut initial_claim = true;
     while let Some(TurnClaim {
         input,
         request_id,
@@ -1326,6 +1302,7 @@ async fn run_ws_turns(
                         &conversation,
                         &mut session,
                         &scope,
+                        initial_claim && intake.is_none(),
                         &input,
                         request_id.as_deref(),
                         generation,
@@ -1370,6 +1347,7 @@ async fn run_ws_turns(
             scope = next_scope;
             next = Some(claim);
         }
+        initial_claim = false;
     }
     state.ws_conversations.release_if_unused(&conversation);
 }
@@ -1459,6 +1437,7 @@ fn persist_conversation_messages(
     backend: &dyn zeroclaw_infra::session_backend::SessionBackend,
     session_key: &str,
     messages: &[zeroclaw_providers::ConversationMessage],
+    ingress: Option<&zeroclaw_api::review::UserMessageIngress>,
 ) {
     // if the user deleted the session between the turn starting and
     // the post-turn persistence, don't resurrect it. The `aborted` / `done`
@@ -1467,6 +1446,7 @@ fn persist_conversation_messages(
     if !backend.session_exists(session_key) {
         return;
     }
+    let mut initial_user = true;
     for message in messages {
         let zeroclaw_providers::ConversationMessage::Chat(message) = message else {
             continue;
@@ -1474,7 +1454,14 @@ fn persist_conversation_messages(
         if message.role == "system" {
             continue;
         }
-        let _ = backend.append(session_key, message);
+        if message.role == "user"
+            && std::mem::take(&mut initial_user)
+            && let Some(ingress) = ingress
+        {
+            let _ = backend.append_with_ingress(session_key, message, ingress);
+        } else {
+            let _ = backend.append(session_key, message);
+        }
     }
 }
 
@@ -1570,6 +1557,7 @@ async fn process_chat_message(
     conversation: &Conversation<WsSession>,
     session: &mut WsSession,
     scope: &WsTurnScope,
+    initial_operator_input: bool,
     content: &str,
     request_id: Option<&str>,
     generation: u64,
@@ -1580,8 +1568,19 @@ async fn process_chat_message(
 
     let WsSession { agent, ws_memory } = session;
     let session_key = scope.session_key.as_str();
-    let session_id = scope.session_id.as_str();
-    let auth_subject = scope.auth_subject.as_deref();
+    // Resolve canonical paired-device membership when storing this input.
+    // Bridge/anonymous sockets and unbound steering receive no owner source.
+    let owner_ingress = || {
+        (initial_operator_input
+            && scope
+                .auth_subject
+                .as_ref()
+                .is_some_and(|subject| state.pairing.tokens().contains(subject)))
+        .then(|| zeroclaw_api::review::UserMessageIngress {
+            source: zeroclaw_api::review::UserMessageSource::Operator,
+            text: content.to_string(),
+        })
+    };
 
     let (turn_alias, turn_provider, turn_model) = agent.attribution_fields();
     let provider_label = turn_provider.clone();
@@ -1783,6 +1782,7 @@ async fn process_chat_message(
                             backend.as_ref(),
                             session_key,
                             &error.new_messages,
+                            owner_ingress().as_ref(),
                         );
                         if !has_assistant_chat_message(&error.new_messages) {
                             let marker = zeroclaw_runtime::i18n::get_required_cli_string(
@@ -1821,8 +1821,6 @@ async fn process_chat_message(
                 }
             }
         }
-
-        persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
 
         // Inform the client the turn was aborted
         let mut aborted = serde_json::json!({ "type": "aborted" });
@@ -1867,10 +1865,13 @@ async fn process_chat_message(
     match result {
         Ok(outcome) => {
             if let Some(ref backend) = state.session_backend {
-                persist_conversation_messages(backend.as_ref(), session_key, &outcome.new_messages);
+                persist_conversation_messages(
+                    backend.as_ref(),
+                    session_key,
+                    &outcome.new_messages,
+                    owner_ingress().as_ref(),
+                );
             }
-
-            persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
 
             // Fire-and-forget curated-memory consolidation (sqlite Memory).
             // Companion capture is a separate seam and already ran above.
@@ -2003,10 +2004,13 @@ async fn process_chat_message(
             if let Some(ref backend) = state.session_backend
                 && !e.new_messages.is_empty()
             {
-                persist_conversation_messages(backend.as_ref(), session_key, &e.new_messages);
+                persist_conversation_messages(
+                    backend.as_ref(),
+                    session_key,
+                    &e.new_messages,
+                    owner_ingress().as_ref(),
+                );
             }
-
-            persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
 
             // Set session state to error
             if let Some(ref backend) = state.session_backend {
@@ -2146,56 +2150,8 @@ mod tests {
     }
 
     #[test]
-    fn cancel_path_captures_before_aborted_frame() {
-        let src = process_chat_message_src();
-        let cancel = src.find("if was_cancelled").expect("cancel branch");
-        let match_result = src.find("match result").expect("match result");
-        let block = &src[cancel..match_result];
-        let capture = block
-            .find("persist_companion_capture")
-            .expect("cancel must call capture");
-        let transmit = block
-            .find("\"type\": \"aborted\"")
-            .expect("cancel must send aborted");
-        assert!(
-            capture < transmit,
-            "cancel must capture at settlement before transmitting aborted"
-        );
-    }
-
-    #[test]
-    fn error_path_captures_before_error_frame() {
-        let src = process_chat_message_src();
-        let err_arm = src.rfind("Err(e) =>").expect("error arm");
-        let block = &src[err_arm..];
-        let capture = block
-            .find("persist_companion_capture")
-            .expect("error must call capture");
-        let transmit = block
-            .find("\"type\": \"error\"")
-            .expect("error must send error frame");
-        assert!(
-            capture < transmit,
-            "error must capture at settlement before transmitting the error frame"
-        );
-    }
-
-    #[test]
-    fn success_path_captures_before_done_frame() {
-        let src = process_chat_message_src();
-        let ok_arm = src.find("Ok(outcome) =>").expect("success arm");
-        let err_arm = src.rfind("Err(e) =>").expect("error arm");
-        let block = &src[ok_arm..err_arm];
-        let capture = block
-            .find("persist_companion_capture")
-            .expect("success must call capture");
-        let transmit = block
-            .find("\"type\": \"done\"")
-            .expect("success must send done");
-        assert!(
-            capture < transmit,
-            "success must capture at settlement before transmitting done"
-        );
+    fn settled_turns_do_not_write_placeholder_capture_receipts() {
+        assert!(!process_chat_message_src().contains("persist_companion_capture"));
     }
 
     #[test]
@@ -2722,6 +2678,10 @@ mod tests {
         fn alias(&self) -> &str {
             "scripted"
         }
+    }
+
+    mod review_source_tests {
+        include!("ws/review_source_tests.rs");
     }
 
     mod intake_tests {
@@ -3542,7 +3502,7 @@ mod tests {
             ConversationMessage::Chat(ChatMessage::assistant("[interrupted by user]")),
         ];
 
-        persist_conversation_messages(&backend, "gw_deleted", &messages);
+        persist_conversation_messages(&backend, "gw_deleted", &messages, None);
 
         assert!(
             backend.append_calls.lock().unwrap().is_empty(),

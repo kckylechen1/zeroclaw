@@ -29,14 +29,14 @@ use super::{
     AUTOSAVE_MIN_MESSAGE_CHARS, ApprovalTypingChannel, AssistantChannelOutcome,
     CHANNEL_HOOK_MAX_OUTBOUND_CHARS, CHANNEL_MESSAGE_TIMEOUT_SCALE_CAP, ChannelNotifyObserver,
     ChannelRouteSelection, ChannelRuntimeContext, LlmExecutionResult, ScopedTypingController,
-    WHATSAPP_CURRENT_GROUP_MESSAGE_LABEL, acquire_persist_lock, append_sender_turn,
-    build_channel_system_prompt_for_message_with_signal, build_channel_turn_context_preamble,
-    channel_message_timeout_budget_secs_with_cap, channel_runtime_cli_string,
-    channel_runtime_cli_string_with_args, classify_channel_reply_intent, clear_sender_history,
-    collapse_inline_image_payloads, compact_sender_history,
-    compose_outgoing_user_turn_with_context, conversation_history_key, conversation_memory_key,
-    ensure_nonempty_channel_reply, extract_current_turn_tool_messages, find_channel_for_message,
-    followup_thread_id, get_or_create_provider, get_route_selection,
+    WHATSAPP_CURRENT_GROUP_MESSAGE_LABEL, acquire_persist_lock, append_channel_user_turn,
+    append_sender_turn, build_channel_system_prompt_for_message_with_signal,
+    build_channel_turn_context_preamble, channel_message_timeout_budget_secs_with_cap,
+    channel_runtime_cli_string, channel_runtime_cli_string_with_args, channel_user_ingress,
+    classify_channel_reply_intent, clear_sender_history, collapse_inline_image_payloads,
+    compact_sender_history, compose_outgoing_user_turn_with_context, conversation_history_key,
+    conversation_memory_key, ensure_nonempty_channel_reply, extract_current_turn_tool_messages,
+    find_channel_for_message, followup_thread_id, get_or_create_provider, get_route_selection,
     handle_runtime_command_if_needed, is_context_window_overflow_error, is_group_reply_target,
     maybe_apply_runtime_config_update, normalize_cached_channel_turns,
     outbound_content_format_for_channel, peer_prompt_channel_ref, provider_cache_key,
@@ -120,6 +120,10 @@ async fn process_channel_message_body(
         "channel inbound message"
     );
 
+    // Canonical sender/text originate at ingress. History below may be enriched
+    // by hooks, media and links, but those derived annotations are not evidence.
+    let ingress = channel_user_ingress(&msg);
+
     // ── Hook: on_message_received (modifying) ────────────
     let mut msg = if let Some(hooks) = &ctx.hooks {
         match hooks.run_on_message_received(msg).await {
@@ -167,7 +171,7 @@ async fn process_channel_message_body(
     let history_key = conversation_history_key(&msg);
     stamp_session_routing_context(ctx.as_ref(), &msg, &history_key);
     if msg.passive_context {
-        record_passive_context(ctx.as_ref(), &msg, &history_key);
+        record_passive_context(ctx.as_ref(), &msg, &history_key, &ingress);
         return;
     }
 
@@ -391,9 +395,10 @@ async fn process_channel_message_body(
     // full content for every marker type so a later turn can re-load it.
     let timestamped_content =
         timestamped_channel_user_history_content(&msg, WHATSAPP_CURRENT_GROUP_MESSAGE_LABEL);
-    append_sender_turn(
+    append_channel_user_turn(
         ctx.as_ref(),
         &history_key,
+        &ingress,
         ChatMessage::user(&timestamped_content),
     );
 
@@ -1349,10 +1354,7 @@ async fn process_channel_message_body(
                 ChatMessage::assistant(&history_response),
             );
 
-            ctx.persist_companion_capture(&msg, &history_key, &turn_id);
-
             // Fire-and-forget LLM-driven curated-memory consolidation.
-            // Companion capture already ran at settlement, before send.
             // Passes the agent's resolved temperature through unchanged —
             // `None` means the provider sends no `temperature` field
             // (necessary for models that reject it, e.g. claude-opus-4-7).

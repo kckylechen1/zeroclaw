@@ -97,6 +97,7 @@ impl CompanionStore {
         f(&self.store.lock())
     }
 
+    #[cfg(test)]
     pub(crate) fn with_store_mut<T>(&self, f: impl FnOnce(&mut MemoryStore) -> T) -> T {
         f(&mut self.store.lock())
     }
@@ -113,22 +114,16 @@ impl CompanionStore {
             .store(n, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(test)]
     pub(crate) fn take_write_refusal(&self) -> bool {
-        #[cfg(test)]
-        {
-            use std::sync::atomic::Ordering;
-            let current = self.fail_next_writes.load(Ordering::SeqCst);
-            if current == 0 {
-                return false;
-            }
-            self.fail_next_writes
-                .store(current.saturating_sub(1), Ordering::SeqCst);
-            true
+        use std::sync::atomic::Ordering;
+        let current = self.fail_next_writes.load(Ordering::SeqCst);
+        if current == 0 {
+            return false;
         }
-        #[cfg(not(test))]
-        {
-            false
-        }
+        self.fail_next_writes
+            .store(current.saturating_sub(1), Ordering::SeqCst);
+        true
     }
 
     #[cfg(test)]

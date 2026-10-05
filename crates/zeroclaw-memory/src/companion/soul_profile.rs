@@ -798,6 +798,7 @@ impl SoulProfileStore {
                 period_from_unix INTEGER NOT NULL,
                 messages_read INTEGER NOT NULL,
                 proposals_created INTEGER NOT NULL,
+                user_model_candidates_created INTEGER NOT NULL DEFAULT 0,
                 outcome TEXT NOT NULL,
                 ran_at_unix INTEGER NOT NULL
              );
@@ -816,6 +817,12 @@ impl SoulProfileStore {
         ensure_column(&conn, "soul_proposals", "target_revision", "INTEGER")?;
         ensure_column(&conn, "soul_proposals", "target_kind", "TEXT")?;
         ensure_column(&conn, "soul_proposals", "target_text", "TEXT")?;
+        ensure_column(
+            &conn,
+            "soul_reflections",
+            "user_model_candidates_created",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         harden_sqlite_owner_only(&db_path);
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1220,7 +1227,7 @@ impl SoulProfileStore {
         let conn = self.conn.lock();
         Ok(conn
             .query_row(
-                "SELECT period_from_unix, messages_read, proposals_created, outcome, ran_at_unix
+                "SELECT period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created
                  FROM soul_reflections WHERE agent = ?1 ORDER BY id DESC LIMIT 1",
                 params![agent],
                 |row| {
@@ -1230,10 +1237,36 @@ impl SoulProfileStore {
                         proposals_created: row.get(2)?,
                         outcome: row.get(3)?,
                         ran_at_unix: row.get(4)?,
+                        user_model_candidates_created: row.get(5)?,
                     })
                 },
             )
             .optional()?)
+    }
+
+    /// Recent receipts in insertion order, with their canonical row IDs.
+    pub fn reflections(
+        &self,
+        agent: &str,
+        limit: usize,
+    ) -> Result<Vec<(i64, SoulReflectionReceipt)>, SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT id, period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created FROM soul_reflections WHERE agent = ?1 ORDER BY id DESC LIMIT ?2")?;
+        let rows = stmt.query_map(params![agent, limit.min(200) as i64], |row| {
+            Ok((
+                row.get(0)?,
+                SoulReflectionReceipt {
+                    period_from_unix: row.get(1)?,
+                    messages_read: row.get(2)?,
+                    proposals_created: row.get(3)?,
+                    outcome: row.get(4)?,
+                    ran_at_unix: row.get(5)?,
+                    user_model_candidates_created: row.get(6)?,
+                },
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Append a reflection receipt (ADR-016 §4).
@@ -1246,15 +1279,16 @@ impl SoulProfileStore {
         let outcome = checked_line("outcome", &receipt.outcome, SOUL_RATIONALE_MAX_BYTES)?;
         self.conn.lock().execute(
             "INSERT INTO soul_reflections
-             (agent, period_from_unix, messages_read, proposals_created, outcome, ran_at_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (agent, period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 agent,
                 receipt.period_from_unix,
                 receipt.messages_read,
                 receipt.proposals_created,
                 outcome,
-                receipt.ran_at_unix
+                receipt.ran_at_unix,
+                receipt.user_model_candidates_created
             ],
         )?;
         Ok(())
@@ -1287,19 +1321,7 @@ impl SoulProfileStore {
     }
 }
 
-/// A completed weekly reflection (ADR-016 §4).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SoulReflectionReceipt {
-    /// Start of the period whose owner messages were read.
-    pub period_from_unix: u64,
-    /// Owner messages read.
-    pub messages_read: u64,
-    /// Proposals created by this reflection.
-    pub proposals_created: u64,
-    /// One-line outcome (`ok`, `nothing_to_reflect_on`, or a failure reason).
-    pub outcome: String,
-    pub ran_at_unix: u64,
-}
+pub use zeroclaw_api::review::SoulReflectionReceipt;
 
 fn profile_of(conn: &Connection, agent: &str) -> Result<SoulProfile, SoulProfileError> {
     Ok(SoulProfile {
@@ -2510,6 +2532,7 @@ mod tests {
                         period_from_unix: ran - 50,
                         messages_read: 7,
                         proposals_created: 1,
+                        user_model_candidates_created: 0,
                         outcome: "ok".into(),
                         ran_at_unix: ran,
                     },
@@ -2521,5 +2544,37 @@ mod tests {
             200
         );
         assert!(store.last_reflection("b").unwrap().is_none());
+    }
+    #[test]
+    fn reflection_receipt_schema_upgrade_preserves_old_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("soul.db")).unwrap();
+        conn.execute_batch("CREATE TABLE soul_reflections (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, period_from_unix INTEGER NOT NULL, messages_read INTEGER NOT NULL, proposals_created INTEGER NOT NULL, outcome TEXT NOT NULL, ran_at_unix INTEGER NOT NULL); INSERT INTO soul_reflections(agent,period_from_unix,messages_read,proposals_created,outcome,ran_at_unix) VALUES ('nova',10,2,1,'ok',20);").unwrap();
+        drop(conn);
+        let store = SoulProfileStore::open(dir.path()).unwrap();
+        let old = store.last_reflection("nova").unwrap().unwrap();
+        assert_eq!(
+            (old.proposals_created, old.user_model_candidates_created),
+            (1, 0)
+        );
+        assert_eq!(store.reflections("nova", 20).unwrap().len(), 1);
+        store
+            .record_reflection(
+                "nova",
+                &SoulReflectionReceipt {
+                    period_from_unix: 20,
+                    messages_read: 3,
+                    proposals_created: 2,
+                    user_model_candidates_created: 1,
+                    outcome: "ok".into(),
+                    ran_at_unix: 30,
+                },
+            )
+            .unwrap();
+        let reopened = SoulProfileStore::open(dir.path()).unwrap();
+        let history = reopened.reflections("nova", 20).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].1, old);
+        assert_eq!(history[0].1.user_model_candidates_created, 1);
     }
 }
