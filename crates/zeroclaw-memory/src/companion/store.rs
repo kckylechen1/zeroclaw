@@ -97,6 +97,7 @@ impl CompanionStore {
         f(&self.store.lock())
     }
 
+    #[cfg(test)]
     pub(crate) fn with_store_mut<T>(&self, f: impl FnOnce(&mut MemoryStore) -> T) -> T {
         f(&mut self.store.lock())
     }
