@@ -23,6 +23,8 @@ use std::time::Duration;
 use zeroclaw_api::channel::ChannelApprovalResponse;
 use zeroclaw_infra::session_backend::RequestReceipt;
 
+pub(crate) mod intake;
+
 /// Default wall-clock budget for the operator to answer an
 /// `approval_request` frame before the channel auto-denies. Mirrors the
 /// channel-side default on `TelegramConfig::approval_timeout_secs`.
@@ -899,6 +901,8 @@ fn handle_client_text(
         Err(e) => return error(format!("Invalid JSON: {e}"), "INVALID_JSON"),
     };
     match parsed["type"].as_str().unwrap_or("") {
+        "source_resume" => intake::resume(state, conversation, scope, &parsed),
+        "source_disposition" => intake::receive(state, conversation, scope, &parsed),
         "answer" => {
             let id = parsed["request_id"].as_str().unwrap_or("");
             let status = if !question_answer_authorized(state, scope) {
@@ -1004,6 +1008,9 @@ fn handle_message_frame(
     scope: &WsTurnScope,
     parsed: &serde_json::Value,
 ) -> (Option<serde_json::Value>, Option<TurnClaim>) {
+    if parsed.get("source").is_some() {
+        return intake::receive(state, conversation, scope, parsed);
+    }
     let request_id = match parsed.get("id") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(id))
@@ -1286,33 +1293,44 @@ fn start_ws_turns(
 async fn run_ws_turns(
     state: AppState,
     conversation: Arc<Conversation<WsSession>>,
-    scope: WsTurnScope,
+    mut scope: WsTurnScope,
     claim: TurnClaim,
 ) {
     let mut next = Some(claim);
     while let Some(TurnClaim {
         input,
         request_id,
+        intake,
         generation,
         cancel,
         mut steering,
     }) = next.take()
     {
+        let mut intake_started = intake.is_none();
+        let mut allow_resume = false;
         let (late, outcome) = match state.session_queue.acquire(&scope.session_key).await {
             Ok(_session_guard) => {
                 let mut session = conversation.agent.lock().await;
-                process_chat_message(
-                    &state,
-                    &conversation,
-                    &mut session,
-                    &scope,
-                    &input,
-                    request_id.as_deref(),
-                    generation,
-                    cancel,
-                    &mut steering,
-                )
-                .await
+                let admitted = intake::begin(&state, &conversation, &scope, intake.as_ref());
+                allow_resume = admitted.is_ok();
+                if !admitted.is_ok_and(|started| started) {
+                    conversation.finish_turn(generation);
+                    (Vec::new(), "error")
+                } else {
+                    intake_started = true;
+                    process_chat_message(
+                        &state,
+                        &conversation,
+                        &mut session,
+                        &scope,
+                        &input,
+                        request_id.as_deref(),
+                        generation,
+                        cancel,
+                        &mut steering,
+                    )
+                    .await
+                }
             }
             Err(e) => {
                 conversation.finish_turn(generation);
@@ -1326,12 +1344,27 @@ async fn run_ws_turns(
                 (Vec::new(), "error")
             }
         };
-        if let Some(id) = &request_id {
+        if let Some(claim) = &intake {
+            if intake_started {
+                intake::finish(&state, &conversation, claim, outcome);
+            } else {
+                intake::release(&state, claim);
+                conversation.publish(&serde_json::json!({"type":"error","id":request_id,"code":"SOURCE_NOT_STARTED",
+                    "message":zeroclaw_runtime::i18n::get_required_cli_string("gateway-intake-unavailable")}));
+            }
+        } else if let Some(id) = &request_id {
             set_request_state(&state, &conversation, &scope.session_key, id, outcome);
         }
         if !late.is_empty()
             && let Submitted::Start(claim) = conversation.submit(late.join("\n\n"))
         {
+            next = Some(claim);
+        }
+        if next.is_none()
+            && allow_resume
+            && let Some((next_scope, claim)) = intake::resume_registered(&state, &conversation)
+        {
+            scope = next_scope;
             next = Some(claim);
         }
     }
@@ -2688,6 +2721,10 @@ mod tests {
         }
     }
 
+    mod intake_tests {
+        include!("ws/intake_tests.rs");
+    }
+
     struct SharedChat {
         vision: bool,
         state: AppState,
@@ -2722,10 +2759,14 @@ mod tests {
         }
 
         async fn attach(&self) -> crate::ws_conversation::Subscription<WsSession> {
+            self.attach_key(&self.scope.session_key).await
+        }
+
+        async fn attach_key(&self, key: &str) -> crate::ws_conversation::Subscription<WsSession> {
             let (subscription, _) = self
                 .state
                 .ws_conversations
-                .attach(&self.scope.session_key, |_seed| {
+                .attach(key, |_seed| {
                     let provider = ScriptedProvider {
                         vision: self.vision,
                         gate: Arc::clone(&self.gate),

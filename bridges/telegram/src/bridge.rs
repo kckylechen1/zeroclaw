@@ -2,15 +2,15 @@
 //! socket kept open for the owner's session. Proactive messages come in on
 //! a separate control socket (see `control`).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep, sleep_until, timeout};
 use zeroclaw_gateway_client::{
-    Backoff, Client, ConnectOptions, Decision, Frame, Rejected, new_request_id,
+    Backoff, Client, ConnectOptions, Decision, Frame, Rejected, SourceInput, SourceRecord,
 };
 use zeroclaw_log::{Action, Event, EventOutcome, record};
 
@@ -73,12 +73,15 @@ pub struct BridgeConfig {
 /// the bridge outright (bad token, unknown agent).
 pub async fn run(config: BridgeConfig) -> Result<()> {
     let api = Api::new(&config.telegram_api, &config.telegram_token)?;
+    let bot_id = api.bot_id().await?;
+    let source = format!("telegram:{bot_id}:{}", config.owner_id);
     let (tx, mut updates) = mpsc::channel(64);
+    let (cursor, poll_cursor) = watch::channel(PollState::default());
     let poll_api = api.clone();
     let poll_wait = config.poll_wait;
-    let poller = zeroclaw_spawn::spawn!(poll_updates(poll_api, poll_wait, tx));
-    // Proactive messages arrive on the control socket, which needs the
-    // bridge token; without a token only the chat relay runs.
+    let poller = zeroclaw_spawn::spawn!(poll_updates(poll_api, poll_wait, tx, poll_cursor));
+    // Proactive messages use the same bridge token on the control socket.
+    // Source intake separately negotiates its scoped durable authority.
     let control = match config.gateway.token.clone() {
         Some(token) => {
             let control_api = api.clone();
@@ -95,13 +98,18 @@ pub async fn run(config: BridgeConfig) -> Result<()> {
             record!(
                 INFO,
                 Event::new(module_path!(), Action::Skip),
-                "no gateway token; proactive messages (cron, notify) are off"
+                "no gateway token; durable source intake requires bridge authentication"
             );
             None
         }
     };
+    let _background = BackgroundTasks { poller, control };
     let mut bridge = Bridge {
         api,
+        source,
+        bot_id,
+        cursor,
+        receipts: HashMap::new(),
         owner_id: config.owner_id,
         options: config.gateway,
         client: None,
@@ -109,33 +117,97 @@ pub async fn run(config: BridgeConfig) -> Result<()> {
         reconnect_at: Instant::now(),
         unacked: VecDeque::new(),
         upload: None,
+        upload_source: None,
         after_upload: VecDeque::new(),
         stream: None,
         typing_at: None,
         keys: ApprovalKeys::default(),
         questions: HashMap::new(),
     };
-    let result = bridge.run(&mut updates).await;
-    poller.abort();
-    if let Some(control) = control {
-        control.abort();
+    bridge.run(&mut updates).await
+}
+
+struct BackgroundTasks {
+    poller: tokio::task::JoinHandle<()>,
+    control: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for BackgroundTasks {
+    fn drop(&mut self) {
+        self.poller.abort();
+        if let Some(control) = &self.control {
+            control.abort();
+        }
     }
-    result
 }
 
 /// Long-poll Telegram and hand updates to the bridge loop.
-async fn poll_updates(api: Api, wait: Duration, tx: mpsc::Sender<Update>) {
-    let mut offset = 0;
+async fn poll_updates(
+    api: Api,
+    wait: Duration,
+    tx: mpsc::Sender<ObservedUpdate>,
+    mut cursor: watch::Receiver<PollState>,
+) {
+    let mut previous_cursor = None;
+    let mut seen = HashSet::new();
+    let mut probe = true;
     let mut backoff = Backoff::new(BACKOFF_INITIAL, BACKOFF_MAX);
     while !tx.is_closed() {
+        let (safe, confirmed) = loop {
+            let state = (*cursor.borrow_and_update()).clone();
+            if let Some(value) = state.cursor {
+                break (value, state.confirmed);
+            }
+            if cursor.changed().await.is_err() {
+                return;
+            }
+        };
+        seen.retain(|id| !confirmed.contains(id));
+        // A startup/idle probe can find a reset or expired source identity
+        // below the stored cursor. Never confirm it merely because the old
+        // cursor is higher; only an exact durable receipt can release it.
+        let held = seen.iter().copied().min().unwrap_or(safe).min(safe);
+        let offset = if probe { 0 } else { held };
+        previous_cursor.get_or_insert(safe);
         match api.get_updates(offset, wait).await {
             Ok(updates) => {
                 backoff.reset();
+                probe = updates.is_empty();
+                let mut added = false;
                 for update in updates {
-                    offset = offset.max(update.update_id + 1);
-                    if tx.send(update).await.is_err() {
+                    if confirmed.contains(&update.update_id) {
+                        if let Some(next) = update.update_id.checked_add(1) {
+                            previous_cursor = Some(previous_cursor.unwrap_or(safe).max(next));
+                        }
+                        continue;
+                    }
+                    if seen.contains(&update.update_id) {
+                        continue;
+                    }
+                    if seen.len() >= 100 {
+                        break;
+                    }
+                    let Some(next) = update.update_id.checked_add(1) else {
+                        return;
+                    };
+                    if update.update_id < 0 {
                         return;
                     }
+                    let observed = ObservedUpdate {
+                        previous_cursor: previous_cursor.unwrap_or(safe),
+                        update,
+                    };
+                    seen.insert(observed.update.update_id);
+                    previous_cursor = Some(next);
+                    added = true;
+                    if tx.send(observed).await.is_err() {
+                        return;
+                    }
+                }
+                // A held offset returns the same page immediately, even with
+                // long polling enabled. Bound retries while still observing controls.
+                if !added {
+                    sleep(Duration::from_millis(100)).await;
                 }
             }
             Err(e) => {
@@ -154,6 +226,17 @@ async fn poll_updates(api: Api, wait: Duration, tx: mpsc::Sender<Update>) {
             }
         }
     }
+}
+
+struct ObservedUpdate {
+    update: Update,
+    previous_cursor: i64,
+}
+
+#[derive(Clone, Default)]
+struct PollState {
+    cursor: Option<i64>,
+    confirmed: HashSet<i64>,
 }
 
 /// The reply being streamed into Telegram messages.
@@ -177,6 +260,10 @@ impl Stream {
 
 struct Bridge {
     api: Api,
+    source: String,
+    bot_id: i64,
+    cursor: watch::Sender<PollState>,
+    receipts: HashMap<i64, SourceRecord>,
     owner_id: i64,
     options: ConnectOptions,
     client: Option<Client>,
@@ -184,9 +271,10 @@ struct Bridge {
     reconnect_at: Instant,
     /// Messages sent (or waiting to be sent) without an `ack` yet, with
     /// their request ids. After a reconnect they go again under the same
-    /// id, so the gateway runs each at most once.
+    /// id, so the gateway reconciles its retained durable source receipt.
     unacked: VecDeque<PendingMessage>,
     upload: Option<tokio::task::JoinHandle<Result<PendingMessage>>>,
+    upload_source: Option<SourceInput>,
     // Inputs that arrived after the uploading file, preserving owner order.
     after_upload: VecDeque<PendingMessage>,
     stream: Option<Stream>,
@@ -202,6 +290,9 @@ struct PendingMessage {
     id: String,
     text: String,
     attachments: Vec<String>,
+    source: SourceInput,
+    disposition: Option<&'static str>,
+    control: Option<Inbound>,
 }
 
 impl Drop for Bridge {
@@ -241,7 +332,7 @@ async fn sleep_until_some(at: Option<Instant>) {
 }
 
 impl Bridge {
-    async fn run(&mut self, updates: &mut mpsc::Receiver<Update>) -> Result<()> {
+    async fn run(&mut self, updates: &mut mpsc::Receiver<ObservedUpdate>) -> Result<()> {
         loop {
             if self.client.is_none() && Instant::now() >= self.reconnect_at {
                 self.connect().await?;
@@ -258,7 +349,14 @@ impl Bridge {
                 }
                 uploaded = next_upload(&mut self.upload) => {
                     self.upload.take();
-                    match uploaded { Ok(message)=>self.queue_message(message).await,Err(_)=>self.reply("Attachment could not be uploaded; it was not sent to the agent").await }
+                    let source = self.upload_source.take();
+                    match uploaded {
+                        Ok(message) => self.queue_message(message).await,
+                        Err(_) => {
+                            self.reply("Attachment could not be uploaded; it was not sent to the agent").await;
+                            if let Some(source) = source { self.queue_disposition(source, "rejected", None).await; }
+                        }
+                    }
                     while let Some(message) = self.after_upload.pop_front() {
                         self.queue_message(message).await;
                     }
@@ -278,8 +376,28 @@ impl Bridge {
     /// Attach to the session. Only a refusal the bridge cannot fix by
     /// waiting (bad token, unknown agent) is returned as an error.
     async fn connect(&mut self) -> Result<()> {
-        let error = match timeout(CONNECT_TIMEOUT, Client::connect(&self.options)).await {
-            Ok(Ok(client)) => {
+        let error = match timeout(CONNECT_TIMEOUT, async {
+            let mut client = Client::connect(&self.options).await?;
+            let ready = client.resume_source(&self.source).await?;
+            if ready.receipts.len() > 128 || ready.unknown.len() > 128 {
+                bail!("source intake resume exceeded its receipt bound");
+            }
+            let mut ids = HashSet::new();
+            for row in &ready.receipts {
+                if row.update_id < 0
+                    || row.previous_cursor < 0
+                    || row.id != self.request_id(row.update_id)
+                    || !known_intake_state(&row.state)
+                    || !ids.insert(row.update_id)
+                {
+                    bail!("unsupported source intake resume receipt");
+                }
+            }
+            Ok::<_, anyhow::Error>((client, ready))
+        })
+        .await
+        {
+            Ok(Ok((client, ready))) => {
                 record!(
                     INFO,
                     Event::new(module_path!(), Action::Connect)
@@ -294,7 +412,19 @@ impl Bridge {
                     "attached to the gateway"
                 );
                 self.backoff.reset();
+                self.receipts = ready
+                    .receipts
+                    .into_iter()
+                    .map(|row| (row.update_id, row))
+                    .collect();
                 self.client = Some(client);
+                self.cursor.send_replace(PollState {
+                    cursor: Some(ready.cursor),
+                    confirmed: self.receipts.keys().copied().collect(),
+                });
+                if !ready.unknown.is_empty() {
+                    self.reply("A previous input has an unknown processing outcome; it will not be run again automatically").await;
+                }
                 self.resend_unacked().await;
                 return Ok(());
             }
@@ -327,16 +457,13 @@ impl Bridge {
             let Some(client) = &mut self.client else {
                 return;
             };
-            if let Err(e) = client
-                .send_message_with_attachments(&message.id, &message.text, &message.attachments)
-                .await
-            {
+            if let Err(e) = send_pending(client, &message).await {
                 self.disconnected(format!("{e:#}"));
                 return;
             }
             // Send inline: a replayed message may complete its turn before
             // the loop's timer branch gets scheduled at all.
-            if self.typing_at.is_none() {
+            if message.disposition.is_none() && self.typing_at.is_none() {
                 self.show_typing().await;
             }
         }
@@ -356,6 +483,7 @@ impl Bridge {
             "gateway connection lost; reconnecting"
         );
         self.client = None;
+        self.cursor.send_modify(|state| state.cursor = None);
         self.reconnect_at = Instant::now() + delay;
         // A turn in flight keeps running on the gateway; its frames are
         // not replayed, so the partial reply stays as last shown.
@@ -363,8 +491,44 @@ impl Bridge {
         self.typing_at = None;
     }
 
-    async fn on_update(&mut self, update: Update) {
-        match classify(&update, self.owner_id) {
+    fn request_id(&self, update_id: i64) -> String {
+        format!("tg:{}:{}:{update_id}", self.bot_id, self.owner_id)
+    }
+
+    async fn queue_disposition(
+        &mut self,
+        source: SourceInput,
+        disposition: &'static str,
+        control: Option<Inbound>,
+    ) {
+        self.queue_message(PendingMessage {
+            id: self.request_id(source.update_id),
+            text: String::new(),
+            attachments: Vec::new(),
+            source,
+            disposition: Some(disposition),
+            control,
+        })
+        .await;
+    }
+
+    async fn on_update(&mut self, observed: ObservedUpdate) {
+        let update = observed.update;
+        let inbound = classify(&update, self.owner_id);
+        if let Some(receipt) = self.receipts.get(&update.update_id)
+            && receipt.id == self.request_id(update.update_id)
+        {
+            if receipt.state == "control" && !matches!(inbound, Inbound::Ignored(_)) {
+                self.reply("This control was already recorded; its outcome may be unknown and it will not be replayed").await;
+            }
+            return;
+        }
+        let source = SourceInput {
+            namespace: self.source.clone(),
+            update_id: update.update_id,
+            previous_cursor: observed.previous_cursor,
+        };
+        match inbound {
             Inbound::Ignored(reason) => {
                 record!(
                     DEBUG,
@@ -374,22 +538,36 @@ impl Bridge {
                     })),
                     "ignored a Telegram update"
                 );
+                self.queue_disposition(source, "ignored", None).await;
             }
-            Inbound::Text { text, .. } => self.on_text(text).await,
+            Inbound::Text { text, .. } if text.trim() == "/start" => {
+                self.queue_disposition(source, "ignored", None).await
+            }
+            Inbound::Text { chat_id, text } if text.trim() == "/cancel" => {
+                self.queue_disposition(source, "control", Some(Inbound::Text { chat_id, text }))
+                    .await
+            }
+            Inbound::Text { text, .. } => self.on_text(source, text).await,
             Inbound::Attachment { file, caption } => {
                 if self.upload.is_some() {
                     self.reply("An attachment is already uploading; retry shortly")
                         .await;
+                    self.queue_disposition(source, "rejected", None).await;
                     return;
                 }
                 let api = self.api.clone();
                 let options = self.options.clone();
+                let id = self.request_id(source.update_id);
+                self.upload_source = Some(source.clone());
                 self.upload = Some(zeroclaw_spawn::spawn!(async move {
                     let handle = crate::attachments::upload(&api, &options, &file).await?;
                     Ok(PendingMessage {
-                        id: new_request_id(),
+                        id,
                         text: caption,
                         attachments: vec![handle],
+                        source,
+                        disposition: None,
+                        control: None,
                     })
                 }));
             }
@@ -398,10 +576,34 @@ impl Bridge {
                 text,
                 original_text,
                 ..
-            } => {
-                self.on_answer(message_id, &text, original_text.as_deref())
+            } if !self.questions.contains_key(&message_id)
+                && original_text
+                    .as_ref()
+                    .is_some_and(|s| !s.starts_with(crate::telegram::QUESTION_MARKER)) =>
+            {
+                self.on_text(source, text).await;
+            }
+            control @ (Inbound::Reply { .. } | Inbound::Callback { .. }) => {
+                self.queue_disposition(source, "control", Some(control))
                     .await
             }
+        }
+    }
+
+    async fn execute_control(&mut self, control: Inbound) {
+        match control {
+            Inbound::Text { .. } => {
+                let Some(client) = &mut self.client else {
+                    self.reply(text::OFFLINE).await;
+                    return;
+                };
+                if let Err(e) = client.cancel().await {
+                    self.disconnected(format!("{e:#}"));
+                }
+            }
+            Inbound::Reply {
+                message_id, text, ..
+            } => self.on_answer(message_id, &text).await,
             Inbound::Callback {
                 id,
                 chat_id,
@@ -410,20 +612,16 @@ impl Bridge {
                 data,
             } => {
                 self.on_callback(&id, chat_id, message_id, &message_text, &data)
-                    .await;
+                    .await
             }
+            _ => {}
         }
     }
 
-    async fn on_answer(&mut self, message_id: i64, answer: &str, original_text: Option<&str>) {
+    async fn on_answer(&mut self, message_id: i64, answer: &str) {
         self.questions.retain(|_, q| q.deadline > Instant::now());
         let Some(question) = self.questions.get_mut(&message_id) else {
-            if original_text.is_some_and(|text| !text.starts_with(crate::telegram::QUESTION_MARKER))
-            {
-                self.on_text(answer.to_owned()).await;
-            } else {
-                self.reply(text::EXPIRED).await;
-            }
+            self.reply(text::EXPIRED).await;
             return;
         };
         if question.submitted {
@@ -527,29 +725,20 @@ impl Bridge {
         self.disconnected("Telegram question delivery failed".into());
     }
 
-    async fn on_text(&mut self, text: String) {
-        match text.trim() {
-            "/start" => return,
-            "/cancel" => {
-                let Some(client) = &mut self.client else {
-                    self.reply(text::OFFLINE).await;
-                    return;
-                };
-                if let Err(e) = client.cancel().await {
-                    self.disconnected(format!("{e:#}"));
-                }
-                return;
-            }
-            _ => {}
-        }
+    async fn on_text(&mut self, source: SourceInput, text: String) {
         let message = PendingMessage {
-            id: new_request_id(),
+            id: self.request_id(source.update_id),
             text,
             attachments: Vec::new(),
+            source,
+            disposition: None,
+            control: None,
         };
         if self.upload.is_some() {
             if self.after_upload.len() >= 32 {
                 self.reply("Inputs waiting for the attachment are full; retry shortly")
+                    .await;
+                self.queue_disposition(message.source, "rejected", None)
                     .await;
             } else {
                 self.after_upload.push_back(message);
@@ -562,19 +751,20 @@ impl Bridge {
     async fn queue_message(&mut self, message: PendingMessage) {
         self.unacked.push_back(message.clone());
         let Some(client) = &mut self.client else {
-            self.reply(text::OFFLINE_QUEUED).await;
+            if message.disposition.is_none() {
+                self.reply(text::OFFLINE_QUEUED).await;
+            }
             return;
         };
-        match client
-            .send_message_with_attachments(&message.id, &message.text, &message.attachments)
-            .await
-        {
+        match send_pending(client, &message).await {
             Ok(()) => {
                 // Show typing inline instead of arming the timer: the
                 // gateway can stream the whole turn (ack through done)
                 // before the select loop's typing branch is ever polled,
                 // which used to starve the indicator on fast turns.
-                self.show_typing().await;
+                if message.disposition.is_none() {
+                    self.show_typing().await;
+                }
             }
             Err(e) => self.disconnected(format!("{e:#}")),
         }
@@ -658,9 +848,62 @@ impl Bridge {
                 self.reply(&format!("Answer: {status}")).await;
             }
             Frame::Ack {
-                id, status, turn, ..
+                id,
+                status,
+                turn,
+                durable,
+                state,
+                intake_version,
+                source,
             } => {
-                self.unacked.retain(|message| message.id != id);
+                let Some(index) = self.unacked.iter().position(|message| message.id == id) else {
+                    return;
+                };
+                let pending = &self.unacked[index];
+                let Some(source) = source.filter(|receipt| {
+                    durable == Some(true)
+                        && intake_version == Some(1)
+                        && matches!(status.as_str(), "accepted" | "duplicate")
+                        && receipt.namespace == pending.source.namespace
+                        && receipt.update_id == pending.source.update_id
+                        && receipt.cursor >= 0
+                        && state.as_deref().is_some_and(known_intake_state)
+                        && match pending.disposition {
+                            Some(disposition) => state.as_deref() == Some(disposition),
+                            None => !matches!(state.as_deref(), Some("ignored" | "control")),
+                        }
+                }) else {
+                    return;
+                };
+                let Some(message) = self.unacked.remove(index) else {
+                    return;
+                };
+                let current = self.cursor.borrow().cursor;
+                self.receipts.insert(
+                    source.update_id,
+                    SourceRecord {
+                        id: id.clone(),
+                        update_id: source.update_id,
+                        previous_cursor: message.source.previous_cursor,
+                        state: state.clone().unwrap_or_default(),
+                    },
+                );
+                if self.receipts.len() > 128
+                    && let Some(oldest) = self.receipts.keys().copied().min()
+                {
+                    self.receipts.remove(&oldest);
+                }
+                self.cursor.send_replace(PollState {
+                    cursor: Some(current.unwrap_or_default().max(source.cursor)),
+                    confirmed: self.receipts.keys().copied().collect(),
+                });
+                if let Some(control) = message.control {
+                    if status == "accepted" && state.as_deref() == Some("control") {
+                        self.execute_control(control).await;
+                    } else {
+                        self.reply("This control was already recorded; its outcome may be unknown and it will not be replayed").await;
+                    }
+                }
                 if status == "duplicate" {
                     record!(
                         DEBUG,
@@ -715,26 +958,9 @@ impl Bridge {
                 self.end_turn().await;
                 self.reply(text::ABORTED).await;
             }
-            Frame::Error { message, id, code } => {
-                // These Gateway responses explicitly say no input was run.
-                // Keep unknown outcomes (including no-id/runtime errors) for
-                // deduplicated reconnect replay rather than losing input.
-                if let Some(id) = id.filter(|_| {
-                    matches!(
-                        code.as_deref(),
-                        Some(
-                            "INVALID_ATTACHMENTS"
-                                | "UNAUTHORIZED_ATTACHMENTS"
-                                | "ATTACHMENT_UNAVAILABLE"
-                                | "EMPTY_CONTENT"
-                                | "REQUEST_NOT_RECORDED"
-                                | "STEERING_QUEUE_FULL"
-                                | "STEERING_CLOSED"
-                        )
-                    )
-                }) {
-                    self.unacked.retain(|message| message.id != id);
-                }
+            Frame::Error { message, .. } => {
+                // Only a versioned durable ACK disposes source input. An error
+                // frame may describe a refusal before anything was persisted.
                 self.end_turn().await;
                 self.reply(&text::error(&message)).await;
             }
@@ -827,6 +1053,42 @@ impl Bridge {
     async fn answer_callback(&self, id: &str, text: &str) {
         if let Err(e) = self.api.answer_callback_query(id, text).await {
             log_send_failure("answerCallbackQuery", &e);
+        }
+    }
+}
+
+fn known_intake_state(state: &str) -> bool {
+    matches!(
+        state,
+        "pending"
+            | "running"
+            | "done"
+            | "steered"
+            | "ignored"
+            | "rejected"
+            | "control"
+            | "aborted"
+            | "error"
+            | "outcome_unknown"
+    )
+}
+
+async fn send_pending(client: &mut Client, message: &PendingMessage) -> Result<()> {
+    match message.disposition {
+        Some(disposition) => {
+            client
+                .send_source_disposition(&message.id, &message.source, disposition)
+                .await
+        }
+        None => {
+            client
+                .send_source_message(
+                    &message.id,
+                    &message.text,
+                    &message.attachments,
+                    &message.source,
+                )
+                .await
         }
     }
 }

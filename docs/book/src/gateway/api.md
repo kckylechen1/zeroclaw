@@ -37,6 +37,9 @@ Local-bound by default. Over-the-network access requires TLS termination at
 the gateway or in front of it; the per-property and PATCH endpoints are not
 safe to expose unauthenticated regardless of TLS posture.
 
+See [durable bridge intake](durable-bridge-intake.md) for the opt-in source receipt
+and recovery extension used by the Telegram bridge.
+
 ## WebSocket chat sessions
 
 `GET /ws/chat?agent=<alias>&session_id=<id>` opens a chat socket. All sockets

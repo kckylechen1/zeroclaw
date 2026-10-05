@@ -14,9 +14,8 @@ TELEGRAM_BOT_TOKEN=123:abc TELEGRAM_OWNER_ID=4242 ZEROCLAW_GATEWAY_TOKEN=zcb_...
 
 The gateway token is a bridge token (`[gateway.bridges.telegram]`), scoped
 to the chat sessions it may open. Pass `--session` for the session the
-bridge uses (`main` by default). A paired token still works for the chat
-relay, but the gateway refuses it on the control socket, so proactive
-messages stay off.
+bridge uses (`main` by default). Durable intake requires this scoped bridge token and an upgraded Gateway with
+a durable session backend. A paired token cannot negotiate source intake.
 
 ## Flags
 
@@ -50,8 +49,8 @@ default. Every client attached to that session shares one conversation:
 - A turn started on Telegram streams to `zeroclaw chat -a <agent> -s main` on a
   laptop, and a turn started on the laptop is mirrored into the Telegram
   chat.
-- A message sent while a turn runs steers that turn. The bridge answers
-  "(added to the current turn)".
+- A Telegram message sent while a turn runs waits durably for its own turn.
+  Ordinary CLI/PWA messages retain their existing steering behavior.
 - `/cancel` stops the running turn.
 
 ## Behavior
@@ -68,8 +67,9 @@ default. Every client attached to that session shares one conversation:
   button answers the gateway and marks the message with the decision.
 - If the gateway goes away, the bridge reconnects with backoff (1s doubling
   to 30s) to the same session. A message without an `ack` yet is sent again
-  under the same request id, and the gateway's request dedupe runs it at most
-  once. A message typed while the gateway is down is queued and sent after
+  under the same source-derived request id. Persisted pending input can resume;
+  a claimed input with unknown effects is never automatically rerun. A message
+  typed while the gateway is down waits at Telegram and is sent after
   the reconnect. A refusal the bridge cannot fix by waiting (a bad token or an
   unknown agent) stops the bridge.
 
@@ -94,8 +94,8 @@ messages in the gateway's outbox, and the gateway sends them here as
   chat Telegram does not know, is dropped and logged so it cannot block the
   queue.
 - If the gateway refuses the control socket (for example because the token is
-  a paired token, not a bridge token), the bridge logs an error and keeps
-  relaying chat without proactive messages.
+  a paired token, not a bridge token), the bridge logs an error. Source intake independently requires a scoped bridge
+  token, so paired tokens cannot be used as a chat-only fallback.
 
 ## Questions
 
@@ -123,8 +123,9 @@ the Gateway replays that still-pending question after reconnect, an explicit
 owner retry is enabled. Transient question delivery errors receive at most
 three attempts within the question deadline; exhausted/permanent errors drop
 the chat socket so an invisible question cannot hold its sole subscriber.
-This is not a durable source-update handoff or an exactly-once delivery claim;
-Issue #377 intake/cursor recovery and real-bot acceptance remain separate work.
+Question-answer outcomes remain distinct from the durable source disposition.
+A recorded control with an unknown outcome is never automatically replayed.
+Issue #377 real-bot acceptance remains separate work.
 
 ## Attachments
 
@@ -151,10 +152,22 @@ approval decision. Audio transcription, PDF/binary parsing and automatic outboun
 Telegram file delivery remain follow-ups. Authorized clients can use the matching
 HTTP fetch route to download a stored attachment.
 
-Not yet: groups or durable attachment/intake recovery. A turn's frames that
+Not yet: groups or durable attachment bytes. A turn's frames that
 arrive while the chat socket is down are not replayed.
 
 While a file uploads, up to 32 subsequent owner text inputs wait behind it in
 arrival order. Gateway events and `/cancel` remain responsive; additional files
-or text beyond that bound receive a retry response. A definitive Gateway input
-rejection ends reconnect retries for that request.
+or text beyond that bound receive a retry response. A correlated durable Gateway rejection ends reconnect retries for that
+request; a plain error frame cannot release the source update.
+
+## Durable source intake
+
+The bridge obtains its bot identity with `getMe`, negotiates source intake v1,
+and releases only updates backed by correlated durable receipts. Gateway
+`sessions.db` owns input bodies and the predecessor-linked cursor. Only pending
+inputs restart automatically; uncertain effects do not. Missing attachment
+bytes reject the whole input. Unsupported Gateway versions leave polling closed.
+
+See [the durable intake contract](../../docs/book/src/gateway/durable-bridge-intake.md)
+for wire fields, bounds, source-ID reset handling, deletion and upgrade/rollback.
+This does not claim exactly-once external effects or Telegram delivery.
