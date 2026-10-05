@@ -1,5 +1,5 @@
 use super::*;
-use zeroclaw_api::review::UserMessageSource;
+use zeroclaw_api::review::{UserMessageIngress, UserMessageSource};
 
 #[test]
 fn message_source_migration_preserves_unknown_history_and_bound_sources_after_reopen() {
@@ -10,11 +10,18 @@ fn message_source_migration_preserves_unknown_history_and_bound_sources_after_re
     old.execute_batch("CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, session_key TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL); INSERT INTO sessions (session_key, role, content, created_at) VALUES ('mixed', 'user', 'unattributed legacy input', '2026-10-01T00:00:00Z');").unwrap();
     drop(old);
     let store = SqliteSessionBackend::new(dir.path()).unwrap();
-    let source = UserMessageSource::Channel {
-        sender_id: "owner-fixture".into(),
+    let ingress = UserMessageIngress {
+        source: UserMessageSource::Channel {
+            sender_id: "owner-fixture".into(),
+        },
+        text: "bound owner input".into(),
     };
     store
-        .append_with_source("mixed", &ChatMessage::user("bound owner input"), &source)
+        .append_with_ingress(
+            "mixed",
+            &ChatMessage::user("enriched derived context"),
+            &ingress,
+        )
         .unwrap();
     store
         .set_session_context(
@@ -31,10 +38,10 @@ fn message_source_migration_preserves_unknown_history_and_bound_sources_after_re
     let rows = reopened.load_with_timestamps("mixed");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].message.content, "unattributed legacy input");
-    assert!(rows[0].source.is_none());
+    assert!(rows[0].ingress.is_none());
     assert!(rows[0].created_at.is_some());
-    assert_eq!(rows[1].source, Some(source));
-    assert_eq!(rows[1].message.content, "bound owner input");
+    assert_eq!(rows[1].ingress, Some(ingress));
+    assert_eq!(rows[1].message.content, "enriched derived context");
     assert_eq!(
         reopened
             .get_session_metadata("mixed")
@@ -51,10 +58,13 @@ fn source_and_message_append_roll_back_when_metadata_write_fails() {
     let store = SqliteSessionBackend::new(dir.path()).unwrap();
     store.conn.lock().execute_batch("CREATE TRIGGER deny_metadata BEFORE INSERT ON session_metadata BEGIN SELECT RAISE(ABORT, 'fixture metadata refusal'); END;").unwrap();
     let err = store
-        .append_with_source(
+        .append_with_ingress(
             "owner",
             &ChatMessage::user("owner input"),
-            &UserMessageSource::Operator,
+            &UserMessageIngress {
+                source: UserMessageSource::Operator,
+                text: "owner input".into(),
+            },
         )
         .unwrap_err();
     assert!(err.to_string().contains("fixture metadata refusal"));
@@ -62,11 +72,35 @@ fn source_and_message_append_roll_back_when_metadata_write_fails() {
     assert!(store.load_with_timestamps("owner").is_empty());
     assert!(
         store
-            .append_with_source(
+            .append_with_ingress(
                 "owner",
                 &ChatMessage::assistant("assistant"),
-                &UserMessageSource::Operator
+                &UserMessageIngress {
+                    source: UserMessageSource::Operator,
+                    text: "owner input".into()
+                }
             )
             .is_err()
     );
+}
+
+#[test]
+fn invalid_or_source_only_ingress_records_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteSessionBackend::new(dir.path()).unwrap();
+    for raw in [
+        "broken json",
+        r#"{"kind":"operator"}"#,
+        r#"{"source":{"kind":"operator"}}"#,
+        r#"{"source":{"kind":"operator"},"text":"owner","extra":true}"#,
+        r#"{"source":{"kind":"unknown"},"text":"owner"}"#,
+    ] {
+        store.conn.lock().execute(
+            "INSERT INTO sessions(session_key,role,content,created_at,message_source) VALUES ('invalid','user','derived context','2026-10-01T00:00:00Z',?1)",
+            [raw],
+        ).unwrap();
+    }
+    let rows = store.load_with_timestamps("invalid");
+    assert_eq!(rows.len(), 5, "history remains readable");
+    assert!(rows.iter().all(|r| r.ingress.is_none()));
 }

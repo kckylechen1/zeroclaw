@@ -32,7 +32,7 @@ use super::{
     WHATSAPP_CURRENT_GROUP_MESSAGE_LABEL, acquire_persist_lock, append_channel_user_turn,
     append_sender_turn, build_channel_system_prompt_for_message_with_signal,
     build_channel_turn_context_preamble, channel_message_timeout_budget_secs_with_cap,
-    channel_runtime_cli_string, channel_runtime_cli_string_with_args,
+    channel_runtime_cli_string, channel_runtime_cli_string_with_args, channel_user_ingress,
     classify_channel_reply_intent, clear_sender_history, collapse_inline_image_payloads,
     compact_sender_history, compose_outgoing_user_turn_with_context, conversation_history_key,
     conversation_memory_key, ensure_nonempty_channel_reply, extract_current_turn_tool_messages,
@@ -120,6 +120,10 @@ async fn process_channel_message_body(
         "channel inbound message"
     );
 
+    // Canonical sender/text originate at ingress. History below may be enriched
+    // by hooks, media and links, but those derived annotations are not evidence.
+    let ingress = channel_user_ingress(&msg);
+
     // ── Hook: on_message_received (modifying) ────────────
     let mut msg = if let Some(hooks) = &ctx.hooks {
         match hooks.run_on_message_received(msg).await {
@@ -167,7 +171,7 @@ async fn process_channel_message_body(
     let history_key = conversation_history_key(&msg);
     stamp_session_routing_context(ctx.as_ref(), &msg, &history_key);
     if msg.passive_context {
-        record_passive_context(ctx.as_ref(), &msg, &history_key);
+        record_passive_context(ctx.as_ref(), &msg, &history_key, &ingress);
         return;
     }
 
@@ -394,7 +398,7 @@ async fn process_channel_message_body(
     append_channel_user_turn(
         ctx.as_ref(),
         &history_key,
-        &msg,
+        &ingress,
         ChatMessage::user(&timestamped_content),
     );
 

@@ -1437,7 +1437,7 @@ fn persist_conversation_messages(
     backend: &dyn zeroclaw_infra::session_backend::SessionBackend,
     session_key: &str,
     messages: &[zeroclaw_providers::ConversationMessage],
-    source: Option<&zeroclaw_api::review::UserMessageSource>,
+    ingress: Option<&zeroclaw_api::review::UserMessageIngress>,
 ) {
     // if the user deleted the session between the turn starting and
     // the post-turn persistence, don't resurrect it. The `aborted` / `done`
@@ -1456,9 +1456,9 @@ fn persist_conversation_messages(
         }
         if message.role == "user"
             && std::mem::take(&mut initial_user)
-            && let Some(source) = source
+            && let Some(ingress) = ingress
         {
-            let _ = backend.append_with_source(session_key, message, source);
+            let _ = backend.append_with_ingress(session_key, message, ingress);
         } else {
             let _ = backend.append(session_key, message);
         }
@@ -1570,13 +1570,16 @@ async fn process_chat_message(
     let session_key = scope.session_key.as_str();
     // Resolve canonical paired-device membership when storing this input.
     // Bridge/anonymous sockets and unbound steering receive no owner source.
-    let owner_source = || {
+    let owner_ingress = || {
         (initial_operator_input
             && scope
                 .auth_subject
                 .as_ref()
                 .is_some_and(|subject| state.pairing.tokens().contains(subject)))
-        .then_some(zeroclaw_api::review::UserMessageSource::Operator)
+        .then(|| zeroclaw_api::review::UserMessageIngress {
+            source: zeroclaw_api::review::UserMessageSource::Operator,
+            text: content.to_string(),
+        })
     };
 
     let (turn_alias, turn_provider, turn_model) = agent.attribution_fields();
@@ -1779,7 +1782,7 @@ async fn process_chat_message(
                             backend.as_ref(),
                             session_key,
                             &error.new_messages,
-                            owner_source().as_ref(),
+                            owner_ingress().as_ref(),
                         );
                         if !has_assistant_chat_message(&error.new_messages) {
                             let marker = zeroclaw_runtime::i18n::get_required_cli_string(
@@ -1866,7 +1869,7 @@ async fn process_chat_message(
                     backend.as_ref(),
                     session_key,
                     &outcome.new_messages,
-                    owner_source().as_ref(),
+                    owner_ingress().as_ref(),
                 );
             }
 
@@ -2005,7 +2008,7 @@ async fn process_chat_message(
                     backend.as_ref(),
                     session_key,
                     &e.new_messages,
-                    owner_source().as_ref(),
+                    owner_ingress().as_ref(),
                 );
             }
 

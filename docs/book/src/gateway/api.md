@@ -338,13 +338,15 @@ Each candidate has `review_url` pointing to its existing operator endpoint:
 - Reflection receipts have no review action: they report what ran and how many
   proposals/candidates were created. They grant no approval authority.
 
-Reflection uses an immutable ingress source on each SQLite message row, rather
+Reflection uses immutable original ingress text and its source on each SQLite message row, rather
 than the session's latest sender. Active and passive channel messages store
 their actual sender; the current owner identity list is checked when reflecting.
 Each ordinary paired operator WS turn marks its initial user input. Anonymous,
 bridge and steering inputs without bound owner origin are excluded. A late
 steering follow-up does not inherit the original socket's owner identity.
-Historical rows and imported JSONL without this source stay readable as chat
+Hooks, link previews and media annotations remain in chat history but cannot
+replace this original evidence. Historical rows and imported JSONL without this
+ingress record stay readable as chat
 history but are excluded from reflection; unknown origin is never guessed.
 
 The PWA consumes this API under #379; phone review remains a separate slice.
@@ -440,7 +442,11 @@ outside the input are refused. Nothing is applied. Owner messages require
 the per-message ingress source described above: an operator origin or a
 channel sender listed in the current `[companion_memory.owner].identities`.
 The last sender of a shared session cannot authorize its other rows. Tool
-results, injected memory, and link previews are removed first. The first check only starts the clock, a
+results and injected memory are removed first. Link previews and other derived
+annotations are never read from history. A `storage_write_failed` receipt retains
+already committed candidate counts and the original period, delays retry for
+six hours, and still propagates the storage error to the worker. The first check
+only starts the clock, a
 week with no owner messages makes no model call, and a failed call is retried
 after 6 hours. `last_reflection` reports the period, the number of messages
 read, the Soul proposals created, `user_model_candidates_created`, and the

@@ -13,7 +13,8 @@
 //!
 //! "The owner's own messages" means messages with an immutable operator-ingress
 //! source or a per-message channel sender matching the current
-//! `[companion_memory.owner].identities`. Unattributed historical rows are excluded. Assistant turns, tool
+//! `[companion_memory.owner].identities`. Only the original ingress text is read,
+//! never the enriched history content. Unattributed historical rows are excluded. Assistant turns, tool
 //! results, injected memory, and link previews never reach the model, so no
 //! third-party text can steer the agent's growth.
 
@@ -57,6 +58,10 @@ pub const OUTCOME_OK: &str = "ok";
 /// Receipt outcome prefix when the model call failed; retried sooner.
 pub const OUTCOME_MODEL_FAILED: &str = "model_call_failed";
 
+/// Retryable outcome when candidate persistence failed after the model call.
+/// Counts preserve the writes already committed; no storage details are exposed.
+pub const OUTCOME_STORAGE_FAILED: &str = "storage_write_failed";
+
 /// Session keys written by unattended runs, never by the owner.
 const UNATTENDED_SESSION_PREFIXES: &[&str] = &["cron-", "cron_", "heartbeat_", "heartbeat-"];
 
@@ -77,7 +82,8 @@ pub fn reflection_due(last: Option<&SoulReflectionReceipt>, now_unix: u64) -> Re
     let Some(last) = last else {
         return ReflectionDue::StartClock;
     };
-    let failed = last.outcome.starts_with(OUTCOME_MODEL_FAILED);
+    let failed =
+        last.outcome.starts_with(OUTCOME_MODEL_FAILED) || last.outcome == OUTCOME_STORAGE_FAILED;
     let wait = if failed {
         REFLECTION_RETRY_SECS
     } else {
@@ -199,7 +205,10 @@ pub fn collect_owner_messages(
             if row.message.role != "user" {
                 continue;
             }
-            let Some(source) = row.source.filter(|source| source_is_owners(source, owner)) else {
+            let Some(ingress) = row
+                .ingress
+                .filter(|input| source_is_owners(&input.source, owner))
+            else {
                 continue;
             };
             let Some(at) = row
@@ -211,12 +220,12 @@ pub fn collect_owner_messages(
             if at < since_unix || at >= until_unix {
                 continue;
             }
-            if let Some(text) = owner_text(&row.message.content) {
+            if let Some(text) = owner_text(&ingress.text) {
                 found.push(ReflectionMessage {
                     session_id: meta.key.clone(),
                     at_unix: at,
                     text,
-                    source,
+                    source: ingress.source,
                 });
             }
         }
@@ -409,7 +418,7 @@ fn record_user_model_reflection(
     reply: &str,
     since: u64,
     now: u64,
-) -> Result<u64, rusqlite::Error> {
+) -> Result<u64, (u64, rusqlite::Error)> {
     if reply.len() > 16 * 1024 {
         return Ok(0);
     }
@@ -441,7 +450,7 @@ fn record_user_model_reflection(
         ) {
             Ok(Some(_)) => created += 1,
             Ok(None) | Err(rusqlite::Error::InvalidParameterName(_)) => {}
-            Err(err) => return Err(err),
+            Err(err) => return Err((created, err)),
         }
     }
     Ok(created)
@@ -473,6 +482,23 @@ pub async fn reflect(
             outcome,
             ran_at_unix: now_unix,
         }
+    };
+    let storage_failure = |error: anyhow::Error, soul_created, user_created| {
+        let partial = receipt(
+            OUTCOME_STORAGE_FAILED.to_string(),
+            soul_created,
+            user_created,
+        );
+        if let Err(receipt_error) = store.record_reflection(agent_alias, &partial) {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(serde_json::json!({"agent": agent_alias, "error": receipt_error.to_string()})),
+                "Soul reflection failed to record partial-write receipt"
+            );
+        }
+        error
     };
     let pending = store.proposals(agent_alias, true)?;
     let user_pending = user_model.list_pending_candidates()?;
@@ -520,7 +546,9 @@ pub async fn reflect(
                     match store.submit_proposal(agent_alias, proposal, now_unix) {
                         Ok(SoulProposalOutcome::Recorded { .. }) => created += 1,
                         Ok(SoulProposalOutcome::AlreadyPending { .. }) => {}
-                        Err(err @ SoulProfileError::Storage(_)) => return Err(err.into()),
+                        Err(err @ SoulProfileError::Storage(_)) => {
+                            return Err(storage_failure(err.into(), created, 0));
+                        }
                         Err(err) => {
                             ::zeroclaw_log::record!(
                                 INFO,
@@ -544,7 +572,10 @@ pub async fn reflect(
                     &reply,
                     since_unix,
                     now_unix,
-                )?;
+                )
+                .map_err(|(user_created, err)| {
+                    storage_failure(err.into(), created, user_created)
+                })?;
                 receipt(OUTCOME_OK.to_string(), created, user_created)
             }
         }
@@ -780,7 +811,16 @@ mod tests {
                 _ => UserMessageSource::Operator,
             };
             if message.role == "user" {
-                backend.append_with_source(key, &message, &source).unwrap();
+                backend
+                    .append_with_ingress(
+                        key,
+                        &message,
+                        &zeroclaw_api::review::UserMessageIngress {
+                            source,
+                            text: message.content.clone(),
+                        },
+                    )
+                    .unwrap();
             } else {
                 backend.append(key, &message).unwrap();
             }
@@ -1135,9 +1175,66 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("fixture write refusal"));
-        assert!(soul.last_reflection(AGENT).unwrap().is_none());
+        let partial = soul.last_reflection(AGENT).unwrap().unwrap();
+        assert_eq!(partial.outcome, OUTCOME_STORAGE_FAILED);
+        assert_eq!(partial.proposals_created, 0);
+        assert_eq!(partial.user_model_candidates_created, 0);
+        assert_eq!(
+            reflection_due(Some(&partial), NOW + 3600),
+            ReflectionDue::NotYet
+        );
         assert!(soul.proposals(AGENT, true).unwrap().is_empty());
         assert!(user.active_heads(None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn partial_candidate_write_receipt_preserves_counts_and_retry_period_after_reopen() {
+        let (dir, soul) = store();
+        let user = UserModelStore::open(dir.path()).unwrap();
+        let connection = rusqlite::Connection::open(dir.path().join("user_model.db")).unwrap();
+        connection.execute_batch("CREATE TRIGGER deny_second BEFORE INSERT ON user_model_candidates WHEN NEW.semantic_key = 'communication.second' BEGIN SELECT RAISE(ABORT, 'fixture second write refusal'); END;").unwrap();
+        let (model, _) = fake(Ok(
+            r#"{"proposals":[{"layer":"growth","growth_kind":"bond","proposal":"Shared shorthand"}],"user_model_candidates":[{"kind":"preference","statement":"Brief replies","semantic_key":"communication.first","evidence_indices":[0]},{"kind":"preference","statement":"Detailed replies","semantic_key":"communication.second","evidence_indices":[0]}]}"#,
+        ));
+        let err = reflect(
+            &soul,
+            AGENT,
+            &user,
+            Default::default(),
+            &messages(&["Use our shorthand"]),
+            model,
+            NOW - 100,
+            NOW,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("fixture second write refusal"));
+        let receipt = SoulProfileStore::open(dir.path())
+            .unwrap()
+            .last_reflection(AGENT)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.outcome, OUTCOME_STORAGE_FAILED);
+        assert_eq!(
+            (
+                receipt.proposals_created,
+                receipt.user_model_candidates_created
+            ),
+            (1, 1)
+        );
+        assert_eq!(soul.proposals(AGENT, true).unwrap().len(), 1);
+        assert_eq!(user.list_pending_candidates().unwrap().len(), 1);
+        assert!(user.active_heads(None).unwrap().is_empty());
+        assert_eq!(
+            reflection_due(Some(&receipt), NOW + 3600),
+            ReflectionDue::NotYet
+        );
+        assert_eq!(
+            reflection_due(Some(&receipt), NOW + REFLECTION_RETRY_SECS),
+            ReflectionDue::Due {
+                since_unix: NOW - 100
+            }
+        );
     }
 
     #[test]

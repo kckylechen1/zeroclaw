@@ -93,7 +93,11 @@ async fn sequential_owner_turns_get_sources_but_anonymous_and_steering_do_not() 
     let rows = reopened.load_with_timestamps(&chat.scope.session_key);
     let owner_rows: Vec<_> = rows
         .iter()
-        .filter(|r| r.source == Some(UserMessageSource::Operator))
+        .filter(|r| {
+            r.ingress
+                .as_ref()
+                .is_some_and(|i| i.source == UserMessageSource::Operator)
+        })
         .collect();
     assert_eq!(
         owner_rows.len(),
@@ -116,8 +120,20 @@ async fn sequential_owner_turns_get_sources_but_anonymous_and_steering_do_not() 
             .all(|r| !r.message.content.contains("anonymous"))
     );
     assert!(
+        owner_rows.iter().all(|r| {
+            let text = &r.ingress.as_ref().unwrap().text;
+            [
+                "first owner input",
+                "second owner input",
+                "third owner input",
+            ]
+            .contains(&text.as_str())
+        }),
+        "evidence contains exact input without derived timestamps"
+    );
+    assert!(
         rows.iter()
             .filter(|r| r.message.content.contains("anonymous"))
-            .all(|r| r.source.is_none())
+            .all(|r| r.ingress.is_none())
     );
 }

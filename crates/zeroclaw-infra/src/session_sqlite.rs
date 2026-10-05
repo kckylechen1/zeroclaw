@@ -225,15 +225,15 @@ impl SqliteSessionBackend {
         &self,
         session_key: &str,
         message: &ChatMessage,
-        source: Option<&zeroclaw_api::review::UserMessageSource>,
+        ingress: Option<&zeroclaw_api::review::UserMessageIngress>,
     ) -> std::io::Result<()> {
-        if source.is_some() && message.role != "user" {
+        if ingress.is_some() && message.role != "user" {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "only user messages carry an ingress source",
             ));
         }
-        let source = source
+        let source = ingress
             .map(serde_json::to_string)
             .transpose()
             .map_err(std::io::Error::other)?;
@@ -361,7 +361,7 @@ impl SessionBackend for SqliteSessionBackend {
             Ok(TimestampedMessage {
                 message: ChatMessage { role, content },
                 created_at,
-                source: row
+                ingress: row
                     .get::<_, Option<String>>(3)?
                     .and_then(|raw| serde_json::from_str(&raw).ok()),
             })
@@ -377,13 +377,13 @@ impl SessionBackend for SqliteSessionBackend {
         self.append_message(session_key, message, None)
     }
 
-    fn append_with_source(
+    fn append_with_ingress(
         &self,
         session_key: &str,
         message: &ChatMessage,
-        source: &zeroclaw_api::review::UserMessageSource,
+        ingress: &zeroclaw_api::review::UserMessageIngress,
     ) -> std::io::Result<()> {
-        self.append_message(session_key, message, Some(source))
+        self.append_message(session_key, message, Some(ingress))
     }
 
     fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {

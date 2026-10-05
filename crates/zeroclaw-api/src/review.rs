@@ -9,6 +9,16 @@ pub enum UserMessageSource {
     Channel { sender_id: String },
 }
 
+/// Canonical input captured at trusted ingress before hooks, media annotations,
+/// link previews or model context modify it. Stored atomically with the history
+/// row; history content is a derived view and is never reflection evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserMessageIngress {
+    pub source: UserMessageSource,
+    pub text: String,
+}
+
 /// One owner-authored message in the bounded reflection input.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ReflectionMessage {

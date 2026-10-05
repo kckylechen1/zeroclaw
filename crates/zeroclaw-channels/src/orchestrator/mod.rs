@@ -1401,26 +1401,32 @@ fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool
 /// when proactively trimming. The active exchange stays intact; only older
 /// tool results are shrunk to a bounded extract.
 fn append_sender_turn(ctx: &ChannelRuntimeContext, sender_key: &str, turn: ChatMessage) {
-    append_sender_turn_with_source(ctx, sender_key, turn, None);
+    append_sender_turn_with_ingress(ctx, sender_key, turn, None);
 }
 
 fn append_channel_user_turn(
     ctx: &ChannelRuntimeContext,
     sender_key: &str,
-    msg: &ChannelMessage,
+    ingress: &zeroclaw_api::review::UserMessageIngress,
     turn: ChatMessage,
 ) {
-    let source = zeroclaw_api::review::UserMessageSource::Channel {
-        sender_id: msg.sender.clone(),
-    };
-    append_sender_turn_with_source(ctx, sender_key, turn, Some(&source));
+    append_sender_turn_with_ingress(ctx, sender_key, turn, Some(ingress));
 }
 
-fn append_sender_turn_with_source(
+fn channel_user_ingress(msg: &ChannelMessage) -> zeroclaw_api::review::UserMessageIngress {
+    zeroclaw_api::review::UserMessageIngress {
+        source: zeroclaw_api::review::UserMessageSource::Channel {
+            sender_id: msg.sender.clone(),
+        },
+        text: msg.content.clone(),
+    }
+}
+
+fn append_sender_turn_with_ingress(
     ctx: &ChannelRuntimeContext,
     sender_key: &str,
     turn: ChatMessage,
-    source: Option<&zeroclaw_api::review::UserMessageSource>,
+    ingress: Option<&zeroclaw_api::review::UserMessageIngress>,
 ) {
     // Serialize per-sender persistence to prevent interleaving across concurrent
     // workers that share the same conversation_history_key
@@ -1429,8 +1435,8 @@ fn append_sender_turn_with_source(
 
     // Persist to JSONL before adding to in-memory history.
     if let Some(ref store) = ctx.session_store
-        && let Err(e) = match source {
-            Some(source) => store.append_with_source(sender_key, &turn, source),
+        && let Err(e) = match ingress {
+            Some(ingress) => store.append_with_ingress(sender_key, &turn, ingress),
             None => store.append(sender_key, &turn),
         }
     {
@@ -2748,13 +2754,18 @@ fn stamp_session_routing_context(
     }
 }
 
-fn record_passive_context(ctx: &ChannelRuntimeContext, msg: &ChannelMessage, history_key: &str) {
+fn record_passive_context(
+    ctx: &ChannelRuntimeContext,
+    msg: &ChannelMessage,
+    history_key: &str,
+    ingress: &zeroclaw_api::review::UserMessageIngress,
+) {
     let timestamped_content =
         timestamped_channel_user_history_content(msg, WHATSAPP_OBSERVED_GROUP_MESSAGE_LABEL);
     append_channel_user_turn(
         ctx,
         history_key,
-        msg,
+        ingress,
         ChatMessage::user(&timestamped_content),
     );
     ::zeroclaw_log::record!(

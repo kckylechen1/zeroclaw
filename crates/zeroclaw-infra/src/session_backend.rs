@@ -68,9 +68,9 @@ pub struct SessionQuery {
 pub struct TimestampedMessage {
     pub message: ChatMessage,
     pub created_at: Option<DateTime<Utc>>,
-    /// Per-message ingress fact. Missing on legacy/unsupported history;
-    /// session-level sender metadata cannot substitute for this source.
-    pub source: Option<zeroclaw_api::review::UserMessageSource>,
+    /// Original text and source before runtime enrichment. Missing on legacy or
+    /// unsupported history; neither session metadata nor history is a substitute.
+    pub ingress: Option<zeroclaw_api::review::UserMessageIngress>,
 }
 
 /// Trait for session persistence backends.
@@ -88,7 +88,7 @@ pub trait SessionBackend: Send + Sync {
             .map(|message| TimestampedMessage {
                 message,
                 created_at: None,
-                source: None,
+                ingress: None,
             })
             .collect()
     }
@@ -96,13 +96,13 @@ pub trait SessionBackend: Send + Sync {
     /// Append a single message to a session.
     fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()>;
 
-    /// Append with the source supplied by trusted ingress. Backends without
+    /// Append with the original text and source supplied by trusted ingress. Backends without
     /// source/timestamp storage retain ordinary history but cannot reflect it.
-    fn append_with_source(
+    fn append_with_ingress(
         &self,
         session_key: &str,
         message: &ChatMessage,
-        _source: &zeroclaw_api::review::UserMessageSource,
+        _ingress: &zeroclaw_api::review::UserMessageIngress,
     ) -> std::io::Result<()> {
         self.append(session_key, message)
     }
