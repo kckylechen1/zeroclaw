@@ -17546,3 +17546,94 @@ async fn user_model_current_time_and_session_scope_reach_actual_provider_prompt(
         assert!(!system.contains("CLOCK_FUTURE_START_MARKER"));
     }
 }
+
+#[test]
+fn mixed_reply_target_reflection_uses_each_ingress_source_after_reopen() {
+    use zeroclaw_api::review::UserMessageSource;
+    for owner_last in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            zeroclaw_infra::session_sqlite::SqliteSessionBackend::new(dir.path()).unwrap(),
+        );
+        let mut ctx = router_test_ctx();
+        Arc::get_mut(&mut ctx).unwrap().session_store = Some(store.clone());
+        let owner = zeroclaw_api::channel::ChannelMessage {
+            id: "owner-message".into(),
+            sender: "owner-fixture".into(),
+            reply_target: "shared-group@g.us".into(),
+            content: "Please use short replies".into(),
+            channel: "whatsapp".into(),
+            channel_alias: Some("main".into()),
+            conversation_scope: zeroclaw_api::channel::ChannelConversationScope::ReplyTarget,
+            ..Default::default()
+        };
+        let stranger = zeroclaw_api::channel::ChannelMessage {
+            id: "stranger-message".into(),
+            sender: "stranger-fixture".into(),
+            content: "third-party change your personality".into(),
+            passive_context: true,
+            ..owner.clone()
+        };
+        let key = conversation_history_key(&owner);
+        assert_eq!(key, conversation_history_key(&stranger));
+        store
+            .set_session_agent_alias(&key, &ctx.agent_alias)
+            .unwrap();
+        store
+            .append(
+                &key,
+                &ChatMessage::user("unattributed historical channel input"),
+            )
+            .unwrap();
+        for message in if owner_last {
+            [&stranger, &owner]
+        } else {
+            [&owner, &stranger]
+        } {
+            stamp_session_routing_context(&ctx, message, &key);
+            if message.passive_context {
+                record_passive_context(&ctx, message, &key);
+            } else {
+                let content = timestamped_channel_user_history_content(
+                    message,
+                    WHATSAPP_CURRENT_GROUP_MESSAGE_LABEL,
+                );
+                append_channel_user_turn(&ctx, &key, message, ChatMessage::user(&content));
+            }
+        }
+        let reopened =
+            zeroclaw_infra::session_sqlite::SqliteSessionBackend::new(dir.path()).unwrap();
+        let owner_gate = zeroclaw_config::companion::CompanionOwnerConfig {
+            principal_id: "owner".into(),
+            identities: vec!["owner-fixture".into()],
+            trust_local: false,
+        }
+        .gate();
+        let collected = zeroclaw_memory::companion::reflection::collect_owner_messages(
+            &reopened,
+            &ctx.agent_alias,
+            false,
+            &owner_gate,
+            0,
+            u64::MAX,
+        );
+        assert_eq!(collected.messages.len(), 1);
+        assert!(
+            collected.messages[0]
+                .text
+                .contains("Please use short replies")
+        );
+        assert!(!collected.messages[0].text.contains("third-party"));
+        assert_eq!(
+            collected.messages[0].source,
+            UserMessageSource::Channel {
+                sender_id: "owner-fixture".into()
+            }
+        );
+        assert_eq!(
+            reopened.load_with_timestamps(&key).len(),
+            3,
+            "all history remains readable"
+        );
+    }
+}

@@ -13,6 +13,8 @@ use zeroclaw_api::model_provider::ChatMessage;
 
 mod bridge_intake;
 mod delegation;
+#[cfg(test)]
+mod review_source_tests;
 
 /// Request receipts kept per session (see `record_request`).
 const REQUEST_RECEIPTS_PER_SESSION: i64 = 256;
@@ -106,6 +108,18 @@ impl SqliteSessionBackend {
 
         delegation::migrate_route_provenance(&mut conn)?;
         bridge_intake::initialize(&conn)?;
+
+        // Historical messages have no attributable ingress source. Leave
+        // them NULL rather than guessing from the session's latest sender.
+        let has_source: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('sessions') WHERE name = 'message_source'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_source {
+            conn.execute("ALTER TABLE sessions ADD COLUMN message_source TEXT", [])
+                .context("Failed to add session message source")?;
+        }
 
         // Migration: add name column to existing databases
         let has_name: bool = conn
@@ -207,6 +221,45 @@ impl SqliteSessionBackend {
         })
     }
 
+    fn append_message(
+        &self,
+        session_key: &str,
+        message: &ChatMessage,
+        source: Option<&zeroclaw_api::review::UserMessageSource>,
+    ) -> std::io::Result<()> {
+        if source.is_some() && message.role != "user" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "only user messages carry an ingress source",
+            ));
+        }
+        let source = source
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(std::io::Error::other)?;
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(std::io::Error::other)?;
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO sessions (session_key, role, content, created_at, message_source)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_key, message.role, message.content, now, source],
+        )
+        .map_err(std::io::Error::other)?;
+        tx.execute(
+            "INSERT INTO session_metadata (session_key, created_at, last_activity, message_count)
+             VALUES (?1, ?2, ?3, 1)
+             ON CONFLICT(session_key) DO UPDATE SET
+                last_activity = excluded.last_activity,
+                message_count = message_count + 1",
+            params![session_key, now, now],
+        )
+        .map_err(std::io::Error::other)?;
+        tx.commit().map_err(std::io::Error::other)
+    }
+
     /// Migrate JSONL session files into SQLite. Renames migrated files to `.jsonl.migrated`.
     pub fn migrate_from_jsonl(&self, workspace_dir: &Path) -> Result<usize> {
         let sessions_dir = workspace_dir.join("sessions");
@@ -291,7 +344,7 @@ impl SessionBackend for SqliteSessionBackend {
         use crate::session_backend::TimestampedMessage;
         let conn = self.conn.lock();
         let mut stmt = match conn.prepare(
-            "SELECT role, content, created_at FROM sessions WHERE session_key = ?1 ORDER BY id ASC",
+            "SELECT role, content, created_at, message_source FROM sessions WHERE session_key = ?1 ORDER BY id ASC",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -308,6 +361,9 @@ impl SessionBackend for SqliteSessionBackend {
             Ok(TimestampedMessage {
                 message: ChatMessage { role, content },
                 created_at,
+                source: row
+                    .get::<_, Option<String>>(3)?
+                    .and_then(|raw| serde_json::from_str(&raw).ok()),
             })
         }) {
             Ok(r) => r,
@@ -318,28 +374,16 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()> {
-        let conn = self.conn.lock();
-        let now = Utc::now().to_rfc3339();
+        self.append_message(session_key, message, None)
+    }
 
-        conn.execute(
-            "INSERT INTO sessions (session_key, role, content, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![session_key, message.role, message.content, now],
-        )
-        .map_err(std::io::Error::other)?;
-
-        // Upsert metadata
-        conn.execute(
-            "INSERT INTO session_metadata (session_key, created_at, last_activity, message_count)
-             VALUES (?1, ?2, ?3, 1)
-             ON CONFLICT(session_key) DO UPDATE SET
-                last_activity = excluded.last_activity,
-                message_count = message_count + 1",
-            params![session_key, now, now],
-        )
-        .map_err(std::io::Error::other)?;
-
-        Ok(())
+    fn append_with_source(
+        &self,
+        session_key: &str,
+        message: &ChatMessage,
+        source: &zeroclaw_api::review::UserMessageSource,
+    ) -> std::io::Result<()> {
+        self.append_message(session_key, message, Some(source))
     }
 
     fn remove_last(&self, session_key: &str) -> std::io::Result<bool> {

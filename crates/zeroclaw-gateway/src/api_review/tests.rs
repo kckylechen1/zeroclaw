@@ -109,6 +109,7 @@ async fn actual_http_reflection_inbox_review_reword_narrow_dismiss_and_reopen() 
     let user = UserModelStore::open(dir.path()).unwrap();
     let messages = OwnerMessages {
         messages: vec![zeroclaw_api::review::ReflectionMessage {
+            source: zeroclaw_api::review::UserMessageSource::Operator,
             session_id: "session-a".into(),
             at_unix: 101,
             text: "Please use concise replies and our shorthand".into(),

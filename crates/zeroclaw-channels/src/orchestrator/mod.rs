@@ -1401,6 +1401,27 @@ fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool
 /// when proactively trimming. The active exchange stays intact; only older
 /// tool results are shrunk to a bounded extract.
 fn append_sender_turn(ctx: &ChannelRuntimeContext, sender_key: &str, turn: ChatMessage) {
+    append_sender_turn_with_source(ctx, sender_key, turn, None);
+}
+
+fn append_channel_user_turn(
+    ctx: &ChannelRuntimeContext,
+    sender_key: &str,
+    msg: &ChannelMessage,
+    turn: ChatMessage,
+) {
+    let source = zeroclaw_api::review::UserMessageSource::Channel {
+        sender_id: msg.sender.clone(),
+    };
+    append_sender_turn_with_source(ctx, sender_key, turn, Some(&source));
+}
+
+fn append_sender_turn_with_source(
+    ctx: &ChannelRuntimeContext,
+    sender_key: &str,
+    turn: ChatMessage,
+    source: Option<&zeroclaw_api::review::UserMessageSource>,
+) {
     // Serialize per-sender persistence to prevent interleaving across concurrent
     // workers that share the same conversation_history_key
     let persist_lock = acquire_persist_lock(ctx, sender_key);
@@ -1408,7 +1429,10 @@ fn append_sender_turn(ctx: &ChannelRuntimeContext, sender_key: &str, turn: ChatM
 
     // Persist to JSONL before adding to in-memory history.
     if let Some(ref store) = ctx.session_store
-        && let Err(e) = store.append(sender_key, &turn)
+        && let Err(e) = match source {
+            Some(source) => store.append_with_source(sender_key, &turn, source),
+            None => store.append(sender_key, &turn),
+        }
     {
         ::zeroclaw_log::record!(
             WARN,
@@ -2727,7 +2751,12 @@ fn stamp_session_routing_context(
 fn record_passive_context(ctx: &ChannelRuntimeContext, msg: &ChannelMessage, history_key: &str) {
     let timestamped_content =
         timestamped_channel_user_history_content(msg, WHATSAPP_OBSERVED_GROUP_MESSAGE_LABEL);
-    append_sender_turn(ctx, history_key, ChatMessage::user(&timestamped_content));
+    append_channel_user_turn(
+        ctx,
+        history_key,
+        msg,
+        ChatMessage::user(&timestamped_content),
+    );
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(

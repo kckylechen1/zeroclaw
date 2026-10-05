@@ -11,9 +11,9 @@
 //!    validation and cap as `propose_soul_change`, applying nothing;
 //! 4. appends a reflection receipt, so the cadence survives restarts.
 //!
-//! "The owner's own messages" means messages from operator surfaces (gateway
-//! chat, CLI, TUI: sessions with no channel sender) plus channel sessions whose
-//! sender matches `[companion_memory.owner].identities`. Assistant turns, tool
+//! "The owner's own messages" means messages with an immutable operator-ingress
+//! source or a per-message channel sender matching the current
+//! `[companion_memory.owner].identities`. Unattributed historical rows are excluded. Assistant turns, tool
 //! results, injected memory, and link previews never reach the model, so no
 //! third-party text can steer the agent's growth.
 
@@ -30,7 +30,7 @@ use zeroclaw_api::companion::{
     classify_companion_authority,
 };
 use zeroclaw_api::model_provider::ModelProvider;
-use zeroclaw_api::review::ReflectionMessage;
+use zeroclaw_api::review::{ReflectionMessage, UserMessageSource};
 use zeroclaw_infra::session_backend::{SessionBackend, SessionMetadata};
 
 /// Minimum time between two reflections of one agent.
@@ -101,13 +101,9 @@ pub struct OwnerMessages {
     pub messages: Vec<ReflectionMessage>,
 }
 
-/// Whether a session's `user` messages are the owner's own.
-fn session_is_owners(
-    meta: &SessionMetadata,
-    agent_alias: &str,
-    single_agent: bool,
-    owner: &CompanionOwnerGate,
-) -> bool {
+/// Agent/cadence eligibility only. A shared session's latest sender never
+/// grants authorship to its other messages.
+fn session_is_reflectable(meta: &SessionMetadata, agent_alias: &str, single_agent: bool) -> bool {
     match meta.agent_alias.as_deref() {
         Some(alias) if alias == agent_alias => {}
         // Sessions from before per-agent attribution belong to the only agent.
@@ -120,11 +116,14 @@ fn session_is_owners(
     {
         return false;
     }
-    match meta.sender_id.as_deref().filter(|s| !s.trim().is_empty()) {
-        // Operator surfaces (gateway chat, CLI, TUI) carry no channel sender.
-        None => meta.channel_id.is_none(),
-        Some(sender) => {
-            let ingress = CompanionIngress::from_channel_identity(IngressIdentity::new(sender));
+    true
+}
+
+fn source_is_owners(source: &UserMessageSource, owner: &CompanionOwnerGate) -> bool {
+    match source {
+        UserMessageSource::Operator => true,
+        UserMessageSource::Channel { sender_id } => {
+            let ingress = CompanionIngress::from_channel_identity(IngressIdentity::new(sender_id));
             classify_companion_authority(&ingress, owner) == AuthorityClass::OwnerAuthored
         }
     }
@@ -193,13 +192,16 @@ pub fn collect_owner_messages(
 ) -> OwnerMessages {
     let mut found: Vec<ReflectionMessage> = Vec::new();
     for meta in backend.list_sessions_with_metadata() {
-        if !session_is_owners(&meta, agent_alias, single_agent, owner) {
+        if !session_is_reflectable(&meta, agent_alias, single_agent) {
             continue;
         }
         for row in backend.load_with_timestamps(&meta.key) {
             if row.message.role != "user" {
                 continue;
             }
+            let Some(source) = row.source.filter(|source| source_is_owners(source, owner)) else {
+                continue;
+            };
             let Some(at) = row
                 .created_at
                 .and_then(|at| u64::try_from(at.timestamp()).ok())
@@ -214,6 +216,7 @@ pub fn collect_owner_messages(
                     session_id: meta.key.clone(),
                     at_unix: at,
                     text,
+                    source,
                 });
             }
         }
@@ -424,7 +427,7 @@ fn record_user_model_reflection(
         if candidate.evidence_indices.is_empty() || candidate.evidence_indices.len() > 3 {
             continue;
         }
-        let evidence: Option<Vec<_>> = candidate.evidence_indices.iter().map(|i| messages.messages.get(*i).map(|m| serde_json::json!({"session_id": m.session_id, "at_unix": m.at_unix, "owner_text": m.text}))).collect();
+        let evidence: Option<Vec<_>> = candidate.evidence_indices.iter().map(|i| messages.messages.get(*i).map(|m| serde_json::json!({"session_id": m.session_id, "at_unix": m.at_unix, "owner_text": m.text, "source": m.source}))).collect();
         let Some(evidence) = evidence else {
             continue;
         };
@@ -655,6 +658,7 @@ mod tests {
                     session_id: "owner-session".into(),
                     at_unix: NOW - 100 + i as u64,
                     text: (*t).to_string(),
+                    source: UserMessageSource::Operator,
                 })
                 .collect(),
         }
@@ -766,7 +770,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let backend = zeroclaw_infra::make_session_backend(dir.path(), "sqlite").unwrap();
         let add = |key: &str, agent: &str, message: ChatMessage| {
-            backend.append(key, &message).unwrap();
+            let source = match key {
+                "telegram_owner" => UserMessageSource::Channel {
+                    sender_id: "Owner_TG".into(),
+                },
+                "telegram_other" => UserMessageSource::Channel {
+                    sender_id: "stranger".into(),
+                },
+                _ => UserMessageSource::Operator,
+            };
+            if message.role == "user" {
+                backend.append_with_source(key, &message, &source).unwrap();
+            } else {
+                backend.append(key, &message).unwrap();
+            }
             backend.set_session_agent_alias(key, agent).unwrap();
         };
         // Operator surface (gateway chat): owner.

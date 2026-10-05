@@ -333,9 +333,19 @@ Each candidate has `review_url` pointing to its existing operator endpoint:
   owner's wording for an accepted/narrowed statement. Wording is a non-empty
   single line of at most 240 UTF-8 bytes. Dismissal applies nothing. The
   original candidate/evidence remains intact and the approved revision owns
-  the new wording. Repeated committed decisions return 409.
+  the new wording. Repeated committed decisions return 409, except the one-time reject-to-narrow
+  follow-up documented below.
 - Reflection receipts have no review action: they report what ran and how many
   proposals/candidates were created. They grant no approval authority.
+
+Reflection uses an immutable ingress source on each SQLite message row, rather
+than the session's latest sender. Active and passive channel messages store
+their actual sender; the current owner identity list is checked when reflecting.
+Each ordinary paired operator WS turn marks its initial user input. Anonymous,
+bridge and steering inputs without bound owner origin are excluded. A late
+steering follow-up does not inherit the original socket's owner identity.
+Historical rows and imported JSONL without this source stay readable as chat
+history but are excluded from reflection; unknown origin is never guessed.
 
 The PWA consumes this API under #379; phone review remains a separate slice.
 
@@ -426,10 +436,11 @@ proposals plus three User Model candidates. Each domain has its own pending
 cap of three, so a full Soul queue does not block User Model suggestions.
 User Model suggestions carry runtime-bound owner-message/session evidence and
 remain global candidates until owner review; model-supplied evidence references
-outside the input are refused. Nothing is applied. The owner's messages are those from operator
-surfaces (gateway chat, CLI, TUI) plus channel sessions whose sender is listed
-in `[companion_memory.owner].identities`; tool results, injected memory, and
-link previews are removed first. The first check only starts the clock, a
+outside the input are refused. Nothing is applied. Owner messages require
+the per-message ingress source described above: an operator origin or a
+channel sender listed in the current `[companion_memory.owner].identities`.
+The last sender of a shared session cannot authorize its other rows. Tool
+results, injected memory, and link previews are removed first. The first check only starts the clock, a
 week with no owner messages makes no model call, and a failed call is retried
 after 6 hours. `last_reflection` reports the period, the number of messages
 read, the Soul proposals created, `user_model_candidates_created`, and the

@@ -1270,6 +1270,9 @@ async fn run_ws_turns(
     claim: TurnClaim,
 ) {
     let mut next = Some(claim);
+    // Each idle socket submission starts its own invocation with that
+    // socket's scope. Joined late steering does not inherit its authorship.
+    let mut initial_claim = true;
     while let Some(TurnClaim {
         input,
         request_id,
@@ -1299,6 +1302,7 @@ async fn run_ws_turns(
                         &conversation,
                         &mut session,
                         &scope,
+                        initial_claim && intake.is_none(),
                         &input,
                         request_id.as_deref(),
                         generation,
@@ -1343,6 +1347,7 @@ async fn run_ws_turns(
             scope = next_scope;
             next = Some(claim);
         }
+        initial_claim = false;
     }
     state.ws_conversations.release_if_unused(&conversation);
 }
@@ -1432,6 +1437,7 @@ fn persist_conversation_messages(
     backend: &dyn zeroclaw_infra::session_backend::SessionBackend,
     session_key: &str,
     messages: &[zeroclaw_providers::ConversationMessage],
+    source: Option<&zeroclaw_api::review::UserMessageSource>,
 ) {
     // if the user deleted the session between the turn starting and
     // the post-turn persistence, don't resurrect it. The `aborted` / `done`
@@ -1440,6 +1446,7 @@ fn persist_conversation_messages(
     if !backend.session_exists(session_key) {
         return;
     }
+    let mut initial_user = true;
     for message in messages {
         let zeroclaw_providers::ConversationMessage::Chat(message) = message else {
             continue;
@@ -1447,7 +1454,14 @@ fn persist_conversation_messages(
         if message.role == "system" {
             continue;
         }
-        let _ = backend.append(session_key, message);
+        if message.role == "user"
+            && std::mem::take(&mut initial_user)
+            && let Some(source) = source
+        {
+            let _ = backend.append_with_source(session_key, message, source);
+        } else {
+            let _ = backend.append(session_key, message);
+        }
     }
 }
 
@@ -1543,6 +1557,7 @@ async fn process_chat_message(
     conversation: &Conversation<WsSession>,
     session: &mut WsSession,
     scope: &WsTurnScope,
+    initial_operator_input: bool,
     content: &str,
     request_id: Option<&str>,
     generation: u64,
@@ -1553,6 +1568,16 @@ async fn process_chat_message(
 
     let WsSession { agent, ws_memory } = session;
     let session_key = scope.session_key.as_str();
+    // Resolve canonical paired-device membership when storing this input.
+    // Bridge/anonymous sockets and unbound steering receive no owner source.
+    let owner_source = || {
+        (initial_operator_input
+            && scope
+                .auth_subject
+                .as_ref()
+                .is_some_and(|subject| state.pairing.tokens().contains(subject)))
+        .then_some(zeroclaw_api::review::UserMessageSource::Operator)
+    };
 
     let (turn_alias, turn_provider, turn_model) = agent.attribution_fields();
     let provider_label = turn_provider.clone();
@@ -1754,6 +1779,7 @@ async fn process_chat_message(
                             backend.as_ref(),
                             session_key,
                             &error.new_messages,
+                            owner_source().as_ref(),
                         );
                         if !has_assistant_chat_message(&error.new_messages) {
                             let marker = zeroclaw_runtime::i18n::get_required_cli_string(
@@ -1836,7 +1862,12 @@ async fn process_chat_message(
     match result {
         Ok(outcome) => {
             if let Some(ref backend) = state.session_backend {
-                persist_conversation_messages(backend.as_ref(), session_key, &outcome.new_messages);
+                persist_conversation_messages(
+                    backend.as_ref(),
+                    session_key,
+                    &outcome.new_messages,
+                    owner_source().as_ref(),
+                );
             }
 
             // Fire-and-forget curated-memory consolidation (sqlite Memory).
@@ -1970,7 +2001,12 @@ async fn process_chat_message(
             if let Some(ref backend) = state.session_backend
                 && !e.new_messages.is_empty()
             {
-                persist_conversation_messages(backend.as_ref(), session_key, &e.new_messages);
+                persist_conversation_messages(
+                    backend.as_ref(),
+                    session_key,
+                    &e.new_messages,
+                    owner_source().as_ref(),
+                );
             }
 
             // Set session state to error
@@ -2639,6 +2675,10 @@ mod tests {
         fn alias(&self) -> &str {
             "scripted"
         }
+    }
+
+    mod review_source_tests {
+        include!("ws/review_source_tests.rs");
     }
 
     mod intake_tests {
@@ -3459,7 +3499,7 @@ mod tests {
             ConversationMessage::Chat(ChatMessage::assistant("[interrupted by user]")),
         ];
 
-        persist_conversation_messages(&backend, "gw_deleted", &messages);
+        persist_conversation_messages(&backend, "gw_deleted", &messages, None);
 
         assert!(
             backend.append_calls.lock().unwrap().is_empty(),
