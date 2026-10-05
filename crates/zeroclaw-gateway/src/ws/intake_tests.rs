@@ -554,3 +554,52 @@ async fn an_ignored_predecessor_unblocks_the_pending_message_without_reconnect()
     assert_eq!(chat.seen.lock().len(), 1);
     assert_eq!(intake_snapshot(&chat).inputs[1].state, "done");
 }
+
+#[tokio::test]
+async fn bridge_token_rotation_preserves_the_same_source_identity() {
+    let mut chat = intake_chat();
+    let a = intake_socket(&chat).await;
+    let frame = source_message(21, 0, "one identity through token rotation");
+    let (_, claim) = receive_intake(&chat, &a, frame.clone());
+    chat.gate.add_permits(1);
+    run_intake(&chat, &a, claim.unwrap()).await;
+    drop(a);
+    let new_subject = zeroclaw_config::pairing::PairingGuard::token_hash("rotated-intake-fixture");
+    {
+        let mut config = chat.state.config.write();
+        let mut bridge = config.gateway.bridges.remove("files").unwrap();
+        bridge.token_hash = new_subject.clone();
+        config.gateway.bridges.insert("files".into(), bridge);
+    }
+    chat.scope.auth_subject = Some(new_subject);
+    reopen_intake(&mut chat);
+    let a = intake_socket(&chat).await;
+    let (ack, claim) = receive_intake(&chat, &a, frame);
+    assert_eq!(ack["status"], "duplicate");
+    assert_eq!(ack["state"], "done");
+    assert!(claim.is_none());
+    assert_eq!(chat.seen.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn ambiguous_bridge_credentials_cannot_choose_a_source_by_hashmap_order() {
+    let chat = intake_chat();
+    {
+        let mut config = chat.state.config.write();
+        let mut bridge = config.gateway.bridges["files"].clone();
+        bridge.token_hash = bridge.token_hash.to_ascii_uppercase();
+        config
+            .gateway
+            .bridges
+            .insert("ambiguous-files".into(), bridge);
+    }
+    let a = intake_socket(&chat).await;
+    for frame in [resume_frame(), source_message(21, 0, "refuse ambiguity")] {
+        let (error, claim) = receive_intake(&chat, &a, frame);
+        assert_eq!(error["code"], "SOURCE_UNAUTHORIZED");
+        assert!(claim.is_none());
+    }
+    assert_eq!(intake_snapshot(&chat).cursor, 0);
+    assert!(intake_snapshot(&chat).inputs.is_empty());
+    assert!(chat.seen.lock().is_empty());
+}

@@ -60,13 +60,15 @@ fn source(
     if !config.agents.get(alias).is_some_and(|agent| agent.enabled) {
         return None;
     }
-    let (name, _) = config.gateway.bridges.iter().find(|(_, bridge)| {
-        bridge.allows_session(&scope.session_id)
-            && zeroclaw_config::pairing::constant_time_eq(
-                subject,
-                &bridge.token_hash.to_ascii_lowercase(),
-            )
-    })?;
+    // An ambiguous credential must not select authority by HashMap order.
+    let mut bridges = config.gateway.bridges.iter().filter(|(_, bridge)| {
+        zeroclaw_config::pairing::constant_time_eq(subject, &bridge.token_hash.to_ascii_lowercase())
+    });
+    let (name, bridge) = bridges.next()?;
+    if bridges.next().is_some() || !bridge.allows_session(&scope.session_id) {
+        return None;
+    }
+
     Some(BridgeSource {
         key: format!("{name}:{namespace}"),
         session_key: scope.session_key.clone(),

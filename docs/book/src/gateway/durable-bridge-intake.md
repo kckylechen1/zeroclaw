@@ -9,8 +9,9 @@ Legacy chat messages and their steering behavior keep their existing contract.
 
 The bridge calls Telegram `getMe` and builds `telegram:<numeric bot id>:<owner id>`.
 Each update has the stable request ID `tg:<bot id>:<owner id>:<update_id>`. Bot-token
-rotation preserves this identity. The journal also binds the configured Gateway
-bridge name to one session and agent; changing that mapping fails closed.
+rotation preserves this identity. The journal binds the configured Gateway bridge
+name and source to one session and agent; changing that mapping fails closed.
+Ambiguous credentials shared by multiple bridge entries cannot negotiate intake.
 
 Source intake requires a current scoped bridge token, an enabled agent and a
 durable session backend. Paired tokens, tokenless connections and unsupported

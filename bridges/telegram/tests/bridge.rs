@@ -658,8 +658,10 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
     .await;
     FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "Answer: invalid").await;
     FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
-    FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
     assert_eq!(recv(&mut ws).await["text"], "1");
+    // The first answer is now awaiting its answer_ack. Submit the duplicate
+    // only here so recv() cannot consume both source dispositions together.
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
     ack_disposition(&mut ws).await;
     FakeTelegram::wait_for(&tg, "sendMessage", |b| {
         b["text"] == "The previous answer is awaiting confirmation"
