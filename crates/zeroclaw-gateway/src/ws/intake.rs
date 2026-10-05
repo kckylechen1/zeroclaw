@@ -18,6 +18,9 @@ pub(crate) struct Claim {
     update_id: i64,
 }
 
+#[cfg(test)]
+type ReservationHook = std::sync::Arc<dyn Fn(i64) + Send + Sync>;
+
 #[derive(Default)]
 pub(crate) struct Scheduling {
     // This fact is created here: a pending DB row already has an in-process
@@ -25,7 +28,7 @@ pub(crate) struct Scheduling {
     scheduled: Mutex<HashSet<(String, i64)>>,
     sources: Mutex<HashMap<String, (BridgeSource, WsTurnScope)>>,
     #[cfg(test)]
-    pub(super) reservation_hook: Mutex<Option<std::sync::Arc<dyn Fn(i64) + Send + Sync>>>,
+    pub(super) reservation_hook: Mutex<Option<ReservationHook>>,
 }
 
 fn failure(id: Option<&str>, code: &str) -> Reply {
