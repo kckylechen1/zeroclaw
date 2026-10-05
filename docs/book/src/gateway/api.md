@@ -37,6 +37,9 @@ Local-bound by default. Over-the-network access requires TLS termination at
 the gateway or in front of it; the per-property and PATCH endpoints are not
 safe to expose unauthenticated regardless of TLS posture.
 
+See [durable bridge intake](durable-bridge-intake.md) for the opt-in source receipt
+and recovery extension used by the Telegram bridge.
+
 ## WebSocket chat sessions
 
 `GET /ws/chat?agent=<alias>&session_id=<id>` opens a chat socket. All sockets
@@ -483,7 +486,9 @@ Scope protection of the HTTP bytes does not change shared conversation visibilit
 
 This leaf supplies bounded HTTP upload/download and inbound text/image mapping.
 It does not supply automatic outbound Telegram file delivery, audio transcription,
-PDF/binary parsing, PWA upload UI or durable Telegram intake/cursor recovery.
+PDF/binary parsing or PWA upload UI. Telegram source intake/cursor recovery uses
+the [durable bridge intake](durable-bridge-intake.md) extension; attachment bytes
+remain ephemeral.
 
 Without a durable session backend, request receipts survive idle conversation
 release for 16 minutes from their first acceptance. The Gateway admits at most

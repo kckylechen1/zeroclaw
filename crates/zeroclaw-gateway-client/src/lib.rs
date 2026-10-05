@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, header};
@@ -97,6 +97,38 @@ pub struct SessionStart {
     pub name: Option<String>,
 }
 
+/// Source ordering supplied by a bridge, scoped by the authenticated Gateway.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceInput {
+    pub namespace: String,
+    pub update_id: i64,
+    pub previous_cursor: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SourceReceipt {
+    pub namespace: String,
+    pub update_id: i64,
+    pub cursor: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SourceReady {
+    pub intake_version: u32,
+    pub source: String,
+    pub cursor: i64,
+    pub unknown: Vec<String>,
+    pub receipts: Vec<SourceRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SourceRecord {
+    pub update_id: i64,
+    pub previous_cursor: i64,
+    pub id: String,
+    pub state: String,
+}
+
 /// An operator decision on an `approval_request`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -132,6 +164,10 @@ pub enum Frame {
         /// Last recorded state, on duplicates.
         #[serde(default)]
         state: Option<String>,
+        #[serde(default)]
+        intake_version: Option<u32>,
+        #[serde(default)]
+        source: Option<SourceReceipt>,
     },
     Chunk {
         content: String,
@@ -345,6 +381,52 @@ impl Client {
         attachments: &[String],
     ) -> Result<()> {
         send_json(&mut self.socket,&serde_json::json!({"type":"message","id":id,"content":content,"attachments":attachments})).await
+    }
+
+    /// Negotiate persisted source intake. The caller bounds the handshake wait.
+    pub async fn resume_source(&mut self, source: &str) -> Result<SourceReady> {
+        send_json(
+            &mut self.socket,
+            &serde_json::json!({"type":"source_resume","source":source}),
+        )
+        .await?;
+        loop {
+            match self.next_frame().await? {
+                Some(Frame::Other(value)) if value["type"] == "source_ready" => {
+                    let ready: SourceReady =
+                        serde_json::from_value(value).context("malformed source_ready frame")?;
+                    if ready.intake_version != 1 || ready.source != source || ready.cursor < 0 {
+                        bail!("unsupported source intake contract");
+                    }
+                    return Ok(ready);
+                }
+                Some(Frame::Error { .. }) => bail!("the gateway refused durable source intake"),
+                None => bail!("gateway closed before confirming durable source intake"),
+                Some(_) => {}
+            }
+        }
+    }
+
+    pub async fn send_source_message(
+        &mut self,
+        id: &str,
+        content: &str,
+        attachments: &[String],
+        source: &SourceInput,
+    ) -> Result<()> {
+        send_json(&mut self.socket, &serde_json::json!({"type":"message","id":id,"content":content,"attachments":attachments,"source":source})).await
+    }
+
+    pub async fn send_source_disposition(
+        &mut self,
+        id: &str,
+        source: &SourceInput,
+        disposition: &str,
+    ) -> Result<()> {
+        if !matches!(disposition, "ignored" | "rejected" | "control") {
+            bail!("unsupported source disposition");
+        }
+        send_json(&mut self.socket, &serde_json::json!({"type":"source_disposition","id":id,"source":source,"disposition":disposition})).await
     }
 
     /// Ask the gateway to stop the session's running turn.

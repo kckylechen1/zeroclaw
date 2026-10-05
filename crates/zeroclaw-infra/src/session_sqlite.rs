@@ -11,6 +11,7 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use zeroclaw_api::model_provider::ChatMessage;
 
+mod bridge_intake;
 mod delegation;
 
 /// Request receipts kept per session (see `record_request`).
@@ -104,6 +105,7 @@ impl SqliteSessionBackend {
         .context("Failed to initialize session schema")?;
 
         delegation::migrate_route_provenance(&mut conn)?;
+        bridge_intake::initialize(&conn)?;
 
         // Migration: add name column to existing databases
         let has_name: bool = conn
@@ -473,31 +475,46 @@ impl SessionBackend for SqliteSessionBackend {
     }
 
     fn cleanup_stale(&self, ttl_hours: u32) -> std::io::Result<usize> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(std::io::Error::other)?;
         let cutoff = (Utc::now() - Duration::hours(i64::from(ttl_hours))).to_rfc3339();
 
         // Find stale sessions
         let stale_keys: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT session_key FROM session_metadata WHERE last_activity < ?1")
+            let mut stmt = tx
+                .prepare(
+                    "SELECT session_key FROM session_metadata WHERE last_activity < ?1
+                     AND NOT EXISTS (
+                         SELECT 1 FROM bridge_sources JOIN bridge_inputs USING(source_key)
+                         WHERE bridge_sources.session_key = session_metadata.session_key
+                           AND bridge_inputs.state IN ('pending', 'running', 'steered', 'outcome_unknown')
+                     )",
+                )
                 .map_err(std::io::Error::other)?;
             let rows = stmt
                 .query_map(params![cutoff], |row| row.get(0))
                 .map_err(std::io::Error::other)?;
-            rows.filter_map(|r| r.ok()).collect()
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(std::io::Error::other)?
         };
 
         let count = stale_keys.len();
         for key in &stale_keys {
-            let _ = conn.execute("DELETE FROM sessions WHERE session_key = ?1", params![key]);
-            let _ = conn.execute(
+            tx.execute("DELETE FROM sessions WHERE session_key = ?1", params![key])
+                .map_err(std::io::Error::other)?;
+            tx.execute(
                 "DELETE FROM session_metadata WHERE session_key = ?1",
                 params![key],
-            );
-            let _ = conn.execute(
+            )
+            .map_err(std::io::Error::other)?;
+            tx.execute(
                 "DELETE FROM session_requests WHERE session_key = ?1",
                 params![key],
-            );
+            )
+            .map_err(std::io::Error::other)?;
+            bridge_intake::redact_session_inputs(&tx, key)?;
         }
 
         // Receipts are keyed by client-supplied session ids and can outlive
@@ -505,76 +522,80 @@ impl SessionBackend for SqliteSessionBackend {
         // does not bound them across keys. Sweep receipts whose session no
         // longer exists once they are older than the TTL. Recent orphans stay:
         // a request can be recorded before the session's first append.
-        conn.execute(
+        tx.execute(
             "DELETE FROM session_requests
              WHERE updated_at < ?1
                AND session_key NOT IN (SELECT session_key FROM session_metadata)",
             params![cutoff],
         )
         .map_err(std::io::Error::other)?;
-
+        tx.commit().map_err(std::io::Error::other)?;
         Ok(count)
     }
 
     fn clear_messages(&self, session_key: &str) -> std::io::Result<usize> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(std::io::Error::other)?;
 
-        conn.execute(
+        tx.execute(
             "DELETE FROM sessions WHERE session_key = ?1",
             params![session_key],
         )
         .map_err(std::io::Error::other)?;
 
-        let count = conn.changes() as usize;
+        let count = tx.changes() as usize;
 
         if count > 0 {
-            conn.execute(
+            tx.execute(
                 "UPDATE session_metadata SET message_count = 0, last_activity = ?1 WHERE session_key = ?2",
                 params![Utc::now().to_rfc3339(), session_key],
             )
             .map_err(std::io::Error::other)?;
         }
-
+        bridge_intake::redact_session_inputs(&tx, session_key)?;
+        tx.commit().map_err(std::io::Error::other)?;
         Ok(count)
     }
 
     fn delete_session(&self, session_key: &str) -> std::io::Result<bool> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(std::io::Error::other)?;
 
         // Check if session exists
-        let exists: bool = conn
+        let exists: bool = tx
             .query_row(
                 "SELECT COUNT(*) > 0 FROM session_metadata WHERE session_key = ?1",
                 params![session_key],
                 |row| row.get(0),
             )
-            .unwrap_or(false);
-
-        if !exists {
-            return Ok(false);
-        }
+            .map_err(std::io::Error::other)?;
 
         // Delete messages (FTS5 trigger handles sessions_fts cleanup)
-        conn.execute(
+        tx.execute(
             "DELETE FROM sessions WHERE session_key = ?1",
             params![session_key],
         )
         .map_err(std::io::Error::other)?;
 
         // Delete metadata
-        conn.execute(
+        tx.execute(
             "DELETE FROM session_metadata WHERE session_key = ?1",
             params![session_key],
         )
         .map_err(std::io::Error::other)?;
 
-        conn.execute(
+        tx.execute(
             "DELETE FROM session_requests WHERE session_key = ?1",
             params![session_key],
         )
         .map_err(std::io::Error::other)?;
-
-        Ok(true)
+        bridge_intake::redact_session_inputs(&tx, session_key)?;
+        tx.commit().map_err(std::io::Error::other)?;
+        Ok(exists)
     }
 
     fn clear_agent_attribution(&self, agent_alias: &str) -> std::io::Result<usize> {
@@ -705,6 +726,46 @@ impl SessionBackend for SqliteSessionBackend {
         )
         .map_err(std::io::Error::other)?;
         Ok(())
+    }
+
+    fn bridge_resume(
+        &self,
+        source: &zeroclaw_api::bridge_intake::BridgeSource,
+    ) -> std::io::Result<zeroclaw_api::bridge_intake::BridgeResume> {
+        self.bridge_resume_impl(source)
+    }
+
+    fn bridge_receipt(
+        &self,
+        source: &zeroclaw_api::bridge_intake::BridgeSource,
+        update_id: i64,
+    ) -> std::io::Result<Option<zeroclaw_api::bridge_intake::BridgeReceipt>> {
+        self.bridge_receipt_impl(source, update_id)
+    }
+
+    fn bridge_record(
+        &self,
+        source: &zeroclaw_api::bridge_intake::BridgeSource,
+        input: &zeroclaw_api::bridge_intake::BridgeInput,
+    ) -> std::io::Result<zeroclaw_api::bridge_intake::BridgeReceipt> {
+        self.bridge_record_impl(source, input)
+    }
+
+    fn bridge_claim(
+        &self,
+        source: &zeroclaw_api::bridge_intake::BridgeSource,
+        update_id: i64,
+    ) -> std::io::Result<bool> {
+        self.bridge_claim_impl(source, update_id)
+    }
+
+    fn bridge_finish(
+        &self,
+        source: &zeroclaw_api::bridge_intake::BridgeSource,
+        update_id: i64,
+        state: &str,
+    ) -> std::io::Result<()> {
+        self.bridge_finish_impl(source, update_id, state)
     }
 
     fn record_request(

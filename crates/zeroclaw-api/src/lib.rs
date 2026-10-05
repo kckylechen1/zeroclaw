@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod attribution;
+pub mod bridge_intake;
 pub mod channel;
 pub mod companion;
 pub mod delegation_admission;

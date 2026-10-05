@@ -1,6 +1,7 @@
 //! Trait abstraction for session persistence backends.
 
 use chrono::{DateTime, Utc};
+use zeroclaw_api::bridge_intake::{BridgeInput, BridgeReceipt, BridgeResume, BridgeSource};
 use zeroclaw_api::model_provider::ChatMessage;
 
 /// Minimum retry protection shared by durable and in-memory receipts. Longer
@@ -270,6 +271,59 @@ pub trait SessionBackend: Send + Sync {
         _state: &str,
     ) -> std::io::Result<()> {
         Ok(())
+    }
+
+    /// Resume retained bridge intake from the canonical session store. A
+    /// backend without durable intake must refuse, never substitute memory.
+    fn bridge_resume(&self, _source: &BridgeSource) -> std::io::Result<BridgeResume> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "durable bridge intake is unsupported",
+        ))
+    }
+
+    fn bridge_receipt(
+        &self,
+        _source: &BridgeSource,
+        _update_id: i64,
+    ) -> std::io::Result<Option<BridgeReceipt>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "durable bridge intake is unsupported",
+        ))
+    }
+
+    /// Persist input and advance only its connected source prefix atomically.
+    fn bridge_record(
+        &self,
+        _source: &BridgeSource,
+        _input: &BridgeInput,
+    ) -> std::io::Result<BridgeReceipt> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "durable bridge intake is unsupported",
+        ))
+    }
+
+    /// Claim pending input before entering any effect-producing path. Only a
+    /// `true` result permits execution; concurrent claimers cannot both win.
+    fn bridge_claim(&self, _source: &BridgeSource, _update_id: i64) -> std::io::Result<bool> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "durable bridge intake is unsupported",
+        ))
+    }
+
+    fn bridge_finish(
+        &self,
+        _source: &BridgeSource,
+        _update_id: i64,
+        _state: &str,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "durable bridge intake is unsupported",
+        ))
     }
 }
 

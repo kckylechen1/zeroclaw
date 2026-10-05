@@ -128,6 +128,8 @@ pub(crate) struct TurnClaim {
     pub(crate) input: String,
     /// The client's id for that message, if it sent one.
     pub(crate) request_id: Option<String>,
+    /// Reference to the canonical durable bridge input, when this is one.
+    pub(crate) intake: Option<crate::ws::intake::Claim>,
     pub(crate) generation: u64,
     pub(crate) cancel: CancellationToken,
     pub(crate) steering: mpsc::Receiver<String>,
@@ -188,6 +190,23 @@ impl<A> Conversation<A> {
                 Err(mpsc::error::TrySendError::Closed(_)) => Submitted::SteeringClosed,
             };
         }
+        self.start_locked(&mut turn, content)
+    }
+
+    /// Reserve an idle turn without putting durable inputs in the ephemeral
+    /// steering queue. Their session journal remains the owner while busy.
+    pub(crate) fn start_if_idle(&self, content: String) -> Option<TurnClaim> {
+        let mut turn = self.turn.lock();
+        if turn.is_some() {
+            return None;
+        }
+        match self.start_locked(&mut turn, content) {
+            Submitted::Start(claim) => Some(claim),
+            _ => unreachable!("an idle slot always starts a turn"),
+        }
+    }
+
+    fn start_locked(&self, turn: &mut Option<ActiveTurn>, content: String) -> Submitted {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let cancel = CancellationToken::new();
         let (steering_tx, steering_rx) = mpsc::channel(STEERING_BUFFER);
@@ -199,6 +218,7 @@ impl<A> Conversation<A> {
         Submitted::Start(TurnClaim {
             input: content,
             request_id: None,
+            intake: None,
             generation,
             cancel,
             steering: steering_rx,
@@ -261,6 +281,8 @@ type Slot<A> = Arc<OnceCell<Arc<Conversation<A>>>>;
 pub struct ConversationHub<A> {
     /// Canonical bounded ephemeral payload bytes for this gateway.
     pub(crate) attachments: crate::api_attachments::Store,
+    /// Scheduling ownership in this process, not a copy of durable input state.
+    pub(crate) intake: crate::ws::intake::Scheduling,
     slots: parking_lot::Mutex<HashMap<String, Slot<A>>>,
     // Canonical fallback receipts outlive idle conversations. No second copy
     // in Conversation and no agent/history retention for reconnect dedup.
@@ -272,6 +294,7 @@ impl<A> Default for ConversationHub<A> {
         Self {
             slots: parking_lot::Mutex::new(HashMap::new()),
             attachments: crate::api_attachments::Store::default(),
+            intake: crate::ws::intake::Scheduling::default(),
             requests: parking_lot::Mutex::default(),
         }
     }

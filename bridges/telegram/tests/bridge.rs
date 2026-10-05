@@ -4,7 +4,7 @@
 // carry.
 #![allow(clippy::disallowed_methods)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,9 +42,26 @@ async fn bot_api(
     Json(body): Json<Value>,
 ) -> Json<Value> {
     assert_eq!(bot, "botTEST", "the token travels in the path");
+    if method == "getMe" {
+        return Json(json!({"ok":true,"result":{"id":9000,"is_bot":true}}));
+    }
     if method == "getUpdates" {
+        {
+            let mut tg = tg.lock().unwrap();
+            tg.calls.push((method.clone(), body.clone()));
+            let offset = body["offset"].as_i64().unwrap();
+            tg.updates
+                .retain(|update| update["update_id"].as_i64().unwrap() >= offset);
+        }
         for _ in 0..10 {
-            let batch: Vec<Value> = tg.lock().unwrap().updates.drain(..).collect();
+            let batch: Vec<Value> = tg
+                .lock()
+                .unwrap()
+                .updates
+                .iter()
+                .take(100)
+                .cloned()
+                .collect();
             if !batch.is_empty() {
                 return Json(json!({ "ok": true, "result": batch }));
             }
@@ -119,7 +136,30 @@ impl FakeTelegram {
     }
 }
 
-type Ws = WebSocketStream<TcpStream>;
+#[derive(Default)]
+struct SourceLedger {
+    received: HashMap<i64, Value>,
+    receipts: HashMap<i64, Value>,
+    cursor: i64,
+}
+
+struct Ws {
+    socket: WebSocketStream<TcpStream>,
+    ledger: Arc<Mutex<SourceLedger>>,
+}
+
+impl std::ops::Deref for Ws {
+    type Target = WebSocketStream<TcpStream>;
+    fn deref(&self) -> &Self::Target {
+        &self.socket
+    }
+}
+
+impl std::ops::DerefMut for Ws {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.socket
+    }
+}
 
 /// The gateway side: sockets the bridge opened, by path.
 struct FakeGateway {
@@ -133,6 +173,7 @@ struct FakeGateway {
 fn fake_gateway(listener: TcpListener) -> FakeGateway {
     let (chat_tx, chat) = mpsc::channel(4);
     let (control_tx, control) = mpsc::channel(4);
+    let ledger = Arc::new(Mutex::new(SourceLedger::default()));
     tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
@@ -166,7 +207,14 @@ fn fake_gateway(listener: TcpListener) -> FakeGateway {
             } else {
                 &chat_tx
             };
-            if tx.send(ws).await.is_err() {
+            if tx
+                .send(Ws {
+                    socket: ws,
+                    ledger: ledger.clone(),
+                })
+                .await
+                .is_err()
+            {
                 return;
             }
         }
@@ -177,6 +225,10 @@ fn fake_gateway(listener: TcpListener) -> FakeGateway {
 /// Take the bridge's next chat socket and complete the gateway side of the
 /// handshake.
 async fn attach(gateway: &mut FakeGateway) -> Ws {
+    attach_ready(gateway, Value::Null).await
+}
+
+async fn attach_ready(gateway: &mut FakeGateway, ready: Value) -> Ws {
     let mut ws = tokio::time::timeout(WAIT, gateway.chat.recv())
         .await
         .expect("the bridge connects")
@@ -188,6 +240,17 @@ async fn attach(gateway: &mut FakeGateway) -> Ws {
     .await;
     assert_eq!(recv(&mut ws).await["type"], "connect");
     send(&mut ws, json!({ "type": "connected" })).await;
+    assert_eq!(
+        recv_raw(&mut ws).await,
+        json!({"type":"source_resume","source":"telegram:9000:42"})
+    );
+    let ready = if ready.is_null() {
+        let ledger = ws.ledger.lock().unwrap();
+        json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":ledger.cursor,"unknown":[],"receipts":ledger.receipts.values().collect::<Vec<_>>()})
+    } else {
+        ready
+    };
+    send(&mut ws, ready).await;
     ws
 }
 
@@ -205,7 +268,42 @@ async fn control(gateway: &mut FakeGateway) -> Ws {
     ws
 }
 
-async fn send(ws: &mut Ws, frame: Value) {
+async fn send(ws: &mut Ws, mut frame: Value) {
+    if frame["type"] == "ack" {
+        let update_id: i64 = frame["id"]
+            .as_str()
+            .unwrap()
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let object = frame.as_object_mut().unwrap();
+        object.entry("durable").or_insert(json!(true));
+        object.entry("intake_version").or_insert(json!(1));
+        object.entry("state").or_insert(json!("pending"));
+        let cursor = {
+            let mut ledger = ws.ledger.lock().unwrap();
+            let input = ledger
+                .received
+                .get(&update_id)
+                .expect("ACK needs a received source input")
+                .clone();
+            ledger.receipts.insert(update_id, json!({"update_id":update_id,"previous_cursor":input["source"]["previous_cursor"],"id":object["id"],"state":object["state"]}));
+            while let Some(next) = ledger
+                .receipts
+                .values()
+                .find(|row| row["previous_cursor"] == ledger.cursor)
+                .and_then(|row| row["update_id"].as_i64())
+            {
+                ledger.cursor = next + 1;
+            }
+            ledger.cursor
+        };
+        object.entry("source").or_insert(
+            json!({"namespace":"telegram:9000:42","update_id":update_id,"cursor":cursor}),
+        );
+    }
     ws.send(Message::Text(frame.to_string().into()))
         .await
         .unwrap();
@@ -213,13 +311,45 @@ async fn send(ws: &mut Ws, frame: Value) {
 
 async fn recv(ws: &mut Ws) -> Value {
     loop {
+        let frame = recv_raw(ws).await;
+        if frame["type"] != "source_disposition" {
+            return frame;
+        }
+        send(
+            ws,
+            json!({"type":"ack","id":frame["id"],"status":"accepted","state":frame["disposition"]}),
+        )
+        .await;
+    }
+}
+
+async fn ack_disposition(ws: &mut Ws) {
+    let frame = recv_raw(ws).await;
+    assert_eq!(frame["type"], "source_disposition");
+    send(
+        ws,
+        json!({"type":"ack","id":frame["id"],"status":"accepted","state":frame["disposition"]}),
+    )
+    .await;
+}
+
+async fn recv_raw(ws: &mut Ws) -> Value {
+    loop {
         let message = tokio::time::timeout(WAIT, ws.next())
             .await
             .expect("a frame from the bridge")
             .expect("the socket is open")
             .unwrap();
         if let Message::Text(text) = message {
-            return serde_json::from_str(&text).unwrap();
+            let frame: Value = serde_json::from_str(&text).unwrap();
+            if let Some(update_id) = frame["source"]["update_id"].as_i64() {
+                ws.ledger
+                    .lock()
+                    .unwrap()
+                    .received
+                    .insert(update_id, frame.clone());
+            }
+            return frame;
         }
     }
 }
@@ -275,20 +405,15 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
     .await;
     FakeTelegram::wait_for(&tg, "sendChatAction", |b| b["action"] == "typing").await;
 
-    // A message during a turn steers it.
+    // Durable source messages wait as their own inputs while another turn runs.
     FakeTelegram::text(&tg, OWNER, "and this");
     let steer = recv(&mut ws).await;
     assert_eq!(steer["content"], "and this");
     send(
         &mut ws,
-        json!({ "type": "ack", "id": steer["id"], "status": "accepted", "turn": "steered" }),
+        json!({ "type": "ack", "id": steer["id"], "status": "accepted", "state": "pending" }),
     )
     .await;
-    FakeTelegram::wait_for(&tg, "sendMessage", |b| {
-        b["text"] == "(added to the current turn)"
-    })
-    .await;
-
     // Approvals: buttons for the owner, a stranger's press is ignored.
     send(
         &mut ws,
@@ -298,12 +423,13 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
     .await;
     let prompt =
         FakeTelegram::wait_for(&tg, "sendMessage", |b| b.get("reply_markup").is_some()).await;
+    let prompt_id = tg.lock().unwrap().next_message;
     let buttons = &prompt["reply_markup"]["inline_keyboard"][0];
     assert_eq!(buttons[0]["callback_data"], "ap:ap1:y");
     assert_eq!(buttons[1]["callback_data"], "ap:ap1:a");
     assert_eq!(buttons[2]["callback_data"], "ap:ap1:n");
-    FakeTelegram::press(&tg, STRANGER, 3, "ap:ap1:n");
-    FakeTelegram::press(&tg, OWNER, 3, "ap:ap1:y");
+    FakeTelegram::press(&tg, STRANGER, prompt_id, "ap:ap1:n");
+    FakeTelegram::press(&tg, OWNER, prompt_id, "ap:ap1:y");
     let answer = recv(&mut ws).await;
     assert_eq!(answer["type"], "approval_response");
     assert_eq!(answer["request_id"], "ap1");
@@ -313,7 +439,7 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
     })
     .await;
     FakeTelegram::wait_for(&tg, "editMessageText", |b| {
-        b["message_id"] == 3 && b["text"] == "Allow shell?\n\nApproved"
+        b["message_id"] == prompt_id && b["text"] == "Allow shell?\n\nApproved"
     })
     .await;
 
@@ -532,8 +658,11 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
     .await;
     FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "Answer: invalid").await;
     FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
-    FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
     assert_eq!(recv(&mut ws).await["text"], "1");
+    // The first answer is now awaiting its answer_ack. Submit the duplicate
+    // only here so recv() cannot consume both source dispositions together.
+    FakeTelegram::push(&tg, reply(OWNER, message_id, "1"));
+    ack_disposition(&mut ws).await;
     FakeTelegram::wait_for(&tg, "sendMessage", |b| {
         b["text"] == "The previous answer is awaiting confirmation"
     })
@@ -569,6 +698,7 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
     .await;
     FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "Answer: accepted").await;
     FakeTelegram::push(&tg, reply(OWNER, message_id, "late"));
+    ack_disposition(&mut ws).await;
     FakeTelegram::wait_for(&tg, "sendMessage", |b| {
         b["text"] == "This request is no longer known"
     })
@@ -579,4 +709,265 @@ async fn questions_bind_owner_replies_and_wait_for_gateway_acceptance() {
             .is_err()
     );
     bridge.abort();
+}
+
+async fn intake_fixture() -> (
+    Shared,
+    FakeGateway,
+    BridgeConfig,
+    tokio::task::JoinHandle<()>,
+) {
+    let tg: Shared = Arc::default();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/{bot}/{method}", post(bot_api))
+        .with_state(tg.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_url = format!("ws://{}", listener.local_addr().unwrap());
+    let gateway = fake_gateway(listener);
+    let config = BridgeConfig {
+        telegram_api: api,
+        telegram_token: "TEST".into(),
+        owner_id: OWNER,
+        gateway: ConnectOptions {
+            gateway: gateway_url,
+            agent: "assistant".into(),
+            session_id: Some("main".into()),
+            token: Some("zc_token".into()),
+        },
+        poll_wait: Duration::from_millis(10),
+    };
+    (tg, gateway, config, server)
+}
+
+fn intake_ack(message: &Value, cursor: i64) -> Value {
+    json!({"type":"ack","id":message["id"],"status":"accepted","durable":true,"intake_version":1,"state":"pending",
+        "source":{"namespace":message["source"]["namespace"],"update_id":message["source"]["update_id"],"cursor":cursor}})
+}
+
+async fn raw_send(ws: &mut Ws, frame: Value) {
+    ws.send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+}
+
+fn no_source_confirmation(tg: &Shared) {
+    assert!(
+        tg.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|(method, _)| method == "getUpdates")
+            .all(|(_, body)| body["offset"] == 0),
+        "unaccepted source must stay on Telegram"
+    );
+}
+
+#[tokio::test]
+async fn only_matching_versioned_durable_acceptance_releases_the_source_cursor() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config));
+    let mut ws = attach(&mut gateway).await;
+    FakeTelegram::text(&tg, OWNER, "keep until accepted");
+    let message = recv_raw(&mut ws).await;
+    assert_eq!(message["id"], "tg:9000:42:1");
+    assert_eq!(message["source"]["previous_cursor"], 0);
+    let valid = intake_ack(&message, 2);
+    let mut invalid = vec![
+        json!({"type":"ack","id":message["id"],"status":"accepted"}),
+        json!({"type":"ack","id":message["id"],"status":"accepted","durable":true}),
+    ];
+    for (field, value) in [
+        ("durable", json!(false)),
+        ("intake_version", json!(2)),
+        ("status", json!("new_semantics")),
+        ("state", json!("new_semantics")),
+        ("id", json!("tg:9000:42:999")),
+    ] {
+        let mut frame = valid.clone();
+        frame[field] = value;
+        invalid.push(frame);
+    }
+    for (field, value) in [
+        ("namespace", json!("telegram:9999:42")),
+        ("update_id", json!(999)),
+    ] {
+        let mut frame = valid.clone();
+        frame["source"][field] = value;
+        invalid.push(frame);
+    }
+    for frame in invalid {
+        raw_send(&mut ws, frame).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        no_source_confirmation(&tg);
+    }
+    assert_eq!(tg.lock().unwrap().updates.len(), 1);
+    raw_send(&mut ws, valid).await;
+    FakeTelegram::wait_for(&tg, "getUpdates", |body| body["offset"] == 2).await;
+    assert!(tg.lock().unwrap().updates.is_empty());
+    running.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn out_of_order_acceptance_keeps_the_gap_and_uses_the_gateway_cursor() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config));
+    let mut ws = attach(&mut gateway).await;
+    FakeTelegram::text(&tg, OWNER, "first");
+    tg.lock().unwrap().next_update = 20; // Numeric gaps are valid source order.
+    FakeTelegram::text(&tg, OWNER, "second");
+    let first = recv_raw(&mut ws).await;
+    let second = recv_raw(&mut ws).await;
+    assert_eq!(second["source"]["previous_cursor"], 2);
+    raw_send(&mut ws, intake_ack(&second, 0)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    no_source_confirmation(&tg);
+    assert_eq!(tg.lock().unwrap().updates.len(), 2);
+    raw_send(&mut ws, intake_ack(&first, 22)).await;
+    FakeTelegram::wait_for(&tg, "getUpdates", |body| body["offset"] == 22).await;
+    assert!(tg.lock().unwrap().updates.is_empty());
+    running.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn bridge_restart_before_acceptance_replays_the_same_source_identity() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let first_run = tokio::spawn(run(config.clone()));
+    let mut first_socket = attach(&mut gateway).await;
+    FakeTelegram::text(&tg, OWNER, "survive the process");
+    let first = recv_raw(&mut first_socket).await;
+    no_source_confirmation(&tg);
+    first_run.abort();
+    let _ = first_run.await;
+    drop(first_socket);
+    let second_run = tokio::spawn(run(config));
+    let mut second_socket = attach(&mut gateway).await;
+    let replay = recv_raw(&mut second_socket).await;
+    assert_eq!(replay, first);
+    raw_send(&mut second_socket, intake_ack(&replay, 2)).await;
+    FakeTelegram::wait_for(&tg, "getUpdates", |body| body["offset"] == 2).await;
+    second_run.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn durable_control_disposition_precedes_execution_and_duplicate_does_not_repeat_it() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config.clone()));
+    let mut ws = attach(&mut gateway).await;
+    FakeTelegram::text(&tg, OWNER, "/cancel");
+    let disposition = recv_raw(&mut ws).await;
+    assert_eq!(disposition["type"], "source_disposition");
+    assert_eq!(disposition["disposition"], "control");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err()
+    );
+    let mut ack = intake_ack(&disposition, 0);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack.clone()).await;
+    assert_eq!(recv_raw(&mut ws).await["type"], "cancel");
+    ack["status"] = json!("duplicate");
+    raw_send(&mut ws, ack).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err()
+    );
+    running.abort();
+    let _ = running.await;
+    drop(ws);
+
+    // The process died before Telegram confirmed the control. Its persisted
+    // source row is restored, so source replay must not cancel a new turn.
+    let restarted = tokio::spawn(run(config));
+    let ready = json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":2,"unknown":[],
+        "receipts":[{"update_id":1,"previous_cursor":0,"id":disposition["id"],"state":"control"}]});
+    let mut ws = attach_ready(&mut gateway, ready).await;
+    FakeTelegram::wait_for(&tg, "getUpdates", |body| body["offset"] == 2).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err(),
+        "a restored control cannot execute again"
+    );
+    restarted.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_unsupported_source_contract_never_starts_telegram_polling() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config));
+    let mut ws = attach_ready(&mut gateway, json!({"type":"source_ready","intake_version":2,"source":"telegram:9000:42","cursor":900,"unknown":[],"receipts":[]})).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !tg.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(method, _)| method == "getUpdates")
+    );
+    // A socket close is transport cleanup, never an input confirmation.
+    let _ = ws.close(None).await;
+    running.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn restored_attachment_receipts_are_checked_before_any_download() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    FakeTelegram::push(
+        &tg,
+        json!({"message":{"message_id":1,"from":{"id":OWNER},"chat":{"id":OWNER,"type":"private"},
+        "document":{"file_id":"must-not-download","file_name":"note.txt","mime_type":"text/plain"}}}),
+    );
+    let running = tokio::spawn(run(config));
+    let ready = json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":2,"unknown":[],
+        "receipts":[{"update_id":1,"previous_cursor":0,"id":"tg:9000:42:1","state":"pending"}]});
+    let mut ws = attach_ready(&mut gateway, ready).await;
+    FakeTelegram::wait_for(&tg, "getUpdates", |body| body["offset"] == 2).await;
+    assert!(
+        !tg.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(method, _)| method == "getFile")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err()
+    );
+    running.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_unknown_lower_update_holds_the_old_cursor_after_the_startup_probe() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    FakeTelegram::text(&tg, OWNER, "new source sequence after long idle");
+    let running = tokio::spawn(run(config));
+    let ready = json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":900,"unknown":[],"receipts":[]});
+    let mut ws = attach_ready(&mut gateway, ready).await;
+    let input = recv_raw(&mut ws).await;
+    assert_eq!(input["source"]["previous_cursor"], 900);
+    raw_send(&mut ws, json!({"type":"error","id":input["id"],"code":"SOURCE_SEQUENCE","message":"unknown lower update"})).await;
+    FakeTelegram::wait_for(&tg, "getUpdates", |body| body["offset"] == 1).await;
+    assert!(
+        tg.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|(method, _)| method == "getUpdates")
+            .all(|(_, body)| body["offset"].as_i64().unwrap() <= 1)
+    );
+    assert_eq!(tg.lock().unwrap().updates.len(), 1);
+    running.abort();
+    server.abort();
 }

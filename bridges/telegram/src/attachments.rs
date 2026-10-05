@@ -113,6 +113,7 @@ mod tests {
     use tokio::sync::{Semaphore, mpsc};
     struct Telegram {
         updates: Mutex<VecDeque<Value>>,
+        next_update: std::sync::atomic::AtomicI64,
         downloads: std::sync::atomic::AtomicUsize,
         gate: Semaphore,
     }
@@ -122,10 +123,15 @@ mod tests {
         Json(body): Json<Value>,
     ) -> Json<Value> {
         match method.as_str() {
+            "getMe" => Json(json!({"ok":true,"result":{"id":9000,"is_bot":true}})),
             "getUpdates" => {
                 tokio::time::sleep(Duration::from_millis(10)).await;
+                let mut updates = tg.updates.lock().unwrap();
+                updates.retain(|update| {
+                    update["update_id"].as_i64().unwrap() >= body["offset"].as_i64().unwrap()
+                });
                 Json(
-                    json!({"ok":true,"result":tg.updates.lock().unwrap().drain(..).collect::<Vec<_>>() }),
+                    json!({"ok":true,"result":updates.iter().take(100).cloned().collect::<Vec<_>>() }),
                 )
             }
             "getFile" => {
@@ -174,7 +180,14 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match ws.recv().await {
-                    Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
+                    Some(Ok(Message::Text(text))) => {
+                        let frame: Value = serde_json::from_str(&text).unwrap();
+                        if frame["type"] == "source_disposition" {
+                            let mut source = frame["source"].clone();
+                            source["cursor"] = json!(0);
+                            ws.send(Message::Text(json!({"type":"ack","id":frame["id"],"status":"accepted","state":frame["disposition"],"durable":true,"intake_version":1,"source":source}).to_string().into())).await.unwrap();
+                        } else { return frame; }
+                    }
                     Some(Ok(Message::Close(_))) | None => {
                         panic!("fixture socket closed before expected frame")
                     }
@@ -186,8 +199,28 @@ mod tests {
         .await
         .unwrap()
     }
-    async fn send(ws: &mut WebSocket, v: Value) {
+    async fn send(ws: &mut WebSocket, mut v: Value) {
+        if v["type"] == "ack" {
+            let update_id: i64 = v["id"]
+                .as_str()
+                .unwrap()
+                .rsplit(':')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            v["durable"] = json!(true);
+            v["intake_version"] = json!(1);
+            v["source"] = json!({"namespace":"telegram:9000:42","update_id":update_id,"cursor":0});
+            if v.get("state").is_none() {
+                v["state"] = json!("pending");
+            }
+        }
         ws.send(Message::Text(v.to_string().into())).await.unwrap();
+    }
+    async fn resume(ws: &mut WebSocket, cursor: i64, receipts: Value) {
+        assert_eq!(value(ws).await["type"], "source_resume");
+        ws.send(Message::Text(json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":cursor,"unknown":[],"receipts":receipts}).to_string().into())).await.unwrap();
     }
     fn push(tg: &Telegram, from: i64, file: bool) {
         let mut message =
@@ -199,12 +232,20 @@ mod tests {
         } else {
             message["text"] = json!("/cancel");
         }
-        tg.updates.lock().unwrap().push_back(json!({"update_id":tg.downloads.load(std::sync::atomic::Ordering::Relaxed) as i64 + 1,"message":message}));
+        let update_id = tg
+            .next_update
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        tg.updates
+            .lock()
+            .unwrap()
+            .push_back(json!({"update_id":update_id,"message":message}));
     }
     #[tokio::test]
     async fn owner_file_upload_uses_http_handles_and_does_not_block_cancel() {
         let tg = Arc::new(Telegram {
             updates: Mutex::default(),
+            next_update: std::sync::atomic::AtomicI64::new(0),
             downloads: std::sync::atomic::AtomicUsize::new(0),
             gate: Semaphore::new(0),
         });
@@ -242,6 +283,7 @@ mod tests {
         send(&mut ws, json!({"type":"session_start","session_id":"main"})).await;
         assert_eq!(value(&mut ws).await["type"], "connect");
         send(&mut ws, json!({"type":"connected"})).await;
+        resume(&mut ws, 0, json!([])).await;
         push(&tg, 7, true);
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(tg.downloads.load(std::sync::atomic::Ordering::Relaxed), 0);
@@ -259,7 +301,11 @@ mod tests {
             "cancel",
             "upload must not block controls"
         );
-        tg.updates.lock().unwrap().push_back(json!({"update_id":3,"message":{"message_id":11,"from":{"id":42},"chat":{"id":42,"type":"private"},"text":"follow-up after file"}}));
+        let following_id = tg
+            .next_update
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        tg.updates.lock().unwrap().push_back(json!({"update_id":following_id,"message":{"message_id":11,"from":{"id":42},"chat":{"id":42,"type":"private"},"text":"follow-up after file"}}));
         tokio::time::sleep(Duration::from_millis(50)).await;
         tg.gate.add_permits(1);
         let frame = value(&mut ws).await;
@@ -291,12 +337,18 @@ mod tests {
         .await;
         assert_eq!(value(&mut again).await["type"], "connect");
         send(&mut again, json!({"type":"connected"})).await;
+        let mut receipts = json!([
+            {"update_id":1,"previous_cursor":0,"id":"tg:9000:42:1","state":"ignored"},
+            {"update_id":3,"previous_cursor":3,"id":"tg:9000:42:3","state":"control"},
+            {"update_id":4,"previous_cursor":4,"id":"tg:9000:42:4","state":"pending"}
+        ]);
+        resume(&mut again, 2, receipts.clone()).await;
         let replay = value(&mut again).await;
         assert_eq!(replay, frame);
         assert_eq!(tg.downloads.load(std::sync::atomic::Ordering::Relaxed), 1);
         send(
             &mut again,
-            json!({"type":"error","id":frame["id"],"code":"UNAUTHORIZED_ATTACHMENTS","message":"fixture rejection"}),
+            json!({"type":"ack","id":frame["id"],"status":"accepted","state":"rejected"}),
         )
         .await;
         // A definitive rejection ends retries. Reconnecting after permission
@@ -314,6 +366,10 @@ mod tests {
         .await;
         assert_eq!(value(&mut third).await["type"], "connect");
         send(&mut third, json!({"type":"connected"})).await;
+        receipts.as_array_mut().unwrap().push(
+            json!({"update_id":2,"previous_cursor":2,"id":"tg:9000:42:2","state":"rejected"}),
+        );
+        resume(&mut third, 5, receipts).await;
         push(&tg, 42, false);
         assert_eq!(
             value(&mut third).await["type"],

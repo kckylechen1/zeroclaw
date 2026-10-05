@@ -138,6 +138,12 @@ struct Sent {
     message_id: i64,
 }
 
+#[derive(Deserialize)]
+struct BotIdentity {
+    id: i64,
+    is_bot: bool,
+}
+
 /// A Bot API client for one bot token.
 #[derive(Clone)]
 pub struct Api {
@@ -242,6 +248,15 @@ impl Api {
             .await
             .map_err(reqwest::Error::without_url)?;
         bounded_bytes(response, DOWNLOAD_LIMIT).await
+    }
+
+    /// Resolve the public bot identity without deriving anything from its token.
+    pub async fn bot_id(&self) -> Result<i64> {
+        let bot: BotIdentity = self.call("getMe", json!({}), SHORT).await?;
+        if !bot.is_bot || bot.id <= 0 {
+            bail!("Telegram getMe did not return a valid bot identity");
+        }
+        Ok(bot.id)
     }
 
     /// Long-poll for updates after `offset`, waiting up to `wait`.
