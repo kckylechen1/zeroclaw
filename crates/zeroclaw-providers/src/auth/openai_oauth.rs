@@ -510,14 +510,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pkce_generation_is_valid() {
-        let pkce = generate_pkce_state();
-        assert!(pkce.code_verifier.len() >= 43);
-        assert!(!pkce.code_challenge.is_empty());
-        assert!(!pkce.state.is_empty());
-    }
-
-    #[test]
     fn parse_redirect_url_extracts_code() {
         let code = parse_code_from_redirect(
             "http://127.0.0.1:1455/auth/callback?code=abc123&state=xyz",

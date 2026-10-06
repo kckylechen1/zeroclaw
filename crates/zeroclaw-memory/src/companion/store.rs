@@ -15,8 +15,6 @@ const MIGRATE_CLI_HINT: &str = "zeroclaw companion migrate";
 pub struct CompanionStore {
     path: PathBuf,
     store: Mutex<MemoryStore>,
-    #[cfg(test)]
-    fail_next_writes: std::sync::atomic::AtomicU32,
 }
 
 impl CompanionStore {
@@ -109,24 +107,6 @@ impl CompanionStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_next_writes(&self, n: u32) {
-        self.fail_next_writes
-            .store(n, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_write_refusal(&self) -> bool {
-        use std::sync::atomic::Ordering;
-        let current = self.fail_next_writes.load(Ordering::SeqCst);
-        if current == 0 {
-            return false;
-        }
-        self.fail_next_writes
-            .store(current.saturating_sub(1), Ordering::SeqCst);
-        true
-    }
-
-    #[cfg(test)]
     pub(crate) fn store_handle(&self) -> &Mutex<MemoryStore> {
         &self.store
     }
@@ -160,8 +140,6 @@ impl CompanionStore {
         Ok(Self {
             path: path.to_path_buf(),
             store: Mutex::new(store),
-            #[cfg(test)]
-            fail_next_writes: std::sync::atomic::AtomicU32::new(0),
         })
     }
 }
