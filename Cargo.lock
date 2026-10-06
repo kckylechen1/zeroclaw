@@ -8823,7 +8823,6 @@ name = "zeroclawlabs"
 version = "0.8.3"
 dependencies = [
  "anyhow",
- "async-imap",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -8848,13 +8847,11 @@ dependencies = [
  "hyper-util",
  "image",
  "indicatif",
- "lettre",
  "libc",
  "lru 0.18.4",
  "mail-parser",
  "mime_guess",
  "nanohtml2text",
- "nostr-sdk",
  "parking_lot",
  "portable-atomic",
  "rand 0.10.3",

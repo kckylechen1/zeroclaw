@@ -137,7 +137,6 @@ pub use crate::wecom_ws::WeComWsChannel;
 use crate::wecom_ws::WeComWsRuntimePolicy;
 pub use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
 // Local channel types (in misc, not zeroclaw-channels)
-pub use crate::cli::CliChannel;
 pub use crate::link_enricher;
 #[cfg(feature = "channel-matrix")]
 pub use crate::matrix::MatrixChannel;
