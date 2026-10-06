@@ -21,7 +21,6 @@ pub mod util;
 // Always-compiled channels and utilities (no feature gate)
 #[cfg(feature = "channel-acp-server")]
 pub mod acp_channel;
-pub mod cli;
 pub mod link_enricher;
 pub mod transcription;
 pub mod tts;

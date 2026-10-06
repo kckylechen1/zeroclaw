@@ -175,9 +175,6 @@ cron = { version = "0.15", optional = true }
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 console = "0.16"
 
-# Nostr key validation for wizard (behind channel-nostr feature)
-nostr-sdk = { version = "0.44", default-features = false, optional = true }
-
 # Binary discovery (init system detection)
 which = { version = "8.0", optional = true }
 
@@ -188,10 +185,8 @@ regex = "1.10"
 hostname = { version = "0.4.2", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"], optional = true }
 
-# email
-lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"], optional = true }
+# MIME parsing for email attachment integration tests
 mail-parser = { version = "0.11.2", optional = true }
-async-imap = { version = "0.11", features = ["runtime-tokio"], default-features = false, optional = true }
 
 # HTTP server (gateway) — replaces raw TCP for proper HTTP/1.1 compliance
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws", "macros"], optional = true }
@@ -332,10 +327,10 @@ gateway = [
 schema-export = ["zeroclaw-config/schema-export", "zeroclaw-gateway?/schema-export"]
 
 # Channels — each forwards to zeroclaw-channels.
-channel-email = ["zeroclaw-channels/channel-email", "zeroclaw-runtime?/email-tools", "dep:lettre", "dep:mail-parser", "dep:async-imap"]
+channel-email = ["zeroclaw-channels/channel-email", "zeroclaw-runtime?/email-tools", "dep:mail-parser"]
 channel-telegram = ["zeroclaw-channels/channel-telegram"]
 channel-lark = ["zeroclaw-channels/channel-lark"]
-channel-nostr = ["zeroclaw-channels/channel-nostr", "dep:nostr-sdk"]
+channel-nostr = ["zeroclaw-channels/channel-nostr"]
 channel-matrix = ["zeroclaw-channels/channel-matrix"]
 channel-discord = ["zeroclaw-channels/channel-discord"]
 channel-slack = ["zeroclaw-channels/channel-slack"]
