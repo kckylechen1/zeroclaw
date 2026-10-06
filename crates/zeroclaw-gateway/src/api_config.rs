@@ -2,7 +2,7 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -15,6 +15,7 @@ use zeroclaw_config::traits::MaskSecrets;
 use super::AppState;
 use super::ConfigWriteGuard;
 use super::api::require_auth;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 // ── Request / response shapes ───────────────────────────────────────
@@ -395,11 +396,24 @@ async fn persist_and_swap(
     state: &AppState,
     mut new_config: zeroclaw_config::schema::Config,
     _guard: &ConfigWriteGuard,
-) -> Result<(), ConfigApiError> {
+    operator_request: Option<(SocketAddr, &HeaderMap)>,
+) -> Result<(), Response> {
     debug_assert!(
         state.config_write_lock.try_lock().is_err(),
         "persist_and_swap caller must hold state.config_write_lock"
     );
+    // Attention permissions are owner-authored even on an unpaired gateway.
+    // Compare canonical typed values so parent replacement and nested edits
+    // cannot bypass a string-prefix path check.
+    let attention_changed = state.config.read().gateway.attention != new_config.gateway.attention;
+    if attention_changed {
+        let Some((peer, headers)) = operator_request else {
+            return Err((StatusCode::UNAUTHORIZED, "attention_operator_required").into_response());
+        };
+        if let Some(error) = crate::operator_auth::gate_operator_identity(state, peer, headers) {
+            return Err(error);
+        }
+    }
     let config_path = new_config.config_path.clone();
 
     // Snapshot pre-write disk state (used for revert on save failure). When
@@ -418,10 +432,10 @@ async fn persist_and_swap(
         } else if config_path.exists() {
             let _ = tokio::fs::remove_file(&config_path).await;
         }
-        return Err(ConfigApiError::new(
+        return Err(error_response(ConfigApiError::new(
             ConfigApiCode::ReloadFailed,
             format!("save failed: {e}"),
-        ));
+        )));
     }
 
     *state.config.write() = new_config;
@@ -690,6 +704,7 @@ pub async fn handle_prop_get(
 }
 
 pub async fn handle_prop_put(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::Json(body): axum::Json<PropPutBody>,
@@ -755,8 +770,9 @@ pub async fn handle_prop_put(
     let config_path = new_config.config_path.clone();
     let mut warnings = new_config.collect_warnings();
     warnings.extend(scoped_validation_warnings);
-    if let Err(e) = persist_and_swap(&state, new_config, &_cfg_guard).await {
-        return error_response(e);
+    if let Err(e) = persist_and_swap(&state, new_config, &_cfg_guard, Some((peer, &headers))).await
+    {
+        return e;
     }
     if let Some(comment) = body.comment.as_ref() {
         let annotations = [(body.path.clone(), comment.clone())];
@@ -790,6 +806,7 @@ pub async fn handle_prop_put(
 }
 
 pub async fn handle_prop_delete(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<PropQuery>,
@@ -816,8 +833,9 @@ pub async fn handle_prop_delete(
 
     let mut warnings = new_config.collect_warnings();
     warnings.extend(scoped_validation_warnings);
-    if let Err(e) = persist_and_swap(&state, new_config, &_cfg_guard).await {
-        return error_response(e);
+    if let Err(e) = persist_and_swap(&state, new_config, &_cfg_guard, Some((peer, &headers))).await
+    {
+        return e;
     }
 
     if info.is_secret || info.derived_from_secret {
@@ -1047,6 +1065,7 @@ pub async fn handle_get_map_keys(
 /// support route through the same cascade engine as the delete preview;
 /// non-aliased sections keep the generic raw key removal. Persists on success.
 pub async fn handle_delete_map_key(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<MapKeyQuery>,
@@ -1083,8 +1102,9 @@ pub async fn handle_delete_map_key(
     };
     if removed {
         working.mark_dirty(&format!("{}.{}", q.path, q.key));
-        if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
-            return error_response(e);
+        if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some((peer, &headers))).await
+        {
+            return e;
         }
     }
     axum::Json(MapKeyResponse {
@@ -1179,8 +1199,8 @@ async fn delete_agent_cascade(
     for path in cascade.dirty_paths() {
         working.mark_dirty(&path);
     }
-    if let Err(e) = persist_and_swap(state, working, &guard).await {
-        return error_response(e);
+    if let Err(e) = persist_and_swap(state, working, &guard, None).await {
+        return e;
     }
     // Config is committed (saved + swapped). Release before the post-commit
     // side effects below: workspace archive and the memory/cron/ACP/session
@@ -1275,8 +1295,8 @@ async fn delete_config_cascade(
     for dirty_path in &dirty_paths {
         working.mark_dirty(dirty_path);
     }
-    if let Err(e) = persist_and_swap(state, working, guard).await {
-        return error_response(e);
+    if let Err(e) = persist_and_swap(state, working, guard, None).await {
+        return e;
     }
     ::zeroclaw_log::record!(
         INFO,
@@ -1295,6 +1315,7 @@ async fn delete_config_cascade(
 }
 
 pub async fn handle_map_key(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<MapKeyQuery>,
@@ -1354,8 +1375,9 @@ pub async fn handle_map_key(
         }
 
         working.mark_dirty(&format!("{path}.{key}"));
-        if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
-            return error_response(e);
+        if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some((peer, &headers))).await
+        {
+            return e;
         }
     }
 
@@ -1561,6 +1583,7 @@ fn delete_error_response(
 }
 
 pub async fn handle_rename_map_key(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::Json(body): axum::Json<RenameMapKeyBody>,
@@ -1594,8 +1617,10 @@ pub async fn handle_rename_map_key(
             if renamed {
                 working.mark_dirty(&format!("{}.{}", body.path, body.from));
                 working.mark_dirty(&format!("{}.{}", body.path, body.to));
-                if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
-                    return error_response(e);
+                if let Err(e) =
+                    persist_and_swap(&state, working, &_cfg_guard, Some((peer, &headers))).await
+                {
+                    return e;
                 }
             }
             axum::Json(RenameMapKeyResponse {
@@ -1631,8 +1656,8 @@ async fn rename_config_cascade(
     for path in &report.dirty_paths {
         working.mark_dirty(path);
     }
-    if let Err(e) = persist_and_swap(state, working, guard).await {
-        return error_response(e);
+    if let Err(e) = persist_and_swap(state, working, guard, None).await {
+        return e;
     }
     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"path": body.path, "from": body.from, "to": body.to, "dirty_paths": report.dirty_paths.len()})), "alias renamed with config-ref cascade");
     axum::Json(RenameMapKeyResponse {
@@ -1749,8 +1774,8 @@ async fn rename_agent_cascade(
                     working.mark_dirty(path);
                 }
                 let dirty_count = report.dirty_paths.len();
-                if let Err(e) = persist_and_swap(state, working, &guard).await {
-                    return error_response(e);
+                if let Err(e) = persist_and_swap(state, working, &guard, None).await {
+                    return e;
                 }
                 dirty_count
             }
@@ -1814,6 +1839,7 @@ async fn rename_agent_cascade(
 }
 
 pub async fn handle_refresh_context_window(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path((provider_type, alias)): axum::extract::Path<(String, String)>,
@@ -1915,8 +1941,8 @@ pub async fn handle_refresh_context_window(
     }
 
     working.mark_dirty(&format!("{path}.context_window"));
-    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
-        return error_response(e);
+    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some((peer, &headers))).await {
+        return e;
     }
 
     axum::Json(serde_json::json!({
@@ -1927,6 +1953,7 @@ pub async fn handle_refresh_context_window(
 }
 
 pub async fn handle_patch(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -2182,8 +2209,8 @@ pub async fn handle_patch(
     // callers see it.
     let mut warnings = working.collect_warnings();
     warnings.extend(scoped_validation_warnings);
-    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
-        return error_response(e);
+    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some((peer, &headers))).await {
+        return e;
     }
     if !annotations.is_empty()
         && let Err(e) =
@@ -2236,6 +2263,7 @@ pub struct InitResponse {
 /// through `POST /api/config/map-key`. When every requested section is already
 /// configured, returns `{initialized: []}`.
 pub async fn handle_init(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<InitQuery>,
@@ -2263,8 +2291,8 @@ pub async fn handle_init(
     if let Err(err) = scoped_validate(&working) {
         return error_response(err);
     }
-    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
-        return error_response(e);
+    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some((peer, &headers))).await {
+        return e;
     }
 
     axum::Json(InitResponse { initialized }).into_response()
@@ -2679,6 +2707,72 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn attention_policy_changes_always_require_operator_at_persistence_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(temp_config(&tmp));
+        state.pairing = Arc::new(PairingGuard::new(
+            false,
+            &[PairingGuard::token_hash("owner-token")],
+        ));
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let guard = Arc::clone(&state.config_write_lock).lock_owned().await;
+        let policy = zeroclaw_config::attention::AttentionConfig {
+            timezone: "Europe/London".into(),
+            quiet_start: "22:00".into(),
+            quiet_end: "08:00".into(),
+            ..Default::default()
+        };
+        for token in [None, Some("bridge-token")] {
+            let mut working = state.config.read().clone();
+            working.gateway.attention = Some(policy.clone());
+            let mut headers = HeaderMap::new();
+            if let Some(token) = token {
+                headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+            }
+            let error = persist_and_swap(&state, working, &guard, Some((peer, &headers)))
+                .await
+                .unwrap_err();
+            assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+            assert!(state.config.read().gateway.attention.is_none());
+        }
+        let attacker: SocketAddr = "127.0.0.2:12345".parse().unwrap();
+        let mut bad_headers = HeaderMap::new();
+        bad_headers.insert("authorization", "Bearer guessed-token".parse().unwrap());
+        let mut limited = false;
+        for _ in 0..100 {
+            let mut working = state.config.read().clone();
+            working.gateway.attention = Some(policy.clone());
+            let error = persist_and_swap(&state, working, &guard, Some((attacker, &bad_headers)))
+                .await
+                .unwrap_err();
+            if error.status() == StatusCode::TOO_MANY_REQUESTS {
+                limited = true;
+                break;
+            }
+            assert_eq!(error.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert!(
+            limited,
+            "wrong bearer guesses must hit the shared operator limiter"
+        );
+        let mut owner_headers = HeaderMap::new();
+        owner_headers.insert("authorization", "Bearer owner-token".parse().unwrap());
+        let mut working = state.config.read().clone();
+        working.gateway.attention = Some(policy);
+        working.mark_dirty("gateway.attention");
+        persist_and_swap(&state, working, &guard, Some((peer, &owner_headers)))
+            .await
+            .unwrap();
+        let mut replacement = state.config.read().clone();
+        replacement.gateway.attention = None;
+        assert!(
+            persist_and_swap(&state, replacement, &guard, None)
+                .await
+                .is_err()
+        );
+    }
+
     async fn response_json(response: Response) -> (StatusCode, serde_json::Value) {
         let status = response.status();
         let body = response
@@ -2702,6 +2796,7 @@ mod tests {
         let state = test_state(temp_config(&tmp));
         let (status, json) = response_json(
             handle_prop_put(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
                 State(state.clone()),
                 HeaderMap::new(),
                 axum::Json(PropPutBody {
@@ -2739,6 +2834,7 @@ mod tests {
         let state = test_state(config);
         let (status, _json) = response_json(
             handle_prop_put(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
                 State(state.clone()),
                 HeaderMap::new(),
                 axum::Json(PropPutBody {
@@ -2772,6 +2868,7 @@ mod tests {
         // Secret path: the response envelope is `{path, populated}`, not `value`.
         let (status, _json) = response_json(
             handle_prop_put(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
                 State(state.clone()),
                 HeaderMap::new(),
                 axum::Json(PropPutBody {
@@ -2813,6 +2910,7 @@ mod tests {
         let held_guard = Arc::clone(&state.config_write_lock).lock_owned().await;
 
         let mut handler_fut = Box::pin(handle_prop_put(
+            ConnectInfo("127.0.0.1:12345".parse().unwrap()),
             State(state.clone()),
             HeaderMap::new(),
             axum::Json(PropPutBody {
@@ -2868,6 +2966,7 @@ mod tests {
         let state = test_state(config);
         let (status, json) = response_json(
             handle_patch(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
                 State(state.clone()),
                 HeaderMap::new(),
                 axum::Json(serde_json::json!([{
@@ -2922,6 +3021,7 @@ mod tests {
         let state = test_state(config);
         let (status, json) = response_json(
             handle_delete_map_key(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
                 axum::extract::State(state.clone()),
                 axum::http::HeaderMap::new(),
                 axum::extract::Query(MapKeyQuery {
@@ -2973,6 +3073,7 @@ mod tests {
         let state = test_state(config);
         let (status, json) = response_json(
             handle_delete_map_key(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
                 axum::extract::State(state.clone()),
                 axum::http::HeaderMap::new(),
                 axum::extract::Query(MapKeyQuery {
@@ -3015,6 +3116,7 @@ mod tests {
         let state = test_state(config);
         let (status, json) = response_json(
             handle_delete_map_key(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
                 axum::extract::State(state.clone()),
                 axum::http::HeaderMap::new(),
                 axum::extract::Query(MapKeyQuery {
@@ -3089,6 +3191,7 @@ mod tests {
         let state = test_state(config);
         let (status, json) = response_json(
             handle_delete_map_key(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
                 axum::extract::State(state.clone()),
                 axum::http::HeaderMap::new(),
                 axum::extract::Query(MapKeyQuery {
@@ -4331,6 +4434,9 @@ mod tests {
                 axum::http::Request::builder()
                     .method("POST")
                     .uri("/api/config/model-providers/groq/test/refresh-context-window")
+                    .extension(ConnectInfo(
+                        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+                    ))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

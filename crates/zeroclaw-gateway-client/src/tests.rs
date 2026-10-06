@@ -262,3 +262,32 @@ async fn question_answers_use_a_separate_correlated_protocol() {
         serde_json::json!({"type":"answer", "request_id":"q1", "text":"hello"})
     );
 }
+
+#[tokio::test]
+#[allow(clippy::result_large_err)]
+async fn bridge_control_requires_server_selection_of_v2() {
+    for selected in [None, Some("zeroclaw.bridge.v1"), Some(BRIDGE_PROTOCOL)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(stream,
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    assert_eq!(request.headers().get(header::SEC_WEBSOCKET_PROTOCOL).unwrap(), BRIDGE_PROTOCOL);
+                    if let Some(selected) = selected {
+                        response.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static(selected));
+                    }
+                    Ok(response)
+                }).await.unwrap();
+            let _ = socket
+                .send(Message::Text(
+                    r#"{"type":"bridge_start","bridge":"tg"}"#.into(),
+                ))
+                .await;
+        });
+        let result = BridgeClient::connect(&gateway, "synthetic-bridge-token").await;
+        assert_eq!(result.is_ok(), selected == Some(BRIDGE_PROTOCOL));
+        server.await.unwrap();
+    }
+}

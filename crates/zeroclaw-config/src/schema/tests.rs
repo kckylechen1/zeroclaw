@@ -3998,6 +3998,7 @@ async fn checklist_gateway_cli_default_host_is_localhost() {
 #[test]
 async fn checklist_gateway_serde_roundtrip() {
     let g = GatewayConfig {
+        attention: None,
         port: 42617,
         host: "127.0.0.1".into(),
         require_pairing: true,

@@ -4,15 +4,14 @@
 //! control socket open. The gateway sends proactive messages queued in the
 //! bridge outbox (cron output, heartbeat alerts, the `notify` tool) as
 //! `deliver {id, to, thread_id?, content}` frames, and the bridge answers
-//! `delivered {id}` once the platform accepted the message; the row is then
-//! deleted.
+//! `delivered {id}` once the platform accepted the message; a confirmed
+//! receipt remains in the outbox. Socket handoff alone is never confirmation.
 //!
 //! - The bridge is identified by its token (`[gateway.bridges.<name>]`),
 //!   never by a query parameter. The token is always required, whatever
 //!   `require_pairing` says, and paired tokens are not accepted.
-//! - On connect every unacknowledged row is replayed oldest first; rows
-//!   queued later follow in the same order, so replay always precedes live
-//!   delivery.
+//! - Accepted rows are evaluated against live attention policy on every poll.
+//!   Attempted rows with no receipt are unknown and never blindly resent.
 //! - One control socket per bridge: a new connection closes the old one.
 
 use super::AppState;
@@ -34,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use zeroclaw_infra::bridge_outbox::BridgeOutbox;
 
 /// The sub-protocol echoed when the client offers it.
-const BRIDGE_PROTOCOL: &str = "zeroclaw.bridge.v1";
+const BRIDGE_PROTOCOL: &str = "zeroclaw.bridge.v2";
 /// Close code sent to a control socket that a newer connection replaced.
 const CLOSE_REPLACED: u16 = 4000;
 /// How often a socket re-reads the outbox without a local wake-up; picks up
@@ -42,6 +41,8 @@ const CLOSE_REPLACED: u16 = 4000;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Rows read per outbox query.
 const BATCH: usize = 100;
+/// A missing receipt closes the socket without claiming subsequent candidates.
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The live control socket of each bridge.
 #[derive(Default)]
@@ -52,25 +53,42 @@ pub struct BridgeSockets {
 
 impl BridgeSockets {
     /// Register a new socket for `bridge`, closing the previous one.
-    fn claim(&self, bridge: &str) -> (u64, CancellationToken) {
+    fn claim(
+        &self,
+        bridge: &str,
+        outbox: &BridgeOutbox,
+    ) -> anyhow::Result<(u64, CancellationToken)> {
+        let mut live = self.live.lock();
+        // Recover only with no registered socket, under the same lock used to
+        // install a replacement. Recovery cannot rewrite a new active attempt.
+        if !live.contains_key(bridge) {
+            outbox.mark_unknown(bridge)?;
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let token = CancellationToken::new();
-        if let Some((_, old)) = self
-            .live
-            .lock()
-            .insert(bridge.to_string(), (id, token.clone()))
-        {
+        if let Some((_, old)) = live.insert(bridge.to_string(), (id, token.clone())) {
             old.cancel();
         }
-        (id, token)
+        Ok((id, token))
     }
 
-    /// Drop the registration if it is still this socket's.
-    fn release(&self, bridge: &str, id: u64) {
+    /// A delayed old socket owns only its attempted ID, never a replacement's.
+    fn release(
+        &self,
+        bridge: &str,
+        id: u64,
+        outbox: &BridgeOutbox,
+        in_flight: Option<&str>,
+    ) -> anyhow::Result<()> {
         let mut live = self.live.lock();
+        let outcome = match in_flight {
+            Some(candidate) => outbox.mark_attempt_unknown(bridge, candidate),
+            None => Ok(()),
+        };
         if live.get(bridge).is_some_and(|(current, _)| *current == id) {
             live.remove(bridge);
         }
+        outcome
     }
 }
 
@@ -128,13 +146,12 @@ pub async fn handle_ws_bridge(
         .get("sec-websocket-protocol")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|protos| protos.split(',').any(|p| p.trim() == BRIDGE_PROTOCOL));
-    let ws = if offers_protocol {
-        ws.protocols([BRIDGE_PROTOCOL])
-    } else {
-        ws
-    };
+    if !offers_protocol {
+        return (StatusCode::UPGRADE_REQUIRED, "bridge_protocol_v2_required").into_response();
+    }
+    let ws = ws.protocols([BRIDGE_PROTOCOL]);
     let sockets = Arc::clone(&state.bridge_sockets);
-    ws.on_upgrade(move |socket| run_control_socket(socket, bridge, outbox, sockets))
+    ws.on_upgrade(move |socket| run_control_socket(socket, bridge, outbox, sockets, state))
         .into_response()
 }
 
@@ -143,8 +160,20 @@ async fn run_control_socket(
     bridge: String,
     outbox: Arc<BridgeOutbox>,
     sockets: Arc<BridgeSockets>,
+    state: AppState,
 ) {
-    let (conn_id, replaced) = sockets.claim(&bridge);
+    let (conn_id, replaced) = match sockets.claim(&bridge, &outbox) {
+        Ok(claim) => claim,
+        Err(error) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_attrs(serde_json::json!({"error": error.to_string()})),
+                "attention_recovery_failed"
+            );
+            return;
+        }
+    };
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Connect)
@@ -152,8 +181,30 @@ async fn run_control_socket(
             .with_attrs(::serde_json::json!({"bridge": bridge})),
         "bridge control socket attached"
     );
-    let reason = serve(socket, &bridge, &outbox, &replaced).await;
-    sockets.release(&bridge, conn_id);
+    let mut in_flight = None;
+    let reason = serve(
+        socket,
+        &bridge,
+        &outbox,
+        &replaced,
+        &state,
+        conn_id,
+        &mut in_flight,
+    )
+    .await;
+    if let Err(error) = sockets.release(
+        &bridge,
+        conn_id,
+        &outbox,
+        in_flight.as_ref().map(|(id, _)| id.as_str()),
+    ) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_attrs(serde_json::json!({"error": error.to_string()})),
+            "attention_mark_unknown_failed"
+        );
+    }
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Disconnect)
@@ -168,12 +219,17 @@ async fn serve(
     bridge: &str,
     outbox: &BridgeOutbox,
     replaced: &CancellationToken,
+    state: &AppState,
+    conn_id: u64,
+    in_flight: &mut Option<(String, tokio::time::Instant)>,
 ) -> &'static str {
     let (mut sender, mut receiver) = socket.split();
     // Subscribe before the first read so a write that lands between the
     // read and the wait still wakes this socket.
     let mut changed = outbox.subscribe();
-    let _ = outbox.purge_expired();
+    if outbox.purge_expired().is_err() {
+        return "attention_store_unavailable";
+    }
     let start = serde_json::json!({ "type": "bridge_start", "bridge": bridge });
     if sender
         .send(Message::Text(start.to_string().into()))
@@ -183,17 +239,35 @@ async fn serve(
         return "send failed";
     }
 
-    // Highest row sent on this socket. Starting at 0 replays every row
-    // not yet acknowledged, oldest first.
-    let mut sent_through = 0_i64;
+    // Each poll scans accepted rows again: a deferred low sequence must not
+    // disappear behind a later delivered row. Claims prevent duplicate sends.
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        match send_pending(&mut sender, bridge, outbox, &mut sent_through).await {
-            Ok(()) => {}
-            Err(reason) => return reason,
+        if let Some((id, _)) = in_flight.as_ref() {
+            match outbox.is_resolved(bridge, id) {
+                Ok(true) => *in_flight = None,
+                Ok(false) => {}
+                Err(_) => return "attention_store_unavailable",
+            }
         }
+        if in_flight.is_none() {
+            match send_pending(&mut sender, bridge, outbox, state, conn_id).await {
+                Ok(Some(id)) => {
+                    *in_flight = Some((id, tokio::time::Instant::now() + RECEIPT_TIMEOUT))
+                }
+                Ok(None) => {}
+                Err(reason) => return reason,
+            }
+        }
+        let deadline = in_flight
+            .as_ref()
+            .map(|(_, deadline)| *deadline)
+            .unwrap_or_else(|| tokio::time::Instant::now() + RECEIPT_TIMEOUT);
         tokio::select! {
+            _ = tokio::time::sleep_until(deadline), if in_flight.is_some() => {
+                return "attention_receipt_timeout";
+            }
             () = replaced.cancelled() => {
                 let _ = sender
                     .send(Message::Close(Some(CloseFrame {
@@ -224,10 +298,15 @@ async fn send_pending(
     sender: &mut Sender,
     bridge: &str,
     outbox: &BridgeOutbox,
-    sent_through: &mut i64,
-) -> Result<(), &'static str> {
+    state: &AppState,
+    conn_id: u64,
+) -> Result<Option<String>, &'static str> {
+    outbox
+        .purge_expired()
+        .map_err(|_| "attention_store_unavailable")?;
+    let mut after_seq = 0;
     loop {
-        let rows = match outbox.pending(bridge, *sent_through, BATCH) {
+        let rows = match outbox.pending(bridge, after_seq, BATCH) {
             Ok(rows) => rows,
             Err(e) => {
                 ::zeroclaw_log::record!(
@@ -240,11 +319,40 @@ async fn send_pending(
                         })),
                     "reading the bridge outbox failed"
                 );
-                return Ok(());
+                return Err("attention_store_unavailable");
             }
         };
         let full = rows.len() == BATCH;
         for row in rows {
+            after_seq = row.seq;
+            let now = chrono::Utc::now();
+            // Hold the canonical config read lock through the durable claim;
+            // a policy update cannot slip between evaluation and reservation.
+            let claimed = {
+                // Serialize generation validation and durable reservation with
+                // replacement. A cancelled old socket cannot claim new work.
+                let live = state.bridge_sockets.live.lock();
+                if live.get(bridge).is_none_or(|(id, _)| *id != conn_id) {
+                    return Err("replaced");
+                }
+                let config = state.config.read();
+                let permitted = crate::attention::permits(
+                    config.gateway.attention.as_ref(),
+                    bridge,
+                    &row.to,
+                    &row.source_kind,
+                    &row.source_id,
+                    now,
+                )
+                .map_err(|_| "attention_invalid_policy")?;
+                permitted
+                    && outbox
+                        .claim(bridge, &row.id, now.timestamp())
+                        .map_err(|_| "attention_store_unavailable")?
+            };
+            if !claimed {
+                continue;
+            }
             let mut frame = serde_json::json!({
                 "type": "deliver",
                 "id": row.id,
@@ -254,17 +362,25 @@ async fn send_pending(
             if let Some(thread_id) = row.thread_id {
                 frame["thread_id"] = serde_json::Value::String(thread_id);
             }
-            if sender
-                .send(Message::Text(frame.to_string().into()))
-                .await
-                .is_err()
-            {
+            if !matches!(
+                tokio::time::timeout(
+                    RECEIPT_TIMEOUT,
+                    sender.send(Message::Text(frame.to_string().into()))
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
                 return Err("send failed");
             }
-            *sent_through = row.seq;
+            outbox
+                .mark_sent(bridge, &row.id)
+                .map_err(|_| "attention_store_unavailable")?;
+            // Do not reserve buffered frames that the bridge cannot attempt
+            // until this one's platform result is known.
+            return Ok(Some(row.id));
         }
         if !full {
-            return Ok(());
+            return Ok(None);
         }
     }
 }
@@ -368,6 +484,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replaced_generation_cannot_claim_through_send_pending() {
+        use tokio::io::AsyncWriteExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = bridge_state(&tmp, true);
+        let outbox = outbox(&state);
+        let candidate = outbox.enqueue("tg", "42", None, "still accepted").unwrap();
+        let (old, _) = state.bridge_sockets.claim("tg", &outbox).unwrap();
+        let (current, _) = state.bridge_sockets.claim("tg", &outbox).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let handler_state = state.clone();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |ws: WebSocketUpgrade| {
+                let state = handler_state.clone();
+                let tx = tx.clone();
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        let outbox = self::outbox(&state);
+                        let (mut sender, _) = socket.split();
+                        let stale = send_pending(&mut sender, "tg", &outbox, &state, old).await;
+                        let accepted = outbox.pending("tg", 0, BATCH).unwrap().len();
+                        let active =
+                            send_pending(&mut sender, "tg", &outbox, &state, current).await;
+                        tx.send((stale, accepted, active)).await.unwrap();
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server =
+            zeroclaw_spawn::spawn!(async move { axum::serve(listener, app).await.unwrap() });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.write_all(format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").as_bytes()).await.unwrap();
+        let (stale, accepted, active) = tokio::time::timeout(WAIT, rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale, Err("replaced"));
+        assert_eq!(
+            accepted, 1,
+            "old generation must leave the candidate accepted"
+        );
+        assert_eq!(active, Ok(Some(candidate.clone())));
+        assert_eq!(
+            outbox.inspect("tg", &candidate).unwrap().unwrap()["delivery_state"],
+            "sent"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn delayed_old_socket_cleanup_cannot_change_replacement_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outbox = BridgeOutbox::open(tmp.path()).unwrap();
+        let sockets = BridgeSockets::default();
+        let x = outbox.enqueue("tg", "42", None, "X").unwrap();
+        let y = outbox.enqueue("tg", "42", None, "Y").unwrap();
+        let (old, old_cancel) = sockets.claim("tg", &outbox).unwrap();
+        assert!(
+            outbox
+                .claim("tg", &x, chrono::Utc::now().timestamp())
+                .unwrap()
+        );
+        outbox.mark_sent("tg", &x).unwrap();
+        let (new, _) = sockets.claim("tg", &outbox).unwrap();
+        assert!(old_cancel.is_cancelled());
+        assert!(
+            outbox
+                .claim("tg", &y, chrono::Utc::now().timestamp())
+                .unwrap()
+        );
+        outbox.mark_sent("tg", &y).unwrap();
+        // Deterministic late teardown: new socket already handed off Y.
+        sockets.release("tg", old, &outbox, Some(&x)).unwrap();
+        assert_eq!(
+            outbox.inspect("tg", &x).unwrap().unwrap()["delivery_state"],
+            "unknown"
+        );
+        assert_eq!(
+            outbox.inspect("tg", &y).unwrap().unwrap()["delivery_state"],
+            "sent"
+        );
+        assert_eq!(sockets.live.lock().get("tg").unwrap().0, new);
+        let (newer, _) = sockets.claim("tg", &outbox).unwrap();
+        assert_eq!(
+            outbox.inspect("tg", &y).unwrap().unwrap()["delivery_state"],
+            "sent",
+            "replacement startup must not recover another socket's attempt"
+        );
+        sockets.release("tg", new, &outbox, Some(&y)).unwrap();
+        sockets.release("tg", newer, &outbox, None).unwrap();
+        let z = outbox
+            .enqueue("tg", "42", None, "orphan after process death")
+            .unwrap();
+        assert!(
+            outbox
+                .claim("tg", &z, chrono::Utc::now().timestamp())
+                .unwrap()
+        );
+        outbox.mark_sent("tg", &z).unwrap();
+        sockets.claim("tg", &outbox).unwrap();
+        assert_eq!(
+            outbox.inspect("tg", &z).unwrap().unwrap()["delivery_state"],
+            "unknown"
+        );
+    }
+
+    #[tokio::test]
     async fn the_control_socket_needs_a_bridge_token_even_without_pairing() {
         let tmp = tempfile::tempdir().unwrap();
         let gateway = serve(bridge_state(&tmp, false)).await;
@@ -378,43 +603,136 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_rows_replay_before_live_ones_and_acks_delete_them() {
+    async fn old_or_unversioned_bridge_control_is_refused_before_delivery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let tmp = tempfile::tempdir().unwrap();
         let state = bridge_state(&tmp, true);
         let outbox = outbox(&state);
+        let id = outbox.enqueue("tg", "42", None, "waiting").unwrap();
         let gateway = serve(state).await;
-        outbox.enqueue("tg", "42", None, "queued 1").unwrap();
-        outbox.enqueue("other", "7", None, "not ours").unwrap();
-        outbox.enqueue("tg", "42", Some("5"), "queued 2").unwrap();
-
-        let mut client = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
-        let first = next(&mut client).await.unwrap();
-        // Written while the replay is in flight: it must come after it.
-        outbox.enqueue("tg", "43", None, "live").unwrap();
-        let second = next(&mut client).await.unwrap();
-        let third = next(&mut client).await.unwrap();
-        assert_eq!(
-            [&first.content, &second.content, &third.content],
-            ["queued 1", "queued 2", "live"]
-        );
-        assert_eq!(second.thread_id.as_deref(), Some("5"));
-        assert_eq!(third.to, "43");
-
-        client.ack(&first.id).await.unwrap();
-        client.ack(&third.id).await.unwrap();
-        // Acks are processed in order with later frames; wait for them.
-        let deadline = tokio::time::Instant::now() + WAIT;
-        while outbox.len("tg").unwrap() != 1 {
-            assert!(tokio::time::Instant::now() < deadline, "acks applied");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        let addr = gateway.trim_start_matches("ws://");
+        for protocol in ["", "Sec-WebSocket-Protocol: zeroclaw.bridge.v1\r\n"] {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let request = format!(
+                "GET /ws/bridge HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer {TOKEN}\r\n{protocol}\r\n"
+            );
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = [0u8; 1024];
+            let n = stream.read(&mut response).await.unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&response[..n])
+                    .split_whitespace()
+                    .nth(1),
+                Some("426")
+            );
         }
-        client.close().await.unwrap();
+        assert_eq!(
+            outbox.inspect("tg", &id).unwrap().unwrap()["delivery_state"],
+            "accepted"
+        );
+    }
 
-        // The unacked row is replayed on the next connection.
+    #[tokio::test]
+    async fn lost_first_receipt_leaves_later_candidate_accepted_for_reconnect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = bridge_state(&tmp, true);
+        let outbox = outbox(&state);
+        let first_id = outbox.enqueue("tg", "42", None, "first").unwrap();
+        let second_id = outbox.enqueue("tg", "42", Some("5"), "second").unwrap();
+        let gateway = serve(state).await;
+        let mut client = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
+        assert_eq!(next(&mut client).await.unwrap().id, first_id);
+        // An unrelated/forged receipt cannot release the current attempt.
+        client.ack(&second_id).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), client.next_deliver())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            outbox.inspect("tg", &second_id).unwrap().unwrap()["delivery_state"],
+            "accepted"
+        );
+        // Refusal or a lost response closes the control socket without an ack.
+        client.close().await.unwrap();
         let mut again = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
-        let replayed = next(&mut again).await.unwrap();
-        assert_eq!(replayed.id, second.id);
-        assert_eq!(outbox.len("other").unwrap(), 1);
+        let second = next(&mut again).await.unwrap();
+        assert_eq!(second.id, second_id);
+        assert_eq!(second.thread_id.as_deref(), Some("5"));
+        assert_eq!(
+            outbox.inspect("tg", &first_id).unwrap().unwrap()["delivery_state"],
+            "unknown"
+        );
+        again.ack(&second.id).await.unwrap();
+        let third = outbox.enqueue("tg", "42", None, "third").unwrap();
+        assert_eq!(next(&mut again).await.unwrap().id, third);
+        let fourth = outbox.enqueue("tg", "42", None, "fourth").unwrap();
+        let item = outbox.inspect("tg", &third).unwrap().unwrap();
+        outbox
+            .owner_action(
+                "tg",
+                "42",
+                item["source_kind"].as_str().unwrap(),
+                item["source_id"].as_str().unwrap(),
+                &third,
+                "dismiss",
+                None,
+                "owner",
+            )
+            .unwrap();
+        assert_eq!(next(&mut again).await.unwrap().id, fourth);
+    }
+
+    #[tokio::test]
+    async fn quiet_lower_sequence_is_revisited_after_live_policy_change() {
+        use zeroclaw_config::attention::{AttentionConfig, ImportantSource};
+        let tmp = tempfile::tempdir().unwrap();
+        let state = bridge_state(&tmp, true);
+        let outbox = outbox(&state);
+        state.config.write().gateway.attention = Some(AttentionConfig {
+            timezone: "America/New_York".into(),
+            quiet_start: "00:00".into(),
+            quiet_end: "00:00".into(),
+            important_sources: vec![ImportantSource {
+                bridge: "tg".into(),
+                recipient: "42".into(),
+                source_kind: "cron".into(),
+                source_id: "urgent-job".into(),
+            }],
+        });
+        let quiet = outbox
+            .enqueue_source("tg", "42", None, "quiet", "cron", "quiet-job", "run1")
+            .unwrap();
+        // Cross a read-batch boundary; deferred candidates must not starve
+        // an eligible later source or become permanently skipped.
+        for n in 0..BATCH {
+            outbox
+                .enqueue_source(
+                    "tg",
+                    "42",
+                    None,
+                    "quiet",
+                    "cron",
+                    "quiet-job",
+                    &format!("extra-{n}"),
+                )
+                .unwrap();
+        }
+        let urgent = outbox
+            .enqueue_source("tg", "42", None, "urgent", "cron", "urgent-job", "run1")
+            .unwrap();
+        let gateway = serve(state.clone()).await;
+        let mut client = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
+        assert_eq!(next(&mut client).await.unwrap().id, urgent);
+        assert_eq!(
+            outbox.inspect("tg", &quiet).unwrap().unwrap()["delivery_state"],
+            "accepted"
+        );
+        client.ack(&urgent).await.unwrap();
+        state.config.write().gateway.attention = None;
+        // New write wakes the same socket; no restart or config snapshot.
+        outbox.enqueue("tg", "42", None, "wake").unwrap();
+        assert_eq!(next(&mut client).await.unwrap().id, quiet);
     }
 
     #[tokio::test]

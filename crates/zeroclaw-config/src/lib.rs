@@ -9,6 +9,7 @@
 pub mod advisor;
 pub mod alias_refs;
 pub mod api_error;
+pub mod attention;
 pub mod autonomy;
 pub mod card;
 pub mod comment_writer;

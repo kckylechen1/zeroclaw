@@ -502,7 +502,19 @@ async fn open(
         headers.insert(header::AUTHORIZATION, value);
     }
     match tokio_tungstenite::connect_async(request).await {
-        Ok((socket, _)) => Ok(socket),
+        Ok((mut socket, response)) => {
+            if protocol == BRIDGE_PROTOCOL
+                && response
+                    .headers()
+                    .get(header::SEC_WEBSOCKET_PROTOCOL)
+                    .and_then(|value| value.to_str().ok())
+                    != Some(BRIDGE_PROTOCOL)
+            {
+                let _ = socket.close(None).await;
+                bail!("bridge_protocol_v2_required");
+            }
+            Ok(socket)
+        }
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
             let reason = response
                 .body()
@@ -521,13 +533,13 @@ async fn open(
 }
 
 /// The control sub-protocol of `/ws/bridge`.
-pub const BRIDGE_PROTOCOL: &str = "zeroclaw.bridge.v1";
+pub const BRIDGE_PROTOCOL: &str = "zeroclaw.bridge.v2";
 
 /// A proactive message the gateway asks a bridge to deliver (cron output,
 /// heartbeat, the `notify` tool). Acknowledge it with [`BridgeClient::ack`]
-/// only after the platform accepted it; until then the gateway keeps it and
-/// sends it again on the next connection, so the same `id` can arrive more
-/// than once.
+/// only after the platform accepted the complete message. Until then the
+/// current attempt is uncertain and is never automatically resent. Refused
+/// or partially delivered messages must not receive a successful receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Deliver {
     pub id: String,
@@ -545,9 +557,11 @@ pub fn bridge_url(gateway: &str) -> String {
 
 /// A bridge's control socket (`/ws/bridge`). The gateway identifies the
 /// bridge by its token and keeps one control socket per bridge: a new
-/// connection replaces the old one. On connect it first replays every
-/// unacknowledged message, oldest first, then sends new ones as they are
-/// queued.
+/// connection replaces the old one. Control protocol v2 is mandatory on both
+/// peers: mixed versions fail closed. Eligible accepted candidates are offered
+/// one at a time. A receipt confirms platform acceptance; a missing receipt
+/// leaves the current attempt unknown and never automatically replayed.
+/// Candidates not yet attempted remain accepted for a later connection.
 pub struct BridgeClient {
     socket: Socket,
     bridge: String,
@@ -589,7 +603,8 @@ impl BridgeClient {
         }
     }
 
-    /// Tell the gateway `id` was delivered; it drops the message.
+    /// Confirm platform acceptance of `id`; the gateway retains a receipt.
+    /// Never acknowledge refusal, partial delivery, or an uncertain response.
     pub async fn ack(&mut self, id: &str) -> Result<()> {
         send_json(
             &mut self.socket,
