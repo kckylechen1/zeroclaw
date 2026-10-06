@@ -2,8 +2,8 @@
 //! occurrences of a folded hour are quiet and skipped spring times need no guess.
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveTime, Utc};
+use chrono_tz::Tz;
 use zeroclaw_config::attention::AttentionConfig;
-use zeroclaw_runtime::cron::Tz;
 
 pub(crate) fn permits(
     policy: Option<&AttentionConfig>,
