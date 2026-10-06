@@ -277,3 +277,73 @@ async fn unavailable_store_and_invalid_queries_return_errors() {
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
+
+#[tokio::test]
+async fn note_owner_correction_enters_http_inbox_and_only_operator_acceptance_applies() {
+    use zeroclaw_api::review::{
+        OWNER_CORRECTION_CONTEXT, OwnerCorrectionContext, OwnerCorrectionResolver,
+        UserMessageIngress, UserMessageSource,
+    };
+    use zeroclaw_api::tool::Tool;
+    let (dir, state) = fixture();
+    let live_config = state.config.clone();
+    let tool =
+        zeroclaw_tools::note_owner_correction::NoteOwnerCorrectionTool::new("nova", move || {
+            let config = live_config.read();
+            Some((
+                config.companion_memory.owner.gate(),
+                config.data_dir.clone(),
+            ))
+        });
+    let resolver: OwnerCorrectionResolver = Arc::new(|| {
+        Some(OwnerCorrectionContext {
+            agent_alias: "nova".into(),
+            session_key: "session-a".into(),
+            ingress: UserMessageIngress {
+                source: UserMessageSource::Operator,
+                text: "Keep replies brief.".into(),
+            },
+        })
+    });
+    let result = zeroclaw_api::TOOL_LOOP_SESSION_KEY.scope(Some("session-a".into()),
+        OWNER_CORRECTION_CONTEXT.scope(resolver, tool.execute(serde_json::json!({
+            "kind":"preference", "statement":"Brief replies.", "semantic_key":"replies.length"
+        })))).await.unwrap();
+    assert!(result.success, "{:?}", result.error);
+    let user = UserModelStore::shared(dir.path()).unwrap();
+    assert!(user.active_heads(None).unwrap().is_empty());
+    let (_server, address) = server(state).await;
+    let (status, inbox) = request(address, "GET", "/api/review/inbox", OPERATOR, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let item = &inbox["items"][0];
+    assert_eq!(item["kind"], "user_model_candidate");
+    assert_eq!(item["item"]["scope"], "session:session-a");
+    let evidence: serde_json::Value =
+        serde_json::from_str(item["item"]["evidence"].as_str().unwrap()).unwrap();
+    assert_eq!(evidence["messages"][0]["session_id"], "session-a");
+    assert_eq!(evidence["messages"][0]["owner_text"], "Keep replies brief.");
+    let review = item["review_url"].as_str().unwrap();
+    let accept = serde_json::json!({"action":"accept"});
+    assert_eq!(
+        request(
+            address,
+            "POST",
+            review,
+            Some("bridge-token"),
+            Some(accept.clone())
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(user.active_heads(None).unwrap().is_empty());
+    assert_eq!(
+        request(address, "POST", review, OPERATOR, Some(accept))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let heads = user.active_heads(None).unwrap();
+    assert_eq!(heads.len(), 1);
+    assert_eq!(heads[0].scope, "session:session-a");
+}
