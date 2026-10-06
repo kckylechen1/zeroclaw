@@ -122,6 +122,10 @@ async fn act(
     ) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => failure(StatusCode::NOT_FOUND, "attention_candidate_not_found"),
+        Err(error) if error.downcast_ref::<rusqlite::Error>().is_some() => failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "attention_store_unavailable",
+        ),
         Err(_) => failure(StatusCode::CONFLICT, "attention_action_not_applied"),
     }
 }
@@ -187,6 +191,11 @@ mod tests {
         // tests, with the production route builder and HTTP body-limit layer.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let db_path = state
+            .config
+            .read()
+            .data_dir
+            .join("sessions/bridge_outbox.db");
         let app = routes()
             .with_state(state)
             .layer(tower_http::limit::RequestBodyLimitLayer::new(
@@ -229,7 +238,17 @@ mod tests {
             store.inspect("tg", &id).unwrap().unwrap()["delivery_state"],
             "accepted"
         );
+        let db = rusqlite::Connection::open(db_path).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_attention_update BEFORE UPDATE ON bridge_outbox BEGIN SELECT RAISE(ABORT, 'test storage failure'); END;").unwrap();
+        assert_eq!(request(addr, "POST", &path, owner, &action).await.0, 503);
+        assert_eq!(
+            store.inspect("tg", &id).unwrap().unwrap()["delivery_state"],
+            "accepted"
+        );
+        db.execute_batch("DROP TRIGGER reject_attention_update")
+            .unwrap();
         assert_eq!(request(addr, "POST", &path, owner, &action).await.0, 204);
+        assert_eq!(request(addr, "POST", &path, owner, &action).await.0, 409);
         assert_eq!(
             store.inspect("tg", &id).unwrap().unwrap()["delivery_state"],
             "dismissed"

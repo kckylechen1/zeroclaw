@@ -256,7 +256,8 @@ Each UTC instant is evaluated against local wall time, so both occurrences of
 an autumn repeated hour are quiet and spring skipped times need no guessed
 boundary. Policy is resolved from live gateway config immediately before the
 outbox claim. Config API changes, including removing the section, always need
-a paired operator bearer even when generic pairing is disabled. Direct local
+a paired operator bearer even when generic pairing is disabled, with the shared
+operator authentication and rate limits. Direct local
 config edits use the existing reload path.
 
 An owner may explicitly allow one source to bypass quiet hours with an
@@ -264,6 +265,11 @@ An owner may explicitly allow one source to bypass quiet hours with an
 `source_kind` and `source_id` values. For cron, use `source_kind = "cron"` and
 the canonical job ID. No urgency label from the model can grant bypass. Mute,
 snooze and expiry still apply to an allowed source.
+
+Cron has a stable job source identity. Generic `notice` producers assign a new
+source ID to each candidate: muting one such notice affects only that candidate,
+not future heartbeat or notify emissions. Stable recurring heartbeat identities,
+delegated results and weekly integration remain #63 follow-up work.
 
 The following endpoints require the existing operator bearer; a bridge token
 or anonymous caller is refused even with `require_pairing = false`:

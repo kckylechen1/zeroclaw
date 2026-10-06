@@ -191,6 +191,7 @@ impl BridgeOutbox {
                 params![bridge, to, source_kind, source_id, event_id], |row| row.get(0),
             ).optional()?;
             if let Some(existing) = existing {
+                tx.commit()?;
                 return Ok(existing);
             }
             let count: i64 = tx.query_row("SELECT COUNT(*) FROM bridge_outbox WHERE bridge=?1 AND delivery_state IN ('accepted','sent','unknown')", [bridge], |row| row.get(0))?;
@@ -569,6 +570,20 @@ mod tests {
                 .enqueue_source("tg", "owner", None, "notice", "cron", "job", event)
                 .unwrap()
         };
+        let expired = enqueue(&outbox, "expired-run");
+        outbox
+            .conn
+            .lock()
+            .execute(
+                "UPDATE bridge_outbox SET expires_at=1 WHERE id=?1",
+                [&expired],
+            )
+            .unwrap();
+        assert_eq!(enqueue(&outbox, "expired-run"), expired);
+        assert_eq!(
+            outbox.inspect("tg", &expired).unwrap().unwrap()["delivery_state"],
+            "expired"
+        );
         let id = enqueue(&outbox, "run1");
         assert_eq!(enqueue(&outbox, "run1"), id);
         assert!(
