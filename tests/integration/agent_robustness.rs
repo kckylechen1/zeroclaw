@@ -119,33 +119,35 @@ async fn agent_handles_mixed_tool_success_and_failure() {
 async fn agent_respects_max_tool_iterations() {
     let (counting_tool, count) = CountingTool::new();
 
-    // Create 20 tool call responses - more than the default limit of 10
+    // Distinct arguments avoid the repeated-call guard masking the iteration limit.
     let mut responses: Vec<ChatResponse> = (0..20)
         .map(|i| {
             tool_response(vec![ToolCall {
                 id: format!("tc_{i}"),
                 name: "counter".into(),
-                arguments: "{}".into(),
+                arguments: serde_json::json!({"iteration": i}).to_string(),
                 extra_content: None,
             }])
         })
         .collect();
-    // Add a final text response that would be used if limit is reached
+    // Reaching this response would mean the iteration limit was bypassed.
     responses.push(text_response("Final response after iterations"));
 
     let model_provider = Box::new(MockModelProvider::new(responses));
     let mut agent = build_agent(model_provider, vec![Box::new(counting_tool)]);
 
-    // Agent should complete (either by hitting iteration limit or running out of responses)
-    let result = agent.turn("keep calling tools").await;
-    // The agent should complete without hanging
-    assert!(result.is_ok() || result.is_err());
-
-    let invocations = *count.lock().unwrap();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.turn("keep calling tools"),
+    )
+    .await
+    .expect("iteration limit must terminate the turn")
+    .expect_err("the scripted tool calls must exceed the iteration limit");
     assert!(
-        invocations <= 10,
-        "tool invocations ({invocations}) should not exceed default max_tool_iterations (10)"
+        error.to_string().contains("maximum tool iterations (10)"),
+        "unexpected termination: {error}"
     );
+    assert_eq!(*count.lock().unwrap(), 10);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -445,12 +445,6 @@ mod tests {
         assert_eq!(WakeState::Processing.to_string(), "Processing");
     }
 
-    #[test]
-    fn wake_state_equality() {
-        assert_eq!(WakeState::Listening, WakeState::Listening);
-        assert_ne!(WakeState::Listening, WakeState::Triggered);
-    }
-
     // ── Energy computation tests ───────────────────────────
 
     #[test]

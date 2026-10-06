@@ -7,10 +7,9 @@ import { getTools } from "@/lib/api";
 import {
   settleToolCatalogResult,
   type CatalogEntry,
-  type ToolCatalogLoadResult,
 } from "./toolCatalog.logic";
 
-export type { CatalogEntry, CatalogLoadWarning, ToolCatalogLoadResult } from "./toolCatalog.logic";
+export type { CatalogEntry } from "./toolCatalog.logic";
 
 // Process-wide cache so re-mounting a consumer (e.g. reopening the Cron
 // modal, or switching config sections) doesn't re-hit the network. Keyed by
@@ -20,7 +19,7 @@ export type { CatalogEntry, CatalogLoadWarning, ToolCatalogLoadResult } from "./
 // from the default. Each per-agent catalog is effectively static for the
 // daemon's lifetime.
 const catalogCache = new Map<string, CatalogEntry[]>();
-const catalogInflight = new Map<string, Promise<ToolCatalogLoadResult>>();
+const catalogInflight = new Map<string, Promise<CatalogEntry[]>>();
 
 /** Synchronous cache peek — `null` when nothing has been fetched yet for
  *  this agent. Lets a consumer seed its initial state without waiting on
@@ -29,27 +28,21 @@ export function peekToolCatalog(agent?: string): CatalogEntry[] | null {
   return catalogCache.get(agent ?? "") ?? null;
 }
 
-export function loadToolCatalogResult(agent?: string): Promise<ToolCatalogLoadResult> {
+export function loadToolCatalog(agent?: string): Promise<CatalogEntry[]> {
   const key = agent ?? "";
   const cached = catalogCache.get(key);
-  if (cached) return Promise.resolve({ entries: cached, warnings: [] });
+  if (cached) return Promise.resolve(cached);
   const inflight = catalogInflight.get(key);
   if (inflight) return inflight;
   const promise = Promise.allSettled([getTools(agent)])
     .then(([toolsResult]) => {
-      const result = settleToolCatalogResult(toolsResult);
-      if (result.warnings.length === 0) {
-        catalogCache.set(key, result.entries);
-      }
-      return result;
+      const entries = settleToolCatalogResult(toolsResult);
+      catalogCache.set(key, entries);
+      return entries;
     })
     .finally(() => {
       catalogInflight.delete(key);
     });
   catalogInflight.set(key, promise);
   return promise;
-}
-
-export function loadToolCatalog(agent?: string): Promise<CatalogEntry[]> {
-  return loadToolCatalogResult(agent).then((result) => result.entries);
 }
