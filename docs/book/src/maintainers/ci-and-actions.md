@@ -6,20 +6,20 @@ Every workflow lives in `.github/workflows/`. The sections below group them by t
 
 ### Quality Gate (`ci.yml`)
 
-Fires on every PR targeting `master` and on trusted pushes to `master`.
+Fires on PRs targeting any branch, trusted pushes to `master`, and merge-queue groups.
 Composite job with multiple matrix legs:
 
 - **fmt**: `cargo fmt --all -- --check`
-- **lint**: `cargo clippy --workspace --all-targets --locked --features ci-all -- -D warnings`, plus the provider dispatch gate (`scripts/ci/provider_dispatch_gate.sh`). This is also the only all-features compile in the gate: it type-checks every target, benches included.
+- **lint**: `cargo clippy --workspace --all-targets --locked --features ci-all -- -D warnings`, plus the provider dispatch gate (`scripts/ci/provider_dispatch_gate.sh`). It type-checks every target, benches included, with the curated `ci-all` feature set.
 - **build**: matrix: `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`
-- **check**: `cargo check --locked --no-default-features`
+- **check**: `cargo check --locked` across the no-default-features, minimal-companion, and slim-control graphs; slim-control includes `--all-targets`. The separate **check-32bit** job checks `i686-unknown-linux-gnu` with no default features.
 - **test**: `cargo nextest run --locked` per package partition leg on Linux. `dev/ci/test-partition.json` is the single source for each leg's packages, its features, and its extra filtered runs (the runtime leg adds a `sandbox-landlock` run filtered to `landlock` tests); a guard step fails the leg if a workspace member is missing from, or duplicated in, the partition. The architecture guards (config-write isolation, Fluent coverage) are tests in the root `architecture` target and run in the `app` leg. Run a leg locally with `scripts/dev/leg.sh <leg>` (same packages and features as CI).
 - **security**: `cargo deny check`
 - **nix-eval**: evaluates the NixOS module assertions (`nixos-module-eval` flake check)
 - **docs-style**: markdown lint, em-dash prose check, and changed-line link gate via `scripts/ci/docs_quality_gate.sh` and `scripts/ci/docs_links_gate.sh`
 - **installer-drift**: `cargo generate installers --check`. On PRs it runs only when a Cargo manifest, `Cargo.lock`, `xtask/`, `dev/ci/`, `dist/`, or a generated install surface changes.
 
-The 32-bit (`i686-unknown-linux-gnu`, no default features) and minimal-companion check graphs are not in the gate; they run weekly in Cross-Platform Clippy.
+The 32-bit and minimal-companion checks are part of the required PR gate. Cross-Platform Clippy provides separate advisory lint coverage on macOS and Windows.
 
 `fmt` runs first as the cheap serial gate. Every other job declares `needs: [fmt]` and fans out after formatting passes; `CI Required Gate` aggregates every result (a skipped job counts as passing). Branch protection pins the composite gate job. A PR cannot merge until this is green. The `master` push run keeps the same quality signal while seeding trusted Rust caches for later PR runs; jobs that write no cache and only re-prove the PR result (repository structure, docs style, Nix eval, Nix hash drift) are skipped on push.
 
@@ -30,6 +30,12 @@ Fresh required CI is normally the shared evidence for the Cargo surfaces it actu
 - a desktop change did not trigger the desktop workflow;
 - a release target is outside the PR matrix and only covered by release/manual workflows;
 - stale, cancelled, skipped, or unavailable CI is not fresh evidence.
+
+### Local pre-push checks
+
+The optional `.githooks/pre-push` hook runs the Rust quality helper and `cargo test --locked --workspace`. Its default lint graph uses default features plus the channels and runtime `heavy-tests` suites and denies `clippy::correctness`. With `ZEROCLAW_STRICT_LINT=1`, it calls the helper with `--both`: correctness Clippy, provider-dispatch, then strict Clippy with `ci-all` and `-D warnings`. Toolchain, formatting, and provider-dispatch checks each run once. Standalone `--strict` still runs only the strict lint graph.
+
+Both lint graphs are retained because enabling more features can change conditional compilation. The hook's default workspace test run is distinct from CI's package partitions and feature-specific runs above. `ZEROCLAW_DOCS_LINT=1` and `ZEROCLAW_DOCS_LINKS=1` enable their respective docs gates before tests.
 
 ### Dependency policy coverage
 
@@ -101,7 +107,7 @@ Manual trigger for building release binaries across the full target matrix: Linu
 
 ### Cross-Platform Clippy (`cross-platform-clippy.yml`)
 
-Manual and weekly scheduled advisory lint coverage on macOS aarch64 and Windows x86_64 targets. It mirrors the required PR lint command with `--target` set for each platform, but intentionally does not run on PRs and is not part of `CI Required Gate`. The same workflow runs the Linux check graphs that left the PR gate: `i686-unknown-linux-gnu` with no default features, and the minimal companion feature set.
+Manual and weekly scheduled advisory lint coverage on macOS aarch64 and Windows x86_64 targets. It uses the required lint job's `ci-all` feature set and `-D warnings`, with `--target` set for each platform. It does not run on PRs and is not part of `CI Required Gate`. The Linux 32-bit and minimal-companion checks run in `ci.yml`.
 
 ### Release Stable (`release-stable-manual.yml`)
 
@@ -132,7 +138,7 @@ Most Rust-heavy jobs in `ci.yml` use `Swatinem/rust-cache@v2`. The `fmt`, `nix-e
 - **Cache saves on failure.** `cache-on-failure: true` is set on every job, so a partial run still seeds the next attempt warm.
 - **Windows build cache is enabled.** The Windows build leg runs the same pinned Rust cache action as Linux and macOS. If Windows cache behavior flakes or regresses, revert the workflow change and document the failing restore/save evidence in the cache issue.
 - **Incremental compilation is disabled.** `CARGO_INCREMENTAL: 0` at the workflow level. Incremental builds inflate cache size and produce non-reproducible artifacts under partial-stale conditions.
-- **`cargo-deny` and `cargo-nextest` are installed fresh each run.** The `security` job runs `cargo install cargo-deny --locked`; the `test` job pulls the `cargo-nextest` binary from `get.nexte.st`. Neither is cached, so both add a fixed install cost to every run. Switching either to `taiki-e/install-action` would let them be cached, but that action is not in the allowlist today.
+- **Tool installation downloads prebuilt binaries.** The `security` job downloads the pinned `cargo-deny` 0.19.9 Linux musl archive from its GitHub release; the `test` job downloads `cargo-nextest` from `get.nexte.st/latest/linux`. Both install steps run unconditionally, including after a Rust cache hit.
 
 ## When the gate goes red
 
