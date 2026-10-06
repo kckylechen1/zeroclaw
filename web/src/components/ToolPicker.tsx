@@ -24,8 +24,6 @@ import {
 } from '@/lib/toolCatalog';
 import { t } from '@/lib/i18n';
 
-export { loadToolCatalog as loadCatalog, type CatalogEntry } from '@/lib/toolCatalog';
-
 export interface ToolPickerProps {
   /** Currently-selected tool names. Order is preserved on toggle. */
   value: string[];
@@ -149,10 +147,7 @@ export default function ToolPicker({
     );
   }, [catalog, search]);
 
-  const agentEntries = useMemo(
-    () => filtered.filter((e) => e.group === 'agent'),
-    [filtered],
-  );
+  const agentEntries = filtered;
   const agentAllSelected =
     agentEntries.length > 0 && agentEntries.every((e) => selectedSet.has(e.name));
   // Selected names that aren't in the catalog (unknown / removed tools).

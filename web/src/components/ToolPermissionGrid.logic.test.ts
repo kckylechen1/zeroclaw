@@ -9,7 +9,6 @@ import {
   approvalLevelCaveat,
   effectiveApprovalState,
   effectiveAuthState,
-  filterPermissionCatalogEntries,
   isApprovalOnlyWildcard,
   isMcpAutoAdmitted,
   normalizeAutonomyLevel,
@@ -25,15 +24,6 @@ function sets(value: ToolPermissionGridValue) {
     alwaysAskSet: new Set(value.alwaysAsk),
   };
 }
-
-test('permission catalog keeps only agent-registry entries', () => {
-  const entries = [
-    { name: 'shell', group: 'agent' as const },
-    { name: 'some_plugin', group: 'agent' as const },
-  ];
-
-  assert.deepEqual(filterPermissionCatalogEntries(entries), entries);
-});
 
 test('strict allowlists still auto-admit MCP names unless denied', () => {
   const value: ToolPermissionGridValue = {

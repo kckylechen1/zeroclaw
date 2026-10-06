@@ -42,7 +42,6 @@ import {
   approvalLevelCaveat,
   effectiveApprovalState,
   effectiveAuthState,
-  filterPermissionCatalogEntries,
   isApprovalOnlyWildcard,
   isAlwaysAskWildcardLocked,
   isMcpAutoAdmitted,
@@ -137,13 +136,7 @@ export default function ToolPermissionGrid({
   const autoApproveSet = useMemo(() => new Set(value.autoApprove), [value.autoApprove]);
   const alwaysAskSet = useMemo(() => new Set(value.alwaysAsk), [value.alwaysAsk]);
 
-  // The shared catalog includes executables discovered on PATH for callers
-  // such as SOP editors. Risk-profile permission arrays are evaluated against
-  // agent tool names, so keep those CLI-only entries out of this grid.
-  const permissionCatalog = useMemo(
-    () => filterPermissionCatalogEntries(catalog ?? []),
-    [catalog],
-  );
+  const permissionCatalog = useMemo(() => catalog ?? [], [catalog]);
 
   const byName = useMemo(() => {
     const map = new Map<string, CatalogEntry>();
