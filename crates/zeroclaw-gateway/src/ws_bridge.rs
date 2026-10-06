@@ -332,7 +332,7 @@ async fn send_pending(
                 // Serialize generation validation and durable reservation with
                 // replacement. A cancelled old socket cannot claim new work.
                 let live = state.bridge_sockets.live.lock();
-                if !live.get(bridge).is_some_and(|(id, _)| *id == conn_id) {
+                if live.get(bridge).is_none_or(|(id, _)| *id != conn_id) {
                     return Err("replaced");
                 }
                 let config = state.config.read();
