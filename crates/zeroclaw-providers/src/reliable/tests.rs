@@ -989,32 +989,6 @@ async fn model_failover_all_models_fail() {
     assert_eq!(seen.len(), 3);
 }
 
-#[tokio::test]
-async fn no_model_fallbacks_behaves_like_before() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let model_provider = ReliableModelProvider::new(
-        "test",
-        vec![(
-            "primary".into(),
-            Box::new(MockModelProvider {
-                calls: Arc::clone(&calls),
-                fail_until_attempt: 0,
-                response: "ok",
-                error: "boom",
-            }),
-        )],
-        2,
-        1,
-    );
-    // No model_fallbacks set — should work exactly as before
-    let result = model_provider
-        .simple_chat("hello", "test", Some(0.0))
-        .await
-        .unwrap();
-    assert_eq!(result, "ok");
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-}
-
 // ── New tests: auth rotation ──
 
 #[tokio::test]

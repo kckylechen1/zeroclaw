@@ -13,10 +13,9 @@ const agentTool: ToolSpec = {
 test('catalog settling preserves agent tools', () => {
   const result = settleToolCatalogResult({ status: 'fulfilled', value: [agentTool] });
 
-  assert.deepEqual(result.entries.map((entry) => [entry.name, entry.group]), [
+  assert.deepEqual(result.map((entry) => [entry.name, entry.group]), [
     ['shell', 'agent'],
   ]);
-  assert.deepEqual(result.warnings, []);
 });
 
 test('catalog settling throws when agent tools fail', () => {

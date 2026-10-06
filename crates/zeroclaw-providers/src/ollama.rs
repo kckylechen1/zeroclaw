@@ -435,23 +435,6 @@ impl OllamaModelProvider {
             .to_string()
     }
 
-    #[allow(dead_code)]
-    fn build_chat_request(
-        &self,
-        messages: Vec<Message>,
-        model: &str,
-        temperature: Option<f64>,
-        tools: Option<&[serde_json::Value]>,
-    ) -> ChatRequest {
-        self.build_chat_request_with_think(
-            messages,
-            model,
-            temperature,
-            tools,
-            self.reasoning_enabled,
-        )
-    }
-
     /// Build a chat request with an explicit `think` value.
     fn build_chat_request_with_think(
         &self,
@@ -1381,7 +1364,7 @@ mod tests {
     #[test]
     fn request_omits_think_when_reasoning_not_configured() {
         let model_provider = OllamaModelProvider::builder("test").build();
-        let request = model_provider.build_chat_request(
+        let request = model_provider.build_chat_request_with_think(
             vec![Message {
                 role: "user".to_string(),
                 content: Some("hello".to_string()),
@@ -1392,6 +1375,7 @@ mod tests {
             "llama3",
             Some(0.7),
             None,
+            model_provider.reasoning_enabled,
         );
 
         let json = serde_json::to_value(request).unwrap();
@@ -1406,7 +1390,7 @@ mod tests {
         let model_provider = OllamaModelProvider::builder("test")
             .reasoning_enabled(Some(false))
             .build();
-        let request = model_provider.build_chat_request(
+        let request = model_provider.build_chat_request_with_think(
             vec![Message {
                 role: "user".to_string(),
                 content: Some("hello".to_string()),
@@ -1417,6 +1401,7 @@ mod tests {
             "llama3",
             Some(0.7),
             None,
+            model_provider.reasoning_enabled,
         );
 
         let json = serde_json::to_value(request).unwrap();
@@ -1429,7 +1414,7 @@ mod tests {
     #[test]
     fn request_includes_default_num_ctx_and_num_predict() {
         let provider = OllamaModelProvider::builder("test").build();
-        let request = provider.build_chat_request(
+        let request = provider.build_chat_request_with_think(
             vec![Message {
                 role: "user".to_string(),
                 content: Some("hello".to_string()),
@@ -1440,6 +1425,7 @@ mod tests {
             "llama3",
             Some(0.2),
             None,
+            provider.reasoning_enabled,
         );
 
         let json = serde_json::to_value(request).unwrap();
@@ -1503,7 +1489,7 @@ mod tests {
                 temperature_override: None,
             })
             .build();
-        let request = provider.build_chat_request(
+        let request = provider.build_chat_request_with_think(
             vec![Message {
                 role: "user".to_string(),
                 content: Some("hello".to_string()),
@@ -1514,6 +1500,7 @@ mod tests {
             "llama3",
             Some(0.5),
             None,
+            provider.reasoning_enabled,
         );
 
         let json = serde_json::to_value(request).unwrap();
@@ -1531,7 +1518,7 @@ mod tests {
                 temperature_override: Some(0.1),
             })
             .build();
-        let request = provider.build_chat_request(
+        let request = provider.build_chat_request_with_think(
             vec![Message {
                 role: "user".to_string(),
                 content: Some("hello".to_string()),
@@ -1542,6 +1529,7 @@ mod tests {
             "llama3",
             Some(0.9),
             None,
+            provider.reasoning_enabled,
         );
 
         let json = serde_json::to_value(request).unwrap();
@@ -1552,7 +1540,7 @@ mod tests {
     #[test]
     fn temperature_override_unset_passes_per_call_temperature() {
         let provider = OllamaModelProvider::builder("test").build();
-        let request = provider.build_chat_request(
+        let request = provider.build_chat_request_with_think(
             vec![Message {
                 role: "user".to_string(),
                 content: Some("hello".to_string()),
@@ -1563,6 +1551,7 @@ mod tests {
             "llama3",
             Some(0.42),
             None,
+            provider.reasoning_enabled,
         );
 
         let json = serde_json::to_value(request).unwrap();

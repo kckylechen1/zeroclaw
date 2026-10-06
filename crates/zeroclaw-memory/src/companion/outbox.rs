@@ -196,13 +196,10 @@ mod tests {
     #[cfg(feature = "tachi")]
     mod with_store {
         use super::*;
-        use crate::companion::{CompanionCapture, create_companion_store};
+        use crate::companion::create_companion_store;
+        use crate::companion::legacy_capture::seed_legacy_capture;
         use memcore::OutboxState;
         use tempfile::TempDir;
-        use zeroclaw_api::companion::{
-            AgentIdentityId, CaptureContext, CompanionOwnerGate, IngressIdentity,
-        };
-        use zeroclaw_api::principal::PrincipalId;
         use zeroclaw_config::schema::Config;
 
         fn enabled_config(data_dir: &std::path::Path) -> Config {
@@ -218,24 +215,6 @@ mod tests {
             create_companion_store(&enabled_config(tmp.path()))
                 .expect("factory")
                 .expect("enabled")
-        }
-
-        fn owner_gate() -> CompanionOwnerGate {
-            CompanionOwnerGate {
-                principal_id: PrincipalId::from("owner-principal"),
-                identities: vec![IngressIdentity::new("wechat:alice")],
-                trust_local: true,
-            }
-        }
-
-        fn context(turn_id: &str) -> CaptureContext {
-            CaptureContext::from_channel_identity(
-                AgentIdentityId::from_opaque("agent-alias"),
-                "session-1",
-                turn_id,
-                IngressIdentity::new("wechat:alice"),
-                &owner_gate(),
-            )
         }
 
         fn pending_ids(store: &crate::companion::CompanionStore) -> Vec<String> {
@@ -266,7 +245,7 @@ mod tests {
         fn pending_events_report_count_and_age() {
             let tmp = TempDir::new().unwrap();
             let store = open_store(&tmp);
-            let receipt = CompanionCapture::new(&store).capture(&context("turn-health-age"));
+            let receipt = seed_legacy_capture(&store, "turn-health-age");
             assert!(receipt.event_id.is_some());
 
             let health = store.outbox_health();
@@ -301,7 +280,7 @@ mod tests {
         fn health_query_does_not_consume_events() {
             let tmp = TempDir::new().unwrap();
             let store = open_store(&tmp);
-            let _receipt = CompanionCapture::new(&store).capture(&context("turn-health-readonly"));
+            let _receipt = seed_legacy_capture(&store, "turn-health-readonly");
             let before = pending_ids(&store);
             assert_eq!(before.len(), 1);
 
@@ -332,7 +311,7 @@ mod tests {
 
             let tmp = TempDir::new().unwrap();
             let store = open_store(&tmp);
-            let receipt = CompanionCapture::new(&store).capture(&context("turn-health-stale"));
+            let receipt = seed_legacy_capture(&store, "turn-health-stale");
             let event_id = receipt.event_id.expect("outbox id");
             store
                 .store_handle()
@@ -373,7 +352,7 @@ mod tests {
         }
 
         fn backdate_pending(store: &crate::companion::CompanionStore, turn_id: &str) {
-            let receipt = CompanionCapture::new(store).capture(&context(turn_id));
+            let receipt = seed_legacy_capture(store, turn_id);
             let event_id = receipt.event_id.expect("outbox id");
             store
                 .store_handle()
@@ -422,7 +401,7 @@ mod tests {
             let tmp = TempDir::new().unwrap();
             let config = enabled_config(tmp.path());
             let store = open_store(&tmp);
-            let receipt = CompanionCapture::new(&store).capture(&context("turn-probe-existing"));
+            let receipt = seed_legacy_capture(&store, "turn-probe-existing");
             assert!(receipt.event_id.is_some());
             drop(store);
 
