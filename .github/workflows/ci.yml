@@ -46,6 +46,8 @@ jobs:
         run: |
           bash scripts/ci/toolchain_gate.test.sh
           bash scripts/ci/toolchain_gate.sh
+      - name: Rust quality gate orchestration self-test
+        run: bash scripts/ci/rust_quality_gate.test.sh
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -361,9 +363,8 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
-  # `--features ci-all` is already type-checked (all targets) by `lint`, so
-  # only the no-default-features graph needs its own check here. The 32-bit
-  # and minimal-companion checks run weekly in cross-platform-clippy.yml.
+  # `lint` checks the ci-all graph. Keep these distinct no-default-feature
+  # graphs in the required gate; check-32bit below covers the 32-bit target.
   check:
     name: Check (${{ matrix.name }})
     needs: [fmt]
