@@ -28,13 +28,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Search, X, Check, Minus, AlertCircle, Zap } from 'lucide-react';
 import {
-  loadToolCatalogResult,
+  loadToolCatalog,
   peekToolCatalog,
   type CatalogEntry,
-  type CatalogLoadWarning,
 } from '@/lib/toolCatalog';
 import { t } from '@/lib/i18n';
-import { ToolCatalogWarningPanel } from './ToolCatalogWarningPanel';
 import {
   APPROVAL_WILDCARD,
   applyApprovalState,
@@ -44,7 +42,6 @@ import {
   approvalLevelCaveat,
   effectiveApprovalState,
   effectiveAuthState,
-  filterPermissionCatalogEntries,
   isApprovalOnlyWildcard,
   isAlwaysAskWildcardLocked,
   isMcpAutoAdmitted,
@@ -95,38 +92,32 @@ export default function ToolPermissionGrid({
   const [catalog, setCatalog] = useState<CatalogEntry[] | null>(() => peekToolCatalog(cacheKey));
   const [loading, setLoading] = useState(() => peekToolCatalog(cacheKey) === null);
   const [error, setError] = useState<string | null>(null);
-  const [warnings, setWarnings] = useState<CatalogLoadWarning[]>([]);
-  const [reloadSeq, setReloadSeq] = useState(0);
   const [search, setSearch] = useState('');
   const [customName, setCustomName] = useState('');
   const [customError, setCustomError] = useState<string | null>(null);
 
   useEffect(() => {
-    const cached = reloadSeq === 0 ? peekToolCatalog(cacheKey) : null;
+    const cached = peekToolCatalog(cacheKey);
     if (cached) {
       setCatalog(cached);
       setLoading(false);
       setError(null);
-      setWarnings([]);
       return;
     }
     let cancelled = false;
     setLoading(true);
     setError(null);
-    setWarnings([]);
     setCatalog(null);
-    loadToolCatalogResult(agent)
-      .then((result) => {
+    loadToolCatalog(agent)
+      .then((entries) => {
         if (!cancelled) {
-          setCatalog(result.entries);
-          setWarnings(result.warnings);
+          setCatalog(entries);
           setLoading(false);
         }
       })
       .catch((err: unknown) => {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : t('tool_picker.load_failed'));
-          setWarnings([]);
           setCatalog([]);
           setLoading(false);
         }
@@ -134,7 +125,7 @@ export default function ToolPermissionGrid({
     return () => {
       cancelled = true;
     };
-  }, [agent, cacheKey, reloadSeq]);
+  }, [agent, cacheKey]);
 
   const strict = value.allowedTools.length > 0;
   const realAllowSet = useMemo(
@@ -145,17 +136,7 @@ export default function ToolPermissionGrid({
   const autoApproveSet = useMemo(() => new Set(value.autoApprove), [value.autoApprove]);
   const alwaysAskSet = useMemo(() => new Set(value.alwaysAsk), [value.alwaysAsk]);
 
-  // The shared catalog includes executables discovered on PATH for callers
-  // such as SOP editors. Risk-profile permission arrays are evaluated against
-  // agent tool names, so keep those CLI-only entries out of this grid.
-  const permissionCatalog = useMemo(
-    () => filterPermissionCatalogEntries(catalog ?? []),
-    [catalog],
-  );
-  const permissionWarnings = useMemo(
-    () => warnings.filter((warning) => warning.source === 'agent'),
-    [warnings],
-  );
+  const permissionCatalog = useMemo(() => catalog ?? [], [catalog]);
 
   const byName = useMemo(() => {
     const map = new Map<string, CatalogEntry>();
@@ -243,10 +224,6 @@ export default function ToolPermissionGrid({
     setCustomError(null);
     setCustomName('');
     onChange(next);
-  }
-
-  function retryCatalogLoad() {
-    setReloadSeq((seq) => seq + 1);
   }
 
   function mcpAutoAdmitted(name: string): boolean {
@@ -445,14 +422,6 @@ export default function ToolPermissionGrid({
           {t('tool_picker.load_failed_prefix')}
           {error}
         </div>
-      )}
-
-      {permissionWarnings.length > 0 && (
-        <ToolCatalogWarningPanel
-          warnings={permissionWarnings}
-          onRetry={retryCatalogLoad}
-          retryDisabled={loading}
-        />
       )}
 
       {loading ? (
