@@ -1012,6 +1012,17 @@ async fn process_channel_message_body(
                     .scope(thinking.params.native_thinking, tool_loop);
                 let tool_loop = zeroclaw_runtime::agent::loop_::TOOL_LOOP_COST_TRACKING_CONTEXT
                     .scope(cost_tracking_context.clone(), tool_loop);
+                let correction = zeroclaw_api::review::OwnerCorrectionContext {
+                    agent_alias: ctx.agent_alias.to_string(),
+                    session_key: history_key.clone(),
+                    ingress: ingress.clone(),
+                };
+                let correction_resolver: zeroclaw_api::review::OwnerCorrectionResolver =
+                    Arc::new(move || Some(correction.clone()));
+                // Erase the nested scoped future here so the surrounding
+                // channel worker retains one concrete Send boundary.
+                let tool_loop: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send + '_>> =
+                    Box::pin(zeroclaw_api::review::OWNER_CORRECTION_CONTEXT.scope(correction_resolver, tool_loop));
                 let tool_loop = scope_session_key(Some(history_key.clone()), tool_loop);
                 let tool_loop = scope_thread_id(thread_scope_id, tool_loop);
                 let timed_tool_loop =

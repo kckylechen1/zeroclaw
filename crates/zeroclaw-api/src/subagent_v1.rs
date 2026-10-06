@@ -132,6 +132,10 @@ pub struct SubAgentToolNameV1(String);
 /// Tool names that can never appear in a v1 profile, with the clause that
 /// bans each. Refusal is typed at parse time, never tool prose.
 pub const V1_BANNED_TOOL_NAMES: &[(&str, &str)] = &[
+    (
+        "note_owner_correction",
+        "SA-7e/SA-17 (no owner-model mutation)",
+    ),
     ("spawn_subagent", "SA-7b/SA-12 (D1 strict local spawn ban)"),
     ("delegate", "SA-7b/SA-12 (D1 strict local spawn ban)"),
     ("tachi_start", "SA-7b/SA-12 (L1 cannot delegate L2 work)"),

@@ -1013,6 +1013,7 @@ fn handle_message_frame(
     };
 
     let mut content = parsed["content"].as_str().unwrap_or("").to_string();
+    let original_input = content.clone();
     let ids = match parsed.get("attachments") {
         None | Some(serde_json::Value::Null) => Vec::new(),
         Some(serde_json::Value::Array(ids))
@@ -1159,6 +1160,7 @@ fn handle_message_frame(
 
     match conversation.submit(content) {
         Submitted::Start(mut claim) => {
+            claim.original_input = Some(original_input);
             claim.request_id = request_id.map(str::to_string);
             (ack("started"), Some(claim))
         }
@@ -1275,6 +1277,7 @@ async fn run_ws_turns(
     let mut initial_claim = true;
     while let Some(TurnClaim {
         input,
+        original_input,
         request_id,
         intake,
         generation,
@@ -1303,6 +1306,7 @@ async fn run_ws_turns(
                         &mut session,
                         &scope,
                         initial_claim && intake.is_none(),
+                        original_input.as_deref(),
                         &input,
                         request_id.as_deref(),
                         generation,
@@ -1558,6 +1562,7 @@ async fn process_chat_message(
     session: &mut WsSession,
     scope: &WsTurnScope,
     initial_operator_input: bool,
+    original_input: Option<&str>,
     content: &str,
     request_id: Option<&str>,
     generation: u64,
@@ -1576,9 +1581,11 @@ async fn process_chat_message(
                 .auth_subject
                 .as_ref()
                 .is_some_and(|subject| state.pairing.tokens().contains(subject)))
-        .then(|| zeroclaw_api::review::UserMessageIngress {
+        .then_some(original_input)
+        .flatten()
+        .map(|text| zeroclaw_api::review::UserMessageIngress {
             source: zeroclaw_api::review::UserMessageSource::Operator,
-            text: content.to_string(),
+            text: text.to_string(),
         })
     };
 
@@ -1651,6 +1658,25 @@ async fn process_chat_message(
 
     let content_owned = content.to_string();
     let session_key_owned = session_key.to_string();
+    let correction_pairing = Arc::clone(&state.pairing);
+    let correction_subject = scope.auth_subject.clone();
+    let correction_context =
+        original_input.map(|text| zeroclaw_api::review::OwnerCorrectionContext {
+            agent_alias: turn_alias.clone(),
+            session_key: session_key_owned.clone(),
+            ingress: zeroclaw_api::review::UserMessageIngress {
+                source: zeroclaw_api::review::UserMessageSource::Operator,
+                text: text.to_string(),
+            },
+        });
+    let correction_resolver: zeroclaw_api::review::OwnerCorrectionResolver = Arc::new(move || {
+        (initial_operator_input
+            && correction_subject
+                .as_ref()
+                .is_some_and(|subject| correction_pairing.tokens().contains(subject)))
+        .then(|| correction_context.clone())
+        .flatten()
+    });
     let turn_fut = async {
         use ::zeroclaw_log::Instrument as _;
         let span = ::zeroclaw_log::info_span!(
@@ -1681,6 +1707,10 @@ async fn process_chat_message(
         )
         .await
     };
+
+    let turn_fut: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send + '_>> = Box::pin(
+        zeroclaw_api::review::OWNER_CORRECTION_CONTEXT.scope(correction_resolver, turn_fut),
+    );
 
     // Drive both futures concurrently: the agent turn produces events
     // and we relay them over WebSocket. Track streamed chunks so we
@@ -2612,6 +2642,8 @@ mod tests {
         gate: Arc<tokio::sync::Semaphore>,
         seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
         systems: Arc<parking_lot::Mutex<Vec<String>>>,
+        corrections:
+            Arc<parking_lot::Mutex<Vec<Option<zeroclaw_api::review::OwnerCorrectionContext>>>>,
     }
 
     #[async_trait::async_trait]
@@ -2636,6 +2668,12 @@ mod tests {
             _temperature: Option<f64>,
         ) -> anyhow::Result<zeroclaw_providers::ChatResponse> {
             self.gate.acquire().await?.forget();
+            self.corrections.lock().push(
+                zeroclaw_api::review::OWNER_CORRECTION_CONTEXT
+                    .try_with(|resolve| resolve())
+                    .ok()
+                    .flatten(),
+            );
             self.systems.lock().extend(
                 request
                     .messages
@@ -2695,6 +2733,8 @@ mod tests {
         gate: Arc<tokio::sync::Semaphore>,
         seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
         systems: Arc<parking_lot::Mutex<Vec<String>>>,
+        corrections:
+            Arc<parking_lot::Mutex<Vec<Option<zeroclaw_api::review::OwnerCorrectionContext>>>>,
         /// When set, the agent is a body agent assembling Soul and User
         /// Model per turn from this config's `data_dir`.
         owner_config: Option<Arc<zeroclaw_config::schema::Config>>,
@@ -2716,6 +2756,7 @@ mod tests {
                 gate: Arc::new(tokio::sync::Semaphore::new(0)),
                 seen: Arc::default(),
                 systems: Arc::default(),
+                corrections: Arc::default(),
                 owner_config: None,
                 _tmp: tmp,
             }
@@ -2735,6 +2776,7 @@ mod tests {
                         gate: Arc::clone(&self.gate),
                         seen: Arc::clone(&self.seen),
                         systems: Arc::clone(&self.systems),
+                        corrections: Arc::clone(&self.corrections),
                     };
                     let workspace = self._tmp.path().to_path_buf();
                     let owner_config = self.owner_config.clone();

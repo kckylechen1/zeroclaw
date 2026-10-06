@@ -39,3 +39,20 @@ pub struct SoulReflectionReceipt {
     pub outcome: String,
     pub ran_at_unix: u64,
 }
+
+/// Current trusted ingress for one front-stage correction. The resolver is
+/// scoped to the turn, so operator revocation can be checked at tool use.
+#[derive(Debug, Clone)]
+pub struct OwnerCorrectionContext {
+    pub agent_alias: String,
+    pub session_key: String,
+    pub ingress: UserMessageIngress,
+}
+
+pub type OwnerCorrectionResolver =
+    std::sync::Arc<dyn Fn() -> Option<OwnerCorrectionContext> + Send + Sync>;
+
+tokio::task_local! {
+    /// Set only by owner-facing ingress; never inherited by spawned workers.
+    pub static OWNER_CORRECTION_CONTEXT: OwnerCorrectionResolver;
+}

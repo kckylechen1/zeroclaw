@@ -126,6 +126,9 @@ pub(crate) enum Submitted {
 pub(crate) struct TurnClaim {
     /// The message that starts the turn.
     pub(crate) input: String,
+    /// Original socket text before attachment expansion. This is evidence,
+    /// never an authority grant; derived/bridge claims leave it absent.
+    pub(crate) original_input: Option<String>,
     /// The client's id for that message, if it sent one.
     pub(crate) request_id: Option<String>,
     /// Reference to the canonical durable bridge input, when this is one.
@@ -217,6 +220,7 @@ impl<A> Conversation<A> {
         });
         Submitted::Start(TurnClaim {
             input: content,
+            original_input: None,
             request_id: None,
             intake: None,
             generation,

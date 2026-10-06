@@ -39,6 +39,70 @@ pub fn validate_review_text(text: &str) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+fn is_owner_correction_key(key: &str) -> bool {
+    key.strip_prefix("oc.").is_some_and(|digest| {
+        digest.len() == 60
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+/// U5 corrections use an agent/session-local namespace, while historical
+/// semantic-key supersession remains unchanged for every other producer.
+fn owner_correction_key(agent: &str, session: &str, semantic_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"owner-correction\0");
+    for part in [agent, session, semantic_key] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    let digest = format!("{:x}", digest.finalize());
+    format!("oc.{}", &digest[..60])
+}
+
+/// Resolve provenance from the immutable candidate, never from revision prose
+/// or a duplicated agent column. Malformed reserved-namespace rows project nowhere.
+fn correction_evidence_matches(evidence: &str, agent: &str, session: &str, key: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(evidence) else {
+        return false;
+    };
+    let Some(submitted_key) = value["submitted_semantic_key"].as_str() else {
+        return false;
+    };
+    let Some(messages) = value["messages"].as_array() else {
+        return false;
+    };
+    if value["origin"] != "owner_correction"
+        || value["agent"] != agent
+        || agent.trim().is_empty()
+        || agent.trim() != agent
+        || session.trim().is_empty()
+        || session.trim() != session
+        || session.chars().any(char::is_control)
+        || messages.len() != 1
+        || submitted_key.is_empty()
+        || submitted_key.len() > 64
+        || !submitted_key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        || owner_correction_key(agent, session, submitted_key) != key
+    {
+        return false;
+    }
+    let message = &messages[0];
+    message["session_id"] == session
+        && message["at_unix"].as_u64().is_some()
+        && message["owner_text"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty())
+        && serde_json::from_value::<zeroclaw_api::review::UserMessageSource>(
+            message["source"].clone(),
+        )
+        .is_ok()
+}
+
 /// What kind of statement this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -131,6 +195,19 @@ pub struct UserModelCandidate {
     pub scope: String,
     pub evidence: String,
     pub created_at_unix: u64,
+}
+
+impl UserModelCandidate {
+    pub(crate) fn visible_to_agent(&self, agent: &str) -> bool {
+        if !is_owner_correction_key(&self.semantic_key) {
+            return true;
+        }
+        let Some(Scope::Session(session)) = Scope::parse(&self.scope) else {
+            return false;
+        };
+        self.scope == Scope::Session(session.clone()).to_string()
+            && correction_evidence_matches(&self.evidence, agent, &session, &self.semantic_key)
+    }
 }
 
 /// An append-only revision. The active head for a semantic key is derived
@@ -313,8 +390,16 @@ impl UserModelStore {
         evidence: &str,
         now_unix: u64,
     ) -> Result<UserModelCandidate, rusqlite::Error> {
-        self.insert_observation(kind, statement, semantic_key, evidence, now_unix, false)?
-            .ok_or(rusqlite::Error::InvalidQuery)
+        self.insert_observation(
+            kind,
+            statement,
+            semantic_key,
+            evidence,
+            now_unix,
+            false,
+            "global",
+        )?
+        .ok_or(rusqlite::Error::InvalidQuery)
     }
 
     /// Reflection observations remain pending. One transaction enforces the
@@ -338,7 +423,59 @@ impl UserModelStore {
                 "invalid semantic key".into(),
             ));
         }
-        self.insert_observation(kind, statement, semantic_key, evidence, now_unix, true)
+        self.insert_observation(
+            kind,
+            statement,
+            semantic_key,
+            evidence,
+            now_unix,
+            true,
+            "global",
+        )
+    }
+
+    /// A correction shares the bounded review queue, but applies only to its
+    /// originating session if the owner later accepts it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_owner_correction(
+        &self,
+        agent: &str,
+        kind: UserModelKind,
+        statement: &str,
+        semantic_key: &str,
+        evidence: &str,
+        session: &str,
+        now_unix: u64,
+    ) -> Result<Option<UserModelCandidate>, rusqlite::Error> {
+        validate_review_text(statement)?;
+        if session.trim().is_empty()
+            || session.trim() != session
+            || session.chars().any(char::is_control)
+            || semantic_key.is_empty()
+            || semantic_key.len() > 64
+            || !semantic_key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid correction scope or semantic key".into(),
+            ));
+        }
+        let correction_key = owner_correction_key(agent, session, semantic_key);
+        if !correction_evidence_matches(evidence, agent, session, &correction_key) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid owner correction provenance".into(),
+            ));
+        }
+        self.insert_observation(
+            kind,
+            statement,
+            &correction_key,
+            evidence,
+            now_unix,
+            true,
+            &Scope::Session(session.to_string()).to_string(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -350,20 +487,21 @@ impl UserModelStore {
         evidence: &str,
         now_unix: u64,
         bounded: bool,
+        scope: &str,
     ) -> Result<Option<UserModelCandidate>, rusqlite::Error> {
         let candidate = UserModelCandidate {
             id: uuid::Uuid::new_v4().to_string(),
             kind,
             statement: statement.to_string(),
             semantic_key: semantic_key.to_string(),
-            scope: "global".to_string(),
+            scope: scope.to_string(),
             evidence: evidence.to_string(),
             created_at_unix: now_unix,
         };
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if bounded {
-            let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM user_model_candidates c WHERE kind = ?1 AND semantic_key = ?2 AND statement = ?3 AND NOT EXISTS(SELECT 1 FROM user_model_review_receipts r WHERE r.candidate_id = c.id))", rusqlite::params![kind.as_str(), semantic_key, statement], |r| r.get(0))?;
+            let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM user_model_candidates c WHERE kind = ?1 AND semantic_key = ?2 AND statement = ?3 AND scope = ?4 AND NOT EXISTS(SELECT 1 FROM user_model_review_receipts r WHERE r.candidate_id = c.id))", rusqlite::params![kind.as_str(), semantic_key, statement, scope], |r| r.get(0))?;
             let pending: usize = tx.query_row("SELECT COUNT(*) FROM user_model_candidates c WHERE NOT EXISTS(SELECT 1 FROM user_model_review_receipts r WHERE r.candidate_id = c.id)", [], |r| r.get(0))?;
             if duplicate || pending >= USER_MODEL_MAX_OPEN_REFLECTION_CANDIDATES {
                 return Ok(None);
@@ -542,13 +680,14 @@ impl UserModelStore {
         // second store connection cannot act on the same pending snapshot.
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let candidate = tx.query_row(
-            "SELECT kind, statement, semantic_key FROM user_model_candidates WHERE id = ?1",
+            "SELECT kind, statement, semantic_key, scope FROM user_model_candidates WHERE id = ?1",
             rusqlite::params![candidate_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )?;
@@ -584,13 +723,18 @@ impl UserModelStore {
         // Validate only actions that are still eligible. Reject ignores
         // narrowed_scope; the other actions retain their existing scope rules.
         let scope = match action {
-            ReviewAction::Narrow => narrowed_scope.unwrap_or("global"),
-            _ => "global",
+            ReviewAction::Narrow => narrowed_scope.unwrap_or(&candidate.3),
+            _ => &candidate.3,
         };
         if action != ReviewAction::Reject && Scope::parse(scope).is_none() {
             return Err(rusqlite::Error::InvalidParameterName(format!(
                 "invalid narrowed scope '{scope}'"
             )));
+        }
+        if action != ReviewAction::Reject && candidate.3 != "global" && scope != candidate.3 {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "review cannot widen or move candidate scope".into(),
+            ));
         }
         let receipt = UserModelReviewReceipt {
             id: uuid::Uuid::new_v4().to_string(),
@@ -643,6 +787,54 @@ impl UserModelStore {
         }
         tx.commit()?;
         Ok(receipt)
+    }
+
+    /// Active heads for an agent's prompt/reflection. Only the U5 reserved
+    /// correction namespace requires agent provenance; other heads preserve
+    /// the historical global/session applicability contract.
+    pub fn active_heads_for_agent(
+        &self,
+        agent: &str,
+        as_of_unix: Option<u64>,
+    ) -> Result<Vec<UserModelRevision>, rusqlite::Error> {
+        let heads = self.active_heads(as_of_unix)?;
+        let conn = self.conn.lock();
+        let mut admitted = Vec::new();
+        for head in heads {
+            if !is_owner_correction_key(&head.semantic_key) {
+                admitted.push(head);
+                continue;
+            }
+            let (Some(candidate), Some(Scope::Session(session))) =
+                (head.source_candidate.as_deref(), Scope::parse(&head.scope))
+            else {
+                continue;
+            };
+            let provenance = conn.query_row(
+                "SELECT semantic_key, scope, evidence FROM user_model_candidates WHERE id = ?1",
+                [candidate],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            );
+            let (key, scope, evidence) = match provenance {
+                Ok(value) => value,
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(error) => return Err(error),
+            };
+            if key == head.semantic_key
+                && scope == head.scope
+                && scope == Scope::Session(session.clone()).to_string()
+                && correction_evidence_matches(&evidence, agent, &session, &key)
+            {
+                admitted.push(head);
+            }
+        }
+        Ok(admitted)
     }
 
     /// Active, applicable revisions as of `as_of_unix` (`None` = now).
@@ -1933,6 +2125,275 @@ mod tests {
         assert_eq!(
             store.candidate_history(&candidate.id).unwrap().unwrap().0,
             candidate
+        );
+    }
+}
+
+#[cfg(test)]
+mod owner_correction_tests {
+    use super::*;
+
+    fn evidence(agent: &str, session: &str, key: &str) -> String {
+        serde_json::json!({"origin":"owner_correction", "agent":agent, "submitted_semantic_key":key,
+            "messages":[{"session_id":session, "at_unix":1, "owner_text":"Owner correction.", "source":{"kind":"operator"}}]}).to_string()
+    }
+
+    #[test]
+    fn owner_correction_projection_resolves_canonical_agent_and_rejects_corrupt_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        store
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "Global baseline.",
+                "style",
+                "global",
+                1,
+            )
+            .unwrap();
+        let mut candidates = Vec::new();
+        for agent in ["nova", "other"] {
+            let candidate = store
+                .record_owner_correction(
+                    agent,
+                    UserModelKind::Preference,
+                    &format!("{agent} correction."),
+                    "style",
+                    &evidence(agent, "same-session", "style"),
+                    "same-session",
+                    2,
+                )
+                .unwrap()
+                .unwrap();
+            assert!(candidate.visible_to_agent(agent));
+            assert!(!candidate.visible_to_agent("unrelated"));
+            store
+                .review_candidate(
+                    &candidate.id,
+                    ReviewAction::Accept,
+                    "operator",
+                    None,
+                    None,
+                    3,
+                )
+                .unwrap();
+            candidates.push(candidate);
+        }
+        assert_ne!(candidates[0].semantic_key, candidates[1].semantic_key);
+        for agent in ["nova", "other"] {
+            let heads = store.active_heads_for_agent(agent, Some(3)).unwrap();
+            assert_eq!(heads.len(), 2);
+            let projection = project_applicable_heads(
+                heads,
+                &ApplicabilityContext::new(agent, "test", "same-session"),
+                1200,
+            );
+            assert!(
+                projection
+                    .prompt_section
+                    .contains(&format!("{agent} correction."))
+            );
+            assert!(projection.prompt_section.contains("Global baseline."));
+        }
+        for broken in [
+            "not JSON",
+            "{}",
+            &evidence("other", "same-session", "style"),
+            &evidence("nova", "another-session", "style"),
+        ] {
+            store
+                .conn
+                .lock()
+                .execute(
+                    "UPDATE user_model_candidates SET evidence = ?1 WHERE id = ?2",
+                    rusqlite::params![broken, candidates[0].id],
+                )
+                .unwrap();
+            let heads = store.active_heads_for_agent("nova", Some(3)).unwrap();
+            assert_eq!(
+                heads.len(),
+                1,
+                "malformed correction must not become shared: {broken}"
+            );
+            assert_eq!(heads[0].statement, "Global baseline.");
+        }
+        assert!(
+            store
+                .record_owner_correction(
+                    "nova",
+                    UserModelKind::Preference,
+                    "Invalid provenance.",
+                    "style",
+                    "{}",
+                    "same-session",
+                    4
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn owner_correction_keys_isolate_sessions_and_global_heads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        store
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "Global baseline.",
+                "style",
+                "global",
+                1,
+            )
+            .unwrap();
+        let a = store
+            .record_owner_correction(
+                "nova",
+                UserModelKind::Preference,
+                "A correction.",
+                "style",
+                &evidence("nova", "a", "style"),
+                "a",
+                2,
+            )
+            .unwrap()
+            .unwrap();
+        let b = store
+            .record_owner_correction(
+                "nova",
+                UserModelKind::Preference,
+                "B correction.",
+                "style",
+                &evidence("nova", "b", "style"),
+                "b",
+                3,
+            )
+            .unwrap()
+            .unwrap();
+        assert_ne!(a.semantic_key, b.semantic_key);
+        for candidate in [&a, &b] {
+            assert!(candidate.semantic_key.len() <= 64);
+            store
+                .review_candidate(
+                    &candidate.id,
+                    ReviewAction::Accept,
+                    "operator",
+                    None,
+                    None,
+                    4,
+                )
+                .unwrap();
+        }
+        let replacement = store
+            .record_owner_correction(
+                "nova",
+                UserModelKind::Preference,
+                "New A correction.",
+                "style",
+                &evidence("nova", "a", "style"),
+                "a",
+                5,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(replacement.semantic_key, a.semantic_key);
+        store
+            .review_candidate(
+                &replacement.id,
+                ReviewAction::Accept,
+                "operator",
+                None,
+                None,
+                6,
+            )
+            .unwrap();
+        let heads = store.active_heads(Some(6)).unwrap();
+        assert_eq!(heads.len(), 3);
+        for (session, own, other) in [
+            ("a", "New A correction.", "B correction."),
+            ("b", "B correction.", "New A correction."),
+        ] {
+            let projection = project_applicable_heads(
+                heads.clone(),
+                &ApplicabilityContext::new("nova", "test", session),
+                1200,
+            );
+            assert!(projection.prompt_section.contains("Global baseline."));
+            assert!(projection.prompt_section.contains(own));
+            assert!(!projection.prompt_section.contains(other));
+        }
+    }
+
+    #[test]
+    fn owner_correction_scope_cannot_expand_and_reflection_stays_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        let correction = store
+            .record_owner_correction(
+                "nova",
+                UserModelKind::Preference,
+                "Short answers.",
+                "answers.length",
+                &evidence("nova", "session-a", "answers.length"),
+                "session-a",
+                1,
+            )
+            .unwrap()
+            .unwrap();
+        for scope in ["global", "session:session-b", "agent:nova"] {
+            assert!(
+                store
+                    .review_candidate(
+                        &correction.id,
+                        ReviewAction::Narrow,
+                        "operator",
+                        None,
+                        Some(scope),
+                        2
+                    )
+                    .is_err()
+            );
+        }
+        assert!(store.active_heads(Some(2)).unwrap().is_empty());
+        store
+            .review_candidate(
+                &correction.id,
+                ReviewAction::Accept,
+                "operator",
+                None,
+                None,
+                3,
+            )
+            .unwrap();
+        assert_eq!(
+            store.active_heads(Some(3)).unwrap()[0].scope,
+            "session:session-a"
+        );
+        let reflection = store
+            .record_reflection_observation(
+                UserModelKind::Preference,
+                "Detailed reviews.",
+                "reviews.detail",
+                "reflection evidence",
+                4,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(reflection.scope, "global");
+        store
+            .review_candidate(
+                &reflection.id,
+                ReviewAction::Accept,
+                "operator",
+                None,
+                None,
+                5,
+            )
+            .unwrap();
+        let heads = store.active_heads(Some(5)).unwrap();
+        assert!(
+            heads
+                .iter()
+                .any(|head| head.semantic_key == "reviews.detail" && head.scope == "global")
         );
     }
 }

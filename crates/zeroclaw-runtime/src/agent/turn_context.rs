@@ -51,7 +51,7 @@ pub fn user_model_section_blocking(
     store: &UserModelStore,
     applicability: &ApplicabilityContext,
 ) -> String {
-    match store.active_heads(None) {
+    match store.active_heads_for_agent(&applicability.agent_alias, None) {
         Ok(heads) => {
             project_applicable_heads(
                 heads,
@@ -175,6 +175,63 @@ mod tests {
 
     fn ctx() -> ApplicabilityContext {
         ApplicabilityContext::new("nova", "wss", "gw_s1")
+    }
+
+    #[test]
+    fn owner_correction_turn_projection_is_agent_bound_even_when_session_keys_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        for agent in ["nova", "other"] {
+            let evidence = serde_json::json!({"origin":"owner_correction", "agent":agent, "submitted_semantic_key":"style",
+                "messages":[{"session_id":"same", "at_unix":1, "owner_text":"A correction.", "source":{"kind":"operator"}}]}).to_string();
+            let candidate = store
+                .record_owner_correction(
+                    agent,
+                    UserModelKind::Preference,
+                    &format!("{agent} wording."),
+                    "style",
+                    &evidence,
+                    "same",
+                    1,
+                )
+                .unwrap()
+                .unwrap();
+            store
+                .review_candidate(
+                    &candidate.id,
+                    zeroclaw_memory::companion::ReviewAction::Accept,
+                    "operator",
+                    None,
+                    None,
+                    2,
+                )
+                .unwrap();
+        }
+        store
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "Legacy shared wording.",
+                "oc.legacy",
+                "global",
+                1,
+            )
+            .unwrap();
+        for (agent, other) in [("nova", "other"), ("other", "nova")] {
+            let section = user_model_section_blocking(
+                &store,
+                &ApplicabilityContext::new(agent, "wss", "same"),
+            );
+            assert!(section.contains(&format!("{agent} wording.")));
+            assert!(!section.contains(&format!("{other} wording.")));
+            assert!(section.contains("Legacy shared wording."));
+            assert!(
+                !user_model_section_blocking(
+                    &store,
+                    &ApplicabilityContext::new(agent, "wss", "different")
+                )
+                .contains(&format!("{agent} wording."))
+            );
+        }
     }
 
     #[tokio::test]
