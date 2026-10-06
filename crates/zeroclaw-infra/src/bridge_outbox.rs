@@ -318,6 +318,14 @@ impl BridgeOutbox {
         Ok(())
     }
 
+    /// Resolve only the current transport attempt's canonical receipt.
+    pub fn is_resolved(&self, bridge: &str, id: &str) -> Result<bool> {
+        Ok(self.conn.lock().query_row(
+            "SELECT delivery_state IN ('confirmed','dismissed','expired') FROM bridge_outbox WHERE bridge=?1 AND id=?2",
+            params![bridge,id], |row| row.get::<_,bool>(0),
+        ).optional()?.unwrap_or(false))
+    }
+
     /// Owner actions are scoped to the exact recipient and canonical source.
     /// Caller must authenticate operator authority; no bridge token can call this API.
     #[allow(clippy::too_many_arguments)]

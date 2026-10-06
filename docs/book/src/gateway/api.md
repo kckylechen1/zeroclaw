@@ -197,7 +197,9 @@ opens, then one frame per queued message:
 
 `thread_id` is present only when the sender set one. The bridge answers
 `{"type":"delivered","id":"<uuid>"}` after the platform accepted the
-message, and the gateway retains a confirmed receipt. Each bridge has at most one
+message, and the gateway retains a confirmed receipt. Control subprotocol `zeroclaw.bridge.v2` is required and checked by both peers;
+old/new binaries fail closed. Upgrade the gateway and bridge together. The chat
+subprotocol is unchanged. Each bridge has at most one
 control socket: a new connection closes the old one (close code 4000).
 
 ### Outbox
@@ -217,6 +219,10 @@ Messages and attention facts share the existing SQLite outbox,
   intentionally tightens the former at-least-once reconnect behavior, including
   legacy outbox rows. A crash between the durable claim and the actual send can
   therefore leave an unsent notification requiring owner reconciliation.
+- At most one candidate is in flight per control socket. The next candidate is
+  not claimed until the current receipt arrives or the owner resolves it. A
+  60-second receipt timeout closes the socket, leaving only the current attempt
+  unknown and later candidates accepted for reconnect delivery.
 - Accepted candidates are scanned in insertion order on every poll. Quiet,
   snoozed and muted candidates do not block later eligible candidates, and are
   revisited when policy permits. There is no persistent sequence cursor that

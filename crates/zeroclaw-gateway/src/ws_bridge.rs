@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use zeroclaw_infra::bridge_outbox::BridgeOutbox;
 
 /// The sub-protocol echoed when the client offers it.
-const BRIDGE_PROTOCOL: &str = "zeroclaw.bridge.v1";
+const BRIDGE_PROTOCOL: &str = "zeroclaw.bridge.v2";
 /// Close code sent to a control socket that a newer connection replaced.
 const CLOSE_REPLACED: u16 = 4000;
 /// How often a socket re-reads the outbox without a local wake-up; picks up
@@ -41,6 +41,8 @@ const CLOSE_REPLACED: u16 = 4000;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Rows read per outbox query.
 const BATCH: usize = 100;
+/// A missing receipt closes the socket without claiming subsequent candidates.
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The live control socket of each bridge.
 #[derive(Default)]
@@ -127,11 +129,10 @@ pub async fn handle_ws_bridge(
         .get("sec-websocket-protocol")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|protos| protos.split(',').any(|p| p.trim() == BRIDGE_PROTOCOL));
-    let ws = if offers_protocol {
-        ws.protocols([BRIDGE_PROTOCOL])
-    } else {
-        ws
-    };
+    if !offers_protocol {
+        return (StatusCode::UPGRADE_REQUIRED, "bridge_protocol_v2_required").into_response();
+    }
+    let ws = ws.protocols([BRIDGE_PROTOCOL]);
     let sockets = Arc::clone(&state.bridge_sockets);
     ws.on_upgrade(move |socket| run_control_socket(socket, bridge, outbox, sockets, state))
         .into_response()
@@ -196,14 +197,34 @@ async fn serve(
 
     // Each poll scans accepted rows again: a deferred low sequence must not
     // disappear behind a later delivered row. Claims prevent duplicate sends.
+    let mut in_flight: Option<(String, tokio::time::Instant)> = None;
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        match send_pending(&mut sender, bridge, outbox, state).await {
-            Ok(()) => {}
-            Err(reason) => return reason,
+        if let Some((id, _)) = &in_flight {
+            match outbox.is_resolved(bridge, id) {
+                Ok(true) => in_flight = None,
+                Ok(false) => {}
+                Err(_) => return "attention_store_unavailable",
+            }
         }
+        if in_flight.is_none() {
+            match send_pending(&mut sender, bridge, outbox, state).await {
+                Ok(Some(id)) => {
+                    in_flight = Some((id, tokio::time::Instant::now() + RECEIPT_TIMEOUT))
+                }
+                Ok(None) => {}
+                Err(reason) => return reason,
+            }
+        }
+        let deadline = in_flight
+            .as_ref()
+            .map(|(_, deadline)| *deadline)
+            .unwrap_or_else(|| tokio::time::Instant::now() + RECEIPT_TIMEOUT);
         tokio::select! {
+            _ = tokio::time::sleep_until(deadline), if in_flight.is_some() => {
+                return "attention_receipt_timeout";
+            }
             () = replaced.cancelled() => {
                 let _ = sender
                     .send(Message::Close(Some(CloseFrame {
@@ -235,7 +256,7 @@ async fn send_pending(
     bridge: &str,
     outbox: &BridgeOutbox,
     state: &AppState,
-) -> Result<(), &'static str> {
+) -> Result<Option<String>, &'static str> {
     outbox
         .purge_expired()
         .map_err(|_| "attention_store_unavailable")?;
@@ -291,19 +312,25 @@ async fn send_pending(
             if let Some(thread_id) = row.thread_id {
                 frame["thread_id"] = serde_json::Value::String(thread_id);
             }
-            if sender
-                .send(Message::Text(frame.to_string().into()))
-                .await
-                .is_err()
-            {
+            if !matches!(
+                tokio::time::timeout(
+                    RECEIPT_TIMEOUT,
+                    sender.send(Message::Text(frame.to_string().into()))
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
                 return Err("send failed");
             }
             outbox
                 .mark_sent(bridge, &row.id)
                 .map_err(|_| "attention_store_unavailable")?;
+            // Do not reserve buffered frames that the bridge cannot attempt
+            // until this one's platform result is known.
+            return Ok(Some(row.id));
         }
         if !full {
-            return Ok(());
+            return Ok(None);
         }
     }
 }
@@ -417,50 +444,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_rows_send_once_and_lost_receipts_remain_unknown() {
+    async fn old_or_unversioned_bridge_control_is_refused_before_delivery() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let tmp = tempfile::tempdir().unwrap();
         let state = bridge_state(&tmp, true);
         let outbox = outbox(&state);
+        let id = outbox.enqueue("tg", "42", None, "waiting").unwrap();
         let gateway = serve(state).await;
-        outbox.enqueue("tg", "42", None, "queued 1").unwrap();
-        outbox.enqueue("other", "7", None, "not ours").unwrap();
-        outbox.enqueue("tg", "42", Some("5"), "queued 2").unwrap();
-
-        let mut client = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
-        let first = next(&mut client).await.unwrap();
-        // Written while the replay is in flight: it must come after it.
-        outbox.enqueue("tg", "43", None, "live").unwrap();
-        let second = next(&mut client).await.unwrap();
-        let third = next(&mut client).await.unwrap();
-        assert_eq!(
-            [&first.content, &second.content, &third.content],
-            ["queued 1", "queued 2", "live"]
-        );
-        assert_eq!(second.thread_id.as_deref(), Some("5"));
-        assert_eq!(third.to, "43");
-
-        client.ack(&first.id).await.unwrap();
-        client.ack(&third.id).await.unwrap();
-        // Acks are processed in order with later frames; wait for them.
-        let deadline = tokio::time::Instant::now() + WAIT;
-        while outbox.len("tg").unwrap() != 1 {
-            assert!(tokio::time::Instant::now() < deadline, "acks applied");
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        let addr = gateway.trim_start_matches("ws://");
+        for protocol in ["", "Sec-WebSocket-Protocol: zeroclaw.bridge.v1\r\n"] {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let request = format!(
+                "GET /ws/bridge HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer {TOKEN}\r\n{protocol}\r\n"
+            );
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = [0u8; 1024];
+            let n = stream.read(&mut response).await.unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&response[..n])
+                    .split_whitespace()
+                    .nth(1),
+                Some("426")
+            );
         }
-        client.close().await.unwrap();
+        assert_eq!(
+            outbox.inspect("tg", &id).unwrap().unwrap()["delivery_state"],
+            "accepted"
+        );
+    }
 
-        // A lost receipt never causes a blind resend after reconnect.
-        let mut again = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
+    #[tokio::test]
+    async fn lost_first_receipt_leaves_later_candidate_accepted_for_reconnect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = bridge_state(&tmp, true);
+        let outbox = outbox(&state);
+        let first_id = outbox.enqueue("tg", "42", None, "first").unwrap();
+        let second_id = outbox.enqueue("tg", "42", Some("5"), "second").unwrap();
+        let gateway = serve(state).await;
+        let mut client = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
+        assert_eq!(next(&mut client).await.unwrap().id, first_id);
+        // An unrelated/forged receipt cannot release the current attempt.
+        client.ack(&second_id).await.unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(150), again.next_deliver())
+            tokio::time::timeout(Duration::from_millis(150), client.next_deliver())
                 .await
                 .is_err()
         );
         assert_eq!(
-            outbox.inspect("tg", &second.id).unwrap().unwrap()["delivery_state"],
+            outbox.inspect("tg", &second_id).unwrap().unwrap()["delivery_state"],
+            "accepted"
+        );
+        // Refusal or a lost response closes the control socket without an ack.
+        client.close().await.unwrap();
+        let mut again = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
+        let second = next(&mut again).await.unwrap();
+        assert_eq!(second.id, second_id);
+        assert_eq!(second.thread_id.as_deref(), Some("5"));
+        assert_eq!(
+            outbox.inspect("tg", &first_id).unwrap().unwrap()["delivery_state"],
             "unknown"
         );
-        assert_eq!(outbox.len("other").unwrap(), 1);
+        again.ack(&second.id).await.unwrap();
+        let third = outbox.enqueue("tg", "42", None, "third").unwrap();
+        assert_eq!(next(&mut again).await.unwrap().id, third);
+        let fourth = outbox.enqueue("tg", "42", None, "fourth").unwrap();
+        let item = outbox.inspect("tg", &third).unwrap().unwrap();
+        outbox
+            .owner_action(
+                "tg",
+                "42",
+                item["source_kind"].as_str().unwrap(),
+                item["source_id"].as_str().unwrap(),
+                &third,
+                "dismiss",
+                None,
+                "owner",
+            )
+            .unwrap();
+        assert_eq!(next(&mut again).await.unwrap().id, fourth);
     }
 
     #[tokio::test]
@@ -508,6 +569,7 @@ mod tests {
             outbox.inspect("tg", &quiet).unwrap().unwrap()["delivery_state"],
             "accepted"
         );
+        client.ack(&urgent).await.unwrap();
         state.config.write().gateway.attention = None;
         // New write wakes the same socket; no restart or config snapshot.
         outbox.enqueue("tg", "42", None, "wake").unwrap();

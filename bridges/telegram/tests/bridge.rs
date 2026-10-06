@@ -189,7 +189,7 @@ fn fake_gateway(listener: TcpListener) -> FakeGateway {
                     );
                     let protocol = if path == "/ws/bridge" {
                         assert_eq!(req.uri().query(), None, "identity comes from the token");
-                        "zeroclaw.bridge.v1"
+                        "zeroclaw.bridge.v2"
                     } else {
                         let query = req.uri().query().unwrap_or_default().to_string();
                         assert_eq!(query, "agent=assistant&session_id=main");

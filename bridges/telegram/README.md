@@ -84,15 +84,22 @@ messages in the gateway's outbox, and the gateway sends them here as
 - `to` is the Telegram chat id and `thread_id` becomes `message_thread_id`.
   Only the owner's chat is served: a message for any other chat is dropped
   with a warning.
-- The bridge acknowledges a message (`delivered`) only after Telegram
-  accepted it. The gateway keeps unacknowledged messages and sends them again
-  on the next connection, oldest first; ids already delivered are
-  acknowledged without sending twice.
-- If Telegram fails with a retryable error (a timeout, a rate limit, a
-  server error), the bridge drops the control socket and reconnects with
-  backoff, and the message comes again. A permanent refusal, such as a
-  chat Telegram does not know, is dropped and logged so it cannot block the
-  queue.
+- Gateway and bridge must both support control subprotocol
+  `zeroclaw.bridge.v2`; old/new combinations fail closed. Upgrade both together.
+  The chat subprotocol is unchanged.
+- The bridge acknowledges a message (`delivered`) only after Telegram accepted
+  the complete message. The gateway records `accepted` when queued, `sent` for
+  socket handoff, `confirmed` for the platform receipt, and `unknown` when an
+  attempted send has no reliable receipt. Confirmation does not mean owner read.
+- Only one candidate is in flight per control socket. The next candidate stays
+  accepted until the current receipt arrives or the owner explicitly resolves
+  it. A missing receipt closes the connection after 60 seconds; only the current
+  attempt is unknown. Later candidates can be delivered after reconnect.
+- A timeout, rate limit, server error, partial send, or permanent refusal closes
+  the control socket without acknowledging success. The gateway retains the
+  uncertain attempt for owner inspection and never automatically resends it.
+  Inspect `/api/attention/{bridge}` and reconcile before dismissing an unknown
+  attempt; any replacement is an explicit new candidate.
 - If the gateway refuses the control socket (for example because the token is
   a paired token, not a bridge token), the bridge logs an error. Source intake independently requires a scoped bridge
   token, so paired tokens cannot be used as a chat-only fallback.
