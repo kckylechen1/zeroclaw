@@ -773,6 +773,31 @@ pub fn all_tools_with_runtime(
             }
         },
     ));
+    // Corrections require live policy. Unsupported snapshot-only entry points
+    // fail closed rather than caching owner authority in a long-lived tool.
+    let correction_live = live_config.clone();
+    let correction_root = config.data_dir.clone();
+    let correction_agent = agent_alias.to_string();
+    tool_arcs.push(Arc::new(
+        zeroclaw_tools::note_owner_correction::NoteOwnerCorrectionTool::new(
+            agent_alias,
+            move || {
+                let live = correction_live.as_ref()?;
+                let current = live.read();
+                let policy = SecurityPolicy::for_agent(&current, &correction_agent).ok()?;
+                (persistent_writes
+                    && policy.can_act()
+                    && policy.is_tool_allowed("note_owner_correction")
+                    && current.data_dir == correction_root)
+                    .then(|| {
+                        (
+                            current.companion_memory.owner.gate(),
+                            correction_root.clone(),
+                        )
+                    })
+            },
+        ),
+    ));
     tool_arcs.push(Arc::new(CalculatorTool::new()));
     tool_arcs.push(Arc::new(WeatherTool::new()));
     tool_arcs.push(Arc::new(TodoWriteTool::new()));

@@ -19,7 +19,7 @@
 use crate::ws_approval::{PendingApprovals, new_pending_approvals};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{OnceCell, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use zeroclaw_api::channel::ChannelApprovalResponse;
@@ -105,6 +105,7 @@ pub(crate) struct Seed {
 
 /// The turn currently running in a conversation.
 struct ActiveTurn {
+    correction_invalidated: Arc<AtomicBool>,
     generation: u64,
     cancel: CancellationToken,
     steering: mpsc::Sender<String>,
@@ -126,6 +127,9 @@ pub(crate) enum Submitted {
 pub(crate) struct TurnClaim {
     /// The message that starts the turn.
     pub(crate) input: String,
+    /// Original socket text before attachment expansion. This is evidence,
+    /// never an authority grant; derived/bridge claims leave it absent.
+    pub(crate) original_input: Option<String>,
     /// The client's id for that message, if it sent one.
     pub(crate) request_id: Option<String>,
     /// Reference to the canonical durable bridge input, when this is one.
@@ -184,8 +188,14 @@ impl<A> Conversation<A> {
     pub(crate) fn submit(&self, content: String) -> Submitted {
         let mut turn = self.turn.lock();
         if let Some(active) = turn.as_ref() {
-            return match active.steering.try_send(content) {
-                Ok(()) => Submitted::Steered,
+            return match active.steering.try_reserve() {
+                Ok(permit) => {
+                    // Reserve first: only accepted steering invalidates authority,
+                    // and invalidation must precede publication to the receiver.
+                    active.correction_invalidated.store(true, Ordering::Release);
+                    permit.send(content);
+                    Submitted::Steered
+                }
                 Err(mpsc::error::TrySendError::Full(_)) => Submitted::SteeringFull,
                 Err(mpsc::error::TrySendError::Closed(_)) => Submitted::SteeringClosed,
             };
@@ -211,18 +221,30 @@ impl<A> Conversation<A> {
         let cancel = CancellationToken::new();
         let (steering_tx, steering_rx) = mpsc::channel(STEERING_BUFFER);
         *turn = Some(ActiveTurn {
+            correction_invalidated: Arc::new(AtomicBool::new(false)),
             generation,
             cancel: cancel.clone(),
             steering: steering_tx,
         });
         Submitted::Start(TurnClaim {
             input: content,
+            original_input: None,
             request_id: None,
             intake: None,
             generation,
             cancel,
             steering: steering_rx,
         })
+    }
+
+    /// A successful steering submission invalidates the initial ingress as
+    /// correction evidence for this generation, regardless of socket identity.
+    pub(crate) fn correction_invalidation(&self, generation: u64) -> Option<Arc<AtomicBool>> {
+        self.turn
+            .lock()
+            .as_ref()
+            .filter(|turn| turn.generation == generation)
+            .map(|turn| Arc::clone(&turn.correction_invalidated))
     }
 
     /// Release the turn slot, but only for the turn that holds it.

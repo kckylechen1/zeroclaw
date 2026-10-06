@@ -338,6 +338,36 @@ Each candidate has `review_url` pointing to its existing operator endpoint:
 - Reflection receipts have no review action: they report what ran and how many
   proposals/candidates were created. They grant no approval authority.
 
+`note_owner_correction` puts a correction from the current owner message into
+this same User Model queue. It uses the existing `user_model.db` owner and the
+shared three-pending-candidate cap; duplicate pending corrections are not added.
+The model supplies only kind, statement and semantic key. Runtime-bound evidence
+records the owning agent, session, original owner text and ingress source. WS
+text is captured before attachment expansion; file bytes never become owner
+evidence, and an attachment-only or unbound input cannot support a correction. Channel
+senders must match the current companion owner policy; paired operator WS input
+is checked against current pairing membership. Bridge, anonymous, steering-only,
+worker and unsupported CLI/ACP turns cannot mint correction evidence. A live
+config handle is required, so snapshot-only tool registries fail closed.
+
+Corrections start with `session:<originating-session>` applicability and change
+no active User Model or Soul state. The runtime derives a separate session-local
+correction key from the agent, session and submitted semantic key, so approving a
+correction cannot supersede another session or a global preference. Repeated
+approved corrections for that same agent/session/key replace that correction
+head. Prompt and reflection readers resolve the owning agent from the immutable
+source candidate evidence; malformed correction provenance is excluded. The
+correction format is `oc.` plus 60 lowercase hex digits on a session-scoped
+source candidate. Historical owner statements and global source candidates keep
+their behavior even when their keys match that format. Same-second correction
+approvals use revision insertion order, so the later approval wins. Any accepted steering
+submission to an active WebSocket turn invalidates its initial correction
+authority for the rest of that turn. Acceptance or rewording preserves that scope;
+`narrow` cannot move the correction to another session or expand it to global.
+Global reflection candidates retain their existing review behavior. The usual
+operator review endpoint is the only promotion path. Disabling this tool removes
+new correction intake without deleting pending candidates or review history.
+
 Reflection uses immutable original ingress text and its source on each SQLite message row, rather
 than the session's latest sender. Active and passive channel messages store
 their actual sender; the current owner identity list is checked when reflecting.

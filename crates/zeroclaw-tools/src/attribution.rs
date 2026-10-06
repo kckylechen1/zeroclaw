@@ -81,6 +81,10 @@ tool_attribution!(McpToolWrapper, ToolKind::Plugin);
 tool_attribution!(MemoryExportTool, ToolKind::Memory);
 tool_attribution!(MemoryForgetTool, ToolKind::Memory);
 tool_attribution!(ProposeSoulChangeTool, ToolKind::Memory);
+tool_attribution!(
+    crate::note_owner_correction::NoteOwnerCorrectionTool,
+    ToolKind::Memory
+);
 tool_attribution!(MemoryPurgeTool, ToolKind::Memory);
 tool_attribution!(MemoryRecallTool, ToolKind::Memory);
 tool_attribution!(MemoryStoreTool, ToolKind::Memory);

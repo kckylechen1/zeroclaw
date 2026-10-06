@@ -178,3 +178,13 @@ tool-tachi-binding-failed = Tachi accepted the attached receipt, but recording i
 
 tool-ask-user-unanswered = The question expired or no client could answer it. Retry ask_user if needed.
 tool-ask-user-question-failed = The question could not be delivered. Check its size, choices and timeout (1–300 seconds).
+
+# Owner corrections remain inactive until operator review.
+tool-note-owner-correction = Record a lasting correction from the owner's current message as a User Model candidate for review. It applies only to this session after owner acceptance. This changes no active User Model or Soul state. Evidence is supplied by the runtime; do not infer sensitive personal data or propose execution permissions.
+tool-owner-correction-statement = One corrected value, goal, preference, habit or constraint, on one line of at most 240 bytes.
+tool-owner-correction-key = Stable semantic key, at most 64 ASCII letters, digits, dots, underscores or hyphens.
+tool-owner-correction-invalid = Supply only kind, statement and semantic_key. Owner identity, evidence and scope are runtime-owned.
+tool-owner-correction-denied = A current authenticated owner message and matching session are required to record a correction.
+tool-owner-correction-recorded = Correction recorded in the review inbox for this session. Nothing has changed until the owner accepts it.
+tool-owner-correction-pending = No new candidate was recorded: this correction is already pending or the review queue is full.
+tool-owner-correction-store-error = Could not record the correction. Check the statement and semantic key, then try again.

@@ -518,7 +518,7 @@ pub async fn reflect(
         input.push_str("\n# Current owner model\n");
         input.push_str(
             &crate::companion::project_active_heads(
-                &user_model.active_heads(Some(now_unix))?,
+                &user_model.active_heads_for_agent(agent_alias, Some(now_unix))?,
                 1200,
             )
             .prompt_section,
@@ -526,6 +526,7 @@ pub async fn reflect(
         input.push_str("\n# Pending User Model candidates\n");
         for candidate in user_pending
             .iter()
+            .filter(|candidate| candidate.visible_to_agent(agent_alias))
             .take(USER_MODEL_MAX_OPEN_REFLECTION_CANDIDATES)
         {
             input.push_str(&format!(
@@ -1048,6 +1049,77 @@ mod tests {
         assert_eq!(receipt.outcome, "model_call_failed: upstream timeout");
         assert!(store.proposals(AGENT, false).unwrap().is_empty());
     }
+    #[tokio::test]
+    async fn owner_correction_reflection_excludes_other_agent_pending_and_active_text() {
+        let (dir, soul) = store();
+        let user = UserModelStore::open(dir.path()).unwrap();
+        user.record_owner_statement(
+            UserModelKind::Preference,
+            "Shared global preference.",
+            "global-style",
+            "global",
+            NOW - 10,
+        )
+        .unwrap();
+        for (agent, key, text, accepted) in [
+            (AGENT, "active", "Own active correction.", true),
+            ("other-agent", "active", "Other active correction.", true),
+            (AGENT, "pending", "Own pending correction.", false),
+            ("other-agent", "pending", "Other pending correction.", false),
+        ] {
+            let evidence = serde_json::json!({"origin":"owner_correction", "agent":agent, "submitted_semantic_key":key,
+                "messages":[{"session_id":"same-session", "at_unix":NOW-5, "owner_text":"A correction.", "source":{"kind":"operator"}}]}).to_string();
+            let candidate = user
+                .record_owner_correction(
+                    agent,
+                    UserModelKind::Preference,
+                    text,
+                    key,
+                    &evidence,
+                    "same-session",
+                    NOW - 5,
+                )
+                .unwrap()
+                .unwrap();
+            if accepted {
+                user.review_candidate(
+                    &candidate.id,
+                    crate::companion::ReviewAction::Accept,
+                    "operator",
+                    None,
+                    None,
+                    NOW - 4,
+                )
+                .unwrap();
+            }
+        }
+        let (model, seen) = fake(Ok("[]"));
+        reflect(
+            &soul,
+            AGENT,
+            &user,
+            PersonaKnobs::default(),
+            &messages(&["Hello"]),
+            model,
+            NOW - 100,
+            NOW,
+        )
+        .await
+        .unwrap();
+        let seen = seen.lock().unwrap();
+        let input = &seen[0].1;
+        for expected in [
+            "Shared global preference.",
+            "Own active correction.",
+            "Own pending correction.",
+        ] {
+            assert!(input.contains(expected), "{input}");
+        }
+        for forbidden in ["Other active correction.", "Other pending correction."] {
+            assert!(!input.contains(forbidden), "{input}");
+        }
+    }
+
     #[tokio::test]
     async fn one_toolless_call_produces_both_queues_with_bound_evidence_and_no_active_writes() {
         let (dir, soul) = store();
