@@ -118,7 +118,10 @@ fn historical_capture_decodes_with_attribution_and_pending_outbox_after_reopen()
     assert_eq!(stored.persisted_at, receipt.persisted_at);
     assert_eq!(Some(entry.revision), receipt.local_revision);
     assert!(receipt.is_durable());
-    assert_eq!(stored.agent_identity_id, "550e8400-e29b-41d4-a716-446655440000");
+    assert_eq!(
+        stored.agent_identity_id,
+        "550e8400-e29b-41d4-a716-446655440000"
+    );
     assert_eq!(stored.principal_id, "owner-principal");
     assert_eq!(stored.session_id, "session-1");
     assert_eq!(stored.turn_id, "turn-history");
