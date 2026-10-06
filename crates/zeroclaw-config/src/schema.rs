@@ -6516,6 +6516,10 @@ impl Default for CostConfig {
 #[prefix = "gateway"]
 #[allow(clippy::struct_excessive_bools)]
 pub struct GatewayConfig {
+    /// Optional owner attention policy for bridge notifications; absent preserves immediate timing.
+    #[serde(default)]
+    #[nested]
+    pub attention: Option<crate::attention::AttentionConfig>,
     /// Gateway port (default: 42617)
     #[serde(default = "default_gateway_port")]
     pub port: u16,
@@ -6745,6 +6749,7 @@ fn default_tunnel_provider() -> String {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
+            attention: None,
             port: default_gateway_port(),
             host: default_gateway_host(),
             require_pairing: true,

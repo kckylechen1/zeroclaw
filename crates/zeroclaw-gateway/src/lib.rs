@@ -7,6 +7,7 @@
 pub mod agent_owned_state;
 pub mod api;
 pub mod api_attachments;
+pub mod api_attention;
 pub mod api_backup_retention;
 pub mod api_config;
 pub mod api_logs;
@@ -1533,6 +1534,7 @@ pub async fn run_gateway(
 
     let inner = inner
         .merge(api_review::routes())
+        .merge(api_attention::routes())
         // ── User Model operator review surface ──
         .route("/api/user-model/candidates", get(api_user_model::list_candidates))
         .route("/api/user-model/candidates/{id}", get(api_user_model::candidate_history))

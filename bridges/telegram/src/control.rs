@@ -3,9 +3,9 @@
 //!
 //! The gateway sends `deliver` frames from its outbox, oldest first, and
 //! keeps each one until the bridge acknowledges it. The bridge acknowledges
-//! only after Telegram accepted the message, so a crash or a failed send
-//! means the message comes again on the next connection; ids already
-//! delivered are remembered and acknowledged without sending twice.
+//! only after Telegram accepted the message. A crash, partial send, refusal,
+//! or lost response leaves an unknown gateway receipt requiring owner review.
+//! Process-local seen IDs are only an extra guard, not durable delivery proof.
 
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
@@ -54,10 +54,9 @@ impl Seen {
 enum Outcome {
     /// Telegram accepted it.
     Sent,
-    /// It can never be sent (not the owner's chat, a chat Telegram refuses);
-    /// acknowledged so it does not block the queue.
+    /// Refused, possibly after sending some chunks. Never acknowledge success.
     Dropped(String),
-    /// A failure worth retrying: reconnect later and get it again.
+    /// An uncertain failure: reconnect, without replaying this attempt.
     Retry(String),
 }
 
@@ -136,13 +135,16 @@ async fn serve(
                         WARN,
                         Event::new(module_path!(), Action::Skip)
                             .with_outcome(EventOutcome::Failure)
-                            .with_attrs(json!({ "id": &deliver.id, "reason": reason })),
+                            .with_attrs(json!({ "id": &deliver.id, "reason": &reason })),
                         "dropped a proactive message that cannot be delivered"
                     );
+                    // Refusal or partial delivery is not a successful platform
+                    // receipt. The gateway retains an unknown attempt for review.
+                    return (format!("Telegram delivery refused: {reason}"), true);
                 }
                 Outcome::Retry(reason) => {
-                    // Not acknowledged: the gateway sends it (and everything
-                    // after it) again on the next connection, in order.
+                    // A lost response can follow a successful platform send.
+                    // No receipt: the gateway holds this attempt as unknown.
                     return (format!("Telegram send failed: {reason}"), true);
                 }
             }

@@ -4,15 +4,14 @@
 //! control socket open. The gateway sends proactive messages queued in the
 //! bridge outbox (cron output, heartbeat alerts, the `notify` tool) as
 //! `deliver {id, to, thread_id?, content}` frames, and the bridge answers
-//! `delivered {id}` once the platform accepted the message; the row is then
-//! deleted.
+//! `delivered {id}` once the platform accepted the message; a confirmed
+//! receipt remains in the outbox. Socket handoff alone is never confirmation.
 //!
 //! - The bridge is identified by its token (`[gateway.bridges.<name>]`),
 //!   never by a query parameter. The token is always required, whatever
 //!   `require_pairing` says, and paired tokens are not accepted.
-//! - On connect every unacknowledged row is replayed oldest first; rows
-//!   queued later follow in the same order, so replay always precedes live
-//!   delivery.
+//! - Accepted rows are evaluated against live attention policy on every poll.
+//!   Attempted rows with no receipt are unknown and never blindly resent.
 //! - One control socket per bridge: a new connection closes the old one.
 
 use super::AppState;
@@ -134,7 +133,7 @@ pub async fn handle_ws_bridge(
         ws
     };
     let sockets = Arc::clone(&state.bridge_sockets);
-    ws.on_upgrade(move |socket| run_control_socket(socket, bridge, outbox, sockets))
+    ws.on_upgrade(move |socket| run_control_socket(socket, bridge, outbox, sockets, state))
         .into_response()
 }
 
@@ -143,6 +142,7 @@ async fn run_control_socket(
     bridge: String,
     outbox: Arc<BridgeOutbox>,
     sockets: Arc<BridgeSockets>,
+    state: AppState,
 ) {
     let (conn_id, replaced) = sockets.claim(&bridge);
     ::zeroclaw_log::record!(
@@ -152,7 +152,15 @@ async fn run_control_socket(
             .with_attrs(::serde_json::json!({"bridge": bridge})),
         "bridge control socket attached"
     );
-    let reason = serve(socket, &bridge, &outbox, &replaced).await;
+    let reason = serve(socket, &bridge, &outbox, &replaced, &state).await;
+    if let Err(error) = outbox.mark_unknown(&bridge) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_attrs(serde_json::json!({"error": error.to_string()})),
+            "attention_mark_unknown_failed"
+        );
+    }
     sockets.release(&bridge, conn_id);
     ::zeroclaw_log::record!(
         INFO,
@@ -168,12 +176,15 @@ async fn serve(
     bridge: &str,
     outbox: &BridgeOutbox,
     replaced: &CancellationToken,
+    state: &AppState,
 ) -> &'static str {
     let (mut sender, mut receiver) = socket.split();
     // Subscribe before the first read so a write that lands between the
     // read and the wait still wakes this socket.
     let mut changed = outbox.subscribe();
-    let _ = outbox.purge_expired();
+    if outbox.purge_expired().is_err() || outbox.mark_unknown(bridge).is_err() {
+        return "attention_store_unavailable";
+    }
     let start = serde_json::json!({ "type": "bridge_start", "bridge": bridge });
     if sender
         .send(Message::Text(start.to_string().into()))
@@ -183,13 +194,12 @@ async fn serve(
         return "send failed";
     }
 
-    // Highest row sent on this socket. Starting at 0 replays every row
-    // not yet acknowledged, oldest first.
-    let mut sent_through = 0_i64;
+    // Each poll scans accepted rows again: a deferred low sequence must not
+    // disappear behind a later delivered row. Claims prevent duplicate sends.
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        match send_pending(&mut sender, bridge, outbox, &mut sent_through).await {
+        match send_pending(&mut sender, bridge, outbox, state).await {
             Ok(()) => {}
             Err(reason) => return reason,
         }
@@ -224,10 +234,14 @@ async fn send_pending(
     sender: &mut Sender,
     bridge: &str,
     outbox: &BridgeOutbox,
-    sent_through: &mut i64,
+    state: &AppState,
 ) -> Result<(), &'static str> {
+    outbox
+        .purge_expired()
+        .map_err(|_| "attention_store_unavailable")?;
+    let mut after_seq = 0;
     loop {
-        let rows = match outbox.pending(bridge, *sent_through, BATCH) {
+        let rows = match outbox.pending(bridge, after_seq, BATCH) {
             Ok(rows) => rows,
             Err(e) => {
                 ::zeroclaw_log::record!(
@@ -240,11 +254,34 @@ async fn send_pending(
                         })),
                     "reading the bridge outbox failed"
                 );
-                return Ok(());
+                return Err("attention_store_unavailable");
             }
         };
         let full = rows.len() == BATCH;
         for row in rows {
+            after_seq = row.seq;
+            let now = chrono::Utc::now();
+            // Hold the canonical config read lock through the durable claim;
+            // a policy update cannot slip between evaluation and reservation.
+            let claimed = {
+                let config = state.config.read();
+                let permitted = zeroclaw_runtime::attention::permits(
+                    config.gateway.attention.as_ref(),
+                    bridge,
+                    &row.to,
+                    &row.source_kind,
+                    &row.source_id,
+                    now,
+                )
+                .map_err(|_| "attention_invalid_policy")?;
+                permitted
+                    && outbox
+                        .claim(bridge, &row.id, now.timestamp())
+                        .map_err(|_| "attention_store_unavailable")?
+            };
+            if !claimed {
+                continue;
+            }
             let mut frame = serde_json::json!({
                 "type": "deliver",
                 "id": row.id,
@@ -261,7 +298,9 @@ async fn send_pending(
             {
                 return Err("send failed");
             }
-            *sent_through = row.seq;
+            outbox
+                .mark_sent(bridge, &row.id)
+                .map_err(|_| "attention_store_unavailable")?;
         }
         if !full {
             return Ok(());
@@ -378,7 +417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_rows_replay_before_live_ones_and_acks_delete_them() {
+    async fn queued_rows_send_once_and_lost_receipts_remain_unknown() {
         let tmp = tempfile::tempdir().unwrap();
         let state = bridge_state(&tmp, true);
         let outbox = outbox(&state);
@@ -410,11 +449,69 @@ mod tests {
         }
         client.close().await.unwrap();
 
-        // The unacked row is replayed on the next connection.
+        // A lost receipt never causes a blind resend after reconnect.
         let mut again = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
-        let replayed = next(&mut again).await.unwrap();
-        assert_eq!(replayed.id, second.id);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), again.next_deliver())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            outbox.inspect("tg", &second.id).unwrap().unwrap()["delivery_state"],
+            "unknown"
+        );
         assert_eq!(outbox.len("other").unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn quiet_lower_sequence_is_revisited_after_live_policy_change() {
+        use zeroclaw_config::attention::{AttentionConfig, ImportantSource};
+        let tmp = tempfile::tempdir().unwrap();
+        let state = bridge_state(&tmp, true);
+        let outbox = outbox(&state);
+        state.config.write().gateway.attention = Some(AttentionConfig {
+            timezone: "America/New_York".into(),
+            quiet_start: "00:00".into(),
+            quiet_end: "00:00".into(),
+            important_sources: vec![ImportantSource {
+                bridge: "tg".into(),
+                recipient: "42".into(),
+                source_kind: "cron".into(),
+                source_id: "urgent-job".into(),
+            }],
+        });
+        let quiet = outbox
+            .enqueue_source("tg", "42", None, "quiet", "cron", "quiet-job", "run1")
+            .unwrap();
+        // Cross a read-batch boundary; deferred candidates must not starve
+        // an eligible later source or become permanently skipped.
+        for n in 0..BATCH {
+            outbox
+                .enqueue_source(
+                    "tg",
+                    "42",
+                    None,
+                    "quiet",
+                    "cron",
+                    "quiet-job",
+                    &format!("extra-{n}"),
+                )
+                .unwrap();
+        }
+        let urgent = outbox
+            .enqueue_source("tg", "42", None, "urgent", "cron", "urgent-job", "run1")
+            .unwrap();
+        let gateway = serve(state.clone()).await;
+        let mut client = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
+        assert_eq!(next(&mut client).await.unwrap().id, urgent);
+        assert_eq!(
+            outbox.inspect("tg", &quiet).unwrap().unwrap()["delivery_state"],
+            "accepted"
+        );
+        state.config.write().gateway.attention = None;
+        // New write wakes the same socket; no restart or config snapshot.
+        outbox.enqueue("tg", "42", None, "wake").unwrap();
+        assert_eq!(next(&mut client).await.unwrap().id, quiet);
     }
 
     #[tokio::test]

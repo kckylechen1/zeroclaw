@@ -177,6 +177,7 @@ pub async fn deliver_and_classify_run_result(
     execution_success: bool,
     mut output: String,
     context: CronDeliveryContext,
+    started_at: DateTime<Utc>,
 ) -> CronDeliveryOutcome {
     // Bound delivery while the scheduler still holds the job claim. A
     // channel send that never returns would otherwise pin `locked_at`
@@ -188,7 +189,7 @@ pub async fn deliver_and_classify_run_result(
         let d_job = job.clone();
         let d_output = output.clone();
         let handle = zeroclaw_spawn::spawn!(async move {
-            deliver_if_configured(&d_config, &d_job, &d_output).await
+            deliver_if_configured(&d_config, &d_job, &d_output, &started_at.to_rfc3339()).await
         });
         let abort = handle.abort_handle();
         match time::timeout(CRON_DELIVERY_TIMEOUT, handle).await {
@@ -226,7 +227,16 @@ pub async fn deliver_and_classify_run_result(
             // finer granularity later, deliver_if_configured can return an
             // enum.
             if announce_delivery_decision(&output).should_deliver() {
-                "succeeded"
+                if job
+                    .delivery
+                    .channel
+                    .as_ref()
+                    .is_some_and(|channel| config.gateway.bridges.contains_key(channel))
+                {
+                    "accepted"
+                } else {
+                    "succeeded"
+                }
             } else {
                 "suppressed"
             }
@@ -310,7 +320,8 @@ pub async fn run_manual_job(
     let (success, output) = execute_job_now(config, job).await;
     let finished_at = Utc::now();
     let duration_ms = (finished_at - started_at).num_milliseconds();
-    let outcome = deliver_and_classify_run_result(config, job, success, output, context).await;
+    let outcome =
+        deliver_and_classify_run_result(config, job, success, output, context, started_at).await;
 
     if let Err(e) = persist_manual_run_result(
         config,
@@ -1129,6 +1140,7 @@ async fn persist_job_result(
         success,
         output.to_string(),
         CronDeliveryContext::Scheduled,
+        started_at,
     )
     .await;
 
@@ -1253,7 +1265,12 @@ fn warn_if_high_frequency_agent_job(job: &CronJob) {
     }
 }
 
-async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> Result<()> {
+async fn deliver_if_configured(
+    config: &Config,
+    job: &CronJob,
+    output: &str,
+    event_id: &str,
+) -> Result<()> {
     let delivery: &DeliveryConfig = &job.delivery;
     if !delivery.mode.eq_ignore_ascii_case("announce") {
         return Ok(());
@@ -1291,6 +1308,23 @@ async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> 
         anyhow::Error::msg("delivery.to is required for announce mode")
     })?;
 
+    if config.gateway.bridges.contains_key(channel) {
+        let content = crate::security::outbound::redact_channel_outbound_leaks(
+            output,
+            &config.security.leak_detection,
+            crate::security::outbound::outbound_content_format_for_channel(channel),
+        );
+        zeroclaw_infra::bridge_outbox::BridgeOutbox::shared(&config.data_dir)?.enqueue_source(
+            channel,
+            target,
+            delivery.thread_id.as_deref(),
+            &content,
+            "cron",
+            &job.id,
+            event_id,
+        )?;
+        return Ok(());
+    }
     deliver_announcement(
         config,
         channel,

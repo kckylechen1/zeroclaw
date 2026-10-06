@@ -197,21 +197,97 @@ opens, then one frame per queued message:
 
 `thread_id` is present only when the sender set one. The bridge answers
 `{"type":"delivered","id":"<uuid>"}` after the platform accepted the
-message, and the gateway then deletes it. Each bridge has at most one
+message, and the gateway retains a confirmed receipt. Each bridge has at most one
 control socket: a new connection closes the old one (close code 4000).
 
 ### Outbox
 
-Messages wait in a SQLite outbox, `<data_dir>/sessions/bridge_outbox.db`,
-until acknowledged.
+Messages and attention facts share the existing SQLite outbox,
+`<data_dir>/sessions/bridge_outbox.db`. Execution truth remains with the source.
 
-- Delivery is at least once. Whatever is not acknowledged is sent again on
-  the next connection, so the same `id` can arrive twice; bridges dedupe on
-  it.
-- Order is first in, first out: on connect every pending message is
-  replayed oldest first, before anything queued later.
-- Each bridge keeps at most 1000 messages; a new one drops the oldest,
-  with a warning in the log. Messages older than 24 hours are purged unsent.
+- `accepted` means durably queued; `sent` means only WebSocket handoff;
+  `confirmed` means the bridge received a successful platform response, not
+  that the owner read it. `unknown` means a send may have happened without a
+  usable receipt. A failed or partial Telegram send is never acknowledged as
+  successful.
+- Before network I/O the gateway durably claims the candidate. A crash, lost
+  response or disconnect leaves an uncertain attempt. **Unknown attempts are
+  never automatically resent.** Inspect and dismiss them after checking the
+  platform; any replacement notice is a deliberate new source event. This
+  intentionally tightens the former at-least-once reconnect behavior, including
+  legacy outbox rows. A crash between the durable claim and the actual send can
+  therefore leave an unsent notification requiring owner reconciliation.
+- Accepted candidates are scanned in insertion order on every poll. Quiet,
+  snoozed and muted candidates do not block later eligible candidates, and are
+  revisited when policy permits. There is no persistent sequence cursor that
+  skips deferred rows.
+- Capacity is 1000 active candidates per bridge. At capacity new enqueue
+  requests fail visibly; active and unknown rows are never evicted. Accepted
+  candidates expire 24 hours after enqueue, including deferred candidates;
+  expiry leaves an inspectable `expired` receipt. Unknown attempts do not expire.
+- Confirmed, dismissed and expired receipts retain source deduplication until
+  30 days after resolution or until displaced from the latest 10,000 terminal
+  receipts per bridge, whichever is earlier. Cleanup runs on writes/drains.
+  Re-observing a source event after this window may create a new notice.
+
+### Owner attention policy
+
+With no `[gateway.attention]` section, notifications retain immediate timing.
+Once present, the section requires an explicit valid IANA timezone and local
+`HH:MM` quiet boundaries. Invalid policy holds delivery and logs
+`attention_invalid_policy`; it never falls back to the host timezone.
+
+```toml
+[gateway.attention]
+timezone = "America/New_York"
+quiet_start = "22:00"
+quiet_end = "08:00"
+important_sources = []
+```
+
+The start is inclusive and the end exclusive; equal boundaries mean all day.
+Each UTC instant is evaluated against local wall time, so both occurrences of
+an autumn repeated hour are quiet and spring skipped times need no guessed
+boundary. Policy is resolved from live gateway config immediately before the
+outbox claim. Config API changes, including removing the section, always need
+a paired operator bearer even when generic pairing is disabled. Direct local
+config edits use the existing reload path.
+
+An owner may explicitly allow one source to bypass quiet hours with an
+`important_sources` entry containing exact `bridge`, `recipient`,
+`source_kind` and `source_id` values. For cron, use `source_kind = "cron"` and
+the canonical job ID. No urgency label from the model can grant bypass. Mute,
+snooze and expiry still apply to an allowed source.
+
+The following endpoints require the existing operator bearer; a bridge token
+or anonymous caller is refused even with `require_pairing = false`:
+
+- `GET /api/attention/{bridge}?after_seq=0` lists at most 100 receipts, without
+  message bodies, plus at most 1000 persistent source `mutes`. Continue the
+  receipts page with the last returned `seq`.
+- `GET /api/attention/{bridge}/{id}` inspects a candidate's source identity,
+  state, expiry, snooze and mute status.
+- `POST /api/attention/{bridge}/{id}` applies an owner action. The JSON body
+  must match the exact `recipient`, `source_kind` and `source_id` shown by GET,
+  and contains `action` (`snooze`, `dismiss`, `mute`, or `unmute`). `snooze`
+  additionally requires a future Unix-seconds `until`; it does not extend expiry.
+
+Snooze applies only before an attempt. Dismiss resolves the notification and
+never cancels the underlying job. Mute persists for that exact recipient/source
+in the same outbox database until explicitly unmuted; it does not update an
+inferred User Model preference. An action racing with a claim cannot retract
+an already-started platform send. The mute list retains the creating candidate
+ID so unmute still works after receipt cleanup. Creating more than 1000 mute
+facts per bridge is refused; existing policies are not evicted.
+
+The migration adds columns and a mute table to the existing database. Before
+rolling back to an older binary, disconnect bridge delivery and preserve the
+outbox for reconciliation: an older binary ignores delivery states and would
+replay retained rows. Do not point an older gateway at a live migrated outbox.
+
+This is the policy leaf of #63. Delegated-result and weekly-review producers,
+and real Telegram quiet-hour acceptance, remain follow-up evidence; the policy
+and simulated transport tests do not establish those integrations.
 
 Three producers write to the outbox:
 
@@ -226,7 +302,8 @@ Three producers write to the outbox:
   ```
 
   A bridge name takes precedence over an in-core channel of the same name.
-  Delivery counts as succeeded once the message is queued.
+  Delivery reports `accepted` once queued. Candidates bind the canonical job ID
+  and run start timestamp; repeated observations of that run reuse its receipt.
 - **Heartbeat.** `heartbeat.target` may name a bridge too.
 - **`notify {bridge, to, text}`.** The model's tool for proactive messages,
   offered only when at least one bridge is configured. It is an ordinary

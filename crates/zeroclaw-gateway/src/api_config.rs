@@ -395,11 +395,24 @@ async fn persist_and_swap(
     state: &AppState,
     mut new_config: zeroclaw_config::schema::Config,
     _guard: &ConfigWriteGuard,
+    operator_headers: Option<&HeaderMap>,
 ) -> Result<(), ConfigApiError> {
     debug_assert!(
         state.config_write_lock.try_lock().is_err(),
         "persist_and_swap caller must hold state.config_write_lock"
     );
+    // Attention permissions are owner-authored even on an unpaired gateway.
+    // Compare canonical typed values so parent replacement and nested edits
+    // cannot bypass a string-prefix path check.
+    if state.config.read().gateway.attention != new_config.gateway.attention
+        && !operator_headers
+            .is_some_and(|headers| crate::operator_auth::require_operator(state, headers).is_ok())
+    {
+        return Err(ConfigApiError::new(
+            ConfigApiCode::ValidationFailed,
+            "attention_operator_required",
+        ));
+    }
     let config_path = new_config.config_path.clone();
 
     // Snapshot pre-write disk state (used for revert on save failure). When
@@ -755,7 +768,7 @@ pub async fn handle_prop_put(
     let config_path = new_config.config_path.clone();
     let mut warnings = new_config.collect_warnings();
     warnings.extend(scoped_validation_warnings);
-    if let Err(e) = persist_and_swap(&state, new_config, &_cfg_guard).await {
+    if let Err(e) = persist_and_swap(&state, new_config, &_cfg_guard, Some(&headers)).await {
         return error_response(e);
     }
     if let Some(comment) = body.comment.as_ref() {
@@ -816,7 +829,7 @@ pub async fn handle_prop_delete(
 
     let mut warnings = new_config.collect_warnings();
     warnings.extend(scoped_validation_warnings);
-    if let Err(e) = persist_and_swap(&state, new_config, &_cfg_guard).await {
+    if let Err(e) = persist_and_swap(&state, new_config, &_cfg_guard, Some(&headers)).await {
         return error_response(e);
     }
 
@@ -1083,7 +1096,7 @@ pub async fn handle_delete_map_key(
     };
     if removed {
         working.mark_dirty(&format!("{}.{}", q.path, q.key));
-        if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
+        if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some(&headers)).await {
             return error_response(e);
         }
     }
@@ -1179,7 +1192,7 @@ async fn delete_agent_cascade(
     for path in cascade.dirty_paths() {
         working.mark_dirty(&path);
     }
-    if let Err(e) = persist_and_swap(state, working, &guard).await {
+    if let Err(e) = persist_and_swap(state, working, &guard, None).await {
         return error_response(e);
     }
     // Config is committed (saved + swapped). Release before the post-commit
@@ -1275,7 +1288,7 @@ async fn delete_config_cascade(
     for dirty_path in &dirty_paths {
         working.mark_dirty(dirty_path);
     }
-    if let Err(e) = persist_and_swap(state, working, guard).await {
+    if let Err(e) = persist_and_swap(state, working, guard, None).await {
         return error_response(e);
     }
     ::zeroclaw_log::record!(
@@ -1354,7 +1367,7 @@ pub async fn handle_map_key(
         }
 
         working.mark_dirty(&format!("{path}.{key}"));
-        if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
+        if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some(&headers)).await {
             return error_response(e);
         }
     }
@@ -1594,7 +1607,8 @@ pub async fn handle_rename_map_key(
             if renamed {
                 working.mark_dirty(&format!("{}.{}", body.path, body.from));
                 working.mark_dirty(&format!("{}.{}", body.path, body.to));
-                if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
+                if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some(&headers)).await
+                {
                     return error_response(e);
                 }
             }
@@ -1631,7 +1645,7 @@ async fn rename_config_cascade(
     for path in &report.dirty_paths {
         working.mark_dirty(path);
     }
-    if let Err(e) = persist_and_swap(state, working, guard).await {
+    if let Err(e) = persist_and_swap(state, working, guard, None).await {
         return error_response(e);
     }
     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"path": body.path, "from": body.from, "to": body.to, "dirty_paths": report.dirty_paths.len()})), "alias renamed with config-ref cascade");
@@ -1749,7 +1763,7 @@ async fn rename_agent_cascade(
                     working.mark_dirty(path);
                 }
                 let dirty_count = report.dirty_paths.len();
-                if let Err(e) = persist_and_swap(state, working, &guard).await {
+                if let Err(e) = persist_and_swap(state, working, &guard, None).await {
                     return error_response(e);
                 }
                 dirty_count
@@ -1915,7 +1929,7 @@ pub async fn handle_refresh_context_window(
     }
 
     working.mark_dirty(&format!("{path}.context_window"));
-    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
+    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some(&headers)).await {
         return error_response(e);
     }
 
@@ -2182,7 +2196,7 @@ pub async fn handle_patch(
     // callers see it.
     let mut warnings = working.collect_warnings();
     warnings.extend(scoped_validation_warnings);
-    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
+    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some(&headers)).await {
         return error_response(e);
     }
     if !annotations.is_empty()
@@ -2263,7 +2277,7 @@ pub async fn handle_init(
     if let Err(err) = scoped_validate(&working) {
         return error_response(err);
     }
-    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard).await {
+    if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some(&headers)).await {
         return error_response(e);
     }
 
@@ -2677,6 +2691,51 @@ mod tests {
             ws_conversations: Default::default(),
             bridge_sockets: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn attention_policy_changes_always_require_operator_at_persistence_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(temp_config(&tmp));
+        state.pairing = Arc::new(PairingGuard::new(
+            false,
+            &[PairingGuard::token_hash("owner-token")],
+        ));
+        let guard = Arc::clone(&state.config_write_lock).lock_owned().await;
+        let policy = zeroclaw_config::attention::AttentionConfig {
+            timezone: "Europe/London".into(),
+            quiet_start: "22:00".into(),
+            quiet_end: "08:00".into(),
+            ..Default::default()
+        };
+        for token in [None, Some("bridge-token")] {
+            let mut working = state.config.read().clone();
+            working.gateway.attention = Some(policy.clone());
+            let mut headers = HeaderMap::new();
+            if let Some(token) = token {
+                headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+            }
+            let error = persist_and_swap(&state, working, &guard, Some(&headers))
+                .await
+                .unwrap_err();
+            assert_eq!(error.message, "attention_operator_required");
+            assert!(state.config.read().gateway.attention.is_none());
+        }
+        let mut owner_headers = HeaderMap::new();
+        owner_headers.insert("authorization", "Bearer owner-token".parse().unwrap());
+        let mut working = state.config.read().clone();
+        working.gateway.attention = Some(policy);
+        working.mark_dirty("gateway.attention");
+        persist_and_swap(&state, working, &guard, Some(&owner_headers))
+            .await
+            .unwrap();
+        let mut replacement = state.config.read().clone();
+        replacement.gateway.attention = None;
+        assert!(
+            persist_and_swap(&state, replacement, &guard, None)
+                .await
+                .is_err()
+        );
     }
 
     async fn response_json(response: Response) -> (StatusCode, serde_json::Value) {

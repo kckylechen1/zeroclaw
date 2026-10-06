@@ -1266,6 +1266,7 @@ async fn delivery_failure_classification_preserves_empty_output_evidence() {
         true,
         String::new(),
         CronDeliveryContext::Scheduled,
+        Utc::now(),
     )
     .await;
 
@@ -1319,7 +1320,11 @@ async fn deliver_if_configured_handles_none_mode() {
     let job = test_job("echo ok");
 
     // Default delivery mode is not "announce", so should be a no-op.
-    assert!(deliver_if_configured(&config, &job, "x").await.is_ok());
+    assert!(
+        deliver_if_configured(&config, &job, "x", "test-run")
+            .await
+            .is_ok()
+    );
 }
 
 static DELIVERED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1372,7 +1377,9 @@ async fn deliver_if_configured_suppresses_no_reply_but_delivers_real_and_failure
         "NO_REPLY[INFO]: healthy",
     ] {
         let before = DELIVERED.load(SeqCst);
-        deliver_if_configured(&config, &job, quiet).await.unwrap();
+        deliver_if_configured(&config, &job, quiet, "test-run")
+            .await
+            .unwrap();
         assert_eq!(
             DELIVERED.load(SeqCst),
             before,
@@ -1382,7 +1389,7 @@ async fn deliver_if_configured_suppresses_no_reply_but_delivers_real_and_failure
 
     // Real content must be delivered.
     let before = DELIVERED.load(SeqCst);
-    deliver_if_configured(&config, &job, "All systems nominal")
+    deliver_if_configured(&config, &job, "All systems nominal", "test-run")
         .await
         .unwrap();
     assert_eq!(
@@ -1397,7 +1404,9 @@ async fn deliver_if_configured_suppresses_no_reply_but_delivers_real_and_failure
         "NO_REPLY[REFUSE]: policy prevented the check",
     ] {
         let before = DELIVERED.load(SeqCst);
-        deliver_if_configured(&config, &job, visible).await.unwrap();
+        deliver_if_configured(&config, &job, visible, "test-run")
+            .await
+            .unwrap();
         assert_eq!(
             DELIVERED.load(SeqCst),
             before + 1,
@@ -1454,16 +1463,18 @@ async fn delivery_to_a_configured_bridge_is_queued_in_its_outbox() {
     use std::sync::atomic::Ordering::SeqCst;
     let before = DELIVERED.load(SeqCst);
 
+    let started_at = Utc::now();
     let outcome = deliver_and_classify_run_result(
         &config,
         &job,
         true,
         "digest ready".to_string(),
         CronDeliveryContext::Scheduled,
+        started_at,
     )
     .await;
 
-    assert_eq!(outcome.delivery_status, "succeeded");
+    assert_eq!(outcome.delivery_status, "accepted");
     // A bridge name shadows the in-core channel: the registered channel
     // delivery function is not called.
     assert_eq!(DELIVERED.load(SeqCst), before);
@@ -1473,6 +1484,20 @@ async fn delivery_to_a_configured_bridge_is_queued_in_its_outbox() {
     assert_eq!(queued[0].to, "4242");
     assert_eq!(queued[0].thread_id.as_deref(), Some("7"));
     assert_eq!(queued[0].content, "digest ready");
+    assert_eq!(queued[0].source_kind, "cron");
+    assert_eq!(queued[0].source_id, job.id);
+    assert_eq!(queued[0].event_id, started_at.to_rfc3339());
+    let repeated = deliver_and_classify_run_result(
+        &config,
+        &job,
+        true,
+        "digest ready".into(),
+        CronDeliveryContext::Scheduled,
+        started_at,
+    )
+    .await;
+    assert_eq!(repeated.delivery_status, "accepted");
+    assert_eq!(outbox.pending(COUNT_CHANNEL, 0, 10).unwrap(), queued);
 }
 
 #[tokio::test]
@@ -1497,10 +1522,11 @@ async fn cron_output_with_an_api_key_is_redacted_in_the_bridge_outbox() {
         true,
         format!("env dump: ANTHROPIC_API_KEY={key}"),
         CronDeliveryContext::Scheduled,
+        Utc::now(),
     )
     .await;
 
-    assert_eq!(outcome.delivery_status, "succeeded");
+    assert_eq!(outcome.delivery_status, "accepted");
     let outbox = zeroclaw_infra::bridge_outbox::BridgeOutbox::shared(&config.data_dir).unwrap();
     let queued = outbox.pending("tg", 0, 10).unwrap();
     assert_eq!(queued.len(), 1);
@@ -1731,6 +1757,7 @@ async fn classify_execution_success_delivery_success() {
         true,
         "all good".to_string(),
         CronDeliveryContext::Scheduled,
+        Utc::now(),
     )
     .await;
 
@@ -1756,6 +1783,7 @@ async fn classify_execution_success_delivery_not_requested() {
         true,
         "all good".to_string(),
         CronDeliveryContext::Scheduled,
+        Utc::now(),
     )
     .await;
 
@@ -1778,6 +1806,7 @@ async fn classify_execution_success_delivery_suppressed_no_reply() {
         true,
         "NO_REPLY".to_string(),
         CronDeliveryContext::Scheduled,
+        Utc::now(),
     )
     .await;
 
@@ -1800,6 +1829,7 @@ async fn classify_execution_success_delivery_fails_best_effort() {
         true,
         "executed ok".to_string(),
         CronDeliveryContext::Scheduled,
+        Utc::now(),
     )
     .await;
 
@@ -1828,6 +1858,7 @@ async fn classify_execution_success_delivery_fails_strict() {
         true,
         "executed ok".to_string(),
         CronDeliveryContext::Scheduled,
+        Utc::now(),
     )
     .await;
 
@@ -1856,6 +1887,7 @@ async fn classify_execution_failure_and_delivery_failure_both_visible() {
         false,
         "executed with error".to_string(),
         CronDeliveryContext::Scheduled,
+        Utc::now(),
     )
     .await;
 

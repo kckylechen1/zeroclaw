@@ -491,7 +491,7 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
         json!({ "type": "delivered", "id": "d1" })
     );
     // A replayed id is acknowledged without sending it twice; a message
-    // for anyone but the owner is dropped (and acknowledged).
+    // for anyone but the owner is refused without a success receipt.
     send(
         &mut ctl,
         json!({ "type": "deliver", "id": "d1", "to": OWNER.to_string(),
@@ -504,7 +504,14 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
         json!({ "type": "deliver", "id": "d2", "to": STRANGER.to_string(), "content": "leak" }),
     )
     .await;
-    assert_eq!(recv(&mut ctl).await["id"], "d2");
+    let closed = tokio::time::timeout(WAIT, ctl.next())
+        .await
+        .expect("refusal closes the control socket");
+    assert!(
+        !matches!(closed, Some(Ok(Message::Text(_)))),
+        "refusal must not acknowledge delivery: {closed:?}"
+    );
+    let mut ctl = control(&mut gateway).await;
     send(
         &mut ctl,
         json!({ "type": "deliver", "id": "d3", "to": OWNER.to_string(),
@@ -525,9 +532,9 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
     assert_eq!(sends("cron says hi"), 1);
     assert_eq!(sends("leak"), 0);
 
-    // A retryable Telegram failure is not acknowledged: the bridge drops
-    // the control socket and the gateway replays the message on the next
-    // connection.
+    // An uncertain Telegram failure is not acknowledged. The real gateway
+    // retains it as unknown and never replays it (covered by ws_bridge tests).
+    // A later candidate still proceeds after reconnect.
     tg.lock().unwrap().fail_sends = 1;
     let d4 = json!({ "type": "deliver", "id": "d4", "to": OWNER.to_string(),
                      "content": "after a failure" });
@@ -540,9 +547,10 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
         "no ack: {closed:?}"
     );
     let mut ctl = control(&mut gateway).await;
-    send(&mut ctl, d4).await;
-    assert_eq!(recv(&mut ctl).await["id"], "d4");
-    assert_eq!(sends("after a failure"), 1);
+    send(&mut ctl, json!({ "type": "deliver", "id": "d5", "to": OWNER.to_string(), "content": "later candidate" })).await;
+    assert_eq!(recv(&mut ctl).await["id"], "d5");
+    assert_eq!(sends("after a failure"), 0);
+    assert_eq!(sends("later candidate"), 1);
 
     // Nothing the stranger sent reached Telegram's owner chat or the gateway.
     let calls = tg.lock().unwrap().calls.clone();

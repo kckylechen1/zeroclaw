@@ -12,6 +12,7 @@ pub mod util;
 
 pub mod agent;
 pub mod approval;
+pub mod attention;
 pub mod browse;
 pub mod cost;
 pub mod cron;

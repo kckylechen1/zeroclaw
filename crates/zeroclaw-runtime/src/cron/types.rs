@@ -180,7 +180,7 @@ pub struct CronRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_status: Option<String>,
     /// Component-level delivery outcome (`"not_requested"`, `"suppressed"`,
-    /// `"succeeded"`, `"failed"`, `"legacy"`).
+    /// `"accepted"` (bridge queue only), `"succeeded"`, `"failed"`, `"legacy"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery_status: Option<String>,
 }
