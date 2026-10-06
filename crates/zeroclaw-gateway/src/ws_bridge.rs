@@ -265,7 +265,7 @@ async fn send_pending(
             // a policy update cannot slip between evaluation and reservation.
             let claimed = {
                 let config = state.config.read();
-                let permitted = zeroclaw_runtime::attention::permits(
+                let permitted = crate::attention::permits(
                     config.gateway.attention.as_ref(),
                     bridge,
                     &row.to,

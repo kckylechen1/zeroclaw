@@ -20,6 +20,7 @@ pub mod api_sections;
 pub mod api_skills;
 pub mod api_soul;
 pub mod api_user_model;
+mod attention;
 pub mod auth_rate_limit;
 #[cfg(feature = "nodes")]
 pub mod device_identity;

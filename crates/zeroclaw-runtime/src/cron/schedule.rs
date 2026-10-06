@@ -1,6 +1,9 @@
 use crate::cron::Schedule;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+// Shared IANA timezone type already used by cron scheduling. Policy remains
+// owned by the consuming subsystem.
+pub use chrono_tz::Tz;
 use cron::Schedule as CronExprSchedule;
 use std::str::FromStr;
 
@@ -12,7 +15,7 @@ pub fn next_run_for_schedule(schedule: &Schedule, from: DateTime<Utc>) -> Result
                 .with_context(|| format!("Invalid cron expression: {expr}"))?;
 
             if let Some(tz_name) = tz {
-                let timezone = chrono_tz::Tz::from_str(tz_name)
+                let timezone = Tz::from_str(tz_name)
                     .with_context(|| format!("Invalid IANA timezone: {tz_name}"))?;
                 let localized_from = from.with_timezone(&timezone);
                 let next_local = cron.after(&localized_from).next().ok_or_else(|| {
