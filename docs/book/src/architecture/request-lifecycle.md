@@ -19,6 +19,17 @@ A channel adapter (e.g. `discord.rs`, `telegram.rs`, `email_channel.rs`) receive
 
 If the channel is not paired or the user isn't allowed, the event is dropped before the runtime sees it.
 
+## CLI entry points
+
+`zeroclaw chat` and interactive `zeroclaw agent` use the Gateway client in
+`src/commands/chat.rs`, so they share the Gateway conversation lifecycle.
+`zeroclaw agent --message` continues to use the local runtime directly.
+
+The unused stdin/stdout `CliChannel` adapter and its Rust exports have been
+removed from the non-published `zeroclaw-channels` crate. This internal API
+removal does not retire the channel package: daemon startup, platform tool
+routing, cron delivery, and channel configuration still use it.
+
 ## Agent loop
 
 ```mermaid
