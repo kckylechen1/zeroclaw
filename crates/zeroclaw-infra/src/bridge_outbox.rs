@@ -313,8 +313,15 @@ impl BridgeOutbox {
         Ok(())
     }
 
+    /// Call only while exclusively registering the first socket for a bridge.
     pub fn mark_unknown(&self, bridge: &str) -> Result<()> {
         self.conn.lock().execute("UPDATE bridge_outbox SET delivery_state='unknown' WHERE bridge=?1 AND delivery_state='sent'", [bridge])?;
+        Ok(())
+    }
+
+    /// Socket teardown may update only the attempt that socket handed off.
+    pub fn mark_attempt_unknown(&self, bridge: &str, id: &str) -> Result<()> {
+        self.conn.lock().execute("UPDATE bridge_outbox SET delivery_state='unknown' WHERE bridge=?1 AND id=?2 AND delivery_state='sent'", params![bridge,id])?;
         Ok(())
     }
 

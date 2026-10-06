@@ -53,25 +53,42 @@ pub struct BridgeSockets {
 
 impl BridgeSockets {
     /// Register a new socket for `bridge`, closing the previous one.
-    fn claim(&self, bridge: &str) -> (u64, CancellationToken) {
+    fn claim(
+        &self,
+        bridge: &str,
+        outbox: &BridgeOutbox,
+    ) -> anyhow::Result<(u64, CancellationToken)> {
+        let mut live = self.live.lock();
+        // Recover only with no registered socket, under the same lock used to
+        // install a replacement. Recovery cannot rewrite a new active attempt.
+        if !live.contains_key(bridge) {
+            outbox.mark_unknown(bridge)?;
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let token = CancellationToken::new();
-        if let Some((_, old)) = self
-            .live
-            .lock()
-            .insert(bridge.to_string(), (id, token.clone()))
-        {
+        if let Some((_, old)) = live.insert(bridge.to_string(), (id, token.clone())) {
             old.cancel();
         }
-        (id, token)
+        Ok((id, token))
     }
 
-    /// Drop the registration if it is still this socket's.
-    fn release(&self, bridge: &str, id: u64) {
+    /// A delayed old socket owns only its attempted ID, never a replacement's.
+    fn release(
+        &self,
+        bridge: &str,
+        id: u64,
+        outbox: &BridgeOutbox,
+        in_flight: Option<&str>,
+    ) -> anyhow::Result<()> {
         let mut live = self.live.lock();
+        let outcome = match in_flight {
+            Some(candidate) => outbox.mark_attempt_unknown(bridge, candidate),
+            None => Ok(()),
+        };
         if live.get(bridge).is_some_and(|(current, _)| *current == id) {
             live.remove(bridge);
         }
+        outcome
     }
 }
 
@@ -145,7 +162,18 @@ async fn run_control_socket(
     sockets: Arc<BridgeSockets>,
     state: AppState,
 ) {
-    let (conn_id, replaced) = sockets.claim(&bridge);
+    let (conn_id, replaced) = match sockets.claim(&bridge, &outbox) {
+        Ok(claim) => claim,
+        Err(error) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_attrs(serde_json::json!({"error": error.to_string()})),
+                "attention_recovery_failed"
+            );
+            return;
+        }
+    };
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Connect)
@@ -153,8 +181,14 @@ async fn run_control_socket(
             .with_attrs(::serde_json::json!({"bridge": bridge})),
         "bridge control socket attached"
     );
-    let reason = serve(socket, &bridge, &outbox, &replaced, &state).await;
-    if let Err(error) = outbox.mark_unknown(&bridge) {
+    let mut in_flight = None;
+    let reason = serve(socket, &bridge, &outbox, &replaced, &state, &mut in_flight).await;
+    if let Err(error) = sockets.release(
+        &bridge,
+        conn_id,
+        &outbox,
+        in_flight.as_ref().map(|(id, _)| id.as_str()),
+    ) {
         ::zeroclaw_log::record!(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
@@ -162,7 +196,6 @@ async fn run_control_socket(
             "attention_mark_unknown_failed"
         );
     }
-    sockets.release(&bridge, conn_id);
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Disconnect)
@@ -178,12 +211,13 @@ async fn serve(
     outbox: &BridgeOutbox,
     replaced: &CancellationToken,
     state: &AppState,
+    in_flight: &mut Option<(String, tokio::time::Instant)>,
 ) -> &'static str {
     let (mut sender, mut receiver) = socket.split();
     // Subscribe before the first read so a write that lands between the
     // read and the wait still wakes this socket.
     let mut changed = outbox.subscribe();
-    if outbox.purge_expired().is_err() || outbox.mark_unknown(bridge).is_err() {
+    if outbox.purge_expired().is_err() {
         return "attention_store_unavailable";
     }
     let start = serde_json::json!({ "type": "bridge_start", "bridge": bridge });
@@ -197,13 +231,12 @@ async fn serve(
 
     // Each poll scans accepted rows again: a deferred low sequence must not
     // disappear behind a later delivered row. Claims prevent duplicate sends.
-    let mut in_flight: Option<(String, tokio::time::Instant)> = None;
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        if let Some((id, _)) = &in_flight {
+        if let Some((id, _)) = in_flight.as_ref() {
             match outbox.is_resolved(bridge, id) {
-                Ok(true) => in_flight = None,
+                Ok(true) => *in_flight = None,
                 Ok(false) => {}
                 Err(_) => return "attention_store_unavailable",
             }
@@ -211,7 +244,7 @@ async fn serve(
         if in_flight.is_none() {
             match send_pending(&mut sender, bridge, outbox, state).await {
                 Ok(Some(id)) => {
-                    in_flight = Some((id, tokio::time::Instant::now() + RECEIPT_TIMEOUT))
+                    *in_flight = Some((id, tokio::time::Instant::now() + RECEIPT_TIMEOUT))
                 }
                 Ok(None) => {}
                 Err(reason) => return reason,
@@ -431,6 +464,63 @@ mod tests {
     async fn refusal(gateway: &str, token: &str) -> u16 {
         let err = BridgeClient::connect(gateway, token).await.err().unwrap();
         err.downcast_ref::<Rejected>().expect("refused").status
+    }
+
+    #[test]
+    fn delayed_old_socket_cleanup_cannot_change_replacement_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outbox = BridgeOutbox::open(tmp.path()).unwrap();
+        let sockets = BridgeSockets::default();
+        let x = outbox.enqueue("tg", "42", None, "X").unwrap();
+        let y = outbox.enqueue("tg", "42", None, "Y").unwrap();
+        let (old, old_cancel) = sockets.claim("tg", &outbox).unwrap();
+        assert!(
+            outbox
+                .claim("tg", &x, chrono::Utc::now().timestamp())
+                .unwrap()
+        );
+        outbox.mark_sent("tg", &x).unwrap();
+        let (new, _) = sockets.claim("tg", &outbox).unwrap();
+        assert!(old_cancel.is_cancelled());
+        assert!(
+            outbox
+                .claim("tg", &y, chrono::Utc::now().timestamp())
+                .unwrap()
+        );
+        outbox.mark_sent("tg", &y).unwrap();
+        // Deterministic late teardown: new socket already handed off Y.
+        sockets.release("tg", old, &outbox, Some(&x)).unwrap();
+        assert_eq!(
+            outbox.inspect("tg", &x).unwrap().unwrap()["delivery_state"],
+            "unknown"
+        );
+        assert_eq!(
+            outbox.inspect("tg", &y).unwrap().unwrap()["delivery_state"],
+            "sent"
+        );
+        assert_eq!(sockets.live.lock().get("tg").unwrap().0, new);
+        let (newer, _) = sockets.claim("tg", &outbox).unwrap();
+        assert_eq!(
+            outbox.inspect("tg", &y).unwrap().unwrap()["delivery_state"],
+            "sent",
+            "replacement startup must not recover another socket's attempt"
+        );
+        sockets.release("tg", new, &outbox, Some(&y)).unwrap();
+        sockets.release("tg", newer, &outbox, None).unwrap();
+        let z = outbox
+            .enqueue("tg", "42", None, "orphan after process death")
+            .unwrap();
+        assert!(
+            outbox
+                .claim("tg", &z, chrono::Utc::now().timestamp())
+                .unwrap()
+        );
+        outbox.mark_sent("tg", &z).unwrap();
+        sockets.claim("tg", &outbox).unwrap();
+        assert_eq!(
+            outbox.inspect("tg", &z).unwrap().unwrap()["delivery_state"],
+            "unknown"
+        );
     }
 
     #[tokio::test]
