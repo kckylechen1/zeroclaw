@@ -200,7 +200,10 @@ async fn run_http_patch(config_dir: &std::path::Path, patch_doc: &[u8]) -> serde
 
     let app = Router::new()
         .route("/api/config", patch(gateway::api_config::handle_patch))
-        .with_state(test_state(config));
+        .with_state(test_state(config))
+        .layer(axum::Extension(axum::extract::ConnectInfo(
+            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        )));
     let response = app
         .oneshot(
             axum::http::Request::builder()
