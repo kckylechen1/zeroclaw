@@ -4434,6 +4434,9 @@ mod tests {
                 axum::http::Request::builder()
                     .method("POST")
                     .uri("/api/config/model-providers/groq/test/refresh-context-window")
+                    .extension(ConnectInfo(
+                        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+                    ))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
