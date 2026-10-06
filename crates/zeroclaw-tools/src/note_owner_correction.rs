@@ -284,9 +284,11 @@ mod tests {
         OWNER_CORRECTION_CONTEXT
             .scope(resolver, async {
                 assert!(
-                    tokio::spawn(async { OWNER_CORRECTION_CONTEXT.try_with(|_| ()).is_err() })
-                        .await
-                        .unwrap()
+                    ::zeroclaw_spawn::spawn!(async {
+                        OWNER_CORRECTION_CONTEXT.try_with(|_| ()).is_err()
+                    })
+                    .await
+                    .unwrap()
                 );
             })
             .await;

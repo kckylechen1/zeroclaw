@@ -357,8 +357,12 @@ correction cannot supersede another session or a global preference. Repeated
 approved corrections for that same agent/session/key replace that correction
 head. Prompt and reflection readers resolve the owning agent from the immutable
 source candidate evidence; malformed correction provenance is excluded. The
-reserved correction-key format is `oc.` plus 60 lowercase hex digits; other
-historical semantic keys retain their existing behavior. Acceptance or rewording preserves that scope;
+correction format is `oc.` plus 60 lowercase hex digits on a session-scoped
+source candidate. Historical owner statements and global source candidates keep
+their behavior even when their keys match that format. Same-second correction
+approvals use revision insertion order, so the later approval wins. Any accepted steering
+submission to an active WebSocket turn invalidates its initial correction
+authority for the rest of that turn. Acceptance or rewording preserves that scope;
 `narrow` cannot move the correction to another session or expand it to global.
 Global reflection candidates retain their existing review behavior. The usual
 operator review endpoint is the only promotion path. Disabling this tool removes

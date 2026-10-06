@@ -274,3 +274,36 @@ async fn note_owner_correction_attachment_turn_uses_only_original_socket_text() 
             .all(|i| !i.text.contains("External attachment"))
     );
 }
+
+#[tokio::test]
+async fn note_owner_correction_mid_turn_steering_revokes_initial_owner_evidence() {
+    let mut chat = SharedChat::new();
+    chat.state.pairing = Arc::new(zeroclaw_config::pairing::PairingGuard::new(
+        false,
+        &["owner-fixture".into()],
+    ));
+    chat.scope.auth_subject = Some(zeroclaw_config::pairing::PairingGuard::token_hash(
+        "owner-fixture",
+    ));
+    let data_dir = chat._tmp.path().to_path_buf();
+    chat.correction_tool = Some(Arc::new(
+        zeroclaw_tools::note_owner_correction::NoteOwnerCorrectionTool::new("web", move || {
+            Some((Default::default(), data_dir.clone()))
+        }),
+    ));
+    let mut socket = chat.attach().await;
+    chat.send(&socket, message("Owner initial correction"));
+    // The active generation is blocked inside its provider. An anonymous
+    // socket targets that same conversation while the turn is still running.
+    chat.scope.auth_subject = None;
+    let other = chat.attach().await;
+    let response = chat
+        .send(&other, serde_json::json!({"type":"message", "id":"steering-fixture", "content":"Anonymous mid-turn instruction"}))
+        .unwrap();
+    assert_eq!(response["turn"], "steered");
+    chat.gate.add_permits(2);
+    frames_until_end(&mut socket).await;
+    let context = chat.corrections.lock().first().cloned().unwrap();
+    assert!(context.is_none());
+    assert_eq!(chat.correction_results.lock().first().copied(), Some(false));
+}

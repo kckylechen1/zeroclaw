@@ -1669,8 +1669,12 @@ async fn process_chat_message(
                 text: text.to_string(),
             },
         });
+    let correction_invalidated = conversation.correction_invalidation(generation);
     let correction_resolver: zeroclaw_api::review::OwnerCorrectionResolver = Arc::new(move || {
         (initial_operator_input
+            && correction_invalidated
+                .as_ref()
+                .is_some_and(|invalidated| !invalidated.load(std::sync::atomic::Ordering::Acquire))
             && correction_subject
                 .as_ref()
                 .is_some_and(|subject| correction_pairing.tokens().contains(subject)))
@@ -2644,6 +2648,8 @@ mod tests {
         systems: Arc<parking_lot::Mutex<Vec<String>>>,
         corrections:
             Arc<parking_lot::Mutex<Vec<Option<zeroclaw_api::review::OwnerCorrectionContext>>>>,
+        correction_tool: Option<Arc<dyn zeroclaw_api::tool::Tool>>,
+        correction_results: Arc<parking_lot::Mutex<Vec<bool>>>,
     }
 
     #[async_trait::async_trait]
@@ -2674,6 +2680,10 @@ mod tests {
                     .ok()
                     .flatten(),
             );
+            if let Some(tool) = &self.correction_tool {
+                let result = tool.execute(serde_json::json!({"kind":"preference", "statement":"Turn correction", "semantic_key":"style"})).await?;
+                self.correction_results.lock().push(result.success);
+            }
             self.systems.lock().extend(
                 request
                     .messages
@@ -2735,6 +2745,8 @@ mod tests {
         systems: Arc<parking_lot::Mutex<Vec<String>>>,
         corrections:
             Arc<parking_lot::Mutex<Vec<Option<zeroclaw_api::review::OwnerCorrectionContext>>>>,
+        correction_tool: Option<Arc<dyn zeroclaw_api::tool::Tool>>,
+        correction_results: Arc<parking_lot::Mutex<Vec<bool>>>,
         /// When set, the agent is a body agent assembling Soul and User
         /// Model per turn from this config's `data_dir`.
         owner_config: Option<Arc<zeroclaw_config::schema::Config>>,
@@ -2757,6 +2769,8 @@ mod tests {
                 seen: Arc::default(),
                 systems: Arc::default(),
                 corrections: Arc::default(),
+                correction_tool: None,
+                correction_results: Arc::default(),
                 owner_config: None,
                 _tmp: tmp,
             }
@@ -2777,6 +2791,8 @@ mod tests {
                         seen: Arc::clone(&self.seen),
                         systems: Arc::clone(&self.systems),
                         corrections: Arc::clone(&self.corrections),
+                        correction_tool: self.correction_tool.clone(),
+                        correction_results: Arc::clone(&self.correction_results),
                     };
                     let workspace = self._tmp.path().to_path_buf();
                     let owner_config = self.owner_config.clone();

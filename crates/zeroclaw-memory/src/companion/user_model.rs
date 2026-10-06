@@ -199,7 +199,7 @@ pub struct UserModelCandidate {
 
 impl UserModelCandidate {
     pub(crate) fn visible_to_agent(&self, agent: &str) -> bool {
-        if !is_owner_correction_key(&self.semantic_key) {
+        if !is_owner_correction_key(&self.semantic_key) || self.scope == "global" {
             return true;
         }
         let Some(Scope::Session(session)) = Scope::parse(&self.scope) else {
@@ -770,7 +770,9 @@ impl UserModelStore {
                               WHERE semantic_key = ?2
                                 AND valid_from_unix <= ?7
                                 AND (valid_until_unix IS NULL OR valid_until_unix > ?7)
-                              ORDER BY created_at_unix DESC, id DESC LIMIT 1),
+                              ORDER BY created_at_unix DESC,
+                                       CASE WHEN ?9 THEN rowid ELSE NULL END DESC,
+                                       id DESC LIMIT 1),
                              ?7, NULL, ?8, ?7)",
                     rusqlite::params![
                         uuid::Uuid::new_v4().to_string(),
@@ -781,6 +783,8 @@ impl UserModelStore {
                         AuthorityClass::OwnerRatified.as_str(),
                         now_unix,
                         candidate_id,
+                        is_owner_correction_key(&candidate.2)
+                            && matches!(Scope::parse(&candidate.3), Some(Scope::Session(_))),
                     ],
                 )?;
             }
@@ -789,7 +793,7 @@ impl UserModelStore {
         Ok(receipt)
     }
 
-    /// Active heads for an agent's prompt/reflection. Only the U5 reserved
+    /// Active heads for an agent's prompt/reflection. Only the U5 session-candidate
     /// correction namespace requires agent provenance; other heads preserve
     /// the historical global/session applicability contract.
     pub fn active_heads_for_agent(
@@ -805,9 +809,9 @@ impl UserModelStore {
                 admitted.push(head);
                 continue;
             }
-            let (Some(candidate), Some(Scope::Session(session))) =
-                (head.source_candidate.as_deref(), Scope::parse(&head.scope))
-            else {
+            let Some(candidate) = head.source_candidate.as_deref() else {
+                // Historical owner statements have no candidate provenance.
+                admitted.push(head);
                 continue;
             };
             let provenance = conn.query_row(
@@ -825,6 +829,15 @@ impl UserModelStore {
                 Ok(value) => value,
                 Err(rusqlite::Error::QueryReturnedNoRows) => continue,
                 Err(error) => return Err(error),
+            };
+            // Pre-U5 producers created global candidates, including candidates
+            // later narrowed to a session. Their keys were never reserved.
+            if scope == "global" {
+                admitted.push(head);
+                continue;
+            }
+            let Some(Scope::Session(session)) = Scope::parse(&scope) else {
+                continue;
             };
             if key == head.semantic_key
                 && scope == head.scope
@@ -871,6 +884,21 @@ impl UserModelStore {
                    SELECT MAX(r2.created_at_unix) FROM user_model_revisions r2
                    WHERE r2.semantic_key = r.semantic_key
                      AND r2.valid_from_unix <= ?1
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM user_model_candidates c
+                   WHERE c.id = r.source_candidate
+                     AND c.scope LIKE 'session:%'
+                     AND length(c.semantic_key) = 63
+                     AND substr(c.semantic_key, 1, 3) = 'oc.'
+                     AND substr(c.semantic_key, 4) NOT GLOB '*[^0-9a-f]*'
+                     AND EXISTS (
+                         SELECT 1 FROM user_model_revisions newer
+                         WHERE newer.semantic_key = r.semantic_key
+                           AND newer.created_at_unix = r.created_at_unix
+                           AND newer.valid_from_unix <= ?1
+                           AND newer.rowid > r.rowid
+                     )
                )
                AND (r.valid_until_unix IS NULL OR r.valid_until_unix > ?1)
              ORDER BY r.created_at_unix DESC, r.id DESC",
@@ -2136,6 +2164,107 @@ mod owner_correction_tests {
     fn evidence(agent: &str, session: &str, key: &str) -> String {
         serde_json::json!({"origin":"owner_correction", "agent":agent, "submitted_semantic_key":key,
             "messages":[{"session_id":session, "at_unix":1, "owner_text":"Owner correction.", "source":{"kind":"operator"}}]}).to_string()
+    }
+
+    #[test]
+    fn owner_correction_same_second_approval_uses_insertion_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        for (statement, forced_id) in [("Earlier", "zzzz"), ("Middle", "aaaa"), ("Later", "bbbb")] {
+            let candidate = store
+                .record_owner_correction(
+                    "nova",
+                    UserModelKind::Preference,
+                    statement,
+                    "style",
+                    &evidence("nova", "s", "style"),
+                    "s",
+                    1,
+                )
+                .unwrap()
+                .unwrap();
+            store
+                .review_candidate(
+                    &candidate.id,
+                    ReviewAction::Accept,
+                    "operator",
+                    None,
+                    None,
+                    2,
+                )
+                .unwrap();
+            store
+                .conn
+                .lock()
+                .execute(
+                    "UPDATE user_model_revisions SET id = ?1 WHERE source_candidate = ?2",
+                    rusqlite::params![forced_id, candidate.id],
+                )
+                .unwrap();
+        }
+        let heads = store.active_heads_for_agent("nova", Some(2)).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].statement, "Later");
+        assert_eq!(heads[0].supersedes.as_deref(), Some("aaaa"));
+        // Expiring the latest same-second head must not revive its predecessor.
+        store
+            .conn
+            .lock()
+            .execute(
+                "UPDATE user_model_revisions SET valid_until_unix = 3 WHERE id = 'bbbb'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            store
+                .active_heads_for_agent("nova", Some(3))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn owner_correction_exact_shape_preserves_historical_statement_and_global_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        let key = format!("oc.{}", "a".repeat(60));
+        store
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "Historical owner",
+                &key,
+                "global",
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            store.active_heads_for_agent("any", Some(1)).unwrap()[0].statement,
+            "Historical owner"
+        );
+        let candidate = store
+            .record_observation(
+                UserModelKind::Preference,
+                "Historical candidate",
+                &key,
+                "[]",
+                2,
+            )
+            .unwrap();
+        assert!(candidate.visible_to_agent("any"));
+        store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Narrow,
+                "operator",
+                None,
+                Some("session:s"),
+                3,
+            )
+            .unwrap();
+        let heads = store.active_heads_for_agent("any", Some(3)).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].statement, "Historical candidate");
+        assert_eq!(heads[0].scope, "session:s");
     }
 
     #[test]
