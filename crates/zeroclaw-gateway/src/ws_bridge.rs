@@ -182,7 +182,16 @@ async fn run_control_socket(
         "bridge control socket attached"
     );
     let mut in_flight = None;
-    let reason = serve(socket, &bridge, &outbox, &replaced, &state, &mut in_flight).await;
+    let reason = serve(
+        socket,
+        &bridge,
+        &outbox,
+        &replaced,
+        &state,
+        conn_id,
+        &mut in_flight,
+    )
+    .await;
     if let Err(error) = sockets.release(
         &bridge,
         conn_id,
@@ -211,6 +220,7 @@ async fn serve(
     outbox: &BridgeOutbox,
     replaced: &CancellationToken,
     state: &AppState,
+    conn_id: u64,
     in_flight: &mut Option<(String, tokio::time::Instant)>,
 ) -> &'static str {
     let (mut sender, mut receiver) = socket.split();
@@ -242,7 +252,7 @@ async fn serve(
             }
         }
         if in_flight.is_none() {
-            match send_pending(&mut sender, bridge, outbox, state).await {
+            match send_pending(&mut sender, bridge, outbox, state, conn_id).await {
                 Ok(Some(id)) => {
                     *in_flight = Some((id, tokio::time::Instant::now() + RECEIPT_TIMEOUT))
                 }
@@ -289,6 +299,7 @@ async fn send_pending(
     bridge: &str,
     outbox: &BridgeOutbox,
     state: &AppState,
+    conn_id: u64,
 ) -> Result<Option<String>, &'static str> {
     outbox
         .purge_expired()
@@ -318,6 +329,12 @@ async fn send_pending(
             // Hold the canonical config read lock through the durable claim;
             // a policy update cannot slip between evaluation and reservation.
             let claimed = {
+                // Serialize generation validation and durable reservation with
+                // replacement. A cancelled old socket cannot claim new work.
+                let live = state.bridge_sockets.live.lock();
+                if !live.get(bridge).is_some_and(|(id, _)| *id == conn_id) {
+                    return Err("replaced");
+                }
                 let config = state.config.read();
                 let permitted = crate::attention::permits(
                     config.gateway.attention.as_ref(),
@@ -464,6 +481,58 @@ mod tests {
     async fn refusal(gateway: &str, token: &str) -> u16 {
         let err = BridgeClient::connect(gateway, token).await.err().unwrap();
         err.downcast_ref::<Rejected>().expect("refused").status
+    }
+
+    #[tokio::test]
+    async fn replaced_generation_cannot_claim_through_send_pending() {
+        use tokio::io::AsyncWriteExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let state = bridge_state(&tmp, true);
+        let outbox = outbox(&state);
+        let candidate = outbox.enqueue("tg", "42", None, "still accepted").unwrap();
+        let (old, _) = state.bridge_sockets.claim("tg", &outbox).unwrap();
+        let (current, _) = state.bridge_sockets.claim("tg", &outbox).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let handler_state = state.clone();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |ws: WebSocketUpgrade| {
+                let state = handler_state.clone();
+                let tx = tx.clone();
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        let outbox = self::outbox(&state);
+                        let (mut sender, _) = socket.split();
+                        let stale = send_pending(&mut sender, "tg", &outbox, &state, old).await;
+                        let accepted = outbox.pending("tg", 0, BATCH).unwrap().len();
+                        let active =
+                            send_pending(&mut sender, "tg", &outbox, &state, current).await;
+                        tx.send((stale, accepted, active)).await.unwrap();
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server =
+            zeroclaw_spawn::spawn!(async move { axum::serve(listener, app).await.unwrap() });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.write_all(format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").as_bytes()).await.unwrap();
+        let (stale, accepted, active) = tokio::time::timeout(WAIT, rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale, Err("replaced"));
+        assert_eq!(
+            accepted, 1,
+            "old generation must leave the candidate accepted"
+        );
+        assert_eq!(active, Ok(Some(candidate.clone())));
+        assert_eq!(
+            outbox.inspect("tg", &candidate).unwrap().unwrap()["delivery_state"],
+            "sent"
+        );
+        server.abort();
     }
 
     #[test]
