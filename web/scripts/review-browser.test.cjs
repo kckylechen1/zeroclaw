@@ -16,6 +16,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     const now = 1780000000;
     let pairingEnabled = false;
     let locale = 'en';
+    let supportsExpectedHead = true;
     let pairCalls = 0;
     let oldHistoryRelease;
     let delayHistory = false;
@@ -28,7 +29,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     const scopedItems = ['agent:nova', 'channel:telegram', 'session:original'].map((scope, i) => ({ ...user, id: `user_model:${9 + i}`, item: { ...user.item, id: String(9 + i), statement: `Scoped candidate ${scope}`, scope } }));
     const addition = { ...proposal, id: 'soul:nova:12', item: { id: 12, layer: 'growth', proposal: 'New growth addition', rationale: 'Synthetic addition', growth_kind: 'self', created_at_unix: now } };
     let items = [proposal, user, ...scopedItems, addition];
-    const currentHead = { id: 'revision-current', semantic_key: 'style', kind: 'preference', statement: 'Existing detailed planning preference', scope: 'global', authority: 'owner_authored' };
+    let currentHead = { id: 'revision-current', semantic_key: 'style', kind: 'preference', statement: 'Existing detailed planning preference', scope: 'global', authority: 'owner_authored' };
     const head = (value) => ({ revision: 2, source: 'owner', created_at_unix: now, value });
     const soul = { agent: 'nova', identity: head({ name: 'Nova' }), principles: head({ items: ['Keep private information private.'] }), growth: head({ entries: [] }), voice: { configured: { warmth: 'high' }, stored: head({ heads: { warmth: 'low' } }) } };
     await context.route('**/*', async (route) => {
@@ -67,6 +68,11 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
         if (req.method() === 'POST') {
             const body = req.postDataJSON();
             actions.push({ path: url.pathname, body });
+            if (url.pathname.endsWith('/8/review') && body.action === 'accept') {
+                assert.deepEqual(body.expected_head, { id: 'revision-current' });
+                currentHead = { ...currentHead, id: 'revision-unseen-B', statement: 'Changed elsewhere before acceptance' };
+                return send({ code: 'head_conflict', error: 'Synthetic CAS conflict' }, 409);
+            }
             if (url.pathname.endsWith('/7/resolve')) {
                 if (body.resolution === 'accepted')
                     return send({ code: 'proposal_stale', error: 'Synthetic stale target' }, 409);
@@ -89,7 +95,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
             return send({ layer: url.searchParams.get('layer'), revisions: [{ ...head({ text: 'Fresh principles history' }), source: 'approved_proposal', proposal_id: 71 }, { ...head({ text: 'Restored principles history' }), revision: 3, source: 'owner', rolled_back_from: 1 }] });
         }
         if (url.pathname === '/api/user-model/heads')
-            return send({ heads: [currentHead] });
+            return send({ heads: [currentHead], ...(supportsExpectedHead ? { supports_expected_head: true } : {}) });
         if (url.pathname === '/api/user-model/candidates')
             return send({ candidates: [rejected] });
         if (url.pathname === '/api/user-model/candidates/42')
@@ -136,6 +142,13 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.match(await userCard.innerText(), /Existing detailed planning preference/);
     assert.match(await userCard.innerText(), /revision-current/);
     await userCard.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-approval-details-375.png') });
+    const beforeConflict = actions.length;
+    await userCard.getByRole('button', { name: 'Accept', exact: true }).click();
+    await userCard.getByText('Changed elsewhere before acceptance', { exact: true }).waitFor();
+    await page.getByText('The current entry for this key changed.', { exact: false }).waitFor();
+    assert.equal(actions.length, beforeConflict + 1);
+    assert.equal(actions.at(-1).body.expected_head.id, 'revision-current');
+    assert.match(await userCard.innerText(), /revision-unseen-B/);
     for (const scoped of scopedItems) {
         const card = page.locator('article').filter({ has: page.getByRole('heading', { name: scoped.item.statement, exact: true }) });
         if (!scoped.item.scope.startsWith('session:')) {
@@ -147,7 +160,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
             assert.equal(await input.evaluate(el => el.readOnly), true);
             await card.getByRole('button', { name: 'Apply reviewed change' }).click();
             await page.getByRole('status').filter({ hasText: 'Decision recorded' }).waitFor();
-            assert.deepEqual(actions.at(-1).body, { action: 'narrow', narrowed_scope: 'session:original' });
+            assert.deepEqual(actions.at(-1).body, { action: 'narrow', narrowed_scope: 'session:original', expected_head: { id: 'revision-unseen-B' } });
         }
     }
     const disclosure = userCard.locator('summary');
@@ -189,13 +202,32 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     await page.getByLabel('Session ID', { exact: true }).fill('weekend');
     await page.getByRole('button', { name: 'Apply reviewed change' }).click();
     await page.getByRole('button', { name: 'Apply reviewed change' }).waitFor({ state: 'detached' });
-    assert.deepEqual(actions.at(-1).body, { action: 'narrow', narrowed_scope: 'session:weekend' });
+    assert.deepEqual(actions.at(-1).body, { action: 'narrow', narrowed_scope: 'session:weekend', expected_head: { id: 'revision-unseen-B' } });
     await page.getByRole('button', { name: 'All candidate review history' }).click();
     await page.getByRole('button', { name: 'History and sources', exact: true }).click();
     await page.getByText('Scope limited', { exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: 'Limit scope' }).count(), 0);
     await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-history-narrowed-375.png') });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    // A server without the capability must never receive guarded approvals.
+    supportsExpectedHead = false;
+    await page.getByRole('button', { name: 'Inbox', exact: true }).click();
+    await userCard.getByText('Upgrade the gateway', { exact: false }).waitFor();
+    assert.equal(await userCard.getByRole('button', { name: 'Accept', exact: true }).count(), 0);
+    assert.equal(await userCard.getByRole('button', { name: 'Reword', exact: true }).count(), 0);
+    assert.equal(await userCard.getByRole('button', { name: 'Limit scope', exact: true }).count(), 0);
+    const beforeDismiss = actions.length;
+    await userCard.getByRole('button', { name: 'Dismiss', exact: true }).click();
+    await page.getByText('Decision recorded.', { exact: false }).waitFor();
+    assert.equal(actions.length, beforeDismiss + 1);
+    assert.deepEqual(actions.at(-1).body, { action: 'reject' });
+    reviewState = 'rejected';
+    await page.getByRole('button', { name: 'About me', exact: true }).click();
+    await openRejected();
+    assert.equal(await page.getByRole('button', { name: 'Limit scope' }).count(), 0);
+    await page.getByText('Upgrade the gateway', { exact: false }).waitFor();
+    assert.equal(actions.length, beforeDismiss + 1);
+    reviewState = 'narrowed';
     locale = 'zh';
     await page.evaluate(() => localStorage.setItem('zeroclaw-locale', 'zh'));
     await page.reload();
@@ -209,7 +241,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-localized-history-375.png') });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.deepEqual(failures, []);
-    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, actions }));
+    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, actions }));
     await browser.close();
     server.close();
 })().catch(async e => { console.error(e); server.close(); if (browser) await browser.close(); process.exitCode = 1; });

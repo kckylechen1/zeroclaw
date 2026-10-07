@@ -9,6 +9,8 @@ export type Locale = 'ar' | 'bn' | 'cs' | 'da' | 'de' | 'el' | 'en' | 'es' | 'fi
 
 const translations: Record<Locale, Record<string, string>> = {
   zh: {
+    "review.upgrade_head_guard": "此网关尚不支持防止覆盖未见修改的审核保护。请升级网关后再接受、改写或限定范围；仍可查看和忽略。",
+    "review.head_conflict": "该语义标识的当前条目已改变，尚未应用此决定。请查看刷新后的条目，再重新决定。",
     "review.semantic_key": "语义标识",
     "review.replaces": "接受后替换的当前条目",
     "review.no_replacement": "没有相同语义标识的当前条目。",
@@ -495,6 +497,8 @@ const translations: Record<Locale, Record<string, string>> = {
   },
 
   en: {
+    "review.upgrade_head_guard": "Upgrade the gateway to approve, reword or limit scope without overwriting unseen changes. Reading and dismissal remain available.",
+    "review.head_conflict": "The current entry for this key changed. This decision was not applied. Review the refreshed entry before deciding again.",
     "review.semantic_key": "Semantic key",
     "review.replaces": "Current entry replaced by acceptance",
     "review.no_replacement": "No current entry has this semantic key.",

@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Button, ConfirmDialog } from '@/components/ui';
 import { useAuth } from '@/hooks/useAuth';
 import { t } from '@/lib/i18n';
-import { canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, ReviewError, type Candidate, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
+import { displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, ReviewError, type Candidate, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
 const field = 'w-full min-h-11 rounded-md border border-pc-border bg-pc-base p-3 text-pc-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]';
 const date = (value: number) => new Date(value * 1000).toLocaleString();
 const layers: Layer[] = ['identity', 'principles', 'growth', 'voice'];
@@ -32,11 +32,12 @@ function VoiceSource({ source }: { source?: NonNullable<Soul['voice']['sources']
         {source.kind === 'persona' && ` · ${source.persona}${source.card ? ` (${source.card})` : ''}`}
     </span>;
 }
-function ProposalCard({ item, act, busy, heads, stale = false, rejectedOnly = false }: {
+function ProposalCard({ item, act, busy, heads, canApproveUserModel, stale = false, rejectedOnly = false }: {
     item: InboxItem;
     act: (item: InboxItem, decision: Decision, text: string, scope: string) => void;
     busy: boolean;
     heads: Head[];
+    canApproveUserModel: boolean;
     stale?: boolean;
     rejectedOnly?: boolean;
 }) {
@@ -53,6 +54,8 @@ function ProposalCard({ item, act, busy, heads, stale = false, rejectedOnly = fa
         <p className="text-sm break-words">{item.item.outcome}</p>
         </article>;
     const user = item.kind === 'user_model_candidate';
+    const approvalBlocked = user && !canApproveUserModel;
+    const currentHead = user ? displayedHead(item.item, heads) : undefined;
     return <article className="py-6 border-b border-pc-border space-y-4">
     <div className="flex flex-wrap gap-2 text-xs text-pc-text-muted">
     <span>{t(user ? 'review.user_model' : 'review.soul')}</span>
@@ -63,11 +66,11 @@ function ProposalCard({ item, act, busy, heads, stale = false, rejectedOnly = fa
     {user && <div className="space-y-2 text-sm">
         <p>{t('review.kind')}: {t(`review.${item.item.kind}`)} · {t('review.semantic_key')}: <span className="break-all">{item.item.semantic_key}</span></p>
         <p className="font-medium">{t('review.replaces')}</p>
-        {heads.filter(head => head.semantic_key === item.item.semantic_key).map(head => <div key={head.id} className="space-y-1">
-            <p className="whitespace-pre-wrap break-words">{head.statement}</p>
-            <p className="text-pc-text-muted break-all">{t(`review.${head.kind}`)} · {head.scope} · {t(`review.${head.authority}`)} · {head.id}</p>
-        </div>)}
-        {!heads.some(head => head.semantic_key === item.item.semantic_key) && <p>{t('review.no_replacement')}</p>}
+        {currentHead && <div className="space-y-1">
+            <p className="whitespace-pre-wrap break-words">{currentHead.statement}</p>
+            <p className="text-pc-text-muted break-all">{t(`review.${currentHead.kind}`)} · {currentHead.scope} · {t(`review.${currentHead.authority}`)} · {currentHead.id}</p>
+        </div>}
+        {!currentHead && <p>{t('review.no_replacement')}</p>}
     </div>}
     {!user && <>
         <p className="text-sm text-pc-text-secondary break-words">{item.item.rationale}</p>
@@ -78,6 +81,7 @@ function ProposalCard({ item, act, busy, heads, stale = false, rejectedOnly = fa
             {item.item.retire_target ? <><p>{t(`review.${item.item.retire_target.kind}`)}</p><p className="whitespace-pre-wrap break-words">{item.item.retire_target.text}</p></> : <p>{t('review.unavailable')}</p>}
         </div>}
         </>}
+    {approvalBlocked && <p role="status">{t('review.upgrade_head_guard')}</p>}
     {stale && <p role="alert">{t('review.proposal_stale')}</p>}
     <details>
     <summary className="cursor-pointer text-sm py-2 min-h-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]">{t('review.evidence')}</summary>
@@ -97,10 +101,10 @@ function ProposalCard({ item, act, busy, heads, stale = false, rejectedOnly = fa
         </label>}
     <div className="flex flex-wrap gap-2">
       {mode ? <>
-        <Button disabled={busy || (mode === 'reword' ? !text.trim() : !user || !validNarrowScope(item.item, `session:${session.trim()}`))} onClick={() => act(item, mode, text, `session:${session.trim()}`)}>{t('review.apply')}</Button>
+        <Button disabled={busy || approvalBlocked || (mode === 'reword' ? !text.trim() : !user || !validNarrowScope(item.item, `session:${session.trim()}`))} onClick={() => act(item, mode, text, `session:${session.trim()}`)}>{t('review.apply')}</Button>
         <Button variant="ghost" disabled={busy} onClick={() => setMode(null)}>{t('common.cancel')}</Button>
         </> : <>
-        {!stale && !rejectedOnly && <Button disabled={busy} onClick={() => act(item, 'accept', '', '')}>{t('review.accept')}</Button>}{!stale && !rejectedOnly && canReword(item) && <Button variant="ghost" disabled={busy} onClick={() => setMode('reword')}>{t('review.reword')}</Button>}{!stale && user && canNarrow(item.item) && <Button variant="ghost" disabled={busy} onClick={() => setMode('narrow')}>{t('review.narrow')}</Button>}{!rejectedOnly && <Button variant="ghost" disabled={busy} onClick={() => act(item, 'dismiss', '', '')}>{t('review.dismiss')}</Button>}
+        {!approvalBlocked && !stale && !rejectedOnly && <Button disabled={busy} onClick={() => act(item, 'accept', '', '')}>{t('review.accept')}</Button>}{!approvalBlocked && !stale && !rejectedOnly && canReword(item) && <Button variant="ghost" disabled={busy} onClick={() => setMode('reword')}>{t('review.reword')}</Button>}{!approvalBlocked && !stale && user && canNarrow(item.item) && <Button variant="ghost" disabled={busy} onClick={() => setMode('narrow')}>{t('review.narrow')}</Button>}{!rejectedOnly && <Button variant="ghost" disabled={busy} onClick={() => act(item, 'dismiss', '', '')}>{t('review.dismiss')}</Button>}
         </>}
     </div>
   </article>;
@@ -113,7 +117,9 @@ export default function Review() {
     const [tab, setTab] = useState<'inbox' | 'profile' | 'user_model'>('inbox');
     const [inbox, setInbox] = useState<Inbox | null>(null);
     const [soul, setSoul] = useState<Soul | null>(null);
-    const [heads, setHeads] = useState<Head[]>([]);
+    const [headRead, setHeadRead] = useState<{ heads: Head[]; supports_expected_head?: boolean } | null>(null);
+    const heads = headRead?.heads ?? [];
+    const canApproveUserModel = headRead?.supports_expected_head === true;
     const [history, setHistory] = useState<{
         layer: Layer;
         revisions: Revision[];
@@ -143,7 +149,7 @@ export default function Review() {
             setNeedsPair(true);
             setInbox(null);
             setSoul(null);
-            setHeads([]);
+            setHeadRead(null);
             setHistory(null);
             setCandidate(null);
             setPastCandidates([]);
@@ -164,7 +170,7 @@ export default function Review() {
         const controller = new AbortController();
         setInbox(null);
         setSoul(null);
-        setHeads([]);
+        setHeadRead(null);
         setHistory(null);
         setCandidate(null);
         setPastCandidates([]);
@@ -190,9 +196,9 @@ export default function Review() {
             setNeedsPair(false);
             // The canonical heads must be visible before any candidate approval.
             if (tab === 'inbox' || tab === 'user_model') {
-                const current = await reviewFetch<{ heads: Head[] }>('/api/user-model/heads', controller.signal);
+                const current = await reviewFetch<{ heads: Head[]; supports_expected_head?: boolean }>('/api/user-model/heads', controller.signal);
                 if (request !== generation.current) return;
-                setHeads(current.heads);
+                setHeadRead(current);
             }
             setInbox(data);
             if (tab === 'profile' && agent) {
@@ -227,7 +233,7 @@ export default function Review() {
                 report(err);
                 onFailure?.(err);
                 if (err instanceof ReviewError && err.status === 409) {
-                    setNotice(t(err.code === 'proposal_stale' ? 'review.proposal_stale' : err.code === 'revision_conflict' ? 'review.revision_conflict' : ['proposal_already_resolved', 'candidate_already_reviewed'].includes(err.code ?? '') ? 'review.already_reviewed' : 'review.conflict'));
+                    setNotice(t(err.code === 'head_conflict' ? 'review.head_conflict' : err.code === 'proposal_stale' ? 'review.proposal_stale' : err.code === 'revision_conflict' ? 'review.revision_conflict' : ['proposal_already_resolved', 'candidate_already_reviewed'].includes(err.code ?? '') ? 'review.already_reviewed' : 'review.conflict'));
                     setVersion(v => v + 1);
                 }
             }
@@ -237,7 +243,7 @@ export default function Review() {
             setBusy(false);
         }
     };
-    const act = (item: InboxItem, decision: Decision, text: string, scope: string) => void perform(() => { const request = decisionRequest(item, decision, text, scope); return reviewFetch(request.path, undefined, request.body); }, true, err => {
+    const act = (item: InboxItem, decision: Decision, text: string, scope: string) => void perform(() => { if (item.kind === 'user_model_candidate' && decision !== 'dismiss' && !canApproveUserModel) throw new Error('Head guard unavailable'); const request = decisionRequest(item, decision, text, scope, heads); return reviewFetch(request.path, undefined, request.body); }, true, err => {
         if (err instanceof ReviewError && err.code === 'proposal_stale') setStaleProposals(previous => new Set([...previous, item.id]));
     });
     const inspect = async (path: string, apply: (value: unknown) => void) => {
@@ -286,7 +292,7 @@ export default function Review() {
       <nav aria-label={t('review.sections')} className="flex flex-wrap gap-2">{(['inbox', 'profile', 'user_model'] as const).map(section => <Button key={section} variant={tab === section ? 'primary' : 'ghost'} disabled={busy} aria-pressed={tab === section} onClick={() => setTab(section)}>{t(`review.${section}`)}</Button>)}</nav>
       {loading && <p role="status">{t('review.loading')}</p>}
       {tab === 'inbox' && inbox && <section>
-            <p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{inbox.items.length === 0 && <p className="py-10 text-pc-text-secondary">{t('review.empty')}</p>}{inbox.items.map(item => <ProposalCard key={item.id} item={item} heads={heads} busy={busy} act={act} stale={staleProposals.has(item.id)}/>)}{inbox.next_offset !== null && <Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/review/inbox?limit=100&offset=${inbox.next_offset}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, value => setInbox(value as Inbox))}>{t('review.next')}</Button>}</section>}
+            <p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{inbox.items.length === 0 && <p className="py-10 text-pc-text-secondary">{t('review.empty')}</p>}{inbox.items.map(item => <ProposalCard key={item.id} item={item} heads={heads} canApproveUserModel={canApproveUserModel} busy={busy} act={act} stale={staleProposals.has(item.id)}/>)}{inbox.next_offset !== null && <Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/review/inbox?limit=100&offset=${inbox.next_offset}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, value => setInbox(value as Inbox))}>{t('review.next')}</Button>}</section>}
       {tab === 'profile' && soul && <section className="space-y-8">{layers.map(layer => {
                     const head = layer === 'voice' ? soul.voice.stored : soul[layer];
                     return <article key={layer} className="border-t border-pc-border pt-5 space-y-4">
@@ -316,7 +322,7 @@ export default function Review() {
                 <h3 className="font-medium">{t('review.history')}</h3>
                 <p>{candidate.candidate.statement}</p>
                 <p>{t(`review.state_${candidate.review_state}`)}</p>
-                {candidate.review_state === 'rejected' && <ProposalCard key={candidate.candidate.id} item={{ id: `user_model:${candidate.candidate.id}`, kind: 'user_model_candidate', item: candidate.candidate }} heads={heads} busy={busy} act={act} rejectedOnly/>}
+                {candidate.review_state === 'rejected' && <ProposalCard key={candidate.candidate.id} item={{ id: `user_model:${candidate.candidate.id}`, kind: 'user_model_candidate', item: candidate.candidate }} heads={heads} canApproveUserModel={canApproveUserModel} busy={busy} act={act} rejectedOnly/>}
                 <Value value={candidate.candidate.evidence}/>{candidate.review_receipts.map(receipt => <p key={receipt.id}>{t(`review.action_${receipt.action}`)} · {date(receipt.at_unix)} {receipt.note}</p>)}</article>}</section>}
     </>}
     <ConfirmDialog open={rollback !== null} title={t('review.rollback')} message={t('review.rollback_hint')} confirmLabel={t('review.rollback')} onClose={() => setRollback(null)} onConfirm={() => { if (!rollback)

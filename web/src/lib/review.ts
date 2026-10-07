@@ -125,7 +125,11 @@ export function canNarrow(candidate: Candidate): boolean {
 export function validNarrowScope(candidate: Candidate, scope: string): boolean {
     return canNarrow(candidate) && scope.startsWith('session:') && !!scope.slice(8).trim() && scope.trim() === scope && (candidate.scope === 'global' || scope === candidate.scope);
 }
-export function decisionRequest(item: InboxItem, decision: Decision, text: string, scope: string): {
+// Use the same canonical row for the displayed replacement and approval CAS.
+export function displayedHead(candidate: Candidate, heads: readonly Head[]): Head | undefined {
+    return heads.find(head => head.semantic_key === candidate.semantic_key);
+}
+export function decisionRequest(item: InboxItem, decision: Decision, text: string, scope: string, heads: readonly Head[]): {
     path: string;
     body: unknown;
 } {
@@ -137,5 +141,5 @@ export function decisionRequest(item: InboxItem, decision: Decision, text: strin
         throw new Error('Invalid scope');
     if (item.kind === 'soul_proposal')
         return { path: `/api/soul/proposals/${item.item.id}/resolve`, body: { agent: item.agent, resolution: decision === 'dismiss' ? 'dismissed' : 'accepted', ...(decision === 'reword' ? { final_text: text.trim() } : {}) } };
-    return { path: `/api/user-model/candidates/${encodeURIComponent(item.item.id)}/review`, body: { action: decision === 'dismiss' ? 'reject' : decision === 'reword' ? 'accept' : decision, ...(decision === 'reword' ? { final_text: text.trim() } : {}), ...(decision === 'narrow' ? { narrowed_scope: scope } : {}) } };
+    return { path: `/api/user-model/candidates/${encodeURIComponent(item.item.id)}/review`, body: { ...(decision === 'dismiss' ? {} : { expected_head: { id: displayedHead(item.item, heads)?.id ?? null } }), action: decision === 'dismiss' ? 'reject' : decision === 'reword' ? 'accept' : decision, ...(decision === 'reword' ? { final_text: text.trim() } : {}), ...(decision === 'narrow' ? { narrowed_scope: scope } : {}) } };
 }
