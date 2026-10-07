@@ -13,6 +13,9 @@ generate = "run -p xtask --bin generate --"
 lint-ci = "clippy --workspace --all-targets --locked --features ci-all -- -D warnings"
 
 [build]
+# Bound local disk use across worktrees and feature combinations.
+# Opt in for a short edit loop with CARGO_INCREMENTAL=1.
+incremental = false
 rustdocflags = ["--default-theme=ayu"]
 
 [target.x86_64-unknown-linux-musl]
