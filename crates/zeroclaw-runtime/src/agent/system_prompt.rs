@@ -267,7 +267,7 @@ pub fn build_system_prompt_with_persona(
         let voice_start = if section.starts_with("## Voice\n") {
             Some(0)
         } else {
-            section.rfind("\n## Voice\n").map(|offset| offset + 1)
+            section.rfind("\n## Voice\n")
         };
         let start = prompt.len();
         prompt.push_str(section);
@@ -1012,11 +1012,19 @@ mod tests {
     fn voice_yields_to_capped_prompt_without_displacing_governed_identity_or_safety() {
         let workspace = tempfile::TempDir::new().unwrap();
         let policy = zeroclaw_config::schema::RiskProfileConfig::default();
-        let identity = "## Identity\n\nOwner-governed identity.\n\n";
+        let config = zeroclaw_config::schema::Config {
+            data_dir: workspace.path().to_path_buf(),
+            ..Default::default()
+        };
+        let with_voice = crate::agent::persona_projection::persona_projection(&config, "nova")
+            .section
+            .unwrap();
+        let (governed, _) = with_voice.rsplit_once("\n\n## Voice\n").unwrap();
+        // The canonical projection joins trimmed layers and appends one newline.
+        let identity = format!("{governed}\n");
         let voice = zeroclaw_config::persona::PersonaKnobs::default()
             .to_prompt_section()
             .unwrap();
-        let with_voice = format!("{identity}{voice}");
         let render = |persona: &str, cap| {
             build_system_prompt_with_persona(
                 workspace.path(),
@@ -1036,11 +1044,14 @@ mod tests {
                 LegacyPersonaFiles::Suppress,
             )
         };
-        let baseline = render(identity, 0);
+        let baseline = render(&identity, 0);
         assert!(baseline.contains("## Safety"));
         for cap in [4000, baseline.len()] {
-            assert_eq!(render(&with_voice, cap), render(identity, cap));
-            assert!(render(&with_voice, cap).contains("Owner-governed identity."));
+            assert_eq!(render(&with_voice, cap), render(&identity, cap));
+            assert!(
+                render(&with_voice, cap)
+                    .contains(crate::agent::persona_projection::IDENTITY_HONESTY_LINE)
+            );
         }
         assert!(render(&with_voice, 0).contains(&voice));
     }
