@@ -17,6 +17,10 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     let pairingEnabled = false;
     let locale = 'en';
     let supportsExpectedHead = true;
+    let inboxUnavailable = false;
+    let headsUnavailable = false;
+    let soulUnavailable = false;
+    let inboxReads = 0;
     let pairCalls = 0;
     let oldHistoryRelease;
     let delayHistory = false;
@@ -28,7 +32,9 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     const rejected = { ...user.item, id: '42', statement: 'Previously dismissed preference' };
     const scopedItems = ['agent:nova', 'channel:telegram', 'session:original'].map((scope, i) => ({ ...user, id: `user_model:${9 + i}`, item: { ...user.item, id: String(9 + i), statement: `Scoped candidate ${scope}`, scope } }));
     const addition = { ...proposal, id: 'soul:nova:12', item: { id: 12, layer: 'growth', proposal: 'New growth addition', rationale: 'Synthetic addition', growth_kind: 'self', created_at_unix: now } };
-    let items = [proposal, user, ...scopedItems, addition];
+    const voiceProposal = { ...proposal, id: 'soul:nova:19', item: { id: 19, layer: 'voice', trait_key: 'warmth', level: 'xhigh', proposal: 'Warmer replies', rationale: 'Synthetic Voice limit fixture', created_at_unix: now } };
+    const receipts = ['clock_started', 'nothing_to_reflect_on', 'proposal_queue_full', 'model_call_failed: synthetic timeout: retry'].map((outcome, i) => ({ id: `reflection:nova:${i}`, kind: 'reflection_receipt', agent: 'nova', item: { period_from_unix: now, ran_at_unix: now, proposals_created: 0, user_model_candidates_created: 0, outcome } }));
+    let items = [proposal, user, ...scopedItems, addition, voiceProposal, ...receipts];
     let currentHead = { id: 'revision-current', semantic_key: 'style', kind: 'preference', statement: 'Existing detailed planning preference', scope: 'global', authority: 'owner_authored' };
     const head = (value) => ({ revision: 2, source: 'owner', created_at_unix: now, value });
     const soul = { agent: 'nova', identity: head({ name: 'Nova' }), principles: head({ items: ['Keep private information private.'] }), growth: head({ entries: [] }), voice: { configured: { warmth: 'high' }, stored: head({ heads: { warmth: 'low' } }) } };
@@ -59,6 +65,8 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
                 return send({ error: 'Unauthorized' }, 401);
         }
         if (url.pathname === '/api/review/inbox') {
+            inboxReads++;
+            if (inboxUnavailable) return send({ code: 'store_unavailable' }, 503);
             if (url.searchParams.get('agent') === 'deleted') {
                 unknownReads++;
                 return send({ code: 'unknown_agent', error: 'Unknown' }, 404);
@@ -68,6 +76,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
         if (req.method() === 'POST') {
             const body = req.postDataJSON();
             actions.push({ path: url.pathname, body });
+            if (url.pathname.endsWith('/19/resolve')) return send({ code: 'invalid', field: 'level', error: 'untrusted validation detail' }, 400);
             if (url.pathname.endsWith('/8/review') && body.action === 'accept') {
                 assert.deepEqual(body.expected_head, { id: 'revision-current' });
                 currentHead = { ...currentHead, id: 'revision-unseen-B', statement: 'Changed elsewhere before acceptance' };
@@ -86,7 +95,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
             return send({ ok: true });
         }
         if (url.pathname === '/api/soul')
-            return send(soul);
+            return soulUnavailable ? send({ code: 'store_unavailable' }, 503) : send(soul);
         if (url.pathname === '/api/soul/history') {
             if (delayHistory && url.searchParams.get('layer') === 'identity') {
                 oldHistoryRelease = () => send({ code: 'unauthorized', error: 'late failure' }, 401);
@@ -95,7 +104,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
             return send({ layer: url.searchParams.get('layer'), revisions: [{ ...head({ text: 'Fresh principles history' }), source: 'approved_proposal', proposal_id: 71 }, { ...head({ text: 'Restored principles history' }), revision: 3, source: 'owner', rolled_back_from: 1 }] });
         }
         if (url.pathname === '/api/user-model/heads')
-            return send({ heads: [currentHead], ...(supportsExpectedHead ? { supports_expected_head: true } : {}) });
+            return headsUnavailable ? send({ code: 'store_unavailable' }, 503) : send({ heads: [currentHead], ...(supportsExpectedHead ? { supports_expected_head: true } : {}) });
         if (url.pathname === '/api/user-model/candidates')
             return send({ candidates: [rejected] });
         if (url.pathname === '/api/user-model/candidates/42')
@@ -129,6 +138,15 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     await page.getByText('Bound entry to retire · Revision 17', { exact: true }).waitFor();
     const addCard = page.locator('article').filter({ has: page.getByRole('heading', { name: addition.item.proposal, exact: true }) });
     assert.match(await addCard.innerText(), /Self/);
+    const voiceApproval = page.locator('article').filter({ has: page.getByRole('heading', { name: voiceProposal.item.proposal, exact: true }) });
+    const beforeInvalid = actions.length;
+    const beforeInvalidReads = inboxReads;
+    await voiceApproval.getByRole('button', { name: 'Accept', exact: true }).click();
+    await page.getByText('This proposal exceeds the current Voice one-step limit', { exact: false }).waitFor();
+    await voiceApproval.getByRole('button', { name: 'Accept', exact: true }).waitFor();
+    assert.ok(inboxReads > beforeInvalidReads);
+    assert.equal(actions.length, beforeInvalid + 1);
+    assert.equal(await page.getByText('Could not complete the request. Check the connection and try again.', { exact: true }).count(), 0);
     const staleCard = page.locator('article').filter({ has: page.getByRole('heading', { name: proposal.item.proposal, exact: true }) });
     await staleCard.getByRole('button', { name: 'Accept', exact: true }).click();
     await staleCard.getByText('This proposal no longer matches its target.', { exact: false }).waitFor();
@@ -240,8 +258,25 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     await page.getByText(/^忽略 ·/).waitFor();
     await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-localized-history-375.png') });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.getByRole('button', { name: '待审核', exact: true }).click();
+    for (const label of ['每周反思计时已开始', '本期没有可供反思的内容', '待审核提案已满', '反思模型调用失败: synthetic timeout: retry']) await page.getByText(label, { exact: true }).waitFor();
+    assert.equal(await page.getByText('clock_started', { exact: true }).count(), 0);
+    // A failure in the combined inbox or the other store cannot block a healthy tab.
+    inboxUnavailable = true;
+    headsUnavailable = true;
+    const beforeIndependentTabs = inboxReads;
+    await page.getByRole('button', { name: '我的智能体', exact: true }).click();
+    await page.getByRole('heading', { name: '身份', exact: true }).waitFor();
+    assert.equal(await page.getByRole('alert').count(), 0);
+    assert.equal(inboxReads, beforeIndependentTabs);
+    headsUnavailable = false;
+    soulUnavailable = true;
+    await page.getByRole('button', { name: '关于我', exact: true }).click();
+    await page.getByRole('heading', { name: currentHead.statement, exact: true }).waitFor();
+    assert.equal(await page.getByRole('alert').count(), 0);
+    assert.equal(inboxReads, beforeIndependentTabs);
     assert.deepEqual(failures, []);
-    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, actions }));
+    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, voice_validation_refresh: true, actions }));
     await browser.close();
     server.close();
 })().catch(async e => { console.error(e); server.close(); if (browser) await browser.close(); process.exitCode = 1; });

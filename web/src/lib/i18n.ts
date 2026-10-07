@@ -9,6 +9,17 @@ export type Locale = 'ar' | 'bn' | 'cs' | 'da' | 'de' | 'el' | 'en' | 'es' | 'fi
 
 const translations: Record<Locale, Record<string, string>> = {
   zh: {
+    "review.outcome_clock_started": "每周反思计时已开始",
+    "review.outcome_nothing_to_reflect_on": "本期没有可供反思的内容",
+    "review.outcome_proposal_queue_full": "待审核提案已满",
+    "review.outcome_ok": "反思已完成",
+    "review.outcome_model_call_failed": "反思模型调用失败",
+    "review.outcome_storage_write_failed": "部分结果未能存储，将重试",
+    "review.outcome_unknown": "其他反思结果",
+    "review.invalid_voice": "当前 Voice 不可用，未应用此提案。请检查表达风格配置，或忽略此提案。",
+    "review.invalid_level": "此提案已超出当前 Voice 的单级调整限制，未应用修改。请查看当前表达风格，再决定是否忽略此提案。",
+    "review.invalid": "此修改未通过验证，未应用。请查看刷新后的记录并修正内容，或忽略该提案。",
+
     "review.upgrade_head_guard": "此网关尚不支持防止覆盖未见修改的审核保护。请升级网关后再接受、改写或限定范围；仍可查看和忽略。",
     "review.head_conflict": "该语义标识的当前条目已改变，尚未应用此决定。请查看刷新后的条目，再重新决定。",
     "review.semantic_key": "语义标识",
@@ -497,6 +508,17 @@ const translations: Record<Locale, Record<string, string>> = {
   },
 
   en: {
+    "review.outcome_clock_started": "Weekly reflection clock started",
+    "review.outcome_nothing_to_reflect_on": "Nothing to reflect on this period",
+    "review.outcome_proposal_queue_full": "Proposal review queue is full",
+    "review.outcome_ok": "Reflection completed",
+    "review.outcome_model_call_failed": "Reflection model call failed",
+    "review.outcome_storage_write_failed": "Some results could not be stored; retry pending",
+    "review.outcome_unknown": "Other reflection outcome",
+    "review.invalid_voice": "Current Voice is unavailable; the proposal was not applied. Review Voice configuration or dismiss this proposal.",
+    "review.invalid_level": "This proposal exceeds the current Voice one-step limit and was not applied. Review current Voice or dismiss this proposal.",
+    "review.invalid": "This change failed validation and was not applied. Review the refreshed record, correct the content, or dismiss the proposal.",
+
     "review.upgrade_head_guard": "Upgrade the gateway to approve, reword or limit scope without overwriting unseen changes. Reading and dismissal remain available.",
     "review.head_conflict": "The current entry for this key changed. This decision was not applied. Review the refreshed entry before deciding again.",
     "review.semantic_key": "Semantic key",

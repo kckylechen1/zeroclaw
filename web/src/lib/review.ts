@@ -96,7 +96,7 @@ export interface CandidateHistory {
     }[];
 }
 export class ReviewError extends Error {
-    constructor(public status: number, public code?: string) { super(`Review HTTP ${status}`); }
+    constructor(public status: number, public code?: string, public field?: string) { super(`Review HTTP ${status}`); }
 }
 // Owner-only responses have several legacy envelopes. Preserve the status,
 // and keep re-pair local to this surface instead of changing anonymous routes.
@@ -111,7 +111,8 @@ export async function reviewFetch<T>(path: string, signal?: AbortSignal, body?: 
     if (!response.ok) {
         const envelope: unknown = await response.json().catch(() => null);
         const code = envelope && typeof envelope === 'object' && 'code' in envelope && typeof envelope.code === 'string' ? envelope.code : undefined;
-        throw new ReviewError(response.status, code);
+        const field = envelope && typeof envelope === 'object' && 'field' in envelope && typeof envelope.field === 'string' ? envelope.field : undefined;
+        throw new ReviewError(response.status, code, field);
     }
     return response.json() as Promise<T>;
 }
@@ -142,4 +143,16 @@ export function decisionRequest(item: InboxItem, decision: Decision, text: strin
     if (item.kind === 'soul_proposal')
         return { path: `/api/soul/proposals/${item.item.id}/resolve`, body: { agent: item.agent, resolution: decision === 'dismiss' ? 'dismissed' : 'accepted', ...(decision === 'reword' ? { final_text: text.trim() } : {}) } };
     return { path: `/api/user-model/candidates/${encodeURIComponent(item.item.id)}/review`, body: { ...(decision === 'dismiss' ? {} : { expected_head: { id: displayedHead(item.item, heads)?.id ?? null } }), action: decision === 'dismiss' ? 'reject' : decision === 'reword' ? 'accept' : decision, ...(decision === 'reword' ? { final_text: text.trim() } : {}), ...(decision === 'narrow' ? { narrowed_scope: scope } : {}) } };
+}
+
+export function reflectionOutcome(outcome: string): { key: string; detail: string } {
+    const separator = outcome.indexOf(':');
+    const prefix = separator < 0 ? outcome : outcome.slice(0, separator);
+    const known = ['clock_started', 'nothing_to_reflect_on', 'proposal_queue_full', 'ok', 'model_call_failed', 'storage_write_failed'];
+    return known.includes(prefix)
+        ? { key: `review.outcome_${prefix}`, detail: separator < 0 ? '' : outcome.slice(separator + 1).trim() }
+        : { key: 'review.outcome_unknown', detail: outcome };
+}
+export function validationMessage(error: ReviewError): string {
+    return error.field === 'voice' ? 'review.invalid_voice' : error.field === 'level' ? 'review.invalid_level' : 'review.invalid';
 }

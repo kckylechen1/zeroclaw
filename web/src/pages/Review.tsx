@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Button, ConfirmDialog } from '@/components/ui';
 import { useAuth } from '@/hooks/useAuth';
 import { t } from '@/lib/i18n';
-import { displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, ReviewError, type Candidate, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
+import { reflectionOutcome, validationMessage, displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, ReviewError, type Candidate, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
 const field = 'w-full min-h-11 rounded-md border border-pc-border bg-pc-base p-3 text-pc-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]';
 const date = (value: number) => new Date(value * 1000).toLocaleString();
 const layers: Layer[] = ['identity', 'principles', 'growth', 'voice'];
@@ -46,13 +46,15 @@ function ProposalCard({ item, act, busy, heads, canApproveUserModel, stale = fal
     const [session, setSession] = useState(item.kind === 'user_model_candidate' && item.item.scope.startsWith('session:') ? item.item.scope.slice(8) : '');
     const editor = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null);
     useEffect(() => { if (mode) editor.current?.focus(); }, [mode]);
-    if (item.kind === 'reflection_receipt')
+    if (item.kind === 'reflection_receipt') {
+        const outcome = reflectionOutcome(item.item.outcome);
         return <article className="py-5 border-b border-pc-border">
         <h3 className="font-medium">{t('review.reflection')} · {item.agent}</h3>
         <p className="text-xs text-pc-text-muted my-2">{date(item.item.ran_at_unix)}</p>
         <p>{t('review.soul')}: {item.item.proposals_created} · {t('review.user_model')}: {item.item.user_model_candidates_created}</p>
-        <p className="text-sm break-words">{item.item.outcome}</p>
+        <p className="text-sm break-words">{t(outcome.key)}{outcome.detail && `: ${outcome.detail}`}</p>
         </article>;
+    }
     const user = item.kind === 'user_model_candidate';
     const approvalBlocked = user && !canApproveUserModel;
     const currentHead = user ? displayedHead(item.item, heads) : undefined;
@@ -154,7 +156,7 @@ export default function Review() {
             setCandidate(null);
             setPastCandidates([]);
         }
-        setError(t(err instanceof ReviewError ? `review.error_${[401, 403, 409, 429, 503].includes(err.status) ? err.status : 'other'}` : 'review.error_other'));
+        setError(t(err instanceof ReviewError && err.status === 400 && err.code === 'invalid' ? validationMessage(err) : err instanceof ReviewError ? `review.error_${[401, 403, 409, 429, 503].includes(err.status) ? err.status : 'other'}` : 'review.error_other'));
     };
     useEffect(() => {
         if (!needsPair) return;
@@ -191,20 +193,25 @@ export default function Review() {
                 setParams(options.agents[0] ? { agent: options.agents[0] } : {}, { replace: true });
                 return;
             }
-            const data = await reviewFetch<Inbox>(`/api/review/inbox?limit=100${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, controller.signal);
-            if (request !== generation.current) return;
-            setNeedsPair(false);
-            // The canonical heads must be visible before any candidate approval.
-            if (tab === 'inbox' || tab === 'user_model') {
+            // Verify authority using only the selected tab's owner-only API.
+            if (tab === 'inbox') {
+                const data = await reviewFetch<Inbox>(`/api/review/inbox?limit=100${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, controller.signal);
+                // Heads are required before candidate approvals are displayed.
                 const current = await reviewFetch<{ heads: Head[]; supports_expected_head?: boolean }>('/api/user-model/heads', controller.signal);
                 if (request !== generation.current) return;
+                setNeedsPair(false);
                 setHeadRead(current);
-            }
-            setInbox(data);
-            if (tab === 'profile' && agent) {
+                setInbox(data);
+            } else if (tab === 'user_model') {
+                const current = await reviewFetch<{ heads: Head[]; supports_expected_head?: boolean }>('/api/user-model/heads', controller.signal);
+                if (request !== generation.current) return;
+                setNeedsPair(false);
+                setHeadRead(current);
+            } else if (agent) {
                 const value = await reviewFetch<Soul>(`/api/soul?agent=${encodeURIComponent(agent)}`, controller.signal);
-                if (request === generation.current)
-                    setSoul(value);
+                if (request !== generation.current) return;
+                setNeedsPair(false);
+                setSoul(value);
             }
 
         }).catch(err => { if (request === generation.current && !controller.signal.aborted)
@@ -232,6 +239,10 @@ export default function Review() {
             if (request === generation.current) {
                 report(err);
                 onFailure?.(err);
+                if (err instanceof ReviewError && err.status === 400 && err.code === 'invalid') {
+                    setNotice(t(validationMessage(err)));
+                    setVersion(v => v + 1);
+                }
                 if (err instanceof ReviewError && err.status === 409) {
                     setNotice(t(err.code === 'head_conflict' ? 'review.head_conflict' : err.code === 'proposal_stale' ? 'review.proposal_stale' : err.code === 'revision_conflict' ? 'review.revision_conflict' : ['proposal_already_resolved', 'candidate_already_reviewed'].includes(err.code ?? '') ? 'review.already_reviewed' : 'review.conflict'));
                     setVersion(v => v + 1);

@@ -49,3 +49,14 @@ for (const decision of ['accept', 'reword', 'narrow'] as const) {
     assert.deepEqual(noMatch.expected_head, { id: null });
 }
 assert.deepEqual(decisionRequest(user, 'dismiss', '', '', [displayed]).body, { action: 'reject' });
+
+const { reflectionOutcome, validationMessage } = await import('./review');
+for (const outcome of ['clock_started', 'nothing_to_reflect_on', 'proposal_queue_full', 'ok', 'storage_write_failed']) {
+    assert.deepEqual(reflectionOutcome(outcome), { key: `review.outcome_${outcome}`, detail: '' });
+}
+assert.deepEqual(reflectionOutcome('model_call_failed: timeout: synthetic'), { key: 'review.outcome_model_call_failed', detail: 'timeout: synthetic' });
+assert.deepEqual(reflectionOutcome('future_status'), { key: 'review.outcome_unknown', detail: 'future_status' });
+for (const field of ['voice', 'level', 'unexpected_field']) {
+    globalThis.fetch = async () => new Response(JSON.stringify({ code: 'invalid', field, error: 'untrusted prose' }), { status: 400 });
+    await assert.rejects(reviewFetch('/api/soul/proposals/19/resolve'), (error: unknown) => error instanceof ReviewError && error.field === field && validationMessage(error) === (field === 'unexpected_field' ? 'review.invalid' : `review.invalid_${field}`));
+}
