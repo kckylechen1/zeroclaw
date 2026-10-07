@@ -109,9 +109,11 @@ impl Tool for MemoryRecallTool {
             .ok()
             .flatten()
             .filter(|value| !value.trim().is_empty());
+        // Backend session semantics vary: some exclude even unscoped durable
+        // facts. Query a bounded superset and enforce applicability below.
         let recalled = self
             .memory
-            .recall(query, limit, session.as_deref(), since, until)
+            .recall(query, limit, None, since, until)
             .await
             .map(|mut entries| {
                 // Backends may have weaker filtering; enforce the boundary again
@@ -289,6 +291,37 @@ mod tests {
         }
         fn alias(&self) -> &str {
             "QueryEchoMemory"
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_session_recall_keeps_unscoped_long_term_facts() {
+        let (_dir, store) = seeded_mem();
+        for (key, category, session) in [
+            ("durable", MemoryCategory::Core, None),
+            ("current", MemoryCategory::Conversation, Some("A")),
+            ("foreign", MemoryCategory::Conversation, Some("B")),
+            ("legacy", MemoryCategory::Conversation, None),
+        ] {
+            store
+                .store(key, &format!("fixture {key}"), category, session)
+                .await
+                .unwrap();
+        }
+        let tool = MemoryRecallTool::new(store);
+        for query in ["*", "fixture"] {
+            let result = zeroclaw_api::TOOL_LOOP_SESSION_KEY
+                .scope(
+                    Some("A".into()),
+                    tool.execute(json!({"query":query, "limit":20})),
+                )
+                .await
+                .unwrap();
+            assert!(result.success);
+            assert!(result.output.contains("fixture durable"));
+            assert!(result.output.contains("fixture current"));
+            assert!(!result.output.contains("fixture foreign"));
+            assert!(!result.output.contains("fixture legacy"));
         }
     }
 
