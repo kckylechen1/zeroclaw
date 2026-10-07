@@ -9,6 +9,7 @@ export type Locale = 'ar' | 'bn' | 'cs' | 'da' | 'de' | 'el' | 'en' | 'es' | 'fi
 
 const translations: Record<Locale, Record<string, string>> = {
   zh: {
+    "review.heads_unavailable": "当前条目尚不可用，无法批准此候选。请刷新后重试；仍可查看和忽略。",
     "review.outcome_clock_started": "每周反思计时已开始",
     "review.outcome_nothing_to_reflect_on": "本期没有可供反思的内容",
     "review.outcome_proposal_queue_full": "待审核提案已满",
@@ -508,6 +509,7 @@ const translations: Record<Locale, Record<string, string>> = {
   },
 
   en: {
+    "review.heads_unavailable": "Current entries are unavailable, so this candidate cannot be approved. Refresh to try again; reading and dismissal remain available.",
     "review.outcome_clock_started": "Weekly reflection clock started",
     "review.outcome_nothing_to_reflect_on": "Nothing to reflect on this period",
     "review.outcome_proposal_queue_full": "Proposal review queue is full",
