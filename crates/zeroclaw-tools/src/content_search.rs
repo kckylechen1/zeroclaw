@@ -231,7 +231,18 @@ impl Tool for ContentSearchTool {
         // A de-verbatimized Windows path is safe to hand to legacy grep only
         // when it still identifies the exact path that passed authorization.
         // Otherwise use the internal backend, which opens the canonical path.
-        let backend = effective_search_backend(self.backend, &resolved_canon);
+        let backend = if resolved_canon.is_dir()
+            && self
+                .security
+                .requires_guarded_recursive_read(&resolved_canon)
+        {
+            // External recursive search can expose protected filenames/counts
+            // without calling the per-file guard. The internal walker checks
+            // each canonical target, including symlink aliases.
+            SearchBackend::Internal
+        } else {
+            effective_search_backend(self.backend, &resolved_canon)
+        };
 
         // --- Multiline check for non-ripgrep fallbacks ---
         if multiline && backend != SearchBackend::Ripgrep {
@@ -1148,6 +1159,85 @@ mod tests {
                 .unwrap()
                 .contains(&json!("pattern"))
         );
+    }
+
+    #[tokio::test]
+    async fn recursive_search_cannot_probe_companion_stores_with_external_backends() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let data = root.join("data");
+        std::fs::create_dir(&data).unwrap();
+        let policy = Arc::new(SecurityPolicy {
+            workspace_dir: root.clone(),
+            data_dir: Some(data.clone()),
+            workspace_only: false,
+            allowed_roots: vec![root.clone()],
+            ..SecurityPolicy::default()
+        });
+        for name in [
+            "soul.db",
+            "user_model.db",
+            "soul.db-wal",
+            "user_model.db-journal",
+        ] {
+            // Text sidecars are deliberate: binary-skipping alone is not a guard.
+            std::fs::write(data.join(name), "private_fixture_match").unwrap();
+        }
+        std::fs::write(root.join("notes.txt"), "public_fixture_match").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(data.join("soul.db"), root.join("alias.txt")).unwrap();
+        #[cfg(unix)]
+        {
+            let other = root.join("other");
+            std::fs::create_dir(&other).unwrap();
+            std::fs::hard_link(data.join("soul.db"), other.join("hardlink.txt")).unwrap();
+            std::fs::write(other.join("notes.txt"), "public_fixture_match").unwrap();
+            std::fs::hard_link(other.join("notes.txt"), other.join("public-link.txt")).unwrap();
+            for backend in [
+                SearchBackend::Ripgrep,
+                SearchBackend::Grep,
+                SearchBackend::Internal,
+            ] {
+                let tool = ContentSearchTool::new_with_backend(policy.clone(), backend);
+                for mode in ["content", "files_with_matches", "count"] {
+                    let result = tool
+                        .execute(
+                            json!({"pattern":"fixture_match", "path":"other", "output_mode":mode}),
+                        )
+                        .await
+                        .unwrap();
+                    assert!(result.success, "{:?}", result.error);
+                    assert!(result.output.contains("notes.txt"));
+                    assert!(result.output.contains("public-link.txt"));
+                    assert!(!result.output.contains("hardlink.txt"));
+                    assert!(!result.output.contains("private_fixture_match"));
+                }
+            }
+        }
+        for backend in [
+            SearchBackend::Ripgrep,
+            SearchBackend::Grep,
+            SearchBackend::Internal,
+        ] {
+            let tool = ContentSearchTool::new_with_backend(policy.clone(), backend);
+            for mode in ["content", "files_with_matches", "count"] {
+                let result = tool
+                    .execute(json!({"pattern":"fixture_match", "path":".", "output_mode":mode}))
+                    .await
+                    .unwrap();
+                assert!(result.success, "{:?}", result.error);
+                assert!(result.output.contains("notes.txt"));
+                for forbidden in [
+                    "private_fixture_match",
+                    "soul.db",
+                    "user_model.db",
+                    "alias.txt",
+                    "hardlink.txt",
+                ] {
+                    assert!(!result.output.contains(forbidden), "{:?}", result.output);
+                }
+            }
+        }
     }
 
     #[tokio::test]

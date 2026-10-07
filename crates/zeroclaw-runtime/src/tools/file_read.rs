@@ -450,6 +450,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_read_refuses_companion_stores_and_symlink_aliases_even_as_base64() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let data = root.join("data");
+        std::fs::create_dir(&data).unwrap();
+        let tool = FileReadTool::new(Arc::new(SecurityPolicy {
+            workspace_dir: root.clone(),
+            data_dir: Some(data.clone()),
+            workspace_only: false,
+            allowed_roots: vec![root.clone()],
+            ..SecurityPolicy::default()
+        }));
+        for name in ["soul.db", "user_model.db", "user_model.db-wal"] {
+            let path = data.join(name);
+            std::fs::write(&path, "private fixture bytes").unwrap();
+            let result = tool
+                .execute(json!({"path":path, "encoding":"base64"}))
+                .await
+                .unwrap();
+            assert!(!result.success);
+            #[cfg(unix)]
+            {
+                let link = root.join(format!("alias-{name}"));
+                std::os::unix::fs::symlink(&path, &link).unwrap();
+                let result = tool
+                    .execute(json!({"path":link, "encoding":"base64"}))
+                    .await
+                    .unwrap();
+                assert!(!result.success);
+                let hardlink = root.join(format!("hardlink-{name}.txt"));
+                std::fs::hard_link(&path, &hardlink).unwrap();
+                let result = tool
+                    .execute(json!({"path":hardlink, "encoding":"base64"}))
+                    .await
+                    .unwrap();
+                assert!(!result.success);
+                let writer = crate::tools::FileWriteTool::new(tool.security.clone());
+                let result = writer
+                    .execute(json!({"path":hardlink, "content":"replacement"}))
+                    .await
+                    .unwrap();
+                assert!(!result.success);
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    "private fixture bytes"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn file_read_existing_file() {
         let dir = std::env::temp_dir().join("zeroclaw_test_file_read");
         let _ = tokio::fs::remove_dir_all(&dir).await;

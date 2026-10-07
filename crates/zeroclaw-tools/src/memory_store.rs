@@ -93,7 +93,33 @@ impl Tool for MemoryStoreTool {
             });
         }
 
-        match self.memory.store(key, content, category, None).await {
+        let session = if matches!(category, MemoryCategory::Conversation) {
+            let session = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                .try_with(|sessions| sessions.first().cloned())
+                .ok()
+                .flatten();
+            if session
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+                || self.memory.name() == "markdown"
+            {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(crate::i18n::get_required_tool_string(
+                        "memory-store-conversation-scope-required",
+                    )),
+                });
+            }
+            session
+        } else {
+            None
+        };
+        match self
+            .memory
+            .store(key, content, category, session.as_deref())
+            .await
+        {
             Ok(()) => Ok(ToolResult {
                 success: true,
                 output: format!("Stored memory: {key}").into(),
@@ -178,6 +204,55 @@ mod tests {
         let entry = mem.get("proj_note").await.unwrap().unwrap();
         assert_eq!(entry.content, "Uses async runtime");
         assert_eq!(entry.category, MemoryCategory::Custom("project".into()));
+    }
+
+    #[tokio::test]
+    async fn conversation_store_is_recallable_only_in_its_canonical_memory_scope() {
+        let (_tmp, memory) = test_mem();
+        let store = MemoryStoreTool::new(Arc::clone(&memory), test_security());
+        let args =
+            json!({"key":"conversation", "content":"private fixture", "category":"conversation"});
+        assert!(!store.execute(args.clone()).await.unwrap().success);
+        let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .scope(
+                vec!["A".into(), "shared-sender".into()],
+                store.execute(args.clone()),
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(
+            memory
+                .get("conversation")
+                .await
+                .unwrap()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("A")
+        );
+        let recall = crate::memory_recall::MemoryRecallTool::new(memory);
+        for (scope, visible) in [("A", true), ("B", false)] {
+            let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                .scope(
+                    vec![scope.into(), "shared-sender".into()],
+                    recall.execute(json!({"query":"*"})),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.output.contains("private fixture"), visible);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let markdown = MemoryStoreTool::new(
+            Arc::new(zeroclaw_memory::MarkdownMemory::new("test", dir.path())),
+            test_security(),
+        );
+        let denied = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], markdown.execute(args))
+            .await
+            .unwrap();
+        assert!(!denied.success);
+        assert!(!dir.path().join("memory").exists());
     }
 
     #[tokio::test]

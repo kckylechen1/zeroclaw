@@ -80,6 +80,53 @@ current turn a new memory. Review prompt-assembly changes by asking:
   remain filtered;
 - whether the user or operator can see when older context was removed.
 
+## Companion privacy boundaries
+
+The ordinary `memory_recall` tool derives its allowed memory sessions from the
+executing turn's canonical memory input, not its transport/history key. WebSocket
+history and memory IDs differ; channel turns may have multiple sender/group
+scopes. Model arguments cannot select another conversation. Results outside
+those scopes are excluded, and unattributed Conversation rows are not returned.
+Without a session, only unscoped non-Conversation entries remain eligible.
+Recall filters a bounded over-fetch window, not an exhaustive scan: higher-ranked
+ineligible rows can still crowd eligible rows outside that window. Durable
+memory key identity remains `(agent, key)`; this boundary does not create a
+per-session key namespace or prevent same-key replacement by another session.
+Conversation writes through `memory_store` use the first canonical memory scope
+admitted by the turn; without one, the write is refused. Channel groups put
+that group's conversation at index zero, with the sanitized sender as a secondary
+read scope. This prevents a new group Conversation write from entering a shared
+sender scope. Ordered recall deduplication gives group-local entries precedence;
+legacy sender-scoped reads remain available. Markdown cannot preserve
+conversation scope, so that tool refuses Conversation writes to it, and ordinary
+recall omits its unattributed daily-file rows (which mix daily notes and conversation
+autosaves). Its Core file remains globally recallable; existing files are not rewritten.
+Reserved Soul entries remain excluded even if a backend returns them. This is
+session isolation, not a new surface taxonomy: surface/task-specific recall
+policy still belongs to the owning ingress and memory-injection contract.
+
+Generic file access cannot read or write `soul.db`, `user_model.db`, or their
+SQLite WAL/SHM/journal files (including recased names) in the configured runtime
+directories, even when a
+broad workspace/root grant includes those directories. Resolved symlinks obey
+the same guard. On Unix, multiply-linked files are compared with current store
+and sidecar device/inode identities, so alternate hardlink names are also denied.
+If a protected file has multiple links, recursive searches use per-file checks
+even outside runtime directories. Windows hardlink coverage is not established.
+Recursive content searches whose root contains a runtime
+directory use per-file checks (and refuse unsupported multiline searches)
+instead of giving an external search process unfiltered directory access. Owner APIs and the bounded prompt projection remain the typed
+access paths. These application path guards are not an OS sandbox: approved
+arbitrary shell commands and external processes still need their own filesystem
+isolation. Filesystem changes racing a path check and use are a separate boundary.
+Do not treat a shell approval as a proof of protected-store isolation.
+
+Tachi delegation sends the bounded task and protocol routing fields, without
+automatically copying Soul, User Model, or parent history. The production
+registry fixture seeds both canonical companion stores and checks the captured
+outbound requests. An explicitly included task fact is still task content; this
+guarantee does not claim semantic prevention of an LLM paraphrasing its context.
+
 ## Session history and trimming
 
 Session history is the continuity record for a conversation. It can include

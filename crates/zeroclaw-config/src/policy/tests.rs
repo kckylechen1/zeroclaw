@@ -3968,3 +3968,78 @@ fn soul_store_is_runtime_state_in_data_dir() {
     assert!(policy.is_runtime_config_path(&data_dir.join("soul.db-wal")));
     assert!(!policy.is_runtime_config_path(&root.path().join("workspace").join("soul.db")));
 }
+
+#[test]
+fn companion_stores_override_broad_file_grants() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let data = root.join("data");
+    std::fs::create_dir(&data).unwrap();
+    let policy = SecurityPolicy {
+        workspace_dir: root.clone(),
+        data_dir: Some(data.clone()),
+        workspace_only: false,
+        allowed_roots: vec![root.clone()],
+        ..SecurityPolicy::default()
+    };
+    for base in ["soul.db", "user_model.db", "SOUL.DB", "User_Model.Db"] {
+        for suffix in ["", "-wal", "-shm", "-journal", "-WAL", "-ShM", "-JOURNAL"] {
+            let path = data.join(format!("{base}{suffix}"));
+            assert!(policy.is_runtime_config_path(&path));
+            assert!(!policy.is_resolved_path_readable(&path));
+            assert!(!policy.is_resolved_path_allowed(&path));
+        }
+    }
+    assert!(policy.is_resolved_path_readable(&data.join("notes.txt")));
+    let unrelated = root.join("examples/soul.db");
+    assert!(policy.is_resolved_path_readable(&unrelated));
+    assert!(policy.is_resolved_path_allowed(&unrelated));
+}
+
+#[cfg(unix)]
+#[test]
+fn companion_hardlink_identity_overrides_names_and_recursive_roots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let data = root.join("data");
+    let other = root.join("other");
+    std::fs::create_dir(&data).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let policy = SecurityPolicy {
+        workspace_dir: root.clone(),
+        data_dir: Some(data.clone()),
+        workspace_only: false,
+        allowed_roots: vec![root.clone()],
+        ..Default::default()
+    };
+    assert!(!policy.requires_guarded_recursive_read(&other));
+    for (i, name) in [
+        "soul.db",
+        "user_model.db-wal",
+        "SOUL.DB-SHM",
+        "user_model.db-journal",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let source = data.join(name);
+        let alias = other.join(format!("ordinary-{i}.txt"));
+        std::fs::write(&source, "fixture").unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+        assert!(!policy.is_resolved_path_readable(&alias));
+        assert!(!policy.is_resolved_path_allowed(&alias));
+        assert!(policy.requires_guarded_recursive_read(&other));
+        std::fs::remove_file(&source).unwrap();
+        assert!(
+            policy.is_resolved_path_readable(&alias),
+            "identity is current, not cached"
+        );
+    }
+    let ordinary = other.join("public.txt");
+    let alias = other.join("public-link.txt");
+    std::fs::write(&ordinary, "public fixture").unwrap();
+    std::fs::hard_link(&ordinary, &alias).unwrap();
+    assert!(policy.is_resolved_path_readable(&alias));
+    assert!(policy.is_resolved_path_allowed(&alias));
+    assert!(!policy.requires_guarded_recursive_read(&other));
+}

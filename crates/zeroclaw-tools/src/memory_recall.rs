@@ -3,7 +3,7 @@ use serde_json::json;
 use std::fmt::Write;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_memory::Memory;
+use zeroclaw_memory::{Memory, MemoryCategory};
 
 /// Let the agent search its own memory
 pub struct MemoryRecallTool {
@@ -103,7 +103,43 @@ impl Tool for MemoryRecallTool {
             .and_then(serde_json::Value::as_u64)
             .map_or(5, |v| v as usize);
 
-        match self.memory.recall(query, limit, None, since, until).await {
+        // Session authority comes from the executing turn, never model arguments.
+        let sessions = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .try_with(Clone::clone)
+            .unwrap_or_default();
+        // Backend session semantics vary: some exclude even unscoped durable
+        // facts. Fetch at most 64 extra candidates so a small requested limit
+        // is not consumed immediately by foreign rows; this is not exhaustive.
+        let fetch_limit = if limit == 0 {
+            0
+        } else {
+            limit.saturating_add(64)
+        };
+        let recalled = self
+            .memory
+            .recall(query, fetch_limit, None, since, until)
+            .await
+            .map(|mut entries| {
+                // Backends may have weaker filtering; enforce the boundary again
+                // before any result becomes model-visible.
+                entries.retain(|entry| {
+                    entry.namespace != "soul"
+                        && !entry.key.starts_with("soul::")
+                        && match entry.session_id.as_deref() {
+                            Some(source) => sessions.iter().any(|session| session == source),
+                            None => {
+                                !matches!(entry.category, MemoryCategory::Conversation)
+                                    // Markdown daily files erase both original category
+                                    // and session; their rows cannot prove global scope.
+                                    && (self.memory.name() != "markdown"
+                                        || matches!(entry.category, MemoryCategory::Core))
+                            }
+                        }
+                });
+                entries.truncate(limit);
+                entries
+            });
+        match recalled {
             Ok(entries) if entries.is_empty() => Ok(ToolResult {
                 success: true,
                 output: "No memories found.".into(),
@@ -151,6 +187,7 @@ mod tests {
 
     struct QueryEchoMemory {
         last_query: Arc<Mutex<Option<String>>>,
+        entries: Option<Vec<MemoryEntry>>,
     }
 
     #[async_trait]
@@ -178,6 +215,9 @@ mod tests {
             _until: Option<&str>,
         ) -> anyhow::Result<Vec<MemoryEntry>> {
             *self.last_query.lock().unwrap() = Some(query.to_string());
+            if let Some(entries) = &self.entries {
+                return Ok(entries.clone());
+            }
             if is_recent_recall_query(query) {
                 Ok(vec![MemoryEntry {
                     id: "recent".into(),
@@ -266,6 +306,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_session_recall_keeps_unscoped_long_term_facts() {
+        let (_dir, store) = seeded_mem();
+        for (key, category, session) in [
+            ("durable", MemoryCategory::Core, None),
+            ("current", MemoryCategory::Conversation, Some("A")),
+            ("foreign", MemoryCategory::Conversation, Some("B")),
+            ("legacy", MemoryCategory::Conversation, None),
+        ] {
+            store
+                .store(key, &format!("fixture {key}"), category, session)
+                .await
+                .unwrap();
+        }
+        // Recent backend rows are foreign/unattributed, ahead of eligible facts.
+        let newest = store.recall("*", 1, None, None, None).await.unwrap();
+        assert_eq!(newest[0].key, "legacy");
+        let tool = MemoryRecallTool::new(store);
+        for scopes in [vec![], vec!["A".into()]] {
+            let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                .scope(scopes, tool.execute(json!({"query":"*", "limit":1})))
+                .await
+                .unwrap();
+            assert!(result.success);
+            assert!(result.output.contains("Found 1 memories:"));
+            assert!(!result.output.contains("fixture foreign"));
+            assert!(!result.output.contains("fixture legacy"));
+        }
+        for query in ["*", "fixture"] {
+            let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                .scope(
+                    vec!["A".into()],
+                    tool.execute(json!({"query":query, "limit":20})),
+                )
+                .await
+                .unwrap();
+            assert!(result.success);
+            assert!(result.output.contains("fixture durable"));
+            assert!(result.output.contains("fixture current"));
+            assert!(!result.output.contains("fixture foreign"));
+            assert!(!result.output.contains("fixture legacy"));
+        }
+    }
+
+    #[tokio::test]
+    async fn recall_enforces_session_and_protected_memory_even_if_backend_does_not() {
+        let (_dir, store) = seeded_mem();
+        for (key, session, category) in [
+            ("shared_fact", None, MemoryCategory::Core),
+            ("session_a", Some("A"), MemoryCategory::Conversation),
+            ("session_b", Some("B"), MemoryCategory::Conversation),
+            ("unattributed", None, MemoryCategory::Conversation),
+            ("private_preference", Some("B"), MemoryCategory::Core),
+        ] {
+            store.store(key, key, category, session).await.unwrap();
+        }
+        let mut entries = store.recall("*", 20, None, None, None).await.unwrap();
+        let mut protected = entries[0].clone();
+        protected.key = "soul::private".into();
+        protected.content = "protected_soul_bytes".into();
+        protected.namespace = "soul".into();
+        entries.push(protected);
+        let tool = MemoryRecallTool::new(Arc::new(QueryEchoMemory {
+            last_query: Arc::new(Mutex::new(None)),
+            entries: Some(entries),
+        }));
+        for session in [None, Some("A".to_string())] {
+            let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                .scope(
+                    session.clone().into_iter().collect(),
+                    tool.execute(json!({"query":"*", "limit":20})),
+                )
+                .await
+                .unwrap();
+            assert!(result.success);
+            let output = result.output.to_string();
+            assert!(output.contains("shared_fact"));
+            assert_eq!(output.contains("session_a"), session.is_some());
+            for forbidden in [
+                "session_b",
+                "unattributed",
+                "private_preference",
+                "protected_soul_bytes",
+            ] {
+                assert!(!output.contains(forbidden), "{output}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn markdown_unattributed_daily_rows_cannot_expose_conversation_autosaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory: Arc<dyn Memory> =
+            Arc::new(zeroclaw_memory::MarkdownMemory::new("test", dir.path()));
+        memory
+            .store("global", "global fixture", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        memory
+            .store(
+                "private",
+                "foreign conversation fixture",
+                MemoryCategory::Conversation,
+                Some("other-session"),
+            )
+            .await
+            .unwrap();
+        let tool = MemoryRecallTool::new(memory);
+        for scopes in [vec![], vec!["current-session".into()]] {
+            let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                .scope(scopes, tool.execute(json!({"query":"fixture", "limit":20})))
+                .await
+                .unwrap();
+            assert!(result.success);
+            assert!(result.output.contains("global fixture"));
+            assert!(!result.output.contains("foreign conversation fixture"));
+        }
+    }
+
+    #[tokio::test]
     async fn recall_empty() {
         let (_tmp, mem) = seeded_mem();
         let tool = MemoryRecallTool::new(mem);
@@ -349,6 +508,7 @@ mod tests {
     async fn recall_star_query_uses_backend_recent_query_contract() {
         let last_query = Arc::new(Mutex::new(None));
         let mem = Arc::new(QueryEchoMemory {
+            entries: None,
             last_query: last_query.clone(),
         });
         let tool = MemoryRecallTool::new(mem);
