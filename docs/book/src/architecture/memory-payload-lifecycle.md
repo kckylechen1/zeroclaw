@@ -82,9 +82,11 @@ current turn a new memory. Review prompt-assembly changes by asking:
 
 ## Companion privacy boundaries
 
-The ordinary `memory_recall` tool derives its session from the executing turn;
-model arguments cannot select another conversation. Results with a different
-session are excluded, and unattributed Conversation rows are not returned.
+The ordinary `memory_recall` tool derives its allowed memory sessions from the
+executing turn's canonical memory input, not its transport/history key. WebSocket
+history and memory IDs differ; channel turns may have multiple sender/group
+scopes. Model arguments cannot select another conversation. Results outside
+those scopes are excluded, and unattributed Conversation rows are not returned.
 Without a session, only unscoped non-Conversation entries remain eligible.
 Reserved Soul entries remain excluded even if a backend returns them. This is
 session isolation, not a new surface taxonomy: surface/task-specific recall

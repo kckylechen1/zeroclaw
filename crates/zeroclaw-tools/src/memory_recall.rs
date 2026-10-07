@@ -104,11 +104,9 @@ impl Tool for MemoryRecallTool {
             .map_or(5, |v| v as usize);
 
         // Session authority comes from the executing turn, never model arguments.
-        let session = zeroclaw_api::TOOL_LOOP_SESSION_KEY
+        let sessions = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
             .try_with(Clone::clone)
-            .ok()
-            .flatten()
-            .filter(|value| !value.trim().is_empty());
+            .unwrap_or_default();
         // Backend session semantics vary: some exclude even unscoped durable
         // facts. Query a bounded superset and enforce applicability below.
         let recalled = self
@@ -122,7 +120,7 @@ impl Tool for MemoryRecallTool {
                     entry.namespace != "soul"
                         && !entry.key.starts_with("soul::")
                         && match entry.session_id.as_deref() {
-                            Some(source) => session.as_deref() == Some(source),
+                            Some(source) => sessions.iter().any(|session| session == source),
                             None => !matches!(entry.category, MemoryCategory::Conversation),
                         }
                 });
@@ -310,9 +308,9 @@ mod tests {
         }
         let tool = MemoryRecallTool::new(store);
         for query in ["*", "fixture"] {
-            let result = zeroclaw_api::TOOL_LOOP_SESSION_KEY
+            let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
                 .scope(
-                    Some("A".into()),
+                    vec!["A".into()],
                     tool.execute(json!({"query":query, "limit":20})),
                 )
                 .await
@@ -348,9 +346,9 @@ mod tests {
             entries: Some(entries),
         }));
         for session in [None, Some("A".to_string())] {
-            let result = zeroclaw_api::TOOL_LOOP_SESSION_KEY
+            let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
                 .scope(
-                    session.clone(),
+                    session.clone().into_iter().collect(),
                     tool.execute(json!({"query":"*", "limit":20})),
                 )
                 .await
