@@ -511,7 +511,7 @@ configured agent alias; an unknown alias returns 404 with
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/soul?agent=<alias>` | Current `identity`, `principles`, and `growth` heads (each with `revision`, `source`, and `value`), `voice` (`configured` dials and `stored` per-key heads), `legacy_persona_files` (`injected` or `suppressed`), and `last_reflection`. Seeds missing layers on first read. |
+| `GET /api/soul?agent=<alias>` | Current `identity`, `principles`, and `growth` heads (each with `revision`, `source`, and `value`), `voice` (`configured` dials, `stored` heads, `effective` dials and per-key `sources`), `legacy_persona_files` (`injected` or `suppressed`), and `last_reflection`. Seeds missing layers on first read. |
 | `GET /api/soul/history?agent=<alias>&layer=identity\|principles\|growth\|voice` | Every revision of one layer, oldest first. |
 | `PUT /api/soul/identity` | Body `{ "agent", "expected_revision", "identity": { "name", "self_description"?, "primary_language"?, "pronouns"? } }`. |
 | `PUT /api/soul/principles` | Body `{ "agent", "expected_revision", "items": [ ... ] }`, at most 8 single-line items of up to 240 bytes. |
@@ -541,11 +541,34 @@ Soul or the User Model.
 Model file tools cannot write `SOUL.md`, `IDENTITY.md`, or `USER.md` at an
 agent workspace root.
 
+Voice uses the same resolver in the prompt and `GET /api/soul`. The configured
+selection is the agent's persona, otherwise its card's persona, otherwise the
+built-in `medium` dials. Stored Voice keys override that selection individually;
+removing a stored key restores its configured value. `voice.effective` returns
+all five levels; `voice.sources` maps each key to `{ "kind": "builtin" }`,
+`{ "kind": "persona", "persona": "<alias>", "card": "<alias or null>" }`, or
+`{ "kind": "stored", "revision": 3 }`. The stored revision identifies the current
+Voice layer snapshot, not the author of each individual dial; layer authorship
+and proposal receipts remain in `voice.stored` and history.
+
+Each of the five levels renders repository-owned behavioral guidance and a
+one-line example for every dial, including `medium`. The complete `## Voice`
+section stays within 1,024 bytes. Tone never changes honesty, permissions or
+safety rules. The guidance has no surface input; surface formatting cannot
+change its Voice bytes. Config-only persona edits still require an Agent
+rebuild; stored Soul changes use the next-turn refresh described above.
+
 The model's only path into its own Soul is a proposal, either from the
 `propose_soul_change` tool mid-conversation or from the weekly reflection. At
 most three proposals wait per agent, and identical pending proposals are not
 stored twice. Identity is never proposable, and the agent cannot propose
-`challenge` below `low`. Accepting a proposal applies it in the same
+`challenge` below `low`. Voice proposals can move a dial by at most one level
+from its current effective value. The store checks this at creation and again
+inside the approval transaction, so changed config, changed stored heads and
+historical proposals cannot bypass the bound. A tool without a current config
+resolver refuses Voice proposals. The owner may still set any level directly
+through `PUT /api/soul/voice`, including large changes and `challenge = minimal`;
+the honesty floor still renders. Accepting a proposal applies it in the same
 transaction; `final_text` lets the owner reword a growth entry or principle
 before it applies. If the apply fails validation or the layer changed
 underneath it, the proposal stays pending. Dismissing applies nothing.
@@ -555,6 +578,11 @@ own `user` messages since the previous reflection (at most the latest 32 KiB),
 makes one model call with no tools, and stores at most three validated Soul
 proposals plus three User Model candidates. Each domain has its own pending
 cap of three, so a full Soul queue does not block User Model suggestions.
+Voice reflection compares Growth bond entries with actual owner reactions.
+Each Voice proposal must select exactly one supplied owner-message index; its
+existing `session_ref` records the canonical session and timestamp, and its
+bounded rationale includes a quote from that message. Missing or out-of-range
+references are refused. Familiarity alone is not approval to change tone.
 User Model suggestions carry runtime-bound owner-message/session evidence and
 remain global candidates until owner review; model-supplied evidence references
 outside the input are refused. Nothing is applied. Owner messages require

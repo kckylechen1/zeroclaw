@@ -8,6 +8,7 @@
 //! name and identity are never proposable.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -25,6 +26,7 @@ pub const PROPOSAL_RECORDED_REPLY: &str =
 pub struct ProposeSoulChangeTool {
     data_dir: PathBuf,
     agent: String,
+    configured_voice: Arc<dyn Fn() -> Option<zeroclaw_config::persona::PersonaKnobs> + Send + Sync>,
 }
 
 impl ProposeSoulChangeTool {
@@ -32,7 +34,18 @@ impl ProposeSoulChangeTool {
         Self {
             data_dir,
             agent: agent.to_string(),
+            configured_voice: Arc::new(|| None),
         }
+    }
+
+    /// The store invokes this resolver at proposal creation, under its write
+    /// transaction. No configured policy is copied into a long-lived tool.
+    pub fn with_voice_resolver(
+        mut self,
+        resolver: impl Fn() -> Option<zeroclaw_config::persona::PersonaKnobs> + Send + Sync + 'static,
+    ) -> Self {
+        self.configured_voice = Arc::new(resolver);
+        self
     }
 
     fn failure(message: String) -> ToolResult {
@@ -118,7 +131,7 @@ impl Tool for ProposeSoulChangeTool {
                 "level": {
                     "type": "string",
                     "enum": ["minimal", "low", "medium", "high", "xhigh"],
-                    "description": "Voice only: the suggested position."
+                    "description": "Voice only: at most one level from the current effective dial; challenge stays at least low."
                 }
             },
             "required": ["layer", "proposal", "rationale"]
@@ -176,8 +189,14 @@ impl Tool for ProposeSoulChangeTool {
         }
         let data_dir = self.data_dir.clone();
         let agent = self.agent.clone();
+        let voice = Arc::clone(&self.configured_voice);
         let result = tokio::task::spawn_blocking(move || {
-            SoulProfileStore::shared(&data_dir)?.submit_proposal(&agent, proposal, now_unix())
+            SoulProfileStore::shared(&data_dir)?.submit_proposal_with_voice(
+                &agent,
+                proposal,
+                now_unix(),
+                || voice(),
+            )
         })
         .await;
         Ok(match result {
@@ -203,7 +222,8 @@ mod tests {
 
     fn tool() -> (tempfile::TempDir, ProposeSoulChangeTool) {
         let dir = tempfile::tempdir().unwrap();
-        let tool = ProposeSoulChangeTool::new(dir.path().to_path_buf(), "nova");
+        let tool = ProposeSoulChangeTool::new(dir.path().to_path_buf(), "nova")
+            .with_voice_resolver(|| Some(Default::default()));
         (dir, tool)
     }
 
@@ -260,6 +280,23 @@ mod tests {
         let result = tool.execute(principle("Four.")).await.unwrap();
         assert!(!result.success);
         assert!(result.error.unwrap().contains("already waiting"));
+    }
+
+    #[tokio::test]
+    async fn voice_tool_resolves_changed_config_at_each_submission() {
+        use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
+        let (dir, tool) = tool();
+        let current = Arc::new(std::sync::Mutex::new(PersonaKnobs::default()));
+        let live = current.clone();
+        let tool = tool.with_voice_resolver(move || Some(*live.lock().unwrap()));
+        let proposal = |level: &str| json!({"layer":"voice", "trait_key":"warmth", "level":level, "proposal":"Adjust warmth.", "rationale":"Owner reaction."});
+        assert!(tool.execute(proposal("high")).await.unwrap().success);
+        current.lock().unwrap().warmth = PersonaLevel::Minimal;
+        assert!(!tool.execute(proposal("high")).await.unwrap().success);
+        assert!(tool.execute(proposal("low")).await.unwrap().success);
+        let store = SoulProfileStore::shared(dir.path()).unwrap();
+        assert_eq!(store.proposals("nova", true).unwrap().len(), 2);
+        assert!(store.profile("nova").unwrap().voice.is_none());
     }
 
     #[tokio::test]

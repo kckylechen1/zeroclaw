@@ -1,9 +1,8 @@
 //! Persona knobs: how an agent talks, as a small set of dials.
 //!
-//! A persona is *authored*, not learned. It is part of an agent's definition,
-//! in the same sense as its risk profile — something a person sets and the
-//! agent reads. Nothing here is derived from conversation history, and nothing
-//! here can widen what an agent is allowed to do.
+//! Config persona defaults are authored. Reviewed Soul Voice heads may
+//! override them per key after owner approval. This module owns the closed
+//! vocabulary and presentation guidance; nothing here widens authority.
 //!
 //! The dials use the same five-step vocabulary as `reasoning_effort`
 //! (`minimal` / `low` / `medium` / `high` / `xhigh`) so one mental model covers
@@ -91,17 +90,14 @@ impl PersonaLevel {
         }
     }
 
-    /// Whether this dial is far enough from the middle to be worth spending
-    /// prompt budget on. A dial left at `medium` says nothing the model does
-    /// not already default to, so it is omitted from the rendered prompt.
-    #[must_use]
-    pub fn is_notable(self) -> bool {
-        self != Self::Medium
+    /// Distance on the closed five-level scale, used only to bound reviewed changes.
+    pub fn steps_from(self, other: Self) -> u8 {
+        (self as u8).abs_diff(other as u8)
     }
 }
 
 /// The dials themselves. Every field defaults to `medium`, so an agent with no
-/// persona configured renders no persona text at all.
+/// persona configured uses the repository-owned medium guidance.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
@@ -121,38 +117,46 @@ pub struct PersonaKnobs {
     pub humor: PersonaLevel,
 }
 
+/// Hard byte ceiling for repository-owned Voice guidance (ADR-014/015).
+pub const VOICE_SECTION_MAX_BYTES: usize = 1024;
+
 impl PersonaKnobs {
-    /// Render the dials as prompt text, or `None` when every dial sits at
-    /// `medium` and there is nothing worth saying.
-    ///
-    /// Only off-centre dials are rendered. This keeps the prompt proportional
-    /// to how unusual the persona actually is, rather than spending five lines
-    /// restating defaults on every turn.
+    pub fn level(&self, key: &str) -> Option<PersonaLevel> {
+        match key {
+            "warmth" => Some(self.warmth),
+            "directness" => Some(self.directness),
+            "explanation_density" => Some(self.explanation_density),
+            "challenge" => Some(self.challenge),
+            "humor" => Some(self.humor),
+            _ => None,
+        }
+    }
+
+    /// Render all five dials, including medium. Examples guide presentation,
+    /// never permissions, evidence standards or the honesty floor.
     #[must_use]
     pub fn to_prompt_section(&self) -> Option<String> {
-        let lines: Vec<&'static str> = [
-            (self.warmth, warmth_line(self.warmth)),
-            (self.directness, directness_line(self.directness)),
+        let mut out = String::from("## Voice\n\n");
+        for (key, level, guidance) in [
+            ("warmth", self.warmth, warmth_line(self.warmth)),
             (
+                "directness",
+                self.directness,
+                directness_line(self.directness),
+            ),
+            (
+                "explanation_density",
                 self.explanation_density,
                 explanation_density_line(self.explanation_density),
             ),
-            (self.challenge, challenge_line(self.challenge)),
-            (self.humor, humor_line(self.humor)),
-        ]
-        .into_iter()
-        .filter_map(|(level, line)| level.is_notable().then_some(line))
-        .collect();
-
-        if lines.is_empty() {
-            return None;
-        }
-
-        let mut out = String::from("## Voice\n\n");
-        for line in lines {
-            out.push_str("- ");
-            out.push_str(line);
-            out.push('\n');
+            ("challenge", self.challenge, challenge_line(self.challenge)),
+            ("humor", self.humor, humor_line(self.humor)),
+        ] {
+            let line = format!("- {key} ({}): {guidance}\n", level.as_str());
+            // Fixed strings fit together; preserve whole lines if edited later.
+            if out.len() + line.len() <= VOICE_SECTION_MAX_BYTES {
+                out.push_str(&line);
+            }
         }
         Some(out)
     }
@@ -160,12 +164,18 @@ impl PersonaKnobs {
 
 fn warmth_line(level: PersonaLevel) -> &'static str {
     match level {
-        PersonaLevel::Minimal => "Keep the voice flat and clinical. No pleasantries, no warmth.",
-        PersonaLevel::Low => "Stay cool and businesslike. Skip the social framing.",
-        PersonaLevel::Medium => "",
-        PersonaLevel::High => "Be warm. It is fine to sound like you are on their side.",
+        PersonaLevel::Minimal => {
+            "Stay clinical; omit social framing. Example: \"The check passed.\""
+        }
+        PersonaLevel::Low => "Be courteous and restrained. Example: \"Thanks. The check passed.\"",
+        PersonaLevel::Medium => {
+            "Be friendly without assuming intimacy. Example: \"Thanks for checking; it passed.\""
+        }
+        PersonaLevel::High => {
+            "Acknowledge the person with warmth. Example: \"Glad we checked this together.\""
+        }
         PersonaLevel::Xhigh => {
-            "Be openly warm and personal. Care about the person, not just the task."
+            "Be openly caring without claiming feelings or intimacy. Example: \"That sounded hard; we can take it step by step.\""
         }
     }
 }
@@ -173,58 +183,80 @@ fn warmth_line(level: PersonaLevel) -> &'static str {
 fn directness_line(level: PersonaLevel) -> &'static str {
     match level {
         PersonaLevel::Minimal => {
-            "Never issue a conclusion. Lay out what you see and ask what they make of it."
+            "Offer an observation and a clear question. Example: \"The check failed. Shall we inspect the input?\""
         }
         PersonaLevel::Low => {
-            "Prefer questions to statements. Offer the conclusion as one reading among others."
+            "Suggest a conclusion without commanding. Example: \"I suggest checking the input first.\""
         }
-        PersonaLevel::Medium => "",
-        PersonaLevel::High => "State the conclusion first, then the reasoning behind it.",
+        PersonaLevel::Medium => {
+            "State the answer, then a useful next step. Example: \"It failed; check the input next.\""
+        }
+        PersonaLevel::High => {
+            "Lead with the conclusion and key reason. Example: \"Fix the input: its date is invalid.\""
+        }
         PersonaLevel::Xhigh => {
-            "Lead with the verdict in one sentence. Do not soften it or bury it in preamble."
+            "Give the verdict immediately and plainly. Example: \"The date is invalid. Correct it first.\""
         }
     }
 }
 
 fn explanation_density_line(level: PersonaLevel) -> &'static str {
     match level {
-        PersonaLevel::Minimal => "Give the answer alone. No reasoning unless asked.",
-        PersonaLevel::Low => "Give the answer with one line of justification at most.",
-        PersonaLevel::Medium => "",
-        PersonaLevel::High => "Show the reasoning that carries weight, and name what you checked.",
-        PersonaLevel::Xhigh => "Show the full derivation, including what you ruled out and why.",
+        PersonaLevel::Minimal => {
+            "Give the answer; retain essential caveats. Example: \"It passed; live behavior is untested.\""
+        }
+        PersonaLevel::Low => {
+            "Add one short supporting reason. Example: \"It passed because the input now validates.\""
+        }
+        PersonaLevel::Medium => {
+            "Give the main reason and relevant limit. Example: \"The unit test passed; deployment is untested.\""
+        }
+        PersonaLevel::High => {
+            "Summarize key evidence and alternatives. Example: \"The input check passed; the network path remains untested.\""
+        }
+        PersonaLevel::Xhigh => {
+            "Explain the evidence and assumptions, not private reasoning. Example: \"Both cases pass; this assumes the documented input format.\""
+        }
     }
 }
 
 fn challenge_line(level: PersonaLevel) -> &'static str {
     match level {
         PersonaLevel::Minimal => {
-            "Do not argue. Answer what was asked and leave disagreements alone. \
-             Still correct factual errors and flag safety risks."
+            "Avoid debate. Still correct factual errors and flag safety risks. Example: \"That figure is incorrect; the total is 12.\""
         }
         PersonaLevel::Low => {
-            "Raise objections only when the stakes are high. \
-             Still correct factual errors and flag safety risks."
+            "Object when consequential. Still correct factual errors and flag safety risks. Example: \"That assumption could change the result.\""
         }
-        PersonaLevel::Medium => "",
+        PersonaLevel::Medium => {
+            "Question unsupported assumptions respectfully. Example: \"What evidence supports that estimate?\""
+        }
         PersonaLevel::High => {
-            "Say the unwelcome thing when it is true. Agreement is not the goal; \
-             being right is."
+            "Say the unwelcome thing when evidence warrants it. Example: \"I disagree: the test contradicts that claim.\""
         }
         PersonaLevel::Xhigh => {
-            "Push back hard on weak reasoning, including the user's. If you think \
-             they are wrong, say so plainly and say why. Never agree to be agreeable."
+            "Push back hard on weak reasoning. Never agree to be agreeable. Example: \"That conclusion is unsupported; the evidence says otherwise.\""
         }
     }
 }
 
 fn humor_line(level: PersonaLevel) -> &'static str {
     match level {
-        PersonaLevel::Minimal => "No humour. Keep it strictly functional.",
-        PersonaLevel::Low => "Humour only when it costs nothing.",
-        PersonaLevel::Medium => "",
-        PersonaLevel::High => "Wit is welcome where it lands naturally.",
-        PersonaLevel::Xhigh => "Be funny. A sharp joke is worth the line it costs.",
+        PersonaLevel::Minimal => {
+            "Keep it strictly functional; no jokes. Example: \"The build passed.\""
+        }
+        PersonaLevel::Low => {
+            "Use levity only when clearly welcome. Example: \"One less failing test.\""
+        }
+        PersonaLevel::Medium => {
+            "Allow occasional light humor when appropriate. Example: \"The build finally cooperated.\""
+        }
+        PersonaLevel::High => {
+            "Use natural wit without obscuring the answer. Example: \"The bug has retired; the regression test stays.\""
+        }
+        PersonaLevel::Xhigh => {
+            "Be playful when welcome; stop for distress or serious risk. Example: \"The bug left a forwarding address: the regression test.\""
+        }
     }
 }
 
@@ -251,84 +283,68 @@ mod tests {
         assert!(err.contains("minimal, low, medium, high, xhigh"), "{err}");
     }
 
-    /// A persona nobody configured must not cost prompt budget.
     #[test]
-    fn all_defaults_render_nothing() {
-        assert_eq!(PersonaKnobs::default().to_prompt_section(), None);
-    }
-
-    /// Only the dials that were actually moved appear — the prompt stays
-    /// proportional to how unusual the persona is.
-    #[test]
-    fn only_off_centre_dials_are_rendered() {
-        let knobs = PersonaKnobs {
-            challenge: PersonaLevel::Xhigh,
-            ..PersonaKnobs::default()
-        };
-        let rendered = knobs.to_prompt_section().expect("one dial moved");
-
-        assert!(rendered.contains("Push back hard"), "{rendered}");
-        assert_eq!(
-            rendered.lines().filter(|l| l.starts_with("- ")).count(),
-            1,
-            "medium dials must not be rendered: {rendered}"
-        );
-    }
-
-    /// The anti-sycophancy dial has to actually say the thing. A persona layer
-    /// that cannot express "disagree with me" has no answer to an assistant
-    /// that drifts toward telling people what they want to hear.
-    #[test]
-    fn the_challenge_dial_can_demand_disagreement() {
-        let knobs = PersonaKnobs {
-            challenge: PersonaLevel::Xhigh,
-            ..PersonaKnobs::default()
-        };
-        let rendered = knobs.to_prompt_section().expect("rendered");
-        assert!(
-            rendered.contains("Never agree to be agreeable"),
-            "the highest challenge setting must forbid sycophancy outright: {rendered}"
-        );
-    }
-
-    #[test]
-    fn every_dial_renders_at_every_off_centre_position() {
-        let positions = [
+    fn voice_guidance_bytes_are_pinned_for_every_level() {
+        let levels = [
             PersonaLevel::Minimal,
             PersonaLevel::Low,
+            PersonaLevel::Medium,
             PersonaLevel::High,
             PersonaLevel::Xhigh,
         ];
-        for level in positions {
-            for knobs in [
+        let expected = include_str!("persona_voice_golden.txt");
+        let rendered = levels
+            .into_iter()
+            .map(|level| {
                 PersonaKnobs {
                     warmth: level,
-                    ..PersonaKnobs::default()
-                },
-                PersonaKnobs {
                     directness: level,
-                    ..PersonaKnobs::default()
-                },
-                PersonaKnobs {
                     explanation_density: level,
-                    ..PersonaKnobs::default()
-                },
-                PersonaKnobs {
                     challenge: level,
-                    ..PersonaKnobs::default()
-                },
-                PersonaKnobs {
                     humor: level,
-                    ..PersonaKnobs::default()
-                },
-            ] {
-                let rendered = knobs
-                    .to_prompt_section()
-                    .unwrap_or_else(|| panic!("{level:?} must render for {knobs:?}"));
-                assert!(
-                    rendered.lines().filter(|l| l.starts_with("- ")).count() == 1,
-                    "exactly one line expected: {rendered}"
-                );
+                }
+                .to_prompt_section()
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn voice_guidance_cap_keeps_all_five_dials_in_every_combination() {
+        let levels = [
+            PersonaLevel::Minimal,
+            PersonaLevel::Low,
+            PersonaLevel::Medium,
+            PersonaLevel::High,
+            PersonaLevel::Xhigh,
+        ];
+        for warmth in levels {
+            for directness in levels {
+                for explanation_density in levels {
+                    for challenge in levels {
+                        for humor in levels {
+                            let rendered = PersonaKnobs {
+                                warmth,
+                                directness,
+                                explanation_density,
+                                challenge,
+                                humor,
+                            }
+                            .to_prompt_section()
+                            .unwrap();
+                            assert!(rendered.len() <= VOICE_SECTION_MAX_BYTES);
+                            assert_eq!(
+                                rendered
+                                    .lines()
+                                    .filter(|line| line.starts_with("- "))
+                                    .count(),
+                                5
+                            );
+                        }
+                    }
+                }
             }
         }
     }

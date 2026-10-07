@@ -693,10 +693,21 @@ pub fn all_tools_with_runtime(
         )),
         // The model's only path into its own Soul: records a proposal for
         // owner review and changes nothing (ADR-015 §3).
-        Arc::new(ProposeSoulChangeTool::new(
-            root_config.data_dir.clone(),
-            agent_alias,
-        )),
+        Arc::new(
+            ProposeSoulChangeTool::new(root_config.data_dir.clone(), agent_alias)
+                .with_voice_resolver({
+                    let live = live_config.clone();
+                    let agent = agent_alias.to_string();
+                    move || {
+                        live.as_ref().map(|live| {
+                            live.read()
+                                .persona_for_agent(&agent)
+                                .copied()
+                                .unwrap_or_default()
+                        })
+                    }
+                }),
+        ),
         Arc::new(reasoning_spawn_tool_for_registry(
             root_config,
             agent_alias,

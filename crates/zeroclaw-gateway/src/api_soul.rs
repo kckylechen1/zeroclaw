@@ -165,7 +165,7 @@ fn parse_layer(layer: &str) -> Result<SoulLayer, Box<Response>> {
 }
 
 /// GET /api/soul?agent=<alias> — current Identity and Principles heads (with
-/// revision and source), the configured Voice dials, and whether the legacy
+/// revision and source), effective Voice with per-key provenance, and whether the legacy
 /// persona files are still injected. Seeds missing layers on first read,
 /// exactly as the prompt builder does.
 pub async fn get_soul(
@@ -185,7 +185,6 @@ pub async fn get_soul(
         Ok(found) => found,
         Err(err) => return *err,
     };
-    let voice = state.config.read().persona_for_agent(&agent).copied();
     let last_reflection_agent = agent.clone();
     let seed_agent = agent.clone();
     match run_store(data_dir, move |store| {
@@ -200,6 +199,19 @@ pub async fn get_soul(
     .await
     {
         Ok((profile, last_reflection)) => {
+            let (voice, effective, sources) = {
+                let config = state.config.read();
+                let (effective, sources) = zeroclaw_memory::companion::resolve_effective_voice(
+                    &config,
+                    &agent,
+                    Some(&profile),
+                );
+                (
+                    config.persona_for_agent(&agent).copied(),
+                    effective,
+                    sources,
+                )
+            };
             let legacy_files = if profile.identity_is_owner_authored() {
                 "suppressed"
             } else {
@@ -215,6 +227,8 @@ pub async fn get_soul(
                     "voice": {
                         "configured": voice,
                         "stored": profile.voice,
+                        "effective": effective,
+                        "sources": sources,
                     },
                     "legacy_persona_files": legacy_files,
                     "last_reflection": last_reflection,
@@ -542,14 +556,24 @@ pub async fn post_resolve_proposal(
         Ok(found) => found,
         Err(err) => return *err,
     };
+    let live_config = state.config.clone();
     match run_store(data_dir, move |store| {
-        store.resolve_proposal(
+        store.resolve_proposal_with_voice(
             &agent,
             id,
             resolution,
             body.note,
             body.final_text,
             now_unix(),
+            || {
+                Some(
+                    live_config
+                        .read()
+                        .persona_for_agent(&agent)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+            },
         )
     })
     .await
@@ -635,6 +659,66 @@ mod tests {
             .await,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn effective_voice_provenance_matches_the_prompt_and_refreshes_per_key() {
+        use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
+        let (_dir, state) = state_with_agent();
+        let (_, initial) = get(&state, "/api/soul?agent=nova", operator()).await;
+        assert_eq!(initial["voice"]["sources"]["humor"]["kind"], "builtin");
+        {
+            let mut config = state.config.write();
+            config.personas.insert(
+                "brief".into(),
+                PersonaKnobs {
+                    explanation_density: PersonaLevel::Low,
+                    ..Default::default()
+                },
+            );
+            config.agents.get_mut("nova").unwrap().persona = "brief".into();
+        }
+        let data_dir = state.config.read().data_dir.clone();
+        let store = SoulProfileStore::shared(&data_dir).unwrap();
+        store
+            .set_voice(
+                "nova",
+                SoulVoice {
+                    heads: [("warmth".into(), PersonaLevel::High)].into(),
+                },
+                0,
+                1,
+            )
+            .unwrap();
+        let (status, data) = get(&state, "/api/soul?agent=nova", operator()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["voice"]["effective"]["warmth"], "high");
+        assert_eq!(data["voice"]["effective"]["explanation_density"], "low");
+        assert_eq!(
+            data["voice"]["sources"]["warmth"],
+            serde_json::json!({"kind":"stored","revision":1})
+        );
+        assert_eq!(
+            data["voice"]["sources"]["explanation_density"],
+            serde_json::json!({"kind":"persona","persona":"brief","card":null})
+        );
+        let effective: PersonaKnobs =
+            serde_json::from_value(data["voice"]["effective"].clone()).unwrap();
+        let projection = zeroclaw_runtime::agent::persona_projection::persona_projection(
+            &state.config.read(),
+            "nova",
+        );
+        assert!(
+            projection
+                .section
+                .unwrap()
+                .ends_with(&effective.to_prompt_section().unwrap())
+        );
+        // Removing a stored key restores the configured source, not a cached override.
+        store.set_voice("nova", SoulVoice::default(), 1, 2).unwrap();
+        let (_, data) = get(&state, "/api/soul?agent=nova", operator()).await;
+        assert_eq!(data["voice"]["effective"]["warmth"], "medium");
+        assert_eq!(data["voice"]["sources"]["warmth"]["kind"], "persona");
     }
 
     #[tokio::test]

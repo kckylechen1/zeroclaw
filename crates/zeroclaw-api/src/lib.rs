@@ -32,6 +32,7 @@ pub mod subagent_v1;
 pub mod tachi_staff;
 pub mod taskintent;
 pub mod tool;
+pub mod voice;
 
 tokio::task_local! {
     /// Current thread/sender ID for per-sender rate limiting.
