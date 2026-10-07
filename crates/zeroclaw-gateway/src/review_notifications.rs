@@ -133,12 +133,20 @@ pub(crate) fn permits_delivery(
             })
 }
 
+pub(crate) struct ReviewNotificationTask(tokio::task::JoinHandle<()>);
+
+impl Drop for ReviewNotificationTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Owned by the gateway serve future and cancelled on its shutdown signal or
 /// when the serve future exits. A receipt is retried without re-running reflection.
 pub(crate) fn start(
     config: Arc<RwLock<Config>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
-) -> tokio_util::task::AbortOnDropHandle<()> {
+) -> ReviewNotificationTask {
     let data_dir: PathBuf = config.read().data_dir.clone();
     let stop = tokio_util::sync::CancellationToken::new();
     let stop_on_drop = stop.clone().drop_guard();
@@ -193,7 +201,7 @@ pub(crate) fn start(
         }
         drop(stop_on_drop);
     });
-    tokio_util::task::AbortOnDropHandle::new(task)
+    ReviewNotificationTask(task)
 }
 
 #[cfg(test)]
@@ -260,8 +268,8 @@ mod tests {
         let (dir, config, soul) = fixture();
         receipt(&soul, NOW, 1, "ok");
         let (_shutdown, receiver) = tokio::sync::watch::channel(true);
-        let task = start(Arc::new(config), receiver);
-        tokio::time::timeout(Duration::from_secs(1), task)
+        let mut task = start(Arc::new(config), receiver);
+        tokio::time::timeout(Duration::from_secs(1), &mut task.0)
             .await
             .unwrap()
             .unwrap();
