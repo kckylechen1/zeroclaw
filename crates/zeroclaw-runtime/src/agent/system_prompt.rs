@@ -216,14 +216,10 @@ pub fn build_system_prompt_with_persona(
     max_system_prompt_chars: usize,
     inject_memory: bool,
     show_tool_calls: bool,
-    // Rendered `## Voice` section for this agent's persona dials, or `None`
-    // when the agent has no persona configured (direct or via card) or every
-    // dial sits at `medium`. Placement is deliberate and not caller-movable:
-    // after the anti-narration and tool-honesty blocks below (so a persona
-    // dial can never soften either hard behavioural constraint) and before
-    // the tools list (so the truncation budget at the bottom of this
-    // function, which keeps the *top* of the prompt, cuts the tools list
-    // before it ever cuts the agent's voice).
+    // Governed Soul projection with trailing Voice, or a standalone Voice
+    // section. Hard honesty blocks precede it. Optional Voice yields first
+    // when the assembled prompt exceeds its budget; other layers keep their
+    // existing placement and bounds.
     persona_section: Option<&str>,
     // Whether the legacy `SOUL.md` / `IDENTITY.md` files are still injected.
     // `Suppress` once the owner has written a governed Identity (ADR-015 §2).
@@ -261,13 +257,25 @@ pub fn build_system_prompt_with_persona(
     // ── 0c. Voice (persona dials) ───────────────────────────────
     // Must sit after the two hard behavioural blocks above (a persona dial
     // must never be able to displace anti-narration or tool honesty) and
-    // before the tools list below (so it survives the tail truncation at
-    // the bottom of this function, which keeps the top of the prompt).
+    // before the tools list below. If the prompt exceeds its budget, discard
+    // the optional trailing Voice first so style cannot displace safety,
+    // approval guidance or the governed Identity/Principles/Growth layers.
+    let mut voice_range = None;
     if let Some(section) = persona_section
         && !section.is_empty()
     {
+        let voice_start = if section.starts_with("## Voice\n") {
+            Some(0)
+        } else {
+            section.rfind("\n## Voice\n").map(|offset| offset + 1)
+        };
+        let start = prompt.len();
         prompt.push_str(section);
         prompt.push('\n');
+        voice_range = voice_start.map(|offset| {
+            let end = prompt.len() - usize::from(offset > 0);
+            start + offset..end
+        });
     }
 
     // ── 1. Tooling ──────────────────────────────────────────────
@@ -510,6 +518,12 @@ pub fn build_system_prompt_with_persona(
     } // end if !compact_context (Channel Capabilities)
 
     // ── 9. Truncation (max_system_prompt_chars budget) ──────────
+    if max_system_prompt_chars > 0
+        && prompt.len() > max_system_prompt_chars
+        && let Some(range) = voice_range
+    {
+        prompt.replace_range(range, "");
+    }
     if max_system_prompt_chars > 0 && prompt.len() > max_system_prompt_chars {
         // Truncate on a char boundary, keeping the top portion (identity + safety).
         let mut end = max_system_prompt_chars;
@@ -992,6 +1006,43 @@ mod tests {
             voice_pos < tools_pos,
             "Voice must come before the tools list"
         );
+    }
+
+    #[test]
+    fn voice_yields_to_capped_prompt_without_displacing_governed_identity_or_safety() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let policy = zeroclaw_config::schema::RiskProfileConfig::default();
+        let identity = "## Identity\n\nOwner-governed identity.\n\n";
+        let voice = zeroclaw_config::persona::PersonaKnobs::default()
+            .to_prompt_section()
+            .unwrap();
+        let with_voice = format!("{identity}{voice}");
+        let render = |persona: &str, cap| {
+            build_system_prompt_with_persona(
+                workspace.path(),
+                "test-model",
+                &[("shell", "Run a shell command")],
+                &[],
+                None,
+                Some(4096),
+                Some(&policy),
+                false,
+                SkillsPromptInjectionMode::Full,
+                false,
+                cap,
+                true,
+                false,
+                Some(persona),
+                LegacyPersonaFiles::Suppress,
+            )
+        };
+        let baseline = render(identity, 0);
+        assert!(baseline.contains("## Safety"));
+        for cap in [4000, baseline.len()] {
+            assert_eq!(render(&with_voice, cap), render(identity, cap));
+            assert!(render(&with_voice, cap).contains("Owner-governed identity."));
+        }
+        assert!(render(&with_voice, 0).contains(&voice));
     }
 
     /// Regression guard: `build_system_prompt_with_mode_and_autonomy` (every
