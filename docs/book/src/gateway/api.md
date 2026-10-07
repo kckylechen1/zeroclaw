@@ -612,7 +612,8 @@ recipient = "<owner-chat-id>"
 ```
 
 Without this section no review notices are created. Creating, changing or
-removing it through any config API operation requires a paired operator, even
+removing it, or changing/removing its selected bridge credential, through any
+config API operation requires a paired operator, even
 when generic gateway pairing is disabled; replacing a parent or the root object
 does not bypass that check. The recipient is never inferred from owner identity
 metadata, the last conversation or model output.

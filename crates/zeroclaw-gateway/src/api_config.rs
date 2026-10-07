@@ -402,8 +402,8 @@ async fn persist_and_swap(
         state.config_write_lock.try_lock().is_err(),
         "persist_and_swap caller must hold state.config_write_lock"
     );
-    // Attention policy and review destinations are owner-authored even on an
-    // unpaired gateway.
+    // Attention policy, review destinations and their bridge credentials are
+    // owner-authored even on an unpaired gateway.
     // Compare canonical typed values so parent replacement and nested edits
     // cannot bypass a string-prefix path check.
     let (attention_changed, review_target_changed) = {
@@ -411,7 +411,25 @@ async fn persist_and_swap(
         (
             current.gateway.attention != new_config.gateway.attention,
             current.companion_memory.review_notification
-                != new_config.companion_memory.review_notification,
+                != new_config.companion_memory.review_notification
+                || [
+                    current.companion_memory.review_notification.as_ref(),
+                    new_config.companion_memory.review_notification.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|target| {
+                    // /ws/bridge authenticates by this hash (case-insensitive).
+                    // Chat session scope does not select the delivery socket.
+                    let credential = |config: &zeroclaw_config::schema::Config| {
+                        config
+                            .gateway
+                            .bridges
+                            .get(&target.bridge)
+                            .map(|bridge| bridge.token_hash.to_ascii_lowercase())
+                    };
+                    credential(&current) != credential(&new_config)
+                }),
         )
     };
     if attention_changed || review_target_changed {
@@ -2858,6 +2876,57 @@ mod tests {
         persist_and_swap(&state, working, &guard, Some((peer, &owner)))
             .await
             .unwrap();
+        // Changing the selected bridge credential diverts the destination even
+        // when the review target itself is byte-for-byte unchanged.
+        let mut rotated = state.config.read().clone();
+        rotated.gateway.bridges.get_mut("tg").unwrap().token_hash = "b".repeat(64);
+        rotated.mark_dirty("gateway.bridges");
+        let anonymous = HeaderMap::new();
+        assert_eq!(
+            persist_and_swap(&state, rotated.clone(), &guard, Some((peer, &anonymous)))
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let mut removed = state.config.read().clone();
+        removed.gateway.bridges.clear();
+        assert_eq!(
+            persist_and_swap(&state, removed, &guard, Some((peer, &anonymous)))
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            state.config.read().gateway.bridges["tg"].token_hash,
+            "a".repeat(64)
+        );
+        persist_and_swap(&state, rotated, &guard, Some((peer, &owner)))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.config.read().gateway.bridges["tg"].token_hash,
+            "b".repeat(64)
+        );
+        // Unrelated bridge credentials and the selected bridge's chat scope do
+        // not change its effective /ws/bridge authentication projection.
+        let mut unrelated = state.config.read().clone();
+        unrelated.gateway.bridges.insert(
+            "other".into(),
+            zeroclaw_config::schema::GatewayBridgeConfig {
+                token_hash: "c".repeat(64),
+                ..Default::default()
+            },
+        );
+        let bridge = unrelated.gateway.bridges.get_mut("tg").unwrap();
+        bridge.token_hash = bridge.token_hash.to_ascii_uppercase();
+        bridge.sessions.push("fixture-session".into());
+        unrelated.mark_dirty("gateway.bridges");
+        persist_and_swap(&state, unrelated, &guard, Some((peer, &anonymous)))
+            .await
+            .unwrap();
+        assert!(state.config.read().gateway.bridges.contains_key("other"));
         // Full parent replacement/deletion is compared as typed payload, not path prefixes.
         let mut replacement = state.config.read().clone();
         replacement.companion_memory = Default::default();
