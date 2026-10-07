@@ -65,7 +65,7 @@ scripts/dev/cargo-local.sh test -p <crate> [--lib <filter> | --test <name>]
 
 ```bash
 scripts/dev/cargo-local.sh fmt --all -- --check
-scripts/dev/cargo-local.sh clippy --workspace --all-targets --locked --features ci-all -- -D warnings   # alias: cargo lint-ci
+scripts/dev/cargo-local.sh clippy --workspace --all-targets --locked --features ci-all -- -D warnings   # alias: scripts/dev/cargo-local.sh lint-ci
 scripts/dev/leg.sh <leg>                # each test leg that owns a crate you touched
 bash scripts/ci/provider_dispatch_gate.sh   # model calls go through ProviderDispatch
 bash scripts/ci/docs_quality_gate.sh && bash scripts/ci/docs_links_gate.sh   # docs changes

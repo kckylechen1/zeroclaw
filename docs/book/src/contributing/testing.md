@@ -45,7 +45,8 @@ cargo nextest run --locked --workspace  # what CI runs
 ## Local build storage
 
 Use `scripts/dev/cargo-local.sh` instead of bare `cargo` for host-side checks
-across linked worktrees. It uses the main checkout's `target` directory, checks
+across linked worktrees. The existing `scripts/dev/leg.sh` runner also uses this
+entrypoint for its metadata, runner detection, main test and extra runs. It uses the main checkout's `target` directory, checks
 the pinned toolchain, and defaults to non-incremental compilation. Explicit
 `CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` overrides are respected. Checkouts with
 a separate Git directory must provide an explicit target path.
