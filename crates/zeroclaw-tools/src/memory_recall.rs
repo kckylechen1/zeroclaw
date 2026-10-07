@@ -108,10 +108,16 @@ impl Tool for MemoryRecallTool {
             .try_with(Clone::clone)
             .unwrap_or_default();
         // Backend session semantics vary: some exclude even unscoped durable
-        // facts. Query a bounded superset and enforce applicability below.
+        // facts. Fetch at most 64 extra candidates so a small requested limit
+        // is not consumed immediately by foreign rows; this is not exhaustive.
+        let fetch_limit = if limit == 0 {
+            0
+        } else {
+            limit.saturating_add(64)
+        };
         let recalled = self
             .memory
-            .recall(query, limit, None, since, until)
+            .recall(query, fetch_limit, None, since, until)
             .await
             .map(|mut entries| {
                 // Backends may have weaker filtering; enforce the boundary again
@@ -130,6 +136,7 @@ impl Tool for MemoryRecallTool {
                             }
                         }
                 });
+                entries.truncate(limit);
                 entries
             });
         match recalled {
@@ -312,7 +319,20 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // Recent backend rows are foreign/unattributed, ahead of eligible facts.
+        let newest = store.recall("*", 1, None, None, None).await.unwrap();
+        assert_eq!(newest[0].key, "legacy");
         let tool = MemoryRecallTool::new(store);
+        for scopes in [vec![], vec!["A".into()]] {
+            let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                .scope(scopes, tool.execute(json!({"query":"*", "limit":1})))
+                .await
+                .unwrap();
+            assert!(result.success);
+            assert!(result.output.contains("Found 1 memories:"));
+            assert!(!result.output.contains("fixture foreign"));
+            assert!(!result.output.contains("fixture legacy"));
+        }
         for query in ["*", "fixture"] {
             let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
                 .scope(
