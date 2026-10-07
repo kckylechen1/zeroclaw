@@ -42,7 +42,7 @@ pub use soul_profile::{
     SOUL_SHORT_FIELD_MAX_BYTES, SOUL_VOICE_TRAIT_KEYS, SoulGrowth, SoulIdentity, SoulLayer,
     SoulPrinciples, SoulProfile, SoulProfileError, SoulProfileStore, SoulProposal,
     SoulProposalLayer, SoulProposalOutcome, SoulProposalResolution, SoulReflectionReceipt,
-    SoulRevision, SoulSource, SoulVoice, seed_name_for_agent,
+    SoulRevision, SoulSource, SoulVoice, resolve_effective_voice, seed_name_for_agent,
 };
 pub use user_model::validate_review_text as validate_user_model_review_text;
 pub use user_model::{

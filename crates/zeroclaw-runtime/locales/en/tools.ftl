@@ -188,3 +188,6 @@ tool-owner-correction-denied = A current authenticated owner message and matchin
 tool-owner-correction-recorded = Correction recorded in the review inbox for this session. Nothing has changed until the owner accepts it.
 tool-owner-correction-pending = No new candidate was recorded: this correction is already pending or the review queue is full.
 tool-owner-correction-store-error = Could not record the correction. Check the statement and semantic key, then try again.
+
+soul-voice-unavailable = Current configured Voice is unavailable.
+soul-voice-step-limit = Voice proposals may move a dial by at most one level.
