@@ -19,6 +19,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     let supportsExpectedHead = true;
     let inboxUnavailable = false;
     let headsUnavailable = false;
+    let headsFailureStatus = 503;
     let soulUnavailable = false;
     let inboxReads = 0;
     let pairCalls = 0;
@@ -104,7 +105,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
             return send({ layer: url.searchParams.get('layer'), revisions: [{ ...head({ text: 'Fresh principles history' }), source: 'approved_proposal', proposal_id: 71 }, { ...head({ text: 'Restored principles history' }), revision: 3, source: 'owner', rolled_back_from: 1 }] });
         }
         if (url.pathname === '/api/user-model/heads')
-            return headsUnavailable ? send({ code: 'store_unavailable' }, 503) : send({ heads: [currentHead], ...(supportsExpectedHead ? { supports_expected_head: true } : {}) });
+            return headsUnavailable ? send({ code: 'heads_unavailable' }, headsFailureStatus) : send({ heads: [currentHead], ...(supportsExpectedHead ? { supports_expected_head: true } : {}) });
         if (url.pathname === '/api/user-model/candidates')
             return send({ candidates: [rejected] });
         if (url.pathname === '/api/user-model/candidates/42')
@@ -275,8 +276,28 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     await page.getByRole('heading', { name: currentHead.statement, exact: true }).waitFor();
     assert.equal(await page.getByRole('alert').count(), 0);
     assert.equal(inboxReads, beforeIndependentTabs);
+    // Healthy inbox data survives a separate heads failure, but grants no approvals.
+    inboxUnavailable = false;
+    headsUnavailable = true;
+    supportsExpectedHead = true;
+    await page.getByRole('button', { name: '待审核', exact: true }).click();
+    await page.getByRole('alert').waitFor();
+    await page.getByRole('heading', { name: addition.item.proposal, exact: true }).waitFor();
+    await page.getByText('每周反思计时已开始', { exact: true }).waitFor();
+    assert.equal(await userCard.getByRole('button', { name: '接受', exact: true }).count(), 0);
+    assert.equal(await userCard.getByRole('button', { name: '改写', exact: true }).count(), 0);
+    assert.equal(await userCard.getByRole('button', { name: '限定范围', exact: true }).count(), 0);
+    assert.equal(await userCard.getByRole('button', { name: '忽略', exact: true }).count(), 1);
+    assert.equal(await userCard.getByText('没有相同语义标识的当前条目。', { exact: true }).count(), 0);
+    await userCard.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-heads-unavailable-375.png') });
+    // Authentication failures still clear previously displayed owner data.
+    headsFailureStatus = 401;
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await page.getByRole('button', { name: '以所有者身份配对', exact: true }).waitFor();
+    assert.equal(await page.getByRole('heading', { name: addition.item.proposal, exact: true }).count(), 0);
+    assert.equal(await userCard.count(), 0);
     assert.deepEqual(failures, []);
-    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, voice_validation_refresh: true, actions }));
+    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, voice_validation_refresh: true, heads_failure_preserves_inbox: true, heads_auth_failure_clears_data: true, actions }));
     await browser.close();
     server.close();
 })().catch(async e => { console.error(e); server.close(); if (browser) await browser.close(); process.exitCode = 1; });

@@ -32,11 +32,12 @@ function VoiceSource({ source }: { source?: NonNullable<Soul['voice']['sources']
         {source.kind === 'persona' && ` · ${source.persona}${source.card ? ` (${source.card})` : ''}`}
     </span>;
 }
-function ProposalCard({ item, act, busy, heads, canApproveUserModel, stale = false, rejectedOnly = false }: {
+function ProposalCard({ item, act, busy, heads, headsAvailable, canApproveUserModel, stale = false, rejectedOnly = false }: {
     item: InboxItem;
     act: (item: InboxItem, decision: Decision, text: string, scope: string) => void;
     busy: boolean;
     heads: Head[];
+    headsAvailable: boolean;
     canApproveUserModel: boolean;
     stale?: boolean;
     rejectedOnly?: boolean;
@@ -72,7 +73,7 @@ function ProposalCard({ item, act, busy, heads, canApproveUserModel, stale = fal
             <p className="whitespace-pre-wrap break-words">{currentHead.statement}</p>
             <p className="text-pc-text-muted break-all">{t(`review.${currentHead.kind}`)} · {currentHead.scope} · {t(`review.${currentHead.authority}`)} · {currentHead.id}</p>
         </div>}
-        {!currentHead && <p>{t('review.no_replacement')}</p>}
+        {!currentHead && <p>{t(headsAvailable ? 'review.no_replacement' : 'review.heads_unavailable')}</p>}
     </div>}
     {!user && <>
         <p className="text-sm text-pc-text-secondary break-words">{item.item.rationale}</p>
@@ -83,7 +84,7 @@ function ProposalCard({ item, act, busy, heads, canApproveUserModel, stale = fal
             {item.item.retire_target ? <><p>{t(`review.${item.item.retire_target.kind}`)}</p><p className="whitespace-pre-wrap break-words">{item.item.retire_target.text}</p></> : <p>{t('review.unavailable')}</p>}
         </div>}
         </>}
-    {approvalBlocked && <p role="status">{t('review.upgrade_head_guard')}</p>}
+    {approvalBlocked && headsAvailable && <p role="status">{t('review.upgrade_head_guard')}</p>}
     {stale && <p role="alert">{t('review.proposal_stale')}</p>}
     <details>
     <summary className="cursor-pointer text-sm py-2 min-h-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]">{t('review.evidence')}</summary>
@@ -196,12 +197,15 @@ export default function Review() {
             // Verify authority using only the selected tab's owner-only API.
             if (tab === 'inbox') {
                 const data = await reviewFetch<Inbox>(`/api/review/inbox?limit=100${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, controller.signal);
-                // Heads are required before candidate approvals are displayed.
+                if (request !== generation.current) return;
+                setNeedsPair(false);
+                setInbox(data);
+                // Keep healthy Soul/receipts visible if heads fail. A null headRead
+                // keeps User Model approvals unavailable until this read succeeds.
                 const current = await reviewFetch<{ heads: Head[]; supports_expected_head?: boolean }>('/api/user-model/heads', controller.signal);
                 if (request !== generation.current) return;
                 setNeedsPair(false);
                 setHeadRead(current);
-                setInbox(data);
             } else if (tab === 'user_model') {
                 const current = await reviewFetch<{ heads: Head[]; supports_expected_head?: boolean }>('/api/user-model/heads', controller.signal);
                 if (request !== generation.current) return;
@@ -303,7 +307,7 @@ export default function Review() {
       <nav aria-label={t('review.sections')} className="flex flex-wrap gap-2">{(['inbox', 'profile', 'user_model'] as const).map(section => <Button key={section} variant={tab === section ? 'primary' : 'ghost'} disabled={busy} aria-pressed={tab === section} onClick={() => setTab(section)}>{t(`review.${section}`)}</Button>)}</nav>
       {loading && <p role="status">{t('review.loading')}</p>}
       {tab === 'inbox' && inbox && <section>
-            <p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{inbox.items.length === 0 && <p className="py-10 text-pc-text-secondary">{t('review.empty')}</p>}{inbox.items.map(item => <ProposalCard key={item.id} item={item} heads={heads} canApproveUserModel={canApproveUserModel} busy={busy} act={act} stale={staleProposals.has(item.id)}/>)}{inbox.next_offset !== null && <Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/review/inbox?limit=100&offset=${inbox.next_offset}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, value => setInbox(value as Inbox))}>{t('review.next')}</Button>}</section>}
+            <p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{inbox.items.length === 0 && <p className="py-10 text-pc-text-secondary">{t('review.empty')}</p>}{inbox.items.map(item => <ProposalCard key={item.id} item={item} heads={heads} headsAvailable={headRead !== null} canApproveUserModel={canApproveUserModel} busy={busy} act={act} stale={staleProposals.has(item.id)}/>)}{inbox.next_offset !== null && <Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/review/inbox?limit=100&offset=${inbox.next_offset}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, value => setInbox(value as Inbox))}>{t('review.next')}</Button>}</section>}
       {tab === 'profile' && soul && <section className="space-y-8">{layers.map(layer => {
                     const head = layer === 'voice' ? soul.voice.stored : soul[layer];
                     return <article key={layer} className="border-t border-pc-border pt-5 space-y-4">
@@ -333,7 +337,7 @@ export default function Review() {
                 <h3 className="font-medium">{t('review.history')}</h3>
                 <p>{candidate.candidate.statement}</p>
                 <p>{t(`review.state_${candidate.review_state}`)}</p>
-                {candidate.review_state === 'rejected' && <ProposalCard key={candidate.candidate.id} item={{ id: `user_model:${candidate.candidate.id}`, kind: 'user_model_candidate', item: candidate.candidate }} heads={heads} canApproveUserModel={canApproveUserModel} busy={busy} act={act} rejectedOnly/>}
+                {candidate.review_state === 'rejected' && <ProposalCard key={candidate.candidate.id} item={{ id: `user_model:${candidate.candidate.id}`, kind: 'user_model_candidate', item: candidate.candidate }} heads={heads} headsAvailable={headRead !== null} canApproveUserModel={canApproveUserModel} busy={busy} act={act} rejectedOnly/>}
                 <Value value={candidate.candidate.evidence}/>{candidate.review_receipts.map(receipt => <p key={receipt.id}>{t(`review.action_${receipt.action}`)} · {date(receipt.at_unix)} {receipt.note}</p>)}</article>}</section>}
     </>}
     <ConfirmDialog open={rollback !== null} title={t('review.rollback')} message={t('review.rollback_hint')} confirmLabel={t('review.rollback')} onClose={() => setRollback(null)} onConfirm={() => { if (!rollback)
