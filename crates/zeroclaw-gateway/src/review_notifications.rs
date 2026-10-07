@@ -273,7 +273,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!dir.path().join("bridge_outbox.db").exists());
+        assert!(!dir.path().join("sessions/bridge_outbox.db").exists());
     }
 
     #[test]
@@ -330,7 +330,7 @@ mod tests {
             .take()
             .unwrap();
         assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 0);
-        assert!(!dir.path().join("bridge_outbox.db").exists());
+        assert!(!dir.path().join("sessions/bridge_outbox.db").exists());
         config.write().companion_memory.review_notification = Some(ReviewNotificationConfig {
             recipient: " ".into(),
             ..target.clone()
@@ -370,7 +370,8 @@ mod tests {
         let (dir, config, soul) = fixture();
         receipt(&soul, NOW, 1, "ok");
         let outbox = BridgeOutbox::shared(dir.path()).unwrap();
-        let conn = rusqlite::Connection::open(dir.path().join("bridge_outbox.db")).unwrap();
+        let conn =
+            rusqlite::Connection::open(dir.path().join("sessions/bridge_outbox.db")).unwrap();
         conn.execute_batch("CREATE TRIGGER refuse_notice BEFORE INSERT ON bridge_outbox BEGIN SELECT RAISE(ABORT,'fixture enqueue failure'); END;").unwrap();
         assert!(reconcile(&config, dir.path(), NOW).is_err());
         assert_eq!(outbox.len("tg").unwrap(), 0);
