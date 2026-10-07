@@ -1585,7 +1585,9 @@ mod tests {
         assert_eq!(keys, vec!["active", "future-expiry"]);
         assert_eq!(s.active_heads(Some(now)).unwrap(), heads);
     }
-    fn review_scope_snapshot(store: &UserModelStore) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    pub(super) fn review_scope_snapshot(
+        store: &UserModelStore,
+    ) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
         let conn = store.conn.lock();
         [
             "user_model_candidates",
@@ -2310,6 +2312,7 @@ mod tests {
 
 #[cfg(test)]
 mod owner_correction_tests {
+    use super::tests::review_scope_snapshot;
     use super::*;
 
     fn evidence(agent: &str, session: &str, key: &str) -> String {
