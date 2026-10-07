@@ -191,3 +191,4 @@ tool-owner-correction-store-error = Could not record the correction. Check the s
 
 soul-voice-unavailable = Current configured Voice is unavailable.
 soul-voice-step-limit = Voice proposals may move a dial by at most one level.
+memory-store-conversation-scope-required = Conversation memory requires a current session and a backend that preserves its scope.

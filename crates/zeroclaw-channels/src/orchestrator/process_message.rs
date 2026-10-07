@@ -37,7 +37,7 @@ use super::{
     compact_sender_history, compose_outgoing_user_turn_with_context, conversation_history_key,
     conversation_memory_key, ensure_nonempty_channel_reply, extract_current_turn_tool_messages,
     find_channel_for_message, followup_thread_id, get_or_create_provider, get_route_selection,
-    handle_runtime_command_if_needed, is_context_window_overflow_error, is_group_reply_target,
+    handle_runtime_command_if_needed, is_context_window_overflow_error,
     maybe_apply_runtime_config_update, normalize_cached_channel_turns,
     outbound_content_format_for_channel, peer_prompt_channel_ref, provider_cache_key,
     reconcile_early_ack, record_passive_context, refreshed_new_session_system_prompt,
@@ -438,14 +438,10 @@ async fn process_channel_message_body(
     // within the context budget
     collapse_inline_image_payloads(&mut prior_turns);
 
-    let is_group_chat = is_group_reply_target(&msg.reply_target);
-    let mut memory_sessions: Vec<Option<String>> = sender_memory_session_ids(&msg, &history_key)
+    let memory_sessions: Vec<Option<String>> = sender_memory_session_ids(&msg, &history_key)
         .into_iter()
         .map(Some)
         .collect();
-    if is_group_chat {
-        memory_sessions.push(Some(history_key.clone()));
-    }
 
     let base_system_prompt = if had_prior_history {
         ctx.system_prompt.as_str().to_string()

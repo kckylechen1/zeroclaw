@@ -3982,8 +3982,8 @@ fn companion_stores_override_broad_file_grants() {
         allowed_roots: vec![root.clone()],
         ..SecurityPolicy::default()
     };
-    for base in ["soul.db", "user_model.db"] {
-        for suffix in ["", "-wal", "-shm", "-journal"] {
+    for base in ["soul.db", "user_model.db", "SOUL.DB", "User_Model.Db"] {
+        for suffix in ["", "-wal", "-shm", "-journal", "-WAL", "-ShM", "-JOURNAL"] {
             let path = data.join(format!("{base}{suffix}"));
             assert!(policy.is_runtime_config_path(&path));
             assert!(!policy.is_resolved_path_readable(&path));

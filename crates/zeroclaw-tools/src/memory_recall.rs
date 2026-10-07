@@ -121,7 +121,13 @@ impl Tool for MemoryRecallTool {
                         && !entry.key.starts_with("soul::")
                         && match entry.session_id.as_deref() {
                             Some(source) => sessions.iter().any(|session| session == source),
-                            None => !matches!(entry.category, MemoryCategory::Conversation),
+                            None => {
+                                !matches!(entry.category, MemoryCategory::Conversation)
+                                    // Markdown daily files erase both original category
+                                    // and session; their rows cannot prove global scope.
+                                    && (self.memory.name() != "markdown"
+                                        || matches!(entry.category, MemoryCategory::Core))
+                            }
                         }
                 });
                 entries
@@ -365,6 +371,36 @@ mod tests {
             ] {
                 assert!(!output.contains(forbidden), "{output}");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn markdown_unattributed_daily_rows_cannot_expose_conversation_autosaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory: Arc<dyn Memory> =
+            Arc::new(zeroclaw_memory::MarkdownMemory::new("test", dir.path()));
+        memory
+            .store("global", "global fixture", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        memory
+            .store(
+                "private",
+                "foreign conversation fixture",
+                MemoryCategory::Conversation,
+                Some("other-session"),
+            )
+            .await
+            .unwrap();
+        let tool = MemoryRecallTool::new(memory);
+        for scopes in [vec![], vec!["current-session".into()]] {
+            let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                .scope(scopes, tool.execute(json!({"query":"fixture", "limit":20})))
+                .await
+                .unwrap();
+            assert!(result.success);
+            assert!(result.output.contains("global fixture"));
+            assert!(!result.output.contains("foreign conversation fixture"));
         }
     }
 
