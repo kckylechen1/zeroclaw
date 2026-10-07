@@ -2087,18 +2087,8 @@ impl SecurityPolicy {
         dirs
     }
 
-    /// Recursive external readers authorize a directory only once. Roots
-    /// containing runtime directories require per-file policy checks instead.
-    pub fn requires_guarded_recursive_read(&self, root: &Path) -> bool {
-        self.runtime_config_dirs()
-            .iter()
-            .any(|dir| dir.starts_with(root))
-    }
-
-    /// Governed companion stores are available only through their typed APIs.
-    /// Broad workspace/root grants must not turn them into ordinary file data.
-    pub fn is_protected_companion_path(&self, resolved: &Path) -> bool {
-        let Some(name) = resolved.file_name().and_then(|value| value.to_str()) else {
+    fn is_companion_store_name(name: &std::ffi::OsStr) -> bool {
+        let Some(name) = name.to_str() else {
             return false;
         };
         let name = name.to_ascii_lowercase();
@@ -2108,9 +2098,83 @@ impl SecurityPolicy {
             .or_else(|| name.strip_suffix("-journal"))
             .unwrap_or(&name);
         matches!(base, "soul.db" | "user_model.db")
+    }
+
+    // Resolve current store identities on demand, including recased sidecars.
+    // An unreadable configured directory cannot establish safe alias access.
+    #[cfg(unix)]
+    fn companion_metadata_matches(&self, predicate: impl Fn(&std::fs::Metadata) -> bool) -> bool {
+        for dir in self.runtime_config_dirs() {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return true,
+            };
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    return true;
+                };
+                if !Self::is_companion_store_name(&entry.file_name()) {
+                    continue;
+                }
+                match std::fs::metadata(entry.path()) {
+                    Ok(metadata) if predicate(&metadata) => return true,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return true,
+                }
+            }
+        }
+        false
+    }
+
+    /// External directory readers cannot apply per-file identity checks.
+    /// A multiply-linked protected store can have aliases outside its directory.
+    pub fn requires_guarded_recursive_read(&self, root: &Path) -> bool {
+        if self
+            .runtime_config_dirs()
+            .iter()
+            .any(|dir| dir.starts_with(root))
+        {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            self.companion_metadata_matches(|metadata| metadata.nlink() > 1)
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
+    /// Governed stores and their Unix hardlink aliases are typed-API-only.
+    pub fn is_protected_companion_path(&self, resolved: &Path) -> bool {
+        if resolved
+            .file_name()
+            .is_some_and(Self::is_companion_store_name)
             && resolved
                 .parent()
                 .is_some_and(|parent| self.runtime_config_dirs().iter().any(|dir| parent == dir))
+        {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = match std::fs::metadata(resolved) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+                Err(_) => return true,
+            };
+            // Ordinary files cannot alias another live name. Avoid the
+            // cross-store scan on the overwhelmingly common nlink=1 path.
+            if metadata.is_file() && metadata.nlink() > 1 {
+                return self.companion_metadata_matches(|store| {
+                    store.dev() == metadata.dev() && store.ino() == metadata.ino()
+                });
+            }
+        }
+        false
     }
 
     pub fn is_runtime_config_path(&self, resolved: &Path) -> bool {
