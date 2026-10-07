@@ -568,8 +568,10 @@ inside the approval transaction, so changed config, changed stored heads and
 historical proposals cannot bypass the bound. A tool without a current config
 resolver refuses Voice proposals. The owner may still set any level directly
 through `PUT /api/soul/voice`, including large changes and `challenge = minimal`;
-the honesty floor still renders. Accepting a proposal applies it in the same
-transaction; `final_text` lets the owner reword a growth entry or principle
+the honesty floor still renders. Under a prompt budget, optional Voice text
+yields before the existing tail truncation; Identity, Principles and Growth
+retain their existing handling. Accepting a proposal holds the live configured
+Voice stable through validation and commit in the same transaction; `final_text` lets the owner reword a growth entry or principle
 before it applies. If the apply fails validation or the layer changed
 underneath it, the proposal stays pending. Dismissing applies nothing.
 
@@ -580,8 +582,10 @@ proposals plus three User Model candidates. Each domain has its own pending
 cap of three, so a full Soul queue does not block User Model suggestions.
 Voice reflection compares Growth bond entries with actual owner reactions.
 Each Voice proposal must select exactly one supplied owner-message index; its
-existing `session_ref` records the canonical session and timestamp, and its
-bounded rationale includes a quote from that message. Missing or out-of-range
+existing `session_ref` records the canonical session and timestamp (or a
+`sha256:` digest of that canonical JSON when it exceeds the 128-byte field).
+Its 480-byte rationale reserves space for a JSON-escaped owner quote before
+shortening the model rationale at a UTF-8 boundary. Missing or out-of-range
 references are refused. Familiarity alone is not approval to change tone.
 User Model suggestions carry runtime-bound owner-message/session evidence and
 remain global candidates until owner review; model-supplied evidence references
