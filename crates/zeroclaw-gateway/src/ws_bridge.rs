@@ -346,6 +346,7 @@ async fn send_pending(
                 )
                 .map_err(|_| "attention_invalid_policy")?;
                 permitted
+                    && crate::review_notifications::permits_delivery(&config, outbox, &row)
                     && outbox
                         .claim(bridge, &row.id, now.timestamp())
                         .map_err(|_| "attention_store_unavailable")?
@@ -683,6 +684,101 @@ mod tests {
         assert_eq!(next(&mut again).await.unwrap().id, fourth);
     }
 
+    fn queue_review_notice(state: &AppState) -> String {
+        let data_dir = state.config.read().data_dir.clone();
+        {
+            let mut config = state.config.write();
+            config.agents.insert(
+                "nova".into(),
+                zeroclaw_config::schema::AliasedAgentConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            );
+            config.companion_memory.review_notification =
+                Some(zeroclaw_config::companion::ReviewNotificationConfig {
+                    bridge: "tg".into(),
+                    recipient: "42".into(),
+                    thread_id: None,
+                });
+        }
+        let now = chrono::Utc::now().timestamp() as u64;
+        zeroclaw_memory::companion::SoulProfileStore::shared(&data_dir)
+            .unwrap()
+            .record_reflection(
+                "nova",
+                &zeroclaw_memory::companion::SoulReflectionReceipt {
+                    period_from_unix: now - 604800,
+                    messages_read: 2,
+                    proposals_created: 1,
+                    user_model_candidates_created: 1,
+                    outcome: "ok".into(),
+                    ran_at_unix: now,
+                },
+            )
+            .unwrap();
+        crate::review_notifications::reconcile(
+            &state.config,
+            &data_dir,
+            now,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        outbox(state)
+            .pending("tg", 0, 100)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.source_kind == "weekly_review")
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn weekly_review_live_opt_out_and_target_change_hold_old_unclaimed_notice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = bridge_state(&tmp, true);
+        let outbox = outbox(&state);
+        let original = queue_review_notice(&state);
+        let target = state
+            .config
+            .write()
+            .companion_memory
+            .review_notification
+            .take()
+            .unwrap();
+        let gateway = serve(state.clone()).await;
+        let mut client = BridgeClient::connect(&gateway, TOKEN).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), client.next_deliver())
+                .await
+                .is_err()
+        );
+        state.config.write().companion_memory.review_notification =
+            Some(zeroclaw_config::companion::ReviewNotificationConfig {
+                recipient: "99".into(),
+                ..target.clone()
+            });
+        let data_dir = state.config.read().data_dir.clone();
+        crate::review_notifications::reconcile(
+            &state.config,
+            &data_dir,
+            chrono::Utc::now().timestamp() as u64,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        let new_target = next(&mut client).await.unwrap();
+        assert_ne!(new_target.id, original);
+        assert_eq!(new_target.to, "99");
+        assert_eq!(
+            outbox.inspect("tg", &original).unwrap().unwrap()["delivery_state"],
+            "accepted"
+        );
+        client.ack(&new_target.id).await.unwrap();
+        state.config.write().companion_memory.review_notification = Some(target);
+        outbox.enqueue("tg", "42", None, "wake").unwrap();
+        assert_eq!(next(&mut client).await.unwrap().id, original);
+    }
+
     #[tokio::test]
     async fn quiet_lower_sequence_is_revisited_after_live_policy_change() {
         use zeroclaw_config::attention::{AttentionConfig, ImportantSource};
@@ -700,9 +796,7 @@ mod tests {
                 source_id: "urgent-job".into(),
             }],
         });
-        let quiet = outbox
-            .enqueue_source("tg", "42", None, "quiet", "cron", "quiet-job", "run1")
-            .unwrap();
+        let quiet = queue_review_notice(&state);
         // Cross a read-batch boundary; deferred candidates must not starve
         // an eligible later source or become permanently skipped.
         for n in 0..BATCH {

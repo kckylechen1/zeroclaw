@@ -151,6 +151,11 @@ impl BridgeOutbox {
         Ok(handle)
     }
 
+    /// Whether a live configuration still names this handle's owning store.
+    pub fn is_for_data_dir(&self, data_dir: &Path) -> bool {
+        self.db_path == data_dir.join(DB_FILE)
+    }
+
     /// Queue `content` for `bridge` to deliver to `to`. Returns the row id.
     pub fn enqueue(
         &self,

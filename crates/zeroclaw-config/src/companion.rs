@@ -47,6 +47,45 @@ pub struct CompanionMemoryConfig {
     /// Who may produce `owner_authored` companion-memory rows.
     #[nested]
     pub owner: CompanionOwnerConfig,
+    /// Explicit opt-in destination for generic weekly review summaries.
+    /// No recipient is inferred from owner identities or recent conversations.
+    #[nested]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_notification: Option<ReviewNotificationConfig>,
+}
+
+/// Owner-selected bridge destination; delivery uses the existing BridgeOutbox.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+#[prefix = "companion_memory.review_notification"]
+pub struct ReviewNotificationConfig {
+    pub bridge: String,
+    pub recipient: String,
+    pub thread_id: Option<String>,
+}
+
+impl ReviewNotificationConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("bridge", self.bridge.as_str()),
+            ("recipient", self.recipient.as_str()),
+        ]
+        .into_iter()
+        .chain(self.thread_id.as_deref().map(|v| ("thread_id", v)))
+        {
+            if value.is_empty()
+                || value.trim() != value
+                || value.len() > 256
+                || value.chars().any(char::is_control)
+            {
+                return Err(format!(
+                    "companion_memory.review_notification.{field} must be nonempty, trimmed, at most 256 bytes and free of control characters"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl CompanionMemoryConfig {
@@ -162,6 +201,50 @@ mod tests {
 
     fn channel(identity: &str) -> CompanionIngress {
         CompanionIngress::from_channel_identity(IngressIdentity::new(identity))
+    }
+
+    #[test]
+    fn review_notification_is_opt_in_and_rejects_invalid_destination_fields() {
+        assert!(
+            CompanionMemoryConfig::default()
+                .review_notification
+                .is_none()
+        );
+        let target: ReviewNotificationConfig =
+            toml::from_str("bridge='tg'\nrecipient='42'\nthread_id='7'").unwrap();
+        assert!(target.validate().is_ok());
+        for invalid in ["", " ", "owner\nother"] {
+            assert!(
+                ReviewNotificationConfig {
+                    recipient: invalid.into(),
+                    ..target.clone()
+                }
+                .validate()
+                .is_err()
+            );
+            assert!(
+                ReviewNotificationConfig {
+                    thread_id: Some(invalid.into()),
+                    ..target.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            toml::from_str::<ReviewNotificationConfig>(
+                "bridge='tg'\nrecipient='42'\nuntrusted='extra'"
+            )
+            .is_err()
+        );
+        let config = CompanionMemoryConfig {
+            review_notification: Some(target),
+            ..Default::default()
+        };
+        assert_eq!(
+            toml::from_str::<CompanionMemoryConfig>(&toml::to_string(&config).unwrap()).unwrap(),
+            config
+        );
     }
 
     #[test]

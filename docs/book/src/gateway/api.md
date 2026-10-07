@@ -602,6 +602,53 @@ in `zeroclaw-memory`; the daemon only wires stores, providers and cadence.
 Turn settlement no longer writes `NotEvaluated` capture placeholders to the
 companion PortableKernel. Existing historical rows and outbox events are retained.
 
+Weekly review notifications are opt-in through an explicit bridge destination:
+
+```toml
+[companion_memory.review_notification]
+bridge = "telegram" # Must already exist in gateway.bridges.
+recipient = "<owner-chat-id>"
+# thread_id = "<optional-topic-id>"
+```
+
+Without this section no review notices are created. Creating, changing or
+removing it through any config API operation requires a paired operator, even
+when generic gateway pairing is disabled; replacing a parent or the root object
+does not bypass that check. The recipient is never inferred from owner identity
+metadata, the last conversation or model output.
+
+The gateway checks canonical reflection receipts every minute, independently of
+the reflection model call. For each enabled agent it reads the latest 200 receipt
+rows and selects nonzero-created receipts less than 24 hours old. Partial-failure
+receipts with actual created items are included; zero-created, future and stale
+receipts are skipped. A scan that reaches 200 rows emits a warning about older
+unreconciled rows. The localized notice contains counts and `/review` navigation,
+never proposal text, owner evidence, outcome prose or agent names.
+
+Notices enter the existing BridgeOutbox as `source_kind = weekly_review`,
+`source_id = <agent alias>`, `event_id = <canonical reflection row id>`. Repeated
+checks and gateway restarts reuse its deduplication and delivery receipts;
+enqueue errors are logged and retried without re-running the model. No separate
+notification ledger is created. Existing quiet hours, exact-source mute,
+snooze/dismiss and bridge acknowledgement semantics apply. Dismissing a notice
+does not dismiss or approve any review item.
+
+The producer resolves the live destination for every enqueue. Before claiming an
+unclaimed weekly notice, delivery also checks the current destination and agent.
+Disabling the target or changing bridge, recipient or thread holds old unclaimed
+notices until they become eligible again or expire. Already in-flight messages
+cannot be retracted and retain their normal receipt handling. A live data-root
+change denies production and delivery through the old store until restart.
+
+Changing bridge or recipient may deliver summaries from the recent 24-hour
+window to the newly configured destination. Deduplication is scoped to bridge,
+recipient, source and event, and retains the existing 30-day / 10,000-terminal-row
+limits. Changing only `thread_id` holds old notices and affects new receipt
+identities; it does not rewrite or replay an existing deduplicated event. These
+are source/API and synthetic transport guarantees, not real Telegram delivery
+or installed-service acceptance. Remove the config section to opt out; retain
+existing outbox history and the live-target delivery check during rollback.
+
 ## Stable error codes
 
 Errors return JSON with a stable `code` field plus a human-readable `message`.

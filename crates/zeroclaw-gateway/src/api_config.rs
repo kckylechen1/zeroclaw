@@ -402,13 +402,26 @@ async fn persist_and_swap(
         state.config_write_lock.try_lock().is_err(),
         "persist_and_swap caller must hold state.config_write_lock"
     );
-    // Attention permissions are owner-authored even on an unpaired gateway.
+    // Attention policy and review destinations are owner-authored even on an
+    // unpaired gateway.
     // Compare canonical typed values so parent replacement and nested edits
     // cannot bypass a string-prefix path check.
-    let attention_changed = state.config.read().gateway.attention != new_config.gateway.attention;
-    if attention_changed {
+    let (attention_changed, review_target_changed) = {
+        let current = state.config.read();
+        (
+            current.gateway.attention != new_config.gateway.attention,
+            current.companion_memory.review_notification
+                != new_config.companion_memory.review_notification,
+        )
+    };
+    if attention_changed || review_target_changed {
         let Some((peer, headers)) = operator_request else {
-            return Err((StatusCode::UNAUTHORIZED, "attention_operator_required").into_response());
+            let code = if review_target_changed {
+                "review_notification_operator_required"
+            } else {
+                "attention_operator_required"
+            };
+            return Err((StatusCode::UNAUTHORIZED, code).into_response());
         };
         if let Some(error) = crate::operator_auth::gate_operator_identity(state, peer, headers) {
             return Err(error);
@@ -2770,6 +2783,102 @@ mod tests {
             persist_and_swap(&state, replacement, &guard, None)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn review_notification_target_changes_require_operator_including_parent_removal() {
+        use zeroclaw_config::companion::ReviewNotificationConfig;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(temp_config(&tmp));
+        state.pairing = Arc::new(PairingGuard::new(
+            false,
+            &[PairingGuard::token_hash("review-owner-fixture")],
+        ));
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let guard = Arc::clone(&state.config_write_lock).lock_owned().await;
+        let target = ReviewNotificationConfig {
+            bridge: "tg".into(),
+            recipient: "42".into(),
+            thread_id: None,
+        };
+        for token in [None, Some("bridge-token")] {
+            let mut working = state.config.read().clone();
+            working.companion_memory.review_notification = Some(target.clone());
+            let mut headers = HeaderMap::new();
+            if let Some(token) = token {
+                headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+            }
+            let response = persist_and_swap(&state, working, &guard, Some((peer, &headers)))
+                .await
+                .unwrap_err();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(
+                state
+                    .config
+                    .read()
+                    .companion_memory
+                    .review_notification
+                    .is_none()
+            );
+        }
+        let attacker: SocketAddr = "127.0.0.2:12345".parse().unwrap();
+        let mut bad = HeaderMap::new();
+        bad.insert("authorization", "Bearer wrong-fixture".parse().unwrap());
+        let mut limited = false;
+        for _ in 0..100 {
+            let mut working = state.config.read().clone();
+            working.companion_memory.review_notification = Some(target.clone());
+            let response = persist_and_swap(&state, working, &guard, Some((attacker, &bad)))
+                .await
+                .unwrap_err();
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                limited = true;
+                break;
+            }
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert!(limited);
+        let mut owner = HeaderMap::new();
+        owner.insert(
+            "authorization",
+            "Bearer review-owner-fixture".parse().unwrap(),
+        );
+        let mut working = state.config.read().clone();
+        working.gateway.bridges.insert(
+            "tg".into(),
+            zeroclaw_config::schema::GatewayBridgeConfig {
+                token_hash: "a".repeat(64),
+                ..Default::default()
+            },
+        );
+        working.companion_memory.review_notification = Some(target);
+        working.mark_dirty("companion_memory");
+        working.mark_dirty("gateway.bridges");
+        persist_and_swap(&state, working, &guard, Some((peer, &owner)))
+            .await
+            .unwrap();
+        // Full parent replacement/deletion is compared as typed payload, not path prefixes.
+        let mut replacement = state.config.read().clone();
+        replacement.companion_memory = Default::default();
+        assert_eq!(
+            persist_and_swap(&state, replacement.clone(), &guard, None)
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        replacement.mark_dirty("companion_memory");
+        persist_and_swap(&state, replacement, &guard, Some((peer, &owner)))
+            .await
+            .unwrap();
+        assert!(
+            state
+                .config
+                .read()
+                .companion_memory
+                .review_notification
+                .is_none()
         );
     }
 
