@@ -479,6 +479,23 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(!result.success);
+                let hardlink = root.join(format!("hardlink-{name}.txt"));
+                std::fs::hard_link(&path, &hardlink).unwrap();
+                let result = tool
+                    .execute(json!({"path":hardlink, "encoding":"base64"}))
+                    .await
+                    .unwrap();
+                assert!(!result.success);
+                let writer = crate::tools::FileWriteTool::new(tool.security.clone());
+                let result = writer
+                    .execute(json!({"path":hardlink, "content":"replacement"}))
+                    .await
+                    .unwrap();
+                assert!(!result.success);
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    "private fixture bytes"
+                );
             }
         }
     }
