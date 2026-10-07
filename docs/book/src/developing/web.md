@@ -28,7 +28,11 @@ cargo web install       # npm install in web/
 
 ## CI and release builds
 
-CI does not run `cargo web build`: the lint/build/test jobs use a `web/dist/.gitkeep` placeholder so the gateway crate compiles without the bundle. Producing a release artifact that includes the dashboard is a separate step:
+The required web job runs `npm ci`, permission and review regressions, and
+`npm run build` (typecheck plus Vite). Rust lint/build/test jobs use a
+`web/dist/.gitkeep` placeholder so the gateway crate compiles without the
+bundle. Producing a release artifact that includes the dashboard is a
+separate step:
 
 <div class="os-tabs-src">
 
@@ -65,3 +69,59 @@ and `structuredClone()`.
 - Edge 111+
 - Firefox 113+
 - Safari 16.2+
+
+## Owner review on a phone-sized screen
+
+The `/review` page uses the existing operator-only review, Soul and User Model
+APIs. A token's presence does not grant review authority; an owner-only read
+verifies access. The local recovery view checks `/health`: it offers code
+entry only when pairing is enabled. With pairing disabled, the gateway cannot
+issue a new operator token. The owner must enable `gateway.require_pairing`
+in the gateway host configuration, apply it through the normal lifecycle,
+then run `zeroclaw gateway get-paircode --new` on that host. The page provides
+a check-again action; it does not change configuration or start services.
+Existing authorized operator tokens still work with pairing disabled.
+
+The inbox separates unapplied candidates from reflection receipts. Accept and
+reword use the candidate's existing authority path; limiting a User Model
+global candidate binds it to the entered session. Existing session candidates
+can only retain their original session; agent/channel candidates do not offer
+that action. Dismissal applies no candidate.
+A rejected User Model candidate can be narrowed once from its review history.
+Soul proposals have no generic scope-narrowing action. Stale Soul proposals
+show the backend reason and offer dismissal instead of another acceptance. Agent selection filters
+Soul and reflection records, while the shared User Model retains its recorded
+scopes. Approval cards display the canonical Growth retirement target and
+revision, or the User Model kind, semantic key and current head replaced by
+acceptance. Current heads must load before candidate approval is available.
+Evidence is displayed as text, never executed as HTML.
+
+My Agent shows the four Soul layers, provenance and history. Restoring an older
+Soul revision appends a new revision and includes the current revision for
+conflict detection. About me shows active owner-authorized entries and the
+candidate review history; there is no User Model rollback button. Effective
+Voice and per-key sources are read from the gateway when available, without
+recalculating precedence in the browser. Older gateways show configured and
+stored Voice separately. History shows proposal IDs and restored revision IDs
+when present, and candidate state/action labels follow the UI locale.
+
+These pages add no background notification channel or offline record cache.
+They do not establish PWA installability or closed-app delivery. Deploy the web
+bundle alongside a gateway with the review APIs. Rolling back the web bundle
+leaves canonical Soul and User Model records intact.
+
+Run `npm run test:review`, the existing permission tests and `npm run build`
+from `web/`. Validate the rendered owner entry, pending/empty/error states,
+review actions and revision conflicts at 375px and desktop widths with
+synthetic records before shipping. Desktop viewport tests do not prove a
+physical phone or installed-service flow.
+
+The browser regression fixture is `web/scripts/review-browser.test.cjs`. After
+building, run it with an already-installed Playwright module selected by
+`PLAYWRIGHT_MODULE` and optional Chrome executable selected by `REVIEW_CHROME`
+(otherwise the installed Chrome channel is used). `REVIEW_SCREENSHOTS` chooses
+the screenshot directory; it defaults to the system temporary directory. The
+fixture launches an isolated context and synthetic localhost APIs, asserts
+that pairing-disabled gateways never mint tokens, and tests stale proposals,
+late history failures, rejected-candidate narrowing, focus and touch targets.
+It installs no browser package and requires no production credentials.

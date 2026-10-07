@@ -492,6 +492,17 @@ HTTP 409 with `code: "candidate_already_reviewed"` and writes no receipt or
 revision. A failed narrow leaves the rejection available for a later valid
 narrow. Unknown IDs still return 404. The decision and receipt write share one
 SQLite write transaction, including across independent store connections.
+The heads response advertises `supports_expected_head: true`. Review clients
+bind approval to the displayed head with `expected_head: {"id":"<revision-id>"}`,
+or `expected_head: {"id":null}` when no active head was displayed. Before
+accept, narrow, or supersede writes anything, the transaction checks the exact
+current eligible head for the candidate's semantic key using the same expiry
+and tie ordering as the heads endpoint. A mismatch returns HTTP 409 with
+`code: "head_conflict"` and writes nothing; refresh before retrying. Reject
+has no replacement and does not compare heads. Omitting `expected_head` retains
+legacy behavior; malformed objects are rejected. The phone review UI requires
+the capability before offering approval against a gateway, while read and
+dismiss remain available on older gateways.
 
 Active User Model revisions reach the agent's system prompt on every surface:
 `/ws/chat` (and the CLI and bridges that use it) as well as channel turns. Each

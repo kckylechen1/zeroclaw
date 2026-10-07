@@ -49,7 +49,8 @@ pub use user_model::{
     AuthorityClass, ReviewAction, USER_MODEL_MAX_OPEN_REFLECTION_CANDIDATES,
     USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS, USER_MODEL_STATEMENT_MAX_BYTES, UserModelCandidate,
     UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStateProjection,
-    UserModelStore, is_candidate_already_reviewed, project_active_heads, project_applicable_heads,
+    UserModelStore, is_candidate_already_reviewed, is_user_model_head_conflict,
+    project_active_heads, project_applicable_heads,
 };
 pub use user_model_scope::{ApplicabilityContext, Scope};
 

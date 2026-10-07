@@ -2,6 +2,7 @@ import { NavLink } from 'react-router-dom';
 import { basePath } from '../../lib/basePath';
 import {
   Activity,
+  Inbox,
   Bot,
   Clock,
   LayoutDashboard,
@@ -38,7 +39,7 @@ const navGroups: NavGroup[] = [
   },
   {
     headingKey: 'nav.group.chat',
-    items: [{ to: '/agents', icon: MessageSquare, labelKey: 'nav.agents' }],
+    items: [{ to: '/agents', icon: MessageSquare, labelKey: 'nav.agents' }, { to: '/review', icon: Inbox, labelKey: 'nav.review' }],
   },
   {
     headingKey: 'nav.group.configure',

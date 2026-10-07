@@ -714,6 +714,12 @@ jobs:
       - name: Run permission and catalog regressions
         working-directory: web
         run: npm run test:permissions
+      - name: Run owner review regressions
+        working-directory: web
+        run: npm run test:review
+      - name: Typecheck and build web client
+        working-directory: web
+        run: npm run build
 
   # ── Required gate ─────────────────────────────────────────────────────────
   # Branch protection requires only this single job — internal structure
