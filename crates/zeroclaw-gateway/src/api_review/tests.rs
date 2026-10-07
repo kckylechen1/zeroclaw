@@ -119,7 +119,7 @@ async fn actual_http_reflection_inbox_review_reword_narrow_dismiss_and_reopen() 
         &soul,
         "nova",
         &user,
-        Default::default(),
+        || Some(Default::default()),
         &messages,
         || {
             Ok((

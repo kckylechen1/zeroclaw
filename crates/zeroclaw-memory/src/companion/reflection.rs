@@ -536,8 +536,15 @@ pub async fn reflect(
         receipt(OUTCOME_QUEUE_FULL.to_string(), 0, 0)
     } else {
         let profile = store.profile(agent_alias)?;
-        let voice = configured_voice()
-            .ok_or_else(|| anyhow::anyhow!("current configured Voice is unavailable"))?;
+        let voice = configured_voice().ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+                "current configured Voice is unavailable"
+            );
+            anyhow::Error::msg("current configured Voice is unavailable")
+        })?;
         let voice = profile
             .voice
             .as_ref()
