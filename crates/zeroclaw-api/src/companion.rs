@@ -973,3 +973,18 @@ mod tests {
         assert_eq!(open.oldest_pending_age_secs, Some(12));
     }
 }
+
+/// The exact active User Model head the owner reviewed. `None` explicitly
+/// expects no active head; omission of this object is legacy compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserModelExpectedHead {
+    #[serde(deserialize_with = "deserialize_expected_head_id")]
+    pub id: Option<String>,
+}
+
+fn deserialize_expected_head_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
