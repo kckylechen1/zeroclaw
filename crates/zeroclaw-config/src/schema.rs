@@ -3766,25 +3766,35 @@ impl Config {
     /// carded agent's own `agent.persona` field is empty by construction
     /// (validation forbids setting both a card and a persona), so a carded
     /// agent always resolves through the card once one names a persona.
-    /// `None` means "no dials configured" — the caller renders no `## Voice`
-    /// section, not an error, unlike the risk-profile case where every
+    /// `None` means "no dials configured" — the governed Soul renderer uses
+    /// built-in medium guidance, unlike the risk-profile case where every
     /// enabled agent must resolve to one.
     #[must_use]
     pub fn persona_for_agent(&self, agent_alias: &str) -> Option<&crate::persona::PersonaKnobs> {
+        self.persona_selection_for_agent(agent_alias)
+            .map(|(knobs, _, _)| knobs)
+    }
+
+    /// The canonical persona selection, including its registry alias and
+    /// optional card path for derived Voice provenance.
+    #[must_use]
+    pub fn persona_selection_for_agent(
+        &self,
+        agent_alias: &str,
+    ) -> Option<(&crate::persona::PersonaKnobs, &str, Option<&str>)> {
         let agent = self.agents.get(agent_alias)?;
-        let persona_alias = agent.persona.as_str().trim();
-        if !persona_alias.is_empty() {
-            return self.personas.get(persona_alias);
+        let persona = agent.persona.as_str().trim();
+        if !persona.is_empty() {
+            return self
+                .personas
+                .get(persona)
+                .map(|knobs| (knobs, persona, None));
         }
         let card = agent.card.as_str().trim();
-        if card.is_empty() {
-            return None;
-        }
-        let carded_persona = self.cards.get(card)?.persona.as_str().trim();
-        if carded_persona.is_empty() {
-            return None;
-        }
-        self.personas.get(carded_persona)
+        let persona = self.cards.get(card)?.persona.as_str().trim();
+        self.personas
+            .get(persona)
+            .map(|knobs| (knobs, persona, Some(card)))
     }
 
     /// Resolve the card that governs an explicit agent alias, if any.

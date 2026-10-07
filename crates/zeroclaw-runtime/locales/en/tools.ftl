@@ -189,4 +189,6 @@ tool-owner-correction-recorded = Correction recorded in the review inbox for thi
 tool-owner-correction-pending = No new candidate was recorded: this correction is already pending or the review queue is full.
 tool-owner-correction-store-error = Could not record the correction. Check the statement and semantic key, then try again.
 
+soul-voice-unavailable = Current configured Voice is unavailable.
+soul-voice-step-limit = Voice proposals may move a dial by at most one level.
 memory-store-conversation-scope-required = Conversation memory requires a current session and a backend that preserves its scope.

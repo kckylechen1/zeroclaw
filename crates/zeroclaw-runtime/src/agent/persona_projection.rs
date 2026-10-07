@@ -157,13 +157,10 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
         LegacyPersonaFiles::Inject
     };
 
-    let voice = profile
-        .as_ref()
-        .and_then(|profile| profile.voice.as_ref())
-        .map_or(configured_voice, |head| {
-            head.value.layered_over(configured_voice)
-        })
-        .to_prompt_section();
+    let voice =
+        zeroclaw_memory::companion::resolve_effective_voice(config, agent_alias, profile.as_ref())
+            .0
+            .to_prompt_section();
 
     let mut parts: Vec<String> = Vec::new();
     if let Some(profile) = &profile {
@@ -562,7 +559,10 @@ mod tests {
         };
         let projection = persona_projection(&config, "nova");
         assert_eq!(projection.legacy_files, LegacyPersonaFiles::Inject);
-        assert!(projection.section.is_none());
+        assert_eq!(
+            projection.section,
+            zeroclaw_config::persona::PersonaKnobs::default().to_prompt_section()
+        );
         assert!(!config.data_dir.exists());
     }
 
@@ -577,13 +577,22 @@ mod tests {
         let store = SoulProfileStore::shared(&config.data_dir).unwrap();
         store.ensure_seeded("nova", "nova", 1).unwrap();
         let approve = |proposal: NewSoulProposal| {
-            let SoulProposalOutcome::Recorded { id } =
-                store.submit_proposal("nova", proposal, 2).unwrap()
+            let SoulProposalOutcome::Recorded { id } = store
+                .submit_proposal_with_voice("nova", proposal, 2, || Some(Default::default()))
+                .unwrap()
             else {
                 panic!()
             };
             store
-                .resolve_proposal("nova", id, SoulProposalResolution::Accepted, None, None, 3)
+                .resolve_proposal_with_voice(
+                    "nova",
+                    id,
+                    SoulProposalResolution::Accepted,
+                    None,
+                    None,
+                    3,
+                    || Some(Default::default()),
+                )
                 .unwrap();
         };
         approve(NewSoulProposal {
@@ -608,7 +617,7 @@ mod tests {
         assert!(section.contains("- Between us: We call a bad trade a paper cut.\n"));
         // humor=high from the approved head; no config persona is set.
         assert!(
-            section.contains("Wit is welcome where it lands naturally."),
+            section.contains("Use natural wit without obscuring the answer."),
             "{section}"
         );
     }

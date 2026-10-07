@@ -12520,6 +12520,9 @@ async fn persona_for_agent_follows_the_card() {
         .persona_for_agent("default")
         .expect("a carded agent whose card names a persona resolves it");
     assert_eq!(persona.directness, crate::persona::PersonaLevel::Xhigh);
+    let (_, alias, card) = cfg.persona_selection_for_agent("default").unwrap();
+    assert_eq!(alias, "terse");
+    assert_eq!(card, Some("analyst"));
 }
 
 #[tokio::test]
@@ -12529,6 +12532,9 @@ async fn persona_for_agent_resolves_a_direct_persona_on_an_uncarded_agent() {
         .persona_for_agent("default")
         .expect("an uncarded agent's direct persona field resolves");
     assert_eq!(persona.directness, crate::persona::PersonaLevel::Xhigh);
+    let (_, alias, card) = cfg.persona_selection_for_agent("default").unwrap();
+    assert_eq!(alias, "terse");
+    assert_eq!(card, None);
 }
 
 #[tokio::test]

@@ -79,16 +79,19 @@ async fn tick_agent(
         since_unix,
         now_unix,
     );
-    let voice = config
-        .persona_for_agent(agent_alias)
-        .copied()
-        .unwrap_or_default();
     let user_model = UserModelStore::shared(&config.data_dir)?;
     let receipt = reflect(
         store,
         agent_alias,
         &user_model,
-        voice,
+        || {
+            Some(
+                config
+                    .persona_for_agent(agent_alias)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        },
         &messages,
         || reflection_provider(config, agent_alias),
         since_unix,

@@ -261,8 +261,9 @@ Proposal shapes:
 - growth, add: {\"layer\":\"growth\",\"growth_kind\":\"self\"|\"bond\",\"proposal\":\"<one line, at most 200 bytes>\",\"rationale\":\"...\"}
   `self` is how you have changed or what you have come to care about; `bond` is something you and the owner share (a nickname, shorthand, a running joke, a way of working).
 - growth, retire: {\"layer\":\"growth\",\"retire_index\":<index shown below>,\"proposal\":\"<why>\",\"rationale\":\"...\"}
-- voice: {\"layer\":\"voice\",\"trait_key\":\"warmth\"|\"directness\"|\"explanation_density\"|\"challenge\"|\"humor\",\"level\":\"minimal\"|\"low\"|\"medium\"|\"high\"|\"xhigh\",\"proposal\":\"<why>\",\"rationale\":\"...\"}
-  challenge may not go below low.
+- voice: {\"layer\":\"voice\",\"trait_key\":\"warmth\"|\"directness\"|\"explanation_density\"|\"challenge\"|\"humor\",\"level\":\"minimal\"|\"low\"|\"medium\"|\"high\"|\"xhigh\",\"proposal\":\"<why>\",\"rationale\":\"...\",\"evidence_indices\":[<one owner message index>]}
+  Move one dial by at most one adjacent level from the current effective Voice. challenge may not go below low; warmth never trades away honesty.
+  Compare Growth bond entries with actual owner reactions (thanks, corrections, tone complaints). Familiarity alone is not consent: quote a supporting owner reaction in the rationale and include exactly one evidence_indices entry. For example, a supported request for shorter answers can lower explanation_density one level. If reactions are mixed or absent, propose nothing.
 - principles, add: {\"layer\":\"principles\",\"proposal\":\"<one line, at most 240 bytes>\",\"rationale\":\"...\"}
 
 User Model candidate shape:
@@ -355,12 +356,14 @@ struct RawProposal {
     growth_kind: Option<String>,
     #[serde(default)]
     retire_index: Option<u32>,
+    #[serde(default)]
+    evidence_indices: Vec<usize>,
 }
 
 /// Parse the model's reply into at most [`REFLECTION_MAX_PROPOSALS`]
 /// proposals. Malformed entries are dropped; a malformed reply yields none.
 #[must_use]
-pub fn parse_reflection(reply: &str) -> Vec<NewSoulProposal> {
+pub fn parse_reflection(reply: &str, messages: &OwnerMessages) -> Vec<NewSoulProposal> {
     if reply.len() > 16 * 1024 {
         return Vec::new();
     }
@@ -382,15 +385,54 @@ pub fn parse_reflection(reply: &str) -> Vec<NewSoulProposal> {
                 None | Some("") => None,
                 Some(kind) => Some(GrowthKind::parse(kind)?),
             };
+            let (session_ref, rationale) = if layer == SoulProposalLayer::Voice {
+                let [index] = raw.evidence_indices.as_slice() else {
+                    return None;
+                };
+                let message = messages.messages.get(*index)?;
+                let canonical_reference =
+                    serde_json::json!({"session":message.session_id,"at_unix":message.at_unix})
+                        .to_string();
+                // Keep the ordinary reviewable reference; hash only identities
+                // that cannot fit the existing field, never discard their evidence.
+                let reference = if canonical_reference.len() <= 128 {
+                    canonical_reference
+                } else {
+                    use sha2::{Digest, Sha256};
+                    format!(
+                        "sha256:{:x}",
+                        Sha256::digest(canonical_reference.as_bytes())
+                    )
+                };
+                // Reserve a byte budget for the actual owner quote before
+                // shortening the model's rationale. JSON escaping counts too.
+                let mut quote = String::new();
+                for ch in message.text.chars() {
+                    quote.push(ch);
+                    if serde_json::to_string(&quote).ok()?.len() > 160 {
+                        quote.pop();
+                        break;
+                    }
+                }
+                let evidence = format!(" Owner evidence: {}", serde_json::to_string(&quote).ok()?);
+                let budget = crate::companion::SOUL_RATIONALE_MAX_BYTES - evidence.len();
+                let mut end = raw.rationale.len().min(budget);
+                while !raw.rationale.is_char_boundary(end) {
+                    end -= 1;
+                }
+                (reference, format!("{}{}", &raw.rationale[..end], evidence))
+            } else {
+                ("weekly_reflection".to_string(), raw.rationale)
+            };
             Some(NewSoulProposal {
                 layer,
                 proposal: raw.proposal,
-                rationale: raw.rationale,
+                rationale,
                 trait_key: raw.trait_key.filter(|s| !s.trim().is_empty()),
                 level: raw.level.filter(|s| !s.trim().is_empty()),
                 growth_kind,
                 retire_index: raw.retire_index,
-                session_ref: Some("weekly_reflection".to_string()),
+                session_ref: Some(session_ref),
             })
         })
         .collect()
@@ -467,7 +509,7 @@ pub async fn reflect(
     store: &SoulProfileStore,
     agent_alias: &str,
     user_model: &UserModelStore,
-    voice: zeroclaw_config::persona::PersonaKnobs,
+    configured_voice: impl Fn() -> Option<zeroclaw_config::persona::PersonaKnobs>,
     messages: &OwnerMessages,
     model: impl FnOnce() -> anyhow::Result<ReflectionModel>,
     since_unix: u64,
@@ -510,6 +552,15 @@ pub async fn reflect(
         receipt(OUTCOME_QUEUE_FULL.to_string(), 0, 0)
     } else {
         let profile = store.profile(agent_alias)?;
+        let voice = configured_voice().ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+                "current configured Voice is unavailable"
+            );
+            anyhow::Error::msg("current configured Voice is unavailable")
+        })?;
         let voice = profile
             .voice
             .as_ref()
@@ -543,8 +594,13 @@ pub async fn reflect(
             Err(err) => receipt(failure_outcome(&err), 0, 0),
             Ok(reply) => {
                 let mut created = 0;
-                for proposal in parse_reflection(&reply) {
-                    match store.submit_proposal(agent_alias, proposal, now_unix) {
+                for proposal in parse_reflection(&reply, messages) {
+                    match store.submit_proposal_with_voice(
+                        agent_alias,
+                        proposal,
+                        now_unix,
+                        &configured_voice,
+                    ) {
                         Ok(SoulProposalOutcome::Recorded { .. }) => created += 1,
                         Ok(SoulProposalOutcome::AlreadyPending { .. }) => {}
                         Err(err @ SoulProfileError::Storage(_)) => {
@@ -909,6 +965,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn voice_evidence_survives_long_sessions_and_multilingual_rationale() {
+        let (_dir, store) = store();
+        let mut owner = messages(&[&"請保持簡潔🙂\"\\".repeat(40)]);
+        owner.messages[0].session_id = "thread-房間".repeat(80);
+        let reply = serde_json::json!({"proposals":[{
+            "layer":"voice", "trait_key":"warmth", "level":"high",
+            "proposal":"Adjust warmth.", "rationale":"理由".repeat(80),
+            "evidence_indices":[0]
+        }]})
+        .to_string();
+        let proposals = parse_reflection(&reply, &owner);
+        assert_eq!(proposals.len(), 1);
+        let proposal = &proposals[0];
+        assert!(proposal.rationale.len() <= crate::companion::SOUL_RATIONALE_MAX_BYTES);
+        let (_, quote) = proposal.rationale.split_once(" Owner evidence: ").unwrap();
+        let quote: String = serde_json::from_str(quote).unwrap();
+        assert!(!quote.is_empty());
+        assert!(owner.messages[0].text.starts_with(&quote));
+        let reference = proposal.session_ref.as_deref().unwrap();
+        assert!(reference.starts_with("sha256:"));
+        assert_eq!(reference.len(), 71);
+        assert_eq!(
+            parse_reflection(&reply, &owner)[0].session_ref,
+            proposal.session_ref
+        );
+        owner.messages[0].session_id.push('x');
+        assert_ne!(
+            parse_reflection(&reply, &owner)[0].session_ref,
+            proposal.session_ref
+        );
+        store
+            .submit_proposal_with_voice(AGENT, proposals[0].clone(), NOW, || {
+                Some(Default::default())
+            })
+            .unwrap();
+        assert_eq!(store.proposals(AGENT, true).unwrap().len(), 1);
+        assert!(store.profile(AGENT).unwrap().voice.is_none());
+    }
+
+    #[tokio::test]
+    async fn voice_reflection_binds_owner_reaction_and_rejects_unbound_or_large_changes() {
+        let (dir, store) = store();
+        store
+            .set_growth(
+                AGENT,
+                crate::companion::SoulGrowth {
+                    entries: vec![crate::companion::GrowthEntry {
+                        kind: crate::companion::GrowthKind::Bond,
+                        text: "We share a shorthand for reviews.".into(),
+                    }],
+                },
+                0,
+                NOW - 1,
+            )
+            .unwrap();
+        let reply = r#"{"proposals":[
+            {"layer":"voice","trait_key":"explanation_density","level":"low","proposal":"Be briefer.","rationale":"The owner asked for shorter replies.","evidence_indices":[0]},
+            {"layer":"voice","trait_key":"humor","level":"high","proposal":"More humor.","rationale":"Invented praise.","evidence_indices":[99]},
+            {"layer":"voice","trait_key":"warmth","level":"xhigh","proposal":"Much warmer.","rationale":"Thanks.","evidence_indices":[0]}
+        ]}"#;
+        let (model, seen) = fake(Ok(reply));
+        let receipt = reflect(
+            &store,
+            AGENT,
+            &UserModelStore::open(dir.path()).unwrap(),
+            || Some(PersonaKnobs::default()),
+            &messages(&["Please keep replies shorter."]),
+            model,
+            NOW - REFLECTION_PERIOD_SECS,
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt.proposals_created, 1);
+        assert!(store.profile(AGENT).unwrap().voice.is_none());
+        let proposals = store.proposals(AGENT, true).unwrap();
+        assert!(
+            proposals[0]
+                .rationale
+                .contains("Please keep replies shorter.")
+        );
+        let reference: serde_json::Value =
+            serde_json::from_str(proposals[0].session_ref.as_deref().unwrap()).unwrap();
+        assert_eq!(reference["session"], "owner-session");
+        assert_eq!(reference["at_unix"], NOW - 100);
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].0.contains("one adjacent level"));
+        assert!(seen[0].1.contains("We share a shorthand for reviews."));
+    }
+
     #[tokio::test]
     async fn reflection_proposes_at_most_three_validated_changes_and_applies_nothing() {
         let (_dir, store) = store();
@@ -926,7 +1073,7 @@ mod tests {
             &store,
             AGENT,
             &UserModelStore::open(_dir.path()).unwrap(),
-            PersonaKnobs::default(),
+            || Some(PersonaKnobs::default()),
             &messages(&["I prefer short answers", "let's call Fridays ship day"]),
             model,
             NOW - REFLECTION_PERIOD_SECS,
@@ -961,7 +1108,7 @@ mod tests {
             &store,
             AGENT,
             &UserModelStore::open(_dir.path()).unwrap(),
-            PersonaKnobs::default(),
+            || Some(PersonaKnobs::default()),
             &OwnerMessages::default(),
             never_called,
             NOW - REFLECTION_PERIOD_SECS,
@@ -1000,7 +1147,7 @@ mod tests {
             &store,
             AGENT,
             &user_model,
-            PersonaKnobs::default(),
+            || Some(PersonaKnobs::default()),
             &messages(&["hello"]),
             never_called,
             NOW - REFLECTION_PERIOD_SECS,
@@ -1020,7 +1167,7 @@ mod tests {
             &store,
             AGENT,
             &UserModelStore::open(_dir.path()).unwrap(),
-            PersonaKnobs::default(),
+            || Some(PersonaKnobs::default()),
             &messages(&["hi"]),
             model,
             NOW - REFLECTION_PERIOD_SECS,
@@ -1038,7 +1185,7 @@ mod tests {
             &store,
             AGENT,
             &UserModelStore::open(_dir.path()).unwrap(),
-            PersonaKnobs::default(),
+            || Some(PersonaKnobs::default()),
             &messages(&["hi"]),
             model,
             NOW - REFLECTION_PERIOD_SECS,
@@ -1098,7 +1245,7 @@ mod tests {
             &soul,
             AGENT,
             &user,
-            PersonaKnobs::default(),
+            || Some(PersonaKnobs::default()),
             &messages(&["Hello"]),
             model,
             NOW - 100,
@@ -1144,7 +1291,7 @@ mod tests {
             &soul,
             AGENT,
             &user,
-            PersonaKnobs::default(),
+            || Some(PersonaKnobs::default()),
             &messages(&["Please be brief", "Finish this task"]),
             model,
             NOW - REFLECTION_PERIOD_SECS,
@@ -1205,7 +1352,7 @@ mod tests {
             &soul,
             AGENT,
             &user,
-            PersonaKnobs::default(),
+            || Some(PersonaKnobs::default()),
             &messages(&["Please keep it short"]),
             model,
             NOW - 100,
@@ -1238,7 +1385,7 @@ mod tests {
             &soul,
             AGENT,
             &user,
-            Default::default(),
+            || Some(Default::default()),
             &messages(&["Use our shorthand"]),
             model,
             NOW - 100,
@@ -1272,7 +1419,7 @@ mod tests {
             &soul,
             AGENT,
             &user,
-            Default::default(),
+            || Some(Default::default()),
             &messages(&["Use our shorthand"]),
             model,
             NOW - 100,

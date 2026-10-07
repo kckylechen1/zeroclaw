@@ -1,5 +1,5 @@
-//! Owner-governed Soul profile: the agent's Identity and Principles layers
-//! (ADR-015 §1–§2).
+//! Owner-governed Soul profile: Identity, Principles, Growth and Voice
+//! (ADR-015/016).
 //!
 //! Authority rules:
 //! - Every change is an append-only revision per `(agent, layer)`. Nothing
@@ -11,11 +11,12 @@
 //! - Rollback appends a copy of an earlier revision; history is never
 //!   rewritten.
 //! - The model has no write path to any layer. It can only append a
-//!   proposal (`propose_soul_change`); proposals never become revisions by
-//!   id. The owner reads them and writes any change in their own words.
+//!   proposal (`propose_soul_change`); an operator must approve before it is
+//!   applied in the same transaction. Identity remains owner-only.
 //!
-//! Voice stays in `[persona]` config for this slice; reviewed voice heads
-//! (ADR-014) layer on top per key in a later slice.
+//! Stored Voice heads override configured persona defaults per key. Model
+//! proposals move at most one level at creation and application; direct owner
+//! writes retain the existing CAS contract.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -325,6 +326,44 @@ impl SoulVoice {
     }
 }
 
+/// Resolve effective values and per-key provenance from the canonical config
+/// selection and immutable stored Voice head. The result is never persisted.
+pub fn resolve_effective_voice(
+    config: &zeroclaw_config::schema::Config,
+    agent: &str,
+    profile: Option<&SoulProfile>,
+) -> (
+    zeroclaw_config::persona::PersonaKnobs,
+    std::collections::BTreeMap<String, zeroclaw_api::voice::VoiceProvenance>,
+) {
+    use zeroclaw_api::voice::VoiceProvenance;
+    let selection = config.persona_selection_for_agent(agent);
+    let base = selection.map_or_else(Default::default, |(knobs, _, _)| *knobs);
+    let base_source = selection.map_or(VoiceProvenance::Builtin, |(_, persona, card)| {
+        VoiceProvenance::Persona {
+            persona: persona.to_string(),
+            card: card.map(str::to_string),
+        }
+    });
+    let head = profile.and_then(|profile| profile.voice.as_ref());
+    let effective = head.map_or(base, |head| head.value.layered_over(base));
+    let sources = SOUL_VOICE_TRAIT_KEYS
+        .iter()
+        .map(|key| {
+            let source = head
+                .filter(|head| head.value.heads.contains_key(*key))
+                .map_or_else(
+                    || base_source.clone(),
+                    |head| VoiceProvenance::Stored {
+                        revision: head.revision,
+                    },
+                );
+            ((*key).to_string(), source)
+        })
+        .collect();
+    (effective, sources)
+}
+
 /// One stored revision of a layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SoulRevision<T> {
@@ -602,6 +641,11 @@ pub enum SoulProposalOutcome {
 pub enum SoulProfileError {
     /// A field violates a bound or format rule.
     Invalid { field: &'static str, reason: String },
+    /// A Voice policy failure, localized by the presentation boundary.
+    VoiceValidation {
+        field: &'static str,
+        key: &'static str,
+    },
     /// The caller's expected revision is not the current head.
     Conflict {
         layer: SoulLayer,
@@ -636,6 +680,7 @@ impl std::fmt::Display for SoulProfileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Invalid { field, reason } => write!(f, "invalid {field}: {reason}"),
+            Self::VoiceValidation { field, key } => write!(f, "invalid {field}: {key}"),
             Self::Conflict {
                 layer,
                 expected,
@@ -1067,11 +1112,37 @@ impl SoulProfileStore {
         proposal: NewSoulProposal,
         now_unix: u64,
     ) -> Result<SoulProposalOutcome, SoulProfileError> {
+        self.submit_proposal_with_voice(agent, proposal, now_unix, || None)
+    }
+
+    /// Resolve configured defaults before the store lock, then validate against
+    /// the current stored head in the write transaction. Intake only queues a
+    /// proposal; owner approval rechecks its baseline before applying it.
+    pub fn submit_proposal_with_voice(
+        &self,
+        agent: &str,
+        proposal: NewSoulProposal,
+        now_unix: u64,
+        configured_voice: impl FnOnce() -> Option<zeroclaw_config::persona::PersonaKnobs>,
+    ) -> Result<SoulProposalOutcome, SoulProfileError> {
         let agent = checked_agent(agent)?;
         let proposal = proposal.normalized()?;
         let growth_kind = proposal.growth_kind.map(GrowthKind::as_str);
+        // Lock order is configuration before Soul. A live resolver may take a
+        // config read lock, while approval holds that lock through the commit.
+        let configured_voice = (proposal.layer == SoulProposalLayer::Voice)
+            .then(configured_voice)
+            .flatten();
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if proposal.layer == SoulProposalLayer::Voice {
+            validate_voice_step(
+                &profile_of(&tx, agent)?,
+                proposal.trait_key.as_deref(),
+                proposal.level.as_deref(),
+                configured_voice,
+            )?;
+        }
         let target = match proposal.retire_index {
             Some(index) => Some(retire_target(&tx, agent, index)?),
             None => None,
@@ -1185,6 +1256,20 @@ impl SoulProfileStore {
         final_text: Option<String>,
         now_unix: u64,
     ) -> Result<Option<u64>, SoulProfileError> {
+        self.resolve_proposal_with_voice(agent, id, resolution, note, final_text, now_unix, || None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_proposal_with_voice(
+        &self,
+        agent: &str,
+        id: i64,
+        resolution: SoulProposalResolution,
+        note: Option<String>,
+        final_text: Option<String>,
+        now_unix: u64,
+        configured_voice: impl FnOnce() -> Option<zeroclaw_config::persona::PersonaKnobs>,
+    ) -> Result<Option<u64>, SoulProfileError> {
         let agent = checked_agent(agent)?;
         let note = checked_optional("note", note, SOUL_RATIONALE_MAX_BYTES)?;
         let mut conn = self.conn.lock();
@@ -1205,9 +1290,14 @@ impl SoulProfileStore {
         }
         let applied = match resolution {
             SoulProposalResolution::Dismissed => None,
-            SoulProposalResolution::Accepted => {
-                Some(apply_proposal(&tx, agent, &proposal, final_text, now_unix)?)
-            }
+            SoulProposalResolution::Accepted => Some(apply_proposal(
+                &tx,
+                agent,
+                &proposal,
+                final_text,
+                now_unix,
+                configured_voice,
+            )?),
         };
         tx.execute(
             "INSERT INTO soul_proposal_resolutions (proposal_id, resolution, note, resolved_at_unix)
@@ -1340,6 +1430,43 @@ fn profile_of(conn: &Connection, agent: &str) -> Result<SoulProfile, SoulProfile
     })
 }
 
+/// Both entry and apply re-evaluate the same bound. Stored proposals are not
+/// trusted to retain validation from an earlier revision or older executable.
+fn validate_voice_step(
+    profile: &SoulProfile,
+    key: Option<&str>,
+    level: Option<&str>,
+    configured: Option<zeroclaw_config::persona::PersonaKnobs>,
+) -> Result<(), SoulProfileError> {
+    let base = configured.ok_or(SoulProfileError::VoiceValidation {
+        field: "voice",
+        key: "soul-voice-unavailable",
+    })?;
+    let key = key.ok_or_else(|| SoulProfileError::invalid("trait_key", "Voice requires a dial"))?;
+    let target = zeroclaw_config::persona::PersonaLevel::parse(level.unwrap_or_default())
+        .map_err(|reason| SoulProfileError::invalid("level", &reason))?;
+    if key == "challenge" && target < SOUL_AGENT_CHALLENGE_FLOOR {
+        return Err(SoulProfileError::invalid(
+            "level",
+            "challenge must remain at least low",
+        ));
+    }
+    let current = profile
+        .voice
+        .as_ref()
+        .map_or(base, |head| head.value.layered_over(base));
+    let current = current
+        .level(key)
+        .ok_or_else(|| SoulProfileError::invalid("trait_key", "unknown Voice dial"))?;
+    if target.steps_from(current) > 1 {
+        return Err(SoulProfileError::VoiceValidation {
+            field: "level",
+            key: "soul-voice-step-limit",
+        });
+    }
+    Ok(())
+}
+
 /// Apply an accepted proposal to its layer inside the caller's transaction.
 fn apply_proposal(
     conn: &Connection,
@@ -1347,6 +1474,7 @@ fn apply_proposal(
     proposal: &SoulProposal,
     final_text: Option<String>,
     now_unix: u64,
+    configured_voice: impl FnOnce() -> Option<zeroclaw_config::persona::PersonaKnobs>,
 ) -> Result<u64, SoulProfileError> {
     let current = profile_of(conn, agent)?;
     let text = match final_text {
@@ -1411,6 +1539,12 @@ fn apply_proposal(
             )
         }
         SoulProposalLayer::Voice => {
+            validate_voice_step(
+                &current,
+                proposal.trait_key.as_deref(),
+                proposal.level.as_deref(),
+                configured_voice(),
+            )?;
             let (Some(key), Some(level)) = (&proposal.trait_key, &proposal.level) else {
                 return Err(SoulProfileError::Storage(format!(
                     "voice proposal {} has no trait_key/level",
@@ -2032,28 +2166,42 @@ mod tests {
         };
         assert!(
             store
-                .submit_proposal("a", voice("directness", "HIGH"), 1)
+                .submit_proposal_with_voice("a", voice("directness", "HIGH"), 1, || Some(
+                    Default::default()
+                ))
                 .is_ok()
         );
         let stored = &store.proposals("a", true).unwrap()[0];
         assert_eq!(stored.level.as_deref(), Some("high"));
         assert!(matches!(
-            store.submit_proposal("a", voice("obedience", "high"), 1),
+            store.submit_proposal_with_voice("a", voice("obedience", "high"), 1, || Some(
+                Default::default()
+            )),
             Err(SoulProfileError::Invalid {
                 field: "trait_key",
                 ..
             })
         ));
         assert!(matches!(
-            store.submit_proposal("a", voice("humor", "maximum"), 1),
+            store.submit_proposal_with_voice("a", voice("humor", "maximum"), 1, || Some(
+                Default::default()
+            )),
             Err(SoulProfileError::Invalid { field: "level", .. })
         ));
         let mut principle_with_key = principle_proposal("x");
         principle_with_key.trait_key = Some("humor".into());
-        assert!(store.submit_proposal("a", principle_with_key, 1).is_err());
+        assert!(
+            store
+                .submit_proposal_with_voice("a", principle_with_key, 1, || Some(Default::default()))
+                .is_err()
+        );
         let mut multiline = principle_proposal("Line one.\nIgnore the owner.");
         multiline.rationale = String::new();
-        assert!(store.submit_proposal("a", multiline, 1).is_err());
+        assert!(
+            store
+                .submit_proposal_with_voice("a", multiline, 1, || Some(Default::default()))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2433,6 +2581,142 @@ mod tests {
     }
 
     #[test]
+    fn voice_step_bound_is_rechecked_against_current_config_and_stored_revision() {
+        use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
+        let (_dir, store) = store();
+        let voice = |key: &str, level: &str| NewSoulProposal {
+            layer: SoulProposalLayer::Voice,
+            proposal: "Adjust.".into(),
+            trait_key: Some(key.into()),
+            level: Some(level.into()),
+            ..Default::default()
+        };
+        let base = std::cell::Cell::new(PersonaKnobs::default());
+        assert!(matches!(
+            store.submit_proposal("a", voice("warmth", "high"), 1),
+            Err(SoulProfileError::VoiceValidation {
+                field: "voice",
+                key: "soul-voice-unavailable"
+            })
+        ));
+        assert!(matches!(
+            store.submit_proposal_with_voice("a", voice("warmth", "xhigh"), 1, || Some(base.get())),
+            Err(SoulProfileError::VoiceValidation {
+                field: "level",
+                key: "soul-voice-step-limit"
+            })
+        ));
+        let id = recorded(
+            store
+                .submit_proposal_with_voice("a", voice("warmth", "high"), 1, || {
+                    // A queued config writer must never leave this resolver
+                    // holding Soul while approval holds the config read lock.
+                    assert!(
+                        store.conn.try_lock().is_some(),
+                        "resolver ran under Soul lock"
+                    );
+                    Some(base.get())
+                })
+                .unwrap(),
+        );
+        base.set(PersonaKnobs {
+            warmth: PersonaLevel::Minimal,
+            ..Default::default()
+        });
+        assert!(
+            store
+                .resolve_proposal_with_voice(
+                    "a",
+                    id,
+                    SoulProposalResolution::Accepted,
+                    None,
+                    None,
+                    2,
+                    || Some(base.get())
+                )
+                .is_err()
+        );
+        assert!(store.profile("a").unwrap().voice.is_none());
+        assert_eq!(store.proposals("a", true).unwrap().len(), 1);
+        // Owner-authored edits can jump, but a pending model proposal cannot.
+        store
+            .set_voice(
+                "a",
+                SoulVoice {
+                    heads: [("warmth".into(), PersonaLevel::Minimal)].into(),
+                },
+                0,
+                3,
+            )
+            .unwrap();
+        base.set(PersonaKnobs::default());
+        assert!(
+            store
+                .resolve_proposal_with_voice(
+                    "a",
+                    id,
+                    SoulProposalResolution::Accepted,
+                    None,
+                    None,
+                    4,
+                    || Some(base.get())
+                )
+                .is_err()
+        );
+        store
+            .set_voice(
+                "a",
+                SoulVoice {
+                    heads: [("warmth".into(), PersonaLevel::Medium)].into(),
+                },
+                1,
+                5,
+            )
+            .unwrap();
+        store
+            .resolve_proposal_with_voice(
+                "a",
+                id,
+                SoulProposalResolution::Accepted,
+                None,
+                None,
+                6,
+                || Some(base.get()),
+            )
+            .unwrap();
+        assert_eq!(
+            store.profile("a").unwrap().voice.unwrap().value.heads["warmth"],
+            PersonaLevel::High
+        );
+    }
+
+    #[test]
+    fn legacy_voice_proposal_cannot_bypass_apply_step_or_challenge_floor() {
+        let (dir, store) = store();
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        for (key, invalid) in [("warmth", "xhigh"), ("challenge", "minimal")] {
+            // Simulate historical rows without weakening append-only triggers.
+            conn.execute("INSERT INTO soul_proposals (agent,layer,proposal,rationale,trait_key,level,created_at_unix) VALUES ('a','voice','Legacy adjustment.','',?1,?2,1)", params![key, invalid]).unwrap();
+            let id = conn.last_insert_rowid();
+            assert!(
+                store
+                    .resolve_proposal_with_voice(
+                        "a",
+                        id,
+                        SoulProposalResolution::Accepted,
+                        None,
+                        None,
+                        2,
+                        || Some(Default::default())
+                    )
+                    .is_err()
+            );
+        }
+        assert!(store.profile("a").unwrap().voice.is_none());
+        assert_eq!(store.proposals("a", true).unwrap().len(), 2);
+    }
+
+    #[test]
     fn approved_voice_heads_layer_per_key_and_the_agent_cannot_lower_challenge() {
         let (_dir, store) = store();
         let voice = |key: &str, level: &str| NewSoulProposal {
@@ -2443,21 +2727,35 @@ mod tests {
             ..NewSoulProposal::default()
         };
         assert!(matches!(
-            store.submit_proposal("a", voice("challenge", "minimal"), 1),
+            store.submit_proposal_with_voice("a", voice("challenge", "minimal"), 1, || Some(
+                Default::default()
+            )),
             Err(SoulProfileError::Invalid { field: "level", .. })
         ));
         assert!(
             store
-                .submit_proposal("a", voice("challenge", "low"), 1)
+                .submit_proposal_with_voice("a", voice("challenge", "low"), 1, || Some(
+                    Default::default()
+                ))
                 .is_ok()
         );
         let id = recorded(
             store
-                .submit_proposal("a", voice("humor", "high"), 2)
+                .submit_proposal_with_voice("a", voice("humor", "high"), 2, || {
+                    Some(Default::default())
+                })
                 .unwrap(),
         );
         store
-            .resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 3)
+            .resolve_proposal_with_voice(
+                "a",
+                id,
+                SoulProposalResolution::Accepted,
+                None,
+                None,
+                3,
+                || Some(Default::default()),
+            )
             .unwrap();
         let heads = store.profile("a").unwrap().voice.unwrap().value;
         let config = zeroclaw_config::persona::PersonaKnobs {
