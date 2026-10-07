@@ -2087,6 +2087,14 @@ impl SecurityPolicy {
         dirs
     }
 
+    /// Recursive external readers authorize a directory only once. Roots
+    /// containing runtime directories require per-file policy checks instead.
+    pub fn requires_guarded_recursive_read(&self, root: &Path) -> bool {
+        self.runtime_config_dirs()
+            .iter()
+            .any(|dir| dir.starts_with(root))
+    }
+
     /// Governed companion stores are available only through their typed APIs.
     /// Broad workspace/root grants must not turn them into ordinary file data.
     pub fn is_protected_companion_path(&self, resolved: &Path) -> bool {

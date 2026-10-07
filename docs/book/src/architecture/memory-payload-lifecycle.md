@@ -93,7 +93,9 @@ policy still belongs to the owning ingress and memory-injection contract.
 Generic file access cannot read or write `soul.db`, `user_model.db`, or their
 SQLite WAL/SHM/journal files in the configured runtime directories, even when a
 broad workspace/root grant includes those directories. Resolved symlinks obey
-the same guard. Owner APIs and the bounded prompt projection remain the typed
+the same guard. Recursive content searches whose root contains a runtime
+directory use per-file checks (and refuse unsupported multiline searches)
+instead of giving an external search process unfiltered directory access. Owner APIs and the bounded prompt projection remain the typed
 access paths. These application path guards are not an OS sandbox: approved
 arbitrary shell commands and external processes still need their own filesystem
 isolation. Do not treat a shell approval as a proof of protected-store isolation.
