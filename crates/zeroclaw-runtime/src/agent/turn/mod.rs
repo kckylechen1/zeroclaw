@@ -271,7 +271,24 @@ impl<'a> TurnState<'a> {
 pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
     // One loop invocation is one agent turn: advisor consultations made by
     // its tools count against a fresh per-turn budget (#405).
-    crate::subagent_v1::scope_advisor_turn(run_tool_call_loop_turn(p)).await
+    // Use the same canonical IDs as memory injection/autosave. For example,
+    // WebSocket history uses `gw_<id>` while its memory uses `<id>`.
+    // Always scope this invocation, including nested turns with no memory,
+    // so a child cannot inherit its parent's recall authority.
+    let memory_sessions = p
+        .memory
+        .as_ref()
+        .into_iter()
+        .flat_map(|memory| memory.sessions.iter().flatten())
+        .filter(|session| !session.trim().is_empty())
+        .cloned()
+        .collect();
+    zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+        .scope(
+            memory_sessions,
+            crate::subagent_v1::scope_advisor_turn(run_tool_call_loop_turn(p)),
+        )
+        .await
 }
 
 async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {

@@ -47,6 +47,11 @@ tokio::task_local! {
     /// Scoped by gateway and channel turns, read by SessionsCurrentTool.
     pub static TOOL_LOOP_SESSION_KEY: Option<String>;
 
+    /// Canonical memory sessions from the active ToolLoop memory input.
+    /// Derived for this turn only; transport/history keys are not memory IDs.
+    /// An empty scope admits only unscoped non-Conversation recall results.
+    pub static TOOL_LOOP_MEMORY_SESSIONS: Vec<String>;
+
     /// Native extended thinking parameters, set by the outer orchestration
     /// functions and read by `run_tool_call_loop` when building `ChatRequest`.
     pub static NATIVE_THINKING_OVERRIDE: Option<crate::model_provider::NativeThinkingParams>;
