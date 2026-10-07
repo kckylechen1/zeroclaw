@@ -28,7 +28,11 @@ cargo web install       # npm install in web/
 
 ## CI and release builds
 
-CI does not run `cargo web build`: the lint/build/test jobs use a `web/dist/.gitkeep` placeholder so the gateway crate compiles without the bundle. Producing a release artifact that includes the dashboard is a separate step:
+The required web job runs `npm ci`, permission and review regressions, and
+`npm run build` (typecheck plus Vite). Rust lint/build/test jobs use a
+`web/dist/.gitkeep` placeholder so the gateway crate compiles without the
+bundle. Producing a release artifact that includes the dashboard is a
+separate step:
 
 <div class="os-tabs-src">
 
@@ -69,14 +73,21 @@ and `structuredClone()`.
 ## Owner review on a phone-sized screen
 
 The `/review` page uses the existing operator-only review, Soul and User Model
-APIs. Pair as an owner on this page even if ordinary gateway access has pairing
-disabled. A token's presence does not grant review authority; an owner-only
-read verifies access. Expired or bridge tokens show the local re-pair form.
+APIs. A token's presence does not grant review authority; an owner-only read
+verifies access. The local recovery view checks `/health`: it offers code
+entry only when pairing is enabled. With pairing disabled, the gateway cannot
+issue a new operator token. The owner must enable `gateway.require_pairing`
+in the gateway host configuration, apply it through the normal lifecycle,
+then run `zeroclaw gateway get-paircode --new` on that host. The page provides
+a check-again action; it does not change configuration or start services.
+Existing authorized operator tokens still work with pairing disabled.
 
 The inbox separates unapplied candidates from reflection receipts. Accept and
 reword use the candidate's existing authority path; limiting a User Model
 candidate binds it to the entered session. Dismissal applies no candidate.
-Soul proposals have no generic scope-narrowing action. Agent selection filters
+A rejected User Model candidate can be narrowed once from its review history.
+Soul proposals have no generic scope-narrowing action. Stale Soul proposals
+show the backend reason and offer dismissal instead of another acceptance. Agent selection filters
 Soul and reflection records, while the shared User Model retains its recorded
 scopes. Evidence is displayed as text, never executed as HTML.
 
@@ -97,3 +108,13 @@ from `web/`. Validate the rendered owner entry, pending/empty/error states,
 review actions and revision conflicts at 375px and desktop widths with
 synthetic records before shipping. Desktop viewport tests do not prove a
 physical phone or installed-service flow.
+
+The browser regression fixture is `web/scripts/review-browser.test.cjs`. After
+building, run it with an already-installed Playwright module selected by
+`PLAYWRIGHT_MODULE` and optional Chrome executable selected by `REVIEW_CHROME`
+(otherwise the installed Chrome channel is used). `REVIEW_SCREENSHOTS` chooses
+the screenshot directory; it defaults to the system temporary directory. The
+fixture launches an isolated context and synthetic localhost APIs, asserts
+that pairing-disabled gateways never mint tokens, and tests stale proposals,
+late history failures, rejected-candidate narrowing, focus and touch targets.
+It installs no browser package and requires no production credentials.

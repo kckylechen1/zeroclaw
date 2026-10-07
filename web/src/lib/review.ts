@@ -93,7 +93,7 @@ export interface CandidateHistory {
     }[];
 }
 export class ReviewError extends Error {
-    constructor(public status: number) { super(`Review HTTP ${status}`); }
+    constructor(public status: number, public code?: string) { super(`Review HTTP ${status}`); }
 }
 // Owner-only responses have several legacy envelopes. Preserve the status,
 // and keep re-pair local to this surface instead of changing anonymous routes.
@@ -105,8 +105,11 @@ export async function reviewFetch<T>(path: string, signal?: AbortSignal, body?: 
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         cache: 'no-store',
     });
-    if (!response.ok)
-        throw new ReviewError(response.status);
+    if (!response.ok) {
+        const envelope: unknown = await response.json().catch(() => null);
+        const code = envelope && typeof envelope === 'object' && 'code' in envelope && typeof envelope.code === 'string' ? envelope.code : undefined;
+        throw new ReviewError(response.status, code);
+    }
     return response.json() as Promise<T>;
 }
 export type Decision = 'accept' | 'reword' | 'narrow' | 'dismiss';

@@ -22,8 +22,13 @@ globalThis.fetch = async (input, options) => {
     assert.equal(options?.cache, 'no-store');
     return new Response(JSON.stringify({ code: 'store_unavailable', error: 'synthetic' }), { status: 503 });
 };
-await assert.rejects(reviewFetch('/api/review/inbox'), (error: unknown) => error instanceof ReviewError && error.status === 503);
+await assert.rejects(reviewFetch('/api/review/inbox'), (error: unknown) => error instanceof ReviewError && error.status === 503 && error.code === 'store_unavailable');
 globalThis.fetch = async () => new Response('', { status: 401 });
 await assert.rejects(reviewFetch('/api/review/inbox'), (error: unknown) => error instanceof ReviewError && error.status === 401);
 assert.equal(calls, 1);
 console.log('review action binding and owner HTTP status boundaries passed');
+
+for (const code of ['proposal_stale', 'revision_conflict', 'proposal_already_resolved', 'candidate_already_reviewed', 'unknown_agent']) {
+    globalThis.fetch = async () => new Response(JSON.stringify({ code, error: 'untrusted prose' }), { status: code === 'unknown_agent' ? 404 : 409 });
+    await assert.rejects(reviewFetch('/api/review/inbox'), (error: unknown) => error instanceof ReviewError && error.code === code);
+}
