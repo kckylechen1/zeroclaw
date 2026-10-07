@@ -1186,6 +1186,34 @@ mod tests {
         std::fs::write(root.join("notes.txt"), "public_fixture_match").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(data.join("soul.db"), root.join("alias.txt")).unwrap();
+        #[cfg(unix)]
+        {
+            let other = root.join("other");
+            std::fs::create_dir(&other).unwrap();
+            std::fs::hard_link(data.join("soul.db"), other.join("hardlink.txt")).unwrap();
+            std::fs::write(other.join("notes.txt"), "public_fixture_match").unwrap();
+            std::fs::hard_link(other.join("notes.txt"), other.join("public-link.txt")).unwrap();
+            for backend in [
+                SearchBackend::Ripgrep,
+                SearchBackend::Grep,
+                SearchBackend::Internal,
+            ] {
+                let tool = ContentSearchTool::new_with_backend(policy.clone(), backend);
+                for mode in ["content", "files_with_matches", "count"] {
+                    let result = tool
+                        .execute(
+                            json!({"pattern":"fixture_match", "path":"other", "output_mode":mode}),
+                        )
+                        .await
+                        .unwrap();
+                    assert!(result.success, "{:?}", result.error);
+                    assert!(result.output.contains("notes.txt"));
+                    assert!(result.output.contains("public-link.txt"));
+                    assert!(!result.output.contains("hardlink.txt"));
+                    assert!(!result.output.contains("private_fixture_match"));
+                }
+            }
+        }
         for backend in [
             SearchBackend::Ripgrep,
             SearchBackend::Grep,
@@ -1204,6 +1232,7 @@ mod tests {
                     "soul.db",
                     "user_model.db",
                     "alias.txt",
+                    "hardlink.txt",
                 ] {
                     assert!(!result.output.contains(forbidden), "{:?}", result.output);
                 }
