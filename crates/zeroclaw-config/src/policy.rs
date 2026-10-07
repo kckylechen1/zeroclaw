@@ -2101,11 +2101,12 @@ impl SecurityPolicy {
         let Some(name) = resolved.file_name().and_then(|value| value.to_str()) else {
             return false;
         };
+        let name = name.to_ascii_lowercase();
         let base = name
             .strip_suffix("-wal")
             .or_else(|| name.strip_suffix("-shm"))
             .or_else(|| name.strip_suffix("-journal"))
-            .unwrap_or(name);
+            .unwrap_or(&name);
         matches!(base, "soul.db" | "user_model.db")
             && resolved
                 .parent()
