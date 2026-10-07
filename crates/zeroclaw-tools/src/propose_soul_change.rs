@@ -209,6 +209,9 @@ impl Tool for ProposeSoulChangeTool {
                 "{SOUL_MAX_OPEN_PROPOSALS} of your proposals are already waiting for your owner. \
                  Nothing was recorded; wait until they are reviewed."
             )),
+            Ok(Err(SoulProfileError::VoiceValidation { key, .. })) => {
+                Self::failure(crate::i18n::get_required_tool_string(key))
+            }
             Ok(Err(err @ SoulProfileError::Invalid { .. })) => Self::failure(err.to_string()),
             Ok(Err(err)) => Self::failure(format!("Could not record the proposal: {err}")),
             Err(_) => Self::failure("Could not record the proposal: store task failed".into()),
@@ -292,7 +295,14 @@ mod tests {
         let proposal = |level: &str| json!({"layer":"voice", "trait_key":"warmth", "level":level, "proposal":"Adjust warmth.", "rationale":"Owner reaction."});
         assert!(tool.execute(proposal("high")).await.unwrap().success);
         current.lock().unwrap().warmth = PersonaLevel::Minimal;
-        assert!(!tool.execute(proposal("high")).await.unwrap().success);
+        let rejected = tool.execute(proposal("high")).await.unwrap();
+        assert!(!rejected.success);
+        assert_eq!(
+            rejected.error,
+            Some(crate::i18n::get_required_tool_string(
+                "soul-voice-step-limit"
+            ))
+        );
         assert!(tool.execute(proposal("low")).await.unwrap().success);
         let store = SoulProfileStore::shared(dir.path()).unwrap();
         assert_eq!(store.proposals("nova", true).unwrap().len(), 2);

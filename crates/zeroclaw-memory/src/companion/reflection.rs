@@ -390,21 +390,37 @@ pub fn parse_reflection(reply: &str, messages: &OwnerMessages) -> Vec<NewSoulPro
                     return None;
                 };
                 let message = messages.messages.get(*index)?;
-                let reference =
+                let canonical_reference =
                     serde_json::json!({"session":message.session_id,"at_unix":message.at_unix})
                         .to_string();
-                if reference.len() > 128 {
-                    return None;
-                }
-                let quote: String = message.text.chars().take(96).collect();
-                (
-                    reference,
+                // Keep the ordinary reviewable reference; hash only identities
+                // that cannot fit the existing field, never discard their evidence.
+                let reference = if canonical_reference.len() <= 128 {
+                    canonical_reference
+                } else {
+                    use sha2::{Digest, Sha256};
                     format!(
-                        "{} Owner evidence: {}",
-                        raw.rationale,
-                        serde_json::to_string(&quote).ok()?
-                    ),
-                )
+                        "sha256:{:x}",
+                        Sha256::digest(canonical_reference.as_bytes())
+                    )
+                };
+                // Reserve a byte budget for the actual owner quote before
+                // shortening the model's rationale. JSON escaping counts too.
+                let mut quote = String::new();
+                for ch in message.text.chars() {
+                    quote.push(ch);
+                    if serde_json::to_string(&quote).ok()?.len() > 160 {
+                        quote.pop();
+                        break;
+                    }
+                }
+                let evidence = format!(" Owner evidence: {}", serde_json::to_string(&quote).ok()?);
+                let budget = crate::companion::SOUL_RATIONALE_MAX_BYTES - evidence.len();
+                let mut end = raw.rationale.len().min(budget);
+                while !raw.rationale.is_char_boundary(end) {
+                    end -= 1;
+                }
+                (reference, format!("{}{}", &raw.rationale[..end], evidence))
             } else {
                 ("weekly_reflection".to_string(), raw.rationale)
             };
@@ -947,6 +963,46 @@ mod tests {
             later.messages.is_empty(),
             "messages before the period are not read"
         );
+    }
+
+    #[test]
+    fn voice_evidence_survives_long_sessions_and_multilingual_rationale() {
+        let (_dir, store) = store();
+        let mut owner = messages(&[&"請保持簡潔🙂\"\\".repeat(40)]);
+        owner.messages[0].session_id = "thread-房間".repeat(80);
+        let reply = serde_json::json!({"proposals":[{
+            "layer":"voice", "trait_key":"warmth", "level":"high",
+            "proposal":"Adjust warmth.", "rationale":"理由".repeat(80),
+            "evidence_indices":[0]
+        }]})
+        .to_string();
+        let proposals = parse_reflection(&reply, &owner);
+        assert_eq!(proposals.len(), 1);
+        let proposal = &proposals[0];
+        assert!(proposal.rationale.len() <= crate::companion::SOUL_RATIONALE_MAX_BYTES);
+        let (_, quote) = proposal.rationale.split_once(" Owner evidence: ").unwrap();
+        let quote: String = serde_json::from_str(quote).unwrap();
+        assert!(!quote.is_empty());
+        assert!(owner.messages[0].text.starts_with(&quote));
+        let reference = proposal.session_ref.as_deref().unwrap();
+        assert!(reference.starts_with("sha256:"));
+        assert_eq!(reference.len(), 71);
+        assert_eq!(
+            parse_reflection(&reply, &owner)[0].session_ref,
+            proposal.session_ref
+        );
+        owner.messages[0].session_id.push('x');
+        assert_ne!(
+            parse_reflection(&reply, &owner)[0].session_ref,
+            proposal.session_ref
+        );
+        store
+            .submit_proposal_with_voice(AGENT, proposals[0].clone(), NOW, || {
+                Some(Default::default())
+            })
+            .unwrap();
+        assert_eq!(store.proposals(AGENT, true).unwrap().len(), 1);
+        assert!(store.profile(AGENT).unwrap().voice.is_none());
     }
 
     #[tokio::test]

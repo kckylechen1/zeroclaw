@@ -36,6 +36,15 @@ fn error_json(status: StatusCode, code: &str, message: &str) -> Response {
 
 fn soul_error(err: &SoulProfileError) -> Response {
     match err {
+        SoulProfileError::VoiceValidation { field, key } => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "code": "invalid",
+                "field": field,
+                "error": crate::i18n::get_required_cli_string(key),
+            })),
+        )
+            .into_response(),
         SoulProfileError::Invalid { field, .. } => (
             StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({
@@ -558,6 +567,8 @@ pub async fn post_resolve_proposal(
     };
     let live_config = state.config.clone();
     match run_store(data_dir, move |store| {
+        // Keep configuration stable through the SQLite validation and commit.
+        let config = live_config.read();
         store.resolve_proposal_with_voice(
             &agent,
             id,
@@ -567,8 +578,7 @@ pub async fn post_resolve_proposal(
             now_unix(),
             || {
                 Some(
-                    live_config
-                        .read()
+                    config
                         .persona_for_agent(&agent)
                         .copied()
                         .unwrap_or_default(),
@@ -659,6 +669,25 @@ mod tests {
             .await,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn voice_policy_errors_are_localized_with_a_stable_field() {
+        for (field, key) in [
+            ("voice", "soul-voice-unavailable"),
+            ("level", "soul-voice-step-limit"),
+        ] {
+            let (status, body) = json_of(soul_error(&SoulProfileError::VoiceValidation {
+                field,
+                key,
+            }))
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["code"], "invalid");
+            assert_eq!(body["field"], field);
+            assert_eq!(body["error"], crate::i18n::get_required_cli_string(key));
+            assert_ne!(body["error"], key);
+        }
     }
 
     #[tokio::test]

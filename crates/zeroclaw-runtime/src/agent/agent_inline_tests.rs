@@ -1316,7 +1316,9 @@ fn carded_agent_persona_reaches_this_pipelines_built_prompt() {
         "carded persona must render a Voice section"
     );
     assert!(
-        prompt.contains("Lead with the verdict"),
+        prompt.contains(
+            "- directness (xhigh): Give the verdict immediately and plainly. Example: \"The date is invalid. Correct it first.\""
+        ),
         "the card's `terse` persona's xhigh directness dial must be the text that renders"
     );
 }
@@ -1354,7 +1356,9 @@ fn direct_persona_agent_reaches_this_pipelines_built_prompt() {
         "a direct persona field must render a Voice section"
     );
     assert!(
-        prompt.contains("Lead with the verdict"),
+        prompt.contains(
+            "- directness (xhigh): Give the verdict immediately and plainly. Example: \"The date is invalid. Correct it first.\""
+        ),
         "the direct `terse` persona's xhigh directness dial must be the text that renders"
     );
 }
