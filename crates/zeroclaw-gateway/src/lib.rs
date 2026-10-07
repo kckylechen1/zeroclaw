@@ -28,6 +28,7 @@ pub mod device_identity;
 #[cfg(feature = "nodes")]
 pub mod nodes;
 pub mod operator_auth;
+mod review_notifications;
 pub mod security_headers;
 pub mod session_queue;
 pub mod sse;
@@ -1381,6 +1382,12 @@ pub async fn run_gateway(
         bridge_sockets: Default::default(),
     };
 
+    let review_notifications_task = review_notifications::start(
+        Arc::clone(&state.config),
+        state.path_prefix.clone(),
+        state.shutdown_tx.subscribe(),
+    );
+
     // Build router with middleware
     let inner = Router::new()
         // ── Admin routes (for CLI management) ──
@@ -1766,6 +1773,7 @@ pub async fn run_gateway(
         }
     }
 
+    drop(review_notifications_task);
     drop(broadcast_hook_guard);
     Ok(())
 }

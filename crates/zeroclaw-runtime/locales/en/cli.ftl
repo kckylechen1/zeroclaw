@@ -1053,5 +1053,7 @@ gateway-attachment-unavailable = Attachment is expired, unavailable or outside t
 
 gateway-intake-unavailable = The input could not be safely resumed. Reconnect to check its durable receipt before sending it again.
 
+# Generic review notice. Never interpolate Soul or owner evidence content.
+soul-weekly-review-notice = Weekly reflection created { $soul_count } Soul proposals and { $user_count } User Model candidates. Review: { $review_path }
 soul-voice-unavailable = Current configured Voice is unavailable.
 soul-voice-step-limit = Voice proposals may move a dial by at most one level.

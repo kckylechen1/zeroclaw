@@ -17173,6 +17173,22 @@ impl Config {
                 "{reason}"
             );
         }
+        if let Some(target) = &self.companion_memory.review_notification {
+            if let Err(reason) = target.validate() {
+                validation_bail!(
+                    InvalidFormat,
+                    "companion_memory.review_notification",
+                    "{reason}"
+                );
+            }
+            if !self.gateway.bridges.contains_key(&target.bridge) {
+                validation_bail!(
+                    InvalidFormat,
+                    "companion_memory.review_notification.bridge",
+                    "review notification bridge must be configured in gateway.bridges"
+                );
+            }
+        }
         if let Err(reason) = crate::node_allowlist::validate_config(self) {
             validation_bail!(InvalidFormat, "allowed_tools", "{reason}");
         }
