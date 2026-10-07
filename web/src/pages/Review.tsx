@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Button, ConfirmDialog } from '@/components/ui';
 import { useAuth } from '@/hooks/useAuth';
 import { t } from '@/lib/i18n';
-import { canReword, decisionRequest, reviewFetch, ReviewError, type Candidate, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
+import { canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, ReviewError, type Candidate, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
 const field = 'w-full min-h-11 rounded-md border border-pc-border bg-pc-base p-3 text-pc-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]';
 const date = (value: number) => new Date(value * 1000).toLocaleString();
 const layers: Layer[] = ['identity', 'principles', 'growth', 'voice'];
@@ -32,10 +32,11 @@ function VoiceSource({ source }: { source?: NonNullable<Soul['voice']['sources']
         {source.kind === 'persona' && ` · ${source.persona}${source.card ? ` (${source.card})` : ''}`}
     </span>;
 }
-function ProposalCard({ item, act, busy, stale = false, rejectedOnly = false }: {
+function ProposalCard({ item, act, busy, heads, stale = false, rejectedOnly = false }: {
     item: InboxItem;
     act: (item: InboxItem, decision: Decision, text: string, scope: string) => void;
     busy: boolean;
+    heads: Head[];
     stale?: boolean;
     rejectedOnly?: boolean;
 }) {
@@ -59,9 +60,23 @@ function ProposalCard({ item, act, busy, stale = false, rejectedOnly = false }: 
     <span>{t(rejectedOnly ? 'review.rejected' : 'review.pending')}</span>
     </div>
     <h3 className="text-lg leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{user ? item.item.statement : item.item.proposal}</h3>
+    {user && <div className="space-y-2 text-sm">
+        <p>{t('review.kind')}: {t(`review.${item.item.kind}`)} · {t('review.semantic_key')}: <span className="break-all">{item.item.semantic_key}</span></p>
+        <p className="font-medium">{t('review.replaces')}</p>
+        {heads.filter(head => head.semantic_key === item.item.semantic_key).map(head => <div key={head.id} className="space-y-1">
+            <p className="whitespace-pre-wrap break-words">{head.statement}</p>
+            <p className="text-pc-text-muted break-all">{t(`review.${head.kind}`)} · {head.scope} · {t(`review.${head.authority}`)} · {head.id}</p>
+        </div>)}
+        {!heads.some(head => head.semantic_key === item.item.semantic_key) && <p>{t('review.no_replacement')}</p>}
+    </div>}
     {!user && <>
         <p className="text-sm text-pc-text-secondary break-words">{item.item.rationale}</p>
-        <p className="text-sm">{t(`review.${item.item.layer}`)} {item.item.trait_key && `${t(`review.${item.item.trait_key}`)} → ${item.item.level}`}{item.item.retire_index !== undefined && ` · ${t('review.retire')}`}</p>
+        <p className="text-sm">{t(`review.${item.item.layer}`)} {item.item.trait_key && `${t(`review.${item.item.trait_key}`)} → ${t(`review.${item.item.level}`)}`}{item.item.retire_index !== undefined && ` · ${t('review.retire')}`}</p>
+        {item.item.growth_kind && <p>{t('review.kind')}: {t(`review.${item.item.growth_kind}`)}</p>}
+        {item.item.retire_index !== undefined && <div className="space-y-2">
+            <p className="font-medium">{t('review.retire_target')} · {t('review.revision')} {item.item.target_revision ?? t('review.unavailable')}</p>
+            {item.item.retire_target ? <><p>{t(`review.${item.item.retire_target.kind}`)}</p><p className="whitespace-pre-wrap break-words">{item.item.retire_target.text}</p></> : <p>{t('review.unavailable')}</p>}
+        </div>}
         </>}
     {stale && <p role="alert">{t('review.proposal_stale')}</p>}
     <details>
@@ -77,15 +92,15 @@ function ProposalCard({ item, act, busy, stale = false, rejectedOnly = false }: 
         </label>}
     {mode === 'narrow' && <label className="block space-y-2">
         <span>{t('review.session')}</span>
-        <input ref={node => { editor.current = node; }} aria-label={t('review.session')} className={field} value={session} onChange={e => setSession(e.target.value)}/>
-        <span className="text-sm text-pc-text-muted block">{t('review.narrow_hint')}</span>
+        <input ref={node => { editor.current = node; }} aria-label={t('review.session')} readOnly={user && item.item.scope !== 'global'} className={field} value={session} onChange={e => setSession(e.target.value)}/>
+        <span className="text-sm text-pc-text-muted block">{t(user && item.item.scope !== 'global' ? 'review.same_session_hint' : 'review.narrow_hint')}</span>
         </label>}
     <div className="flex flex-wrap gap-2">
       {mode ? <>
-        <Button disabled={busy || (mode === 'reword' ? !text.trim() : !session.trim())} onClick={() => act(item, mode, text, `session:${session.trim()}`)}>{t('review.apply')}</Button>
+        <Button disabled={busy || (mode === 'reword' ? !text.trim() : !user || !validNarrowScope(item.item, `session:${session.trim()}`))} onClick={() => act(item, mode, text, `session:${session.trim()}`)}>{t('review.apply')}</Button>
         <Button variant="ghost" disabled={busy} onClick={() => setMode(null)}>{t('common.cancel')}</Button>
         </> : <>
-        {!stale && !rejectedOnly && <Button disabled={busy} onClick={() => act(item, 'accept', '', '')}>{t('review.accept')}</Button>}{!stale && !rejectedOnly && canReword(item) && <Button variant="ghost" disabled={busy} onClick={() => setMode('reword')}>{t('review.reword')}</Button>}{!stale && user && <Button variant="ghost" disabled={busy} onClick={() => setMode('narrow')}>{t('review.narrow')}</Button>}{!rejectedOnly && <Button variant="ghost" disabled={busy} onClick={() => act(item, 'dismiss', '', '')}>{t('review.dismiss')}</Button>}
+        {!stale && !rejectedOnly && <Button disabled={busy} onClick={() => act(item, 'accept', '', '')}>{t('review.accept')}</Button>}{!stale && !rejectedOnly && canReword(item) && <Button variant="ghost" disabled={busy} onClick={() => setMode('reword')}>{t('review.reword')}</Button>}{!stale && user && canNarrow(item.item) && <Button variant="ghost" disabled={busy} onClick={() => setMode('narrow')}>{t('review.narrow')}</Button>}{!rejectedOnly && <Button variant="ghost" disabled={busy} onClick={() => act(item, 'dismiss', '', '')}>{t('review.dismiss')}</Button>}
         </>}
     </div>
   </article>;
@@ -173,19 +188,19 @@ export default function Review() {
             const data = await reviewFetch<Inbox>(`/api/review/inbox?limit=100${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, controller.signal);
             if (request !== generation.current) return;
             setNeedsPair(false);
+            // The canonical heads must be visible before any candidate approval.
+            if (tab === 'inbox' || tab === 'user_model') {
+                const current = await reviewFetch<{ heads: Head[] }>('/api/user-model/heads', controller.signal);
+                if (request !== generation.current) return;
+                setHeads(current.heads);
+            }
             setInbox(data);
             if (tab === 'profile' && agent) {
                 const value = await reviewFetch<Soul>(`/api/soul?agent=${encodeURIComponent(agent)}`, controller.signal);
                 if (request === generation.current)
                     setSoul(value);
             }
-            if (tab === 'user_model') {
-                const value = await reviewFetch<{
-                    heads: Head[];
-                }>('/api/user-model/heads', controller.signal);
-                if (request === generation.current)
-                    setHeads(value.heads);
-            }
+
         }).catch(err => { if (request === generation.current && !controller.signal.aborted)
             report(err); })
             .finally(() => { if (request === generation.current)
@@ -271,7 +286,7 @@ export default function Review() {
       <nav aria-label={t('review.sections')} className="flex flex-wrap gap-2">{(['inbox', 'profile', 'user_model'] as const).map(section => <Button key={section} variant={tab === section ? 'primary' : 'ghost'} disabled={busy} aria-pressed={tab === section} onClick={() => setTab(section)}>{t(`review.${section}`)}</Button>)}</nav>
       {loading && <p role="status">{t('review.loading')}</p>}
       {tab === 'inbox' && inbox && <section>
-            <p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{inbox.items.length === 0 && <p className="py-10 text-pc-text-secondary">{t('review.empty')}</p>}{inbox.items.map(item => <ProposalCard key={item.id} item={item} busy={busy} act={act} stale={staleProposals.has(item.id)}/>)}{inbox.next_offset !== null && <Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/review/inbox?limit=100&offset=${inbox.next_offset}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, value => setInbox(value as Inbox))}>{t('review.next')}</Button>}</section>}
+            <p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{inbox.items.length === 0 && <p className="py-10 text-pc-text-secondary">{t('review.empty')}</p>}{inbox.items.map(item => <ProposalCard key={item.id} item={item} heads={heads} busy={busy} act={act} stale={staleProposals.has(item.id)}/>)}{inbox.next_offset !== null && <Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/review/inbox?limit=100&offset=${inbox.next_offset}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, value => setInbox(value as Inbox))}>{t('review.next')}</Button>}</section>}
       {tab === 'profile' && soul && <section className="space-y-8">{layers.map(layer => {
                     const head = layer === 'voice' ? soul.voice.stored : soul[layer];
                     return <article key={layer} className="border-t border-pc-border pt-5 space-y-4">
@@ -281,11 +296,12 @@ export default function Review() {
                             <dd className="text-xs text-pc-text-muted">
                             <VoiceSource source={soul.voice.sources?.[dial]}/>
                             </dd>
-                            </div>)}</dl> : <p>{t('review.voice_unavailable')}</p> : <Value value={head?.value}/>}{head && <p className="text-xs text-pc-text-muted">{t('review.revision')} {head.revision} · {t(`review.${head.source}`)} · {date(head.created_at_unix)}</p>}<Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/soul/history?agent=${encodeURIComponent(agent)}&layer=${layer}`, value => setHistory(value as {
+                            </div>)}</dl> : <div className="space-y-4"><p>{t('review.voice_unavailable')}</p><h3 className="font-medium">{t('review.configured')}</h3><Value value={soul.voice.configured}/><h3 className="font-medium">{t('review.stored')}</h3><Value value={soul.voice.stored?.value}/></div> : <Value value={head?.value}/>}{head && <p className="text-xs text-pc-text-muted">{t('review.revision')} {head.revision} · {t(`review.${head.source}`)} · {date(head.created_at_unix)}</p>}<Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/soul/history?agent=${encodeURIComponent(agent)}&layer=${layer}`, value => setHistory(value as {
                         layer: Layer;
                         revisions: Revision[];
                     }))}>{t('review.history')}</Button>{history?.layer === layer && <div className="space-y-5 pl-3 border-l border-pc-border">{history.revisions.slice().reverse().map(revision => <div key={revision.revision} className="space-y-3">
                             <p className="text-sm">{t('review.revision')} {revision.revision} · {t(`review.${revision.source}`)}</p>
+                            <p className="text-sm">{revision.proposal_id != null && `${t('review.proposal_id')}: ${revision.proposal_id}`}{revision.rolled_back_from != null && ` · ${t('review.rolled_back_from')}: ${revision.rolled_back_from}`}</p>
                             <Value value={revision.value}/>{head && revision.revision !== head.revision && <Button variant="ghost" disabled={busy} onClick={() => setRollback({ agent, layer, revision: revision.revision, expected: head.revision })}>{t('review.rollback')}</Button>}</div>)}</div>}</article>;
                 })}</section>}
       {tab === 'user_model' && <section className="space-y-5">
@@ -299,9 +315,9 @@ export default function Review() {
                 <p className="text-sm text-pc-text-muted">{head.scope} · {t(`review.${head.authority}`)}</p>{head.source_candidate && <Button variant="ghost" onClick={() => void inspect(`/api/user-model/candidates/${encodeURIComponent(head.source_candidate!)}`, value => setCandidate(value as CandidateHistory))}>{t('review.history')}</Button>}</article>)}{candidate && <article className="border border-pc-border p-4 space-y-3">
                 <h3 className="font-medium">{t('review.history')}</h3>
                 <p>{candidate.candidate.statement}</p>
-                <p>{candidate.review_state}</p>
-                {candidate.review_state === 'rejected' && <ProposalCard key={candidate.candidate.id} item={{ id: `user_model:${candidate.candidate.id}`, kind: 'user_model_candidate', item: candidate.candidate }} busy={busy} act={act} rejectedOnly/>}
-                <Value value={candidate.candidate.evidence}/>{candidate.review_receipts.map(receipt => <p key={receipt.id}>{receipt.action} · {date(receipt.at_unix)} {receipt.note}</p>)}</article>}</section>}
+                <p>{t(`review.state_${candidate.review_state}`)}</p>
+                {candidate.review_state === 'rejected' && <ProposalCard key={candidate.candidate.id} item={{ id: `user_model:${candidate.candidate.id}`, kind: 'user_model_candidate', item: candidate.candidate }} heads={heads} busy={busy} act={act} rejectedOnly/>}
+                <Value value={candidate.candidate.evidence}/>{candidate.review_receipts.map(receipt => <p key={receipt.id}>{t(`review.action_${receipt.action}`)} · {date(receipt.at_unix)} {receipt.note}</p>)}</article>}</section>}
     </>}
     <ConfirmDialog open={rollback !== null} title={t('review.rollback')} message={t('review.rollback_hint')} confirmLabel={t('review.rollback')} onClose={() => setRollback(null)} onConfirm={() => { if (!rollback)
         return; const choice = rollback; setRollback(null); void perform(() => reviewFetch('/api/soul/rollback', undefined, { agent: choice.agent, layer: choice.layer, to_revision: choice.revision, expected_revision: choice.expected })); }}/>

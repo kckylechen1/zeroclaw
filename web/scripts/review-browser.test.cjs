@@ -15,18 +15,22 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
     const now = 1780000000;
     let pairingEnabled = false;
+    let locale = 'en';
     let pairCalls = 0;
     let oldHistoryRelease;
     let delayHistory = false;
     let unknownReads = 0;
     let reviewState = 'rejected';
     const actions = [];
-    const proposal = { id: 'soul:nova:7', kind: 'soul_proposal', agent: 'nova', item: { id: 7, layer: 'growth', proposal: 'Retire the old shared shorthand', rationale: 'Synthetic stale-target fixture', retire_index: 0, created_at_unix: now } };
+    const proposal = { id: 'soul:nova:7', kind: 'soul_proposal', agent: 'nova', item: { id: 7, layer: 'growth', proposal: 'Retire the old shared shorthand', rationale: 'Synthetic stale-target fixture', retire_index: 0, retire_target: { kind: 'bond', text: 'Actual canonical shared shorthand' }, target_revision: 17, created_at_unix: now } };
     const user = { id: 'user_model:8', kind: 'user_model_candidate', item: { id: '8', kind: 'preference', statement: 'Shorter planning replies', scope: 'global', evidence: 'Synthetic owner evidence', semantic_key: 'style', created_at_unix: now } };
     const rejected = { ...user.item, id: '42', statement: 'Previously dismissed preference' };
-    let items = [proposal, user];
+    const scopedItems = ['agent:nova', 'channel:telegram', 'session:original'].map((scope, i) => ({ ...user, id: `user_model:${9 + i}`, item: { ...user.item, id: String(9 + i), statement: `Scoped candidate ${scope}`, scope } }));
+    const addition = { ...proposal, id: 'soul:nova:12', item: { id: 12, layer: 'growth', proposal: 'New growth addition', rationale: 'Synthetic addition', growth_kind: 'self', created_at_unix: now } };
+    let items = [proposal, user, ...scopedItems, addition];
+    const currentHead = { id: 'revision-current', semantic_key: 'style', kind: 'preference', statement: 'Existing detailed planning preference', scope: 'global', authority: 'owner_authored' };
     const head = (value) => ({ revision: 2, source: 'owner', created_at_unix: now, value });
-    const soul = { agent: 'nova', identity: head({ name: 'Nova' }), principles: head({ items: ['Keep private information private.'] }), growth: head({ entries: [] }), voice: { stored: head({ heads: {} }) } };
+    const soul = { agent: 'nova', identity: head({ name: 'Nova' }), principles: head({ items: ['Keep private information private.'] }), growth: head({ entries: [] }), voice: { configured: { warmth: 'high' }, stored: head({ heads: { warmth: 'low' } }) } };
     await context.route('**/*', async (route) => {
         const req = route.request();
         const url = new URL(req.url());
@@ -42,7 +46,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
         if (!url.pathname.startsWith('/api/'))
             return route.continue();
         if (url.pathname === '/api/status')
-            return send({ locale: 'en', version: 'synthetic', agents: [] });
+            return send({ locale, version: 'synthetic', agents: [] });
         if (url.pathname === '/api/config/agent-options')
             return send({ agents: ['nova', 'atlas'] });
         if (url.pathname === '/api/config/reload-status')
@@ -82,10 +86,10 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
                 oldHistoryRelease = () => send({ code: 'unauthorized', error: 'late failure' }, 401);
                 return;
             }
-            return send({ layer: url.searchParams.get('layer'), revisions: [head({ text: 'Fresh principles history' })] });
+            return send({ layer: url.searchParams.get('layer'), revisions: [{ ...head({ text: 'Fresh principles history' }), source: 'approved_proposal', proposal_id: 71 }, { ...head({ text: 'Restored principles history' }), revision: 3, source: 'owner', rolled_back_from: 1 }] });
         }
         if (url.pathname === '/api/user-model/heads')
-            return send({ heads: [] });
+            return send({ heads: [currentHead] });
         if (url.pathname === '/api/user-model/candidates')
             return send({ candidates: [rejected] });
         if (url.pathname === '/api/user-model/candidates/42')
@@ -115,6 +119,10 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.equal(pairCalls, 1);
     assert.equal(await page.getByRole('combobox', { name: 'Agent', exact: true }).inputValue(), 'nova');
     assert.equal(unknownReads, 0);
+    await page.getByText('Actual canonical shared shorthand', { exact: true }).waitFor();
+    await page.getByText('Bound entry to retire · Revision 17', { exact: true }).waitFor();
+    const addCard = page.locator('article').filter({ has: page.getByRole('heading', { name: addition.item.proposal, exact: true }) });
+    assert.match(await addCard.innerText(), /Self/);
     const staleCard = page.locator('article').filter({ has: page.getByRole('heading', { name: proposal.item.proposal, exact: true }) });
     await staleCard.getByRole('button', { name: 'Accept', exact: true }).click();
     await staleCard.getByText('This proposal no longer matches its target.', { exact: false }).waitFor();
@@ -123,6 +131,25 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     await staleCard.getByRole('button', { name: 'Dismiss', exact: true }).click();
     await page.getByRole('heading', { name: proposal.item.proposal, exact: true }).waitFor({ state: 'detached' });
     const userCard = page.locator('article').filter({ has: page.getByRole('heading', { name: user.item.statement, exact: true }) });
+    assert.match(await userCard.innerText(), /Semantic key: style/);
+    assert.match(await userCard.innerText(), /Preference/);
+    assert.match(await userCard.innerText(), /Existing detailed planning preference/);
+    assert.match(await userCard.innerText(), /revision-current/);
+    await userCard.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-approval-details-375.png') });
+    for (const scoped of scopedItems) {
+        const card = page.locator('article').filter({ has: page.getByRole('heading', { name: scoped.item.statement, exact: true }) });
+        if (!scoped.item.scope.startsWith('session:')) {
+            assert.equal(await card.getByRole('button', { name: 'Limit scope' }).count(), 0);
+        } else {
+            await card.getByRole('button', { name: 'Limit scope' }).click();
+            const input = card.getByLabel('Session ID', { exact: true });
+            assert.equal(await input.inputValue(), 'original');
+            assert.equal(await input.evaluate(el => el.readOnly), true);
+            await card.getByRole('button', { name: 'Apply reviewed change' }).click();
+            await page.getByRole('status').filter({ hasText: 'Decision recorded' }).waitFor();
+            assert.deepEqual(actions.at(-1).body, { action: 'narrow', narrowed_scope: 'session:original' });
+        }
+    }
     const disclosure = userCard.locator('summary');
     assert.ok((await disclosure.boundingBox()).height >= 44);
     await userCard.getByRole('button', { name: 'Reword', exact: true }).focus();
@@ -134,10 +161,18 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     await userCard.getByRole('button', { name: 'Cancel', exact: true }).click();
     await page.getByRole('button', { name: 'My Agent', exact: true }).click();
     await page.getByRole('heading', { name: 'Identity', exact: true }).waitFor();
+    const voiceCard = page.locator('article').filter({ has: page.getByRole('heading', { name: 'Effective Voice', exact: true }) });
+    await voiceCard.getByRole('heading', { name: 'Configured Voice', exact: true }).waitFor();
+    await voiceCard.getByRole('heading', { name: 'Stored Voice', exact: true }).waitFor();
+    assert.match(await voiceCard.innerText(), /high/);
+    assert.match(await voiceCard.innerText(), /low/);
+    await voiceCard.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-voice-fallback-375.png') });
     delayHistory = true;
     await page.getByRole('button', { name: 'History and sources', exact: true }).nth(0).click();
     await page.getByRole('button', { name: 'History and sources', exact: true }).nth(1).click();
     await page.getByText('Fresh principles history', { exact: true }).waitFor();
+    await page.getByText('Proposal ID: 71', { exact: true }).waitFor();
+    await page.getByText('· Restored revision: 1', { exact: true }).waitFor();
     assert.ok(oldHistoryRelease);
     const lateResponse = page.waitForResponse(r => r.url().includes('layer=identity'));
     await oldHistoryRelease();
@@ -146,8 +181,8 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.equal(await page.getByLabel('Pairing code', { exact: true }).count(), 0);
     assert.equal(await page.getByRole('alert').count(), 0);
     await page.getByRole('button', { name: 'About me', exact: true }).click();
-    await page.getByText('No active owner-authorized entries.').waitFor();
-    const openRejected = async () => { await page.getByRole('button', { name: 'All candidate review history' }).click(); await page.getByRole('button', { name: 'History and sources', exact: true }).click(); await page.getByText('rejected', { exact: true }).waitFor(); };
+    await page.getByRole('heading', { name: currentHead.statement, exact: true }).waitFor();
+    const openRejected = async () => { await page.getByRole('button', { name: 'All candidate review history' }).click(); await page.getByRole('button', { name: 'History and sources', exact: true }).click(); await page.getByText('Dismissed', { exact: true }).waitFor(); };
     await openRejected();
     await page.getByRole('button', { name: 'Limit scope' }).click();
     assert.equal(await page.getByLabel('Session ID', { exact: true }).evaluate(el => el === document.activeElement), true);
@@ -157,12 +192,24 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.deepEqual(actions.at(-1).body, { action: 'narrow', narrowed_scope: 'session:weekend' });
     await page.getByRole('button', { name: 'All candidate review history' }).click();
     await page.getByRole('button', { name: 'History and sources', exact: true }).click();
-    await page.getByText('narrowed', { exact: true }).waitFor();
+    await page.getByText('Scope limited', { exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: 'Limit scope' }).count(), 0);
     await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-history-narrowed-375.png') });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    locale = 'zh';
+    await page.evaluate(() => localStorage.setItem('zeroclaw-locale', 'zh'));
+    await page.reload();
+    await page.getByRole('button', { name: '关于我', exact: true }).click();
+    await page.getByRole('button', { name: '所有候选的审核历史' }).click();
+    await page.getByRole('button', { name: '历史与来源', exact: true }).click();
+    await page.getByText('已限定范围', { exact: true }).waitFor();
+    assert.equal(await page.getByText('narrowed', { exact: true }).count(), 0);
+    assert.equal(await page.getByText(/^reject ·/).count(), 0);
+    await page.getByText(/^忽略 ·/).waitFor();
+    await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-localized-history-375.png') });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.deepEqual(failures, []);
-    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, actions }));
+    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, actions }));
     await browser.close();
     server.close();
 })().catch(async e => { console.error(e); server.close(); if (browser) await browser.close(); process.exitCode = 1; });

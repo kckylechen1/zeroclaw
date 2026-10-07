@@ -84,19 +84,26 @@ Existing authorized operator tokens still work with pairing disabled.
 
 The inbox separates unapplied candidates from reflection receipts. Accept and
 reword use the candidate's existing authority path; limiting a User Model
-candidate binds it to the entered session. Dismissal applies no candidate.
+global candidate binds it to the entered session. Existing session candidates
+can only retain their original session; agent/channel candidates do not offer
+that action. Dismissal applies no candidate.
 A rejected User Model candidate can be narrowed once from its review history.
 Soul proposals have no generic scope-narrowing action. Stale Soul proposals
 show the backend reason and offer dismissal instead of another acceptance. Agent selection filters
 Soul and reflection records, while the shared User Model retains its recorded
-scopes. Evidence is displayed as text, never executed as HTML.
+scopes. Approval cards display the canonical Growth retirement target and
+revision, or the User Model kind, semantic key and current head replaced by
+acceptance. Current heads must load before candidate approval is available.
+Evidence is displayed as text, never executed as HTML.
 
 My Agent shows the four Soul layers, provenance and history. Restoring an older
 Soul revision appends a new revision and includes the current revision for
 conflict detection. About me shows active owner-authorized entries and the
 candidate review history; there is no User Model rollback button. Effective
 Voice and per-key sources are read from the gateway when available, without
-recalculating precedence in the browser.
+recalculating precedence in the browser. Older gateways show configured and
+stored Voice separately. History shows proposal IDs and restored revision IDs
+when present, and candidate state/action labels follow the UI locale.
 
 These pages add no background notification channel or offline record cache.
 They do not establish PWA installability or closed-app delivery. Deploy the web

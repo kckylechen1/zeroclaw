@@ -18,6 +18,8 @@ export interface Proposal {
     level?: string;
     growth_kind?: string;
     retire_index?: number;
+    retire_target?: { kind: string; text: string };
+    target_revision?: number;
     session_ref?: string;
     created_at_unix: number;
 }
@@ -76,6 +78,7 @@ export interface Soul {
 }
 export interface Head {
     id: string;
+    semantic_key: string;
     statement: string;
     scope: string;
     authority: string;
@@ -116,6 +119,12 @@ export type Decision = 'accept' | 'reword' | 'narrow' | 'dismiss';
 export function canReword(item: InboxItem): boolean {
     return item.kind === 'user_model_candidate' || (item.kind === 'soul_proposal' && (item.item.layer === 'principles' || (item.item.layer === 'growth' && item.item.retire_index === undefined)));
 }
+export function canNarrow(candidate: Candidate): boolean {
+    return candidate.scope === 'global' || /^session:\S.*$/.test(candidate.scope) && candidate.scope.trim() === candidate.scope;
+}
+export function validNarrowScope(candidate: Candidate, scope: string): boolean {
+    return canNarrow(candidate) && scope.startsWith('session:') && !!scope.slice(8).trim() && scope.trim() === scope && (candidate.scope === 'global' || scope === candidate.scope);
+}
 export function decisionRequest(item: InboxItem, decision: Decision, text: string, scope: string): {
     path: string;
     body: unknown;
@@ -124,7 +133,7 @@ export function decisionRequest(item: InboxItem, decision: Decision, text: strin
         throw new Error('Receipt has no review action');
     if (decision === 'reword' && (!canReword(item) || !text.trim()))
         throw new Error('Invalid reword');
-    if (decision === 'narrow' && (item.kind !== 'user_model_candidate' || !/^session:.+/.test(scope)))
+    if (decision === 'narrow' && (item.kind !== 'user_model_candidate' || !validNarrowScope(item.item, scope)))
         throw new Error('Invalid scope');
     if (item.kind === 'soul_proposal')
         return { path: `/api/soul/proposals/${item.item.id}/resolve`, body: { agent: item.agent, resolution: decision === 'dismiss' ? 'dismissed' : 'accepted', ...(decision === 'reword' ? { final_text: text.trim() } : {}) } };

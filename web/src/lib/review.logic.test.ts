@@ -32,3 +32,11 @@ for (const code of ['proposal_stale', 'revision_conflict', 'proposal_already_res
     globalThis.fetch = async () => new Response(JSON.stringify({ code, error: 'untrusted prose' }), { status: code === 'unknown_agent' ? 404 : 409 });
     await assert.rejects(reviewFetch('/api/review/inbox'), (error: unknown) => error instanceof ReviewError && error.code === code);
 }
+
+for (const scope of ['agent:nova', 'channel:telegram', 'session:A']) {
+    const scoped = { ...user, item: { ...user.item, scope } };
+    assert.throws(() => decisionRequest(scoped, 'narrow', '', 'session:B'));
+    if (scope === 'session:A') assert.deepEqual(decisionRequest(scoped, 'narrow', '', scope).body, { action: 'narrow', narrowed_scope: scope });
+    else assert.throws(() => decisionRequest(scoped, 'narrow', '', scope));
+}
+assert.throws(() => decisionRequest(user, 'narrow', '', 'session:  '));
