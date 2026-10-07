@@ -8,3 +8,5 @@ export const Cron = lazy(() => import('../pages/Cron'));
 export const Logs = lazy(() => import('../pages/Logs'));
 export const Pairing = lazy(() => import('../pages/Pairing'));
 export const Skills = lazy(() => import('../pages/Skills'));
+
+export const Review = lazy(() => import('../pages/Review'));

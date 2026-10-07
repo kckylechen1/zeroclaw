@@ -65,3 +65,35 @@ and `structuredClone()`.
 - Edge 111+
 - Firefox 113+
 - Safari 16.2+
+
+## Owner review on a phone-sized screen
+
+The `/review` page uses the existing operator-only review, Soul and User Model
+APIs. Pair as an owner on this page even if ordinary gateway access has pairing
+disabled. A token's presence does not grant review authority; an owner-only
+read verifies access. Expired or bridge tokens show the local re-pair form.
+
+The inbox separates unapplied candidates from reflection receipts. Accept and
+reword use the candidate's existing authority path; limiting a User Model
+candidate binds it to the entered session. Dismissal applies no candidate.
+Soul proposals have no generic scope-narrowing action. Agent selection filters
+Soul and reflection records, while the shared User Model retains its recorded
+scopes. Evidence is displayed as text, never executed as HTML.
+
+My Agent shows the four Soul layers, provenance and history. Restoring an older
+Soul revision appends a new revision and includes the current revision for
+conflict detection. About me shows active owner-authorized entries and the
+candidate review history; there is no User Model rollback button. Effective
+Voice and per-key sources are read from the gateway when available, without
+recalculating precedence in the browser.
+
+These pages add no background notification channel or offline record cache.
+They do not establish PWA installability or closed-app delivery. Deploy the web
+bundle alongside a gateway with the review APIs. Rolling back the web bundle
+leaves canonical Soul and User Model records intact.
+
+Run `npm run test:review`, the existing permission tests and `npm run build`
+from `web/`. Validate the rendered owner entry, pending/empty/error states,
+review actions and revision conflicts at 375px and desktop widths with
+synthetic records before shipping. Desktop viewport tests do not prove a
+physical phone or installed-service flow.

@@ -12,6 +12,7 @@ import { t } from '@/lib/i18n';
 // reflects the current page instead of a constant "ZeroClaw".
 const TITLE_KEYS: Record<string, string> = {
   agents: 'nav.agents',
+  review: 'nav.review',
   config: 'nav.config',
   setup: 'nav.config',
   tools: 'nav.tools',
