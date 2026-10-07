@@ -88,12 +88,22 @@ history and memory IDs differ; channel turns may have multiple sender/group
 scopes. Model arguments cannot select another conversation. Results outside
 those scopes are excluded, and unattributed Conversation rows are not returned.
 Without a session, only unscoped non-Conversation entries remain eligible.
+Conversation writes through `memory_store` use the first canonical memory scope
+admitted by the turn; without one, the write is refused. Channel groups put
+that group's conversation at index zero, with the sanitized sender as a secondary
+read scope. This prevents a new group Conversation write from entering a shared
+sender scope. Ordered recall deduplication gives group-local entries precedence;
+legacy sender-scoped reads remain available. Markdown cannot preserve
+conversation scope, so that tool refuses Conversation writes to it, and ordinary
+recall omits its unattributed daily-file rows (which mix daily notes and conversation
+autosaves). Its Core file remains globally recallable; existing files are not rewritten.
 Reserved Soul entries remain excluded even if a backend returns them. This is
 session isolation, not a new surface taxonomy: surface/task-specific recall
 policy still belongs to the owning ingress and memory-injection contract.
 
 Generic file access cannot read or write `soul.db`, `user_model.db`, or their
-SQLite WAL/SHM/journal files in the configured runtime directories, even when a
+SQLite WAL/SHM/journal files (including recased names) in the configured runtime
+directories, even when a
 broad workspace/root grant includes those directories. Resolved symlinks obey
 the same guard. Recursive content searches whose root contains a runtime
 directory use per-file checks (and refuse unsupported multiline searches)

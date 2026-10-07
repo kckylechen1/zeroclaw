@@ -48,6 +48,9 @@ tokio::task_local! {
 
     /// Canonical memory sessions from the active ToolLoop memory input.
     /// Derived for this turn only; transport/history keys are not memory IDs.
+    /// Index zero is the canonical Conversation write scope. Channel groups
+    /// put the group conversation first and the sender read scope second;
+    /// ordered recall deduplication therefore prefers group-local entries.
     /// An empty scope admits only unscoped non-Conversation recall results.
     pub static TOOL_LOOP_MEMORY_SESSIONS: Vec<String>;
 

@@ -2025,13 +2025,16 @@ fn sender_memory_session_ids(
     msg: &zeroclaw_api::channel::ChannelMessage,
     history_key: &str,
 ) -> Vec<String> {
+    // Index zero is the canonical Conversation write scope. In groups it
+    // must be this conversation, never the shared sender read scope. Recall
+    // deduplicates in order, so group-local rows also win over sender rows.
+    let mut sessions = vec![history_key.to_string()];
     // Match the sanitized form persisted by memory backend migrations.
     let sanitized_sender = sanitize_session_key(&msg.sender);
-    if is_group_reply_target(&msg.reply_target) {
-        vec![sanitized_sender]
-    } else {
-        vec![history_key.to_string(), sanitized_sender]
+    if sanitized_sender != history_key {
+        sessions.push(sanitized_sender);
     }
+    sessions
 }
 
 #[cfg(all(test, feature = "heavy-tests"))]

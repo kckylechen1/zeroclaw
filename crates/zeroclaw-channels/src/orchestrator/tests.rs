@@ -10665,7 +10665,10 @@ async fn autosaved_group_conversation_memory_stays_session_scoped() {
     .unwrap();
 
     let group_b_sender_session_ids = sender_memory_session_ids(&group_b_msg, &group_b_history_key);
-    assert_eq!(group_b_sender_session_ids, vec!["U123".to_string()]);
+    assert_eq!(
+        group_b_sender_session_ids,
+        vec![group_b_history_key.clone(), "U123".to_string()]
+    );
 
     let group_b_sender_session_id_refs: Vec<Option<&str>> = group_b_sender_session_ids
         .iter()
@@ -10690,6 +10693,72 @@ async fn autosaved_group_conversation_memory_stays_session_scoped() {
         source_group_context.contains("Group alpha codename is quartz"),
         "source group scope should still recall its own autosaved memory, got: {source_group_context}"
     );
+}
+
+#[tokio::test]
+async fn channel_memory_tools_keep_same_sender_group_writes_separate() {
+    use zeroclaw_api::tool::Tool;
+    use zeroclaw_tools::{memory_recall::MemoryRecallTool, memory_store::MemoryStoreTool};
+    let tmp = TempDir::new().unwrap();
+    let memory: Arc<dyn Memory> = Arc::new(SqliteMemory::new("test", tmp.path()).unwrap());
+    let group_a = zeroclaw_api::channel::ChannelMessage {
+        sender: "same-sender".into(),
+        reply_target: "group:alpha".into(),
+        channel: "slack".into(),
+        ..Default::default()
+    };
+    let mut group_b = group_a.clone();
+    group_b.reply_target = "group:beta".into();
+    let a = sender_memory_session_ids(&group_a, &conversation_history_key(&group_a));
+    let b = sender_memory_session_ids(&group_b, &conversation_history_key(&group_b));
+    assert_ne!(a[0], b[0]);
+    assert_eq!(a[1], b[1], "same sender remains a secondary read scope");
+    let store = MemoryStoreTool::new(memory.clone(), Arc::new(SecurityPolicy::default()));
+    let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+        .scope(
+            a.clone(),
+            store.execute(serde_json::json!({
+                "key":"alpha-private", "content":"quartz alpha private", "category":"conversation"
+            })),
+        )
+        .await
+        .unwrap();
+    assert!(result.success);
+    assert_eq!(
+        memory
+            .get("alpha-private")
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some(a[0].as_str())
+    );
+    memory
+        .store(
+            "sender-legacy",
+            "quartz sender legacy",
+            MemoryCategory::Conversation,
+            Some(&a[1]),
+        )
+        .await
+        .unwrap();
+    let recall = MemoryRecallTool::new(memory);
+    for (sessions, local_visible) in [(a, true), (b, false)] {
+        let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .scope(sessions, recall.execute(serde_json::json!({"query":"*"})))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.output.contains("quartz alpha private"),
+            local_visible
+        );
+        assert!(
+            result.output.contains("quartz sender legacy"),
+            "secondary sender read compatibility remains"
+        );
+    }
 }
 
 #[tokio::test]
