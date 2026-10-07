@@ -638,8 +638,10 @@ the reflection model call. For each enabled agent it reads the latest 200 receip
 rows and selects nonzero-created receipts less than 24 hours old. Partial-failure
 receipts with actual created items are included; zero-created, future and stale
 receipts are skipped. A scan that reaches 200 rows emits a warning about older
-unreconciled rows. The localized notice contains counts and `/review` navigation,
-never proposal text, owner evidence, outcome prose or agent names.
+unreconciled rows. The localized notice contains counts and `/review` navigation
+under the running gateway's startup path prefix (for example `/controller/review`).
+Changing live `gateway.path_prefix` does not remount that running router. Notices
+never include proposal text, owner evidence, outcome prose or agent names.
 
 Notices enter the existing BridgeOutbox as `source_kind = weekly_review`,
 `source_id = <agent alias>`, `event_id = <canonical reflection row id>`. Repeated

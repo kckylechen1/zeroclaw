@@ -30,6 +30,7 @@ fn eligible(config: &Config, data_dir: &Path) -> bool {
 pub(crate) fn reconcile(
     config: &RwLock<Config>,
     data_dir: &Path,
+    path_prefix: &str,
     now: u64,
     stop: &tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<usize> {
@@ -48,6 +49,9 @@ pub(crate) fn reconcile(
             .map(|(alias, _)| alias.clone())
             .collect()
     };
+    // The router's startup prefix is authoritative; a live config edit does
+    // not remount this running gateway.
+    let review_path = format!("{path_prefix}/review");
     let store = SoulProfileStore::shared(data_dir)?;
     let mut reconciled = 0;
     for agent in aliases {
@@ -74,7 +78,11 @@ pub(crate) fn reconcile(
             let user_count = receipt.user_model_candidates_created.to_string();
             let content = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
                 "soul-weekly-review-notice",
-                &[("soul_count", &soul_count), ("user_count", &user_count)],
+                &[
+                    ("soul_count", &soul_count),
+                    ("user_count", &user_count),
+                    ("review_path", &review_path),
+                ],
             );
             // Resolve and hold the current destination through enqueue. A
             // simultaneous config swap cannot send to a superseded target.
@@ -145,6 +153,7 @@ impl Drop for ReviewNotificationTask {
 /// when the serve future exits. A receipt is retried without re-running reflection.
 pub(crate) fn start(
     config: Arc<RwLock<Config>>,
+    path_prefix: String,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> ReviewNotificationTask {
     let data_dir: PathBuf = config.read().data_dir.clone();
@@ -164,6 +173,7 @@ pub(crate) fn start(
             }
             let config = Arc::clone(&config);
             let data_dir = data_dir.clone();
+            let path_prefix = path_prefix.clone();
             let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
                 Ok(now) => now.as_secs(),
                 Err(error) => {
@@ -177,8 +187,9 @@ pub(crate) fn start(
                 }
             };
             let pass_stop = stop.clone();
-            let pass =
-                tokio::task::spawn_blocking(move || reconcile(&config, &data_dir, now, &pass_stop));
+            let pass = tokio::task::spawn_blocking(move || {
+                reconcile(&config, &data_dir, &path_prefix, now, &pass_stop)
+            });
             let result = tokio::select! {
                 biased;
                 _ = shutdown.changed() => break,
@@ -215,6 +226,7 @@ mod tests {
         super::reconcile(
             config,
             data_dir,
+            "",
             now,
             &tokio_util::sync::CancellationToken::new(),
         )
@@ -268,12 +280,42 @@ mod tests {
         let (dir, config, soul) = fixture();
         receipt(&soul, NOW, 1, "ok");
         let (_shutdown, receiver) = tokio::sync::watch::channel(true);
-        let mut task = start(Arc::new(config), receiver);
+        let mut task = start(Arc::new(config), String::new(), receiver);
         tokio::time::timeout(Duration::from_secs(1), &mut task.0)
             .await
             .unwrap()
             .unwrap();
         assert!(!dir.path().join("sessions/bridge_outbox.db").exists());
+    }
+
+    #[test]
+    fn weekly_review_link_uses_startup_prefix_not_live_config() {
+        for prefix in ["", "/controller"] {
+            let (dir, config, soul) = fixture();
+            receipt(&soul, NOW, 1, "ok");
+            config.write().gateway.path_prefix = Some("/edited-after-start".into());
+            super::reconcile(
+                &config,
+                dir.path(),
+                prefix,
+                NOW,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .unwrap();
+            let rows = BridgeOutbox::open(dir.path())
+                .unwrap()
+                .pending("tg", 0, 100)
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(
+                rows[0]
+                    .content
+                    .contains(&format!("Review: {prefix}/review")),
+                "{}",
+                rows[0].content
+            );
+            assert!(!rows[0].content.contains("edited-after-start"));
+        }
     }
 
     #[test]

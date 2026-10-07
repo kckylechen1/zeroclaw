@@ -720,6 +720,7 @@ mod tests {
         crate::review_notifications::reconcile(
             &state.config,
             &data_dir,
+            &state.path_prefix,
             now,
             &CancellationToken::new(),
         )
@@ -762,6 +763,7 @@ mod tests {
         crate::review_notifications::reconcile(
             &state.config,
             &data_dir,
+            &state.path_prefix,
             chrono::Utc::now().timestamp() as u64,
             &CancellationToken::new(),
         )

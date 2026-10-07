@@ -1382,8 +1382,11 @@ pub async fn run_gateway(
         bridge_sockets: Default::default(),
     };
 
-    let review_notifications_task =
-        review_notifications::start(Arc::clone(&state.config), state.shutdown_tx.subscribe());
+    let review_notifications_task = review_notifications::start(
+        Arc::clone(&state.config),
+        state.path_prefix.clone(),
+        state.shutdown_tx.subscribe(),
+    );
 
     // Build router with middleware
     let inner = Router::new()
