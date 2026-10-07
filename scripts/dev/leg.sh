@@ -24,6 +24,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PARTITION="$REPO_ROOT/dev/ci/test-partition.json"
+CARGO_LOCAL="$REPO_ROOT/scripts/dev/cargo-local.sh"
 
 usage() {
   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
@@ -39,7 +40,7 @@ command -v jq >/dev/null 2>&1 || die "jq not found"
 
 check_partition() {
   local members listed dupes
-  members="$(cd "$REPO_ROOT" && cargo metadata --no-deps --format-version 1 --locked \
+  members="$(cd "$REPO_ROOT" && "$CARGO_LOCAL" metadata --no-deps --format-version 1 --locked \
     | jq -r '.packages[].name' | sort)"
   listed="$(jq -r '[.legs[][], .excluded[]] | .[]' "$PARTITION" | sort)"
   dupes="$(printf '%s\n' "$listed" | uniq -d)"
@@ -91,11 +92,11 @@ features="$(jq -r --arg leg "$leg" '.features[$leg] // [] | join(",")' "$PARTITI
 
 runner="${LEG_RUNNER:-}"
 if [[ -z "$runner" ]]; then
-  if cargo nextest --version >/dev/null 2>&1; then runner=nextest; else runner=test; fi
+  if "$CARGO_LOCAL" nextest --version >/dev/null 2>&1; then runner=nextest; else runner=test; fi
 fi
 case "$runner" in
-  nextest) run_cmd=(cargo nextest run --locked) ;;
-  test) run_cmd=(cargo test --locked) ;;
+  nextest) run_cmd=("$CARGO_LOCAL" nextest run --locked) ;;
+  test) run_cmd=("$CARGO_LOCAL" test --locked) ;;
   *) die "LEG_RUNNER must be 'nextest' or 'test', got '$runner'" ;;
 esac
 

@@ -395,11 +395,8 @@ ci-all = [
     "zeroclaw-runtime/heavy-tests",
 ]
 
-# Tuned for a 1200+ dependency tree where target directories, not compile time,
-# are the binding constraint. `incremental` is deliberately not set here: cargo
-# already defaults it to true for dev, so stating it again only reads like a
-# decision, and the machines that need it off set `build.incremental` in their
-# own cargo config — which overrides this table either way.
+# Keep local debug artifacts small. Repository Cargo config disables incremental
+# compilation by default; short edit loops can opt in with CARGO_INCREMENTAL=1.
 [profile.dev]
 opt-level = 1                 # own code: mild opt, still fast to compile
 debug = "line-tables-only"    # keep panic backtraces (file:line), drop the bulk of

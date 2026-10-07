@@ -45,6 +45,7 @@ jobs:
       - name: Toolchain pin guard (self-test + active check)
         run: |
           bash scripts/ci/toolchain_gate.test.sh
+          bash scripts/dev/cargo-local.test.sh
           bash scripts/ci/toolchain_gate.sh
       - name: Rust quality gate orchestration self-test
         run: bash scripts/ci/rust_quality_gate.test.sh

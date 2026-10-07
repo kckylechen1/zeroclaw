@@ -42,6 +42,35 @@ cargo nextest run --locked --workspace  # what CI runs
 
 </div>
 
+## Local build storage
+
+Use `scripts/dev/cargo-local.sh` instead of bare `cargo` for host-side checks
+across linked worktrees. The existing `scripts/dev/leg.sh` runner also uses this
+entrypoint for its metadata, runner detection, main test and extra runs. It uses the main checkout's `target` directory, checks
+the pinned toolchain, and defaults to non-incremental compilation. Explicit
+`CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` overrides are respected. Checkouts with
+a separate Git directory must provide an explicit target path.
+
+```sh
+scripts/dev/cargo-local.sh test -p zeroclaw-memory --lib
+scripts/dev/cargo-local.sh clippy -p zeroclaw-memory --all-targets -- -D warnings
+```
+
+Repository Cargo config also disables incremental compilation for bare Cargo.
+Use `CARGO_INCREMENTAL=1` only for a deliberate short edit loop. Turning it off
+does not delete existing incremental artifacts. Keep feature/profile choices
+stable; different worktree paths and compilation modes can still leave multiple
+workspace artifacts in a shared target. Serialize checks sharing that target.
+
+After completing a delivery, inspect the target size and use
+`scripts/dev/target_sweep.sh --dry-run` with `CARGO_TARGET_DIR` set to the same
+shared path. When no build or executable is using it, run the sweep to remove
+workspace artifacts while retaining third-party dependencies. Do not invoke
+cleanup automatically from builds or use it on an active target. The sweep
+requires Bash 4 or newer (macOS's bundled Bash 3 is insufficient). Keep third-party dependencies even in retired targets until an explicit cache
+retirement policy permits their removal; do not use `cargo clean` or bypass
+Cargo cache-tag guards. Retain non-build receipts outside the target.
+
 ## Picking a level for a new test
 
 1. Testing one subsystem in isolation? → `tests/component/`
