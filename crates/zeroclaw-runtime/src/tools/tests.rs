@@ -1427,3 +1427,75 @@ mod wrapper_spec_forwarding_tests {
         );
     }
 }
+
+#[tokio::test]
+async fn voice_proposals_resolve_defaults_in_fixed_and_live_registries() {
+    use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
+    for use_live in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = lineage_registry_config();
+        cfg.data_dir = tmp.path().join("data");
+        std::fs::create_dir(&cfg.data_dir).unwrap();
+        cfg.personas.insert(
+            "reserved".into(),
+            PersonaKnobs {
+                humor: PersonaLevel::Low,
+                ..Default::default()
+            },
+        );
+        cfg.agents.get_mut("parent-agent").unwrap().persona = "reserved".into();
+        let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+        let mem: Arc<dyn Memory> = Arc::from(
+            zeroclaw_memory::create_memory(
+                &MemoryConfig {
+                    backend: "markdown".into(),
+                    ..Default::default()
+                },
+                tmp.path(),
+                None,
+            )
+            .unwrap(),
+        );
+        let security = Arc::new(SecurityPolicy {
+            workspace_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        });
+        let tools = all_tools_with_runtime(
+            Arc::new(cfg.clone()),
+            &security,
+            &cfg.risk_profiles["default"],
+            "parent-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            None,
+            None,
+            &BrowserConfig::default(),
+            &Default::default(),
+            &Default::default(),
+            tmp.path(),
+            &cfg.agents,
+            None,
+            &cfg,
+            false,
+            None,
+            use_live.then(|| live.clone()),
+            None,
+        );
+        // Mutation after registry construction must affect the live branch,
+        // while the fixed request retains its canonical immutable config.
+        live.write().personas.get_mut("reserved").unwrap().humor = PersonaLevel::Xhigh;
+        let tool = tools
+            .tools
+            .iter()
+            .find(|tool| tool.name() == "propose_soul_change")
+            .unwrap();
+        let result = tool
+            .execute(serde_json::json!({
+                "layer":"voice", "trait_key":"humor", "level":"medium",
+                "proposal":"Use occasional humour", "rationale":"Owner requested it"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.success, !use_live, "{:?}", result.error);
+    }
+}

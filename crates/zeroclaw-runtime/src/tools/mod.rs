@@ -697,13 +697,18 @@ pub fn all_tools_with_runtime(
             ProposeSoulChangeTool::new(root_config.data_dir.clone(), agent_alias)
                 .with_voice_resolver({
                     let live = live_config.clone();
+                    let fixed = Arc::clone(&config);
                     let agent = agent_alias.to_string();
                     move || {
-                        live.as_ref().map(|live| {
-                            live.read()
+                        // One-shot registries own an immutable Config for the
+                        // request; long-lived callers resolve the live handle.
+                        Some(match &live {
+                            Some(live) => live
+                                .read()
                                 .persona_for_agent(&agent)
                                 .copied()
-                                .unwrap_or_default()
+                                .unwrap_or_default(),
+                            None => fixed.persona_for_agent(&agent).copied().unwrap_or_default(),
                         })
                     }
                 }),
