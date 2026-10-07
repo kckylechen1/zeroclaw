@@ -1950,6 +1950,9 @@ impl SecurityPolicy {
     }
 
     pub fn is_resolved_path_readable(&self, resolved: &Path) -> bool {
+        if self.is_protected_companion_path(resolved) {
+            return false;
+        }
         // Universal POSIX device files: any operator running on Linux,
         // macOS, or BSD expects these to be readable. Adding them to
         // the per-agent config would be friction without security
@@ -2008,6 +2011,9 @@ impl SecurityPolicy {
     }
 
     pub fn is_resolved_path_allowed(&self, resolved: &Path) -> bool {
+        if self.is_protected_companion_path(resolved) {
+            return false;
+        }
         if is_null_device(resolved) {
             return true;
         }
@@ -2081,7 +2087,27 @@ impl SecurityPolicy {
         dirs
     }
 
+    /// Governed companion stores are available only through their typed APIs.
+    /// Broad workspace/root grants must not turn them into ordinary file data.
+    pub fn is_protected_companion_path(&self, resolved: &Path) -> bool {
+        let Some(name) = resolved.file_name().and_then(|value| value.to_str()) else {
+            return false;
+        };
+        let base = name
+            .strip_suffix("-wal")
+            .or_else(|| name.strip_suffix("-shm"))
+            .or_else(|| name.strip_suffix("-journal"))
+            .unwrap_or(name);
+        matches!(base, "soul.db" | "user_model.db")
+            && resolved
+                .parent()
+                .is_some_and(|parent| self.runtime_config_dirs().iter().any(|dir| parent == dir))
+    }
+
     pub fn is_runtime_config_path(&self, resolved: &Path) -> bool {
+        if self.is_protected_companion_path(resolved) {
+            return true;
+        }
         let Some(file_name) = resolved.file_name().and_then(|value| value.to_str()) else {
             return false;
         };
@@ -2090,10 +2116,7 @@ impl SecurityPolicy {
             || file_name.starts_with(".config.toml.tmp-")
             || file_name == "estop-state.json"
             || file_name == "otp-secret"
-            || file_name == "webauthn_credentials.json"
-            || file_name == "soul.db"
-            || file_name == "soul.db-wal"
-            || file_name == "soul.db-shm";
+            || file_name == "webauthn_credentials.json";
         if !is_protected_name {
             return false;
         }
