@@ -1115,8 +1115,9 @@ impl SoulProfileStore {
         self.submit_proposal_with_voice(agent, proposal, now_unix, || None)
     }
 
-    /// Resolve configured defaults under the write transaction, then validate
-    /// a Voice proposal against the current stored head before insertion.
+    /// Resolve configured defaults before the store lock, then validate against
+    /// the current stored head in the write transaction. Intake only queues a
+    /// proposal; owner approval rechecks its baseline before applying it.
     pub fn submit_proposal_with_voice(
         &self,
         agent: &str,
@@ -1127,6 +1128,11 @@ impl SoulProfileStore {
         let agent = checked_agent(agent)?;
         let proposal = proposal.normalized()?;
         let growth_kind = proposal.growth_kind.map(GrowthKind::as_str);
+        // Lock order is configuration before Soul. A live resolver may take a
+        // config read lock, while approval holds that lock through the commit.
+        let configured_voice = (proposal.layer == SoulProposalLayer::Voice)
+            .then(configured_voice)
+            .flatten();
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if proposal.layer == SoulProposalLayer::Voice {
@@ -1134,7 +1140,7 @@ impl SoulProfileStore {
                 &profile_of(&tx, agent)?,
                 proposal.trait_key.as_deref(),
                 proposal.level.as_deref(),
-                configured_voice(),
+                configured_voice,
             )?;
         }
         let target = match proposal.retire_index {
@@ -2602,7 +2608,15 @@ mod tests {
         ));
         let id = recorded(
             store
-                .submit_proposal_with_voice("a", voice("warmth", "high"), 1, || Some(base.get()))
+                .submit_proposal_with_voice("a", voice("warmth", "high"), 1, || {
+                    // A queued config writer must never leave this resolver
+                    // holding Soul while approval holds the config read lock.
+                    assert!(
+                        store.conn.try_lock().is_some(),
+                        "resolver ran under Soul lock"
+                    );
+                    Some(base.get())
+                })
                 .unwrap(),
         );
         base.set(PersonaKnobs {
