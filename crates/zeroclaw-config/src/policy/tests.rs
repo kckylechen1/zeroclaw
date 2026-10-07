@@ -3968,3 +3968,30 @@ fn soul_store_is_runtime_state_in_data_dir() {
     assert!(policy.is_runtime_config_path(&data_dir.join("soul.db-wal")));
     assert!(!policy.is_runtime_config_path(&root.path().join("workspace").join("soul.db")));
 }
+
+#[test]
+fn companion_stores_override_broad_file_grants() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let data = root.join("data");
+    std::fs::create_dir(&data).unwrap();
+    let policy = SecurityPolicy {
+        workspace_dir: root.clone(),
+        data_dir: Some(data.clone()),
+        workspace_only: false,
+        allowed_roots: vec![root.clone()],
+        ..SecurityPolicy::default()
+    };
+    for base in ["soul.db", "user_model.db", "SOUL.DB", "User_Model.Db"] {
+        for suffix in ["", "-wal", "-shm", "-journal", "-WAL", "-ShM", "-JOURNAL"] {
+            let path = data.join(format!("{base}{suffix}"));
+            assert!(policy.is_runtime_config_path(&path));
+            assert!(!policy.is_resolved_path_readable(&path));
+            assert!(!policy.is_resolved_path_allowed(&path));
+        }
+    }
+    assert!(policy.is_resolved_path_readable(&data.join("notes.txt")));
+    let unrelated = root.join("examples/soul.db");
+    assert!(policy.is_resolved_path_readable(&unrelated));
+    assert!(policy.is_resolved_path_allowed(&unrelated));
+}

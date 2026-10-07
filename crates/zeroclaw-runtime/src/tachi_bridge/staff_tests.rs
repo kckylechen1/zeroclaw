@@ -1387,6 +1387,22 @@ async fn production_registry_starts_once_and_reads_controls_through_same_request
         "protected-user-model-fixture-bytes",
     )
     .unwrap();
+    // Seed the canonical stores as well as legacy files: delegation must not
+    // inherit either the active Soul or the owner-approved User Model.
+    zeroclaw_memory::companion::SoulProfileStore::shared(&cfg.data_dir)
+        .unwrap()
+        .ensure_seeded("home", "protected-soul-fixture-bytes", 1)
+        .unwrap();
+    zeroclaw_memory::companion::UserModelStore::shared(&cfg.data_dir)
+        .unwrap()
+        .record_owner_statement(
+            zeroclaw_memory::companion::UserModelKind::Preference,
+            "protected-user-model-fixture-bytes",
+            "privacy.fixture",
+            "global",
+            1,
+        )
+        .unwrap();
     let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
     let tools = production_tools(&cfg, live.clone());
     let started = invoke(&tools, "tachi_start", start_args("req-prod")).await;

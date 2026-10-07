@@ -19,6 +19,7 @@ const exactRouteTitles: Record<string, string> = {
 const sectionTitles: Record<string, string> = {
   agent: 'nav.agent',
   agents: 'nav.agents',
+  review: 'nav.review',
   skills: 'nav.skills',
   cron: 'nav.cron',
   config: 'nav.config',

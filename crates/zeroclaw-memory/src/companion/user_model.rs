@@ -173,6 +173,20 @@ pub fn is_candidate_already_reviewed(error: &rusqlite::Error) -> bool {
     matches!(error, rusqlite::Error::ToSqlConversionFailure(inner) if inner.is::<CandidateAlreadyReviewed>())
 }
 
+/// Typed approval conflict: the current eligible head differs from the one shown.
+#[derive(Debug)]
+struct HeadConflict;
+impl fmt::Display for HeadConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("head_conflict")
+    }
+}
+impl std::error::Error for HeadConflict {}
+
+pub fn is_user_model_head_conflict(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::ToSqlConversionFailure(inner) if inner.is::<HeadConflict>())
+}
+
 impl ReviewAction {
     fn as_str(self) -> &'static str {
         match self {
@@ -667,6 +681,32 @@ impl UserModelStore {
         final_text: Option<&str>,
         now_unix: u64,
     ) -> Result<UserModelReviewReceipt, rusqlite::Error> {
+        self.review_candidate_with_expected_head(
+            candidate_id,
+            action,
+            reviewer,
+            note,
+            narrowed_scope,
+            final_text,
+            None,
+            now_unix,
+        )
+    }
+
+    /// Compare the exact displayed head under the same write transaction as
+    /// the decision. Reject has no replacement and needs no head expectation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn review_candidate_with_expected_head(
+        &self,
+        candidate_id: &str,
+        action: ReviewAction,
+        reviewer: &str,
+        note: Option<&str>,
+        narrowed_scope: Option<&str>,
+        final_text: Option<&str>,
+        expected_head: Option<&zeroclaw_api::companion::UserModelExpectedHead>,
+        now_unix: u64,
+    ) -> Result<UserModelReviewReceipt, rusqlite::Error> {
         if let Some(text) = final_text {
             if action == ReviewAction::Reject {
                 return Err(rusqlite::Error::InvalidParameterName(
@@ -736,6 +776,24 @@ impl UserModelStore {
                 "review cannot widen or move candidate scope".into(),
             ));
         }
+        let guarded_head = if action != ReviewAction::Reject {
+            if let Some(expected) = expected_head {
+                let current = active_heads_from_connection(&tx, now_unix, Some(&candidate.2))?
+                    .into_iter()
+                    .next()
+                    .map(|head| head.id);
+                if current != expected.id {
+                    return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                        HeadConflict,
+                    )));
+                }
+                Some(current)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let receipt = UserModelReviewReceipt {
             id: uuid::Uuid::new_v4().to_string(),
             candidate_id: candidate_id.to_string(),
@@ -766,13 +824,13 @@ impl UserModelStore {
                          (id, semantic_key, kind, statement, scope, authority, supersedes,
                           valid_from_unix, valid_until_unix, source_candidate, created_at_unix)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6,
-                             (SELECT id FROM user_model_revisions
+                             CASE WHEN ?10 THEN ?11 ELSE (SELECT id FROM user_model_revisions
                               WHERE semantic_key = ?2
                                 AND valid_from_unix <= ?7
                                 AND (valid_until_unix IS NULL OR valid_until_unix > ?7)
                               ORDER BY created_at_unix DESC,
                                        CASE WHEN ?9 THEN rowid ELSE NULL END DESC,
-                                       id DESC LIMIT 1),
+                                       id DESC LIMIT 1) END,
                              ?7, NULL, ?8, ?7)",
                     rusqlite::params![
                         uuid::Uuid::new_v4().to_string(),
@@ -785,6 +843,8 @@ impl UserModelStore {
                         candidate_id,
                         is_owner_correction_key(&candidate.2)
                             && matches!(Scope::parse(&candidate.3), Some(Scope::Session(_))),
+                        guarded_head.is_some(),
+                        guarded_head.as_ref().and_then(|head| head.as_deref()),
                     ],
                 )?;
             }
@@ -871,15 +931,27 @@ impl UserModelStore {
             }
         };
         let conn = self.conn.lock();
-        // Per key: take the newest revision that had already started at the
-        // read instant, THEN gate it on its own validity window. A key whose
-        // newest revision expired goes inactive — an older superseded
-        // revision must never resurface through the gap.
-        let mut stmt = conn.prepare(
-            "SELECT id, semantic_key, kind, statement, scope, authority, supersedes,
+        active_heads_from_connection(&conn, as_of, None)
+    }
+}
+
+// Shared by the public projection and guarded review inside its Immediate
+// transaction: expiry and owner-correction tie ordering have one query.
+fn active_heads_from_connection(
+    conn: &rusqlite::Connection,
+    as_of: u64,
+    semantic_key: Option<&str>,
+) -> Result<Vec<UserModelRevision>, rusqlite::Error> {
+    // Per key: take the newest revision that had already started at the
+    // read instant, THEN gate it on its own validity window. A key whose
+    // newest revision expired goes inactive — an older superseded
+    // revision must never resurface through the gap.
+    let mut stmt = conn.prepare(
+        "SELECT id, semantic_key, kind, statement, scope, authority, supersedes,
                     valid_from_unix, valid_until_unix, source_candidate, created_at_unix
              FROM user_model_revisions r
              WHERE r.valid_from_unix <= ?1
+               AND (?2 IS NULL OR r.semantic_key = ?2)
                AND r.created_at_unix = (
                    SELECT MAX(r2.created_at_unix) FROM user_model_revisions r2
                    WHERE r2.semantic_key = r.semantic_key
@@ -902,19 +974,18 @@ impl UserModelStore {
                )
                AND (r.valid_until_unix IS NULL OR r.valid_until_unix > ?1)
              ORDER BY r.created_at_unix DESC, r.id DESC",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![as_of], revision_from_row)?;
-        let mut seen = std::collections::HashSet::new();
-        let mut heads = Vec::new();
-        for row in rows {
-            let revision = row?;
-            if seen.insert(revision.semantic_key.clone()) {
-                heads.push(revision);
-            }
+    )?;
+    let rows = stmt.query_map(rusqlite::params![as_of, semantic_key], revision_from_row)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut heads = Vec::new();
+    for row in rows {
+        let revision = row?;
+        if seen.insert(revision.semantic_key.clone()) {
+            heads.push(revision);
         }
-        heads.sort_by(|a, b| a.semantic_key.cmp(&b.semantic_key));
-        Ok(heads)
     }
+    heads.sort_by(|a, b| a.semantic_key.cmp(&b.semantic_key));
+    Ok(heads)
 }
 
 /// Default character budget for the projected prompt section. The
@@ -1514,7 +1585,9 @@ mod tests {
         assert_eq!(keys, vec!["active", "future-expiry"]);
         assert_eq!(s.active_heads(Some(now)).unwrap(), heads);
     }
-    fn review_scope_snapshot(store: &UserModelStore) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    pub(super) fn review_scope_snapshot(
+        store: &UserModelStore,
+    ) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
         let conn = store.conn.lock();
         [
             "user_model_candidates",
@@ -1533,6 +1606,86 @@ mod tests {
                 .unwrap()
         })
         .collect()
+    }
+
+    #[test]
+    fn guarded_review_compares_exact_head_before_any_write() {
+        use zeroclaw_api::companion::UserModelExpectedHead;
+        let (_dir, store) = store();
+        for key in ["changed", "appeared"] {
+            let initial = if key == "changed" {
+                Some(
+                    store
+                        .record_owner_statement(UserModelKind::Preference, "A", key, "global", 1)
+                        .unwrap()
+                        .id,
+                )
+            } else {
+                None
+            };
+            let candidate = store
+                .record_observation(UserModelKind::Preference, "Candidate", key, "[]", 2)
+                .unwrap();
+            let latest = store
+                .record_owner_statement(UserModelKind::Preference, "B", key, "global", 3)
+                .unwrap();
+            let before = review_scope_snapshot(&store);
+            let result = store.review_candidate_with_expected_head(
+                &candidate.id,
+                ReviewAction::Accept,
+                "owner",
+                None,
+                None,
+                None,
+                Some(&UserModelExpectedHead { id: initial }),
+                4,
+            );
+            assert!(is_user_model_head_conflict(&result.unwrap_err()));
+            assert_eq!(review_scope_snapshot(&store), before);
+            store
+                .review_candidate_with_expected_head(
+                    &candidate.id,
+                    ReviewAction::Accept,
+                    "owner",
+                    None,
+                    None,
+                    None,
+                    Some(&UserModelExpectedHead {
+                        id: Some(latest.id.clone()),
+                    }),
+                    4,
+                )
+                .unwrap();
+            let head = store
+                .active_heads(Some(4))
+                .unwrap()
+                .into_iter()
+                .find(|head| head.semantic_key == key)
+                .unwrap();
+            assert_eq!(head.supersedes.as_deref(), Some(latest.id.as_str()));
+        }
+        let fresh = store
+            .record_observation(UserModelKind::Preference, "New", "empty", "[]", 5)
+            .unwrap();
+        store
+            .review_candidate_with_expected_head(
+                &fresh.id,
+                ReviewAction::Narrow,
+                "owner",
+                None,
+                Some("session:one"),
+                None,
+                Some(&UserModelExpectedHead { id: None }),
+                6,
+            )
+            .unwrap();
+        let head = store
+            .active_heads(Some(6))
+            .unwrap()
+            .into_iter()
+            .find(|head| head.semantic_key == "empty")
+            .unwrap();
+        assert!(head.supersedes.is_none());
     }
 
     #[test]
@@ -2159,6 +2312,7 @@ mod tests {
 
 #[cfg(test)]
 mod owner_correction_tests {
+    use super::tests::review_scope_snapshot;
     use super::*;
 
     fn evidence(agent: &str, session: &str, key: &str) -> String {
@@ -2206,6 +2360,37 @@ mod owner_correction_tests {
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].statement, "Later");
         assert_eq!(heads[0].supersedes.as_deref(), Some("aaaa"));
+        let next = store
+            .record_owner_correction(
+                "nova",
+                UserModelKind::Preference,
+                "Next",
+                "style",
+                &evidence("nova", "s", "style"),
+                "s",
+                2,
+            )
+            .unwrap()
+            .unwrap();
+        let stale = zeroclaw_api::companion::UserModelExpectedHead {
+            id: Some("zzzz".into()),
+        };
+        let before = review_scope_snapshot(&store);
+        assert!(is_user_model_head_conflict(
+            &store
+                .review_candidate_with_expected_head(
+                    &next.id,
+                    ReviewAction::Accept,
+                    "owner",
+                    None,
+                    None,
+                    None,
+                    Some(&stale),
+                    2
+                )
+                .unwrap_err()
+        ));
+        assert_eq!(review_scope_snapshot(&store), before);
         // Expiring the latest same-second head must not revive its predecessor.
         store
             .conn
@@ -2220,6 +2405,25 @@ mod owner_correction_tests {
                 .active_heads_for_agent("nova", Some(3))
                 .unwrap()
                 .is_empty()
+        );
+        let empty = zeroclaw_api::companion::UserModelExpectedHead { id: None };
+        store
+            .review_candidate_with_expected_head(
+                &next.id,
+                ReviewAction::Accept,
+                "owner",
+                None,
+                None,
+                None,
+                Some(&empty),
+                4,
+            )
+            .unwrap();
+        let heads = store.active_heads_for_agent("nova", Some(4)).unwrap();
+        assert_eq!(heads[0].statement, "Next");
+        assert!(
+            heads[0].supersedes.is_none(),
+            "expired head must not revive during guarded approval"
         );
     }
 

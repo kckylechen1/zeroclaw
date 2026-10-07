@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use zeroclaw_memory::companion::{
     ReviewAction, UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStore,
-    is_candidate_already_reviewed,
+    is_candidate_already_reviewed, is_user_model_head_conflict,
 };
 
 use crate::AppState;
@@ -161,7 +161,7 @@ pub async fn list_heads(
     match result {
         Ok(Ok(heads)) => (
             StatusCode::OK,
-            axum::Json(serde_json::json!({ "heads": heads })),
+            axum::Json(serde_json::json!({ "heads": heads, "supports_expected_head": true })),
         )
             .into_response(),
         Ok(Err(err)) => error_json(StatusCode::SERVICE_UNAVAILABLE, &err),
@@ -175,6 +175,17 @@ struct ReviewBody {
     note: Option<String>,
     narrowed_scope: Option<String>,
     final_text: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_expected_head")]
+    expected_head: Option<zeroclaw_api::companion::UserModelExpectedHead>,
+}
+
+fn deserialize_expected_head<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<zeroclaw_api::companion::UserModelExpectedHead>, D::Error> {
+    <zeroclaw_api::companion::UserModelExpectedHead as serde::Deserialize>::deserialize(
+        deserializer,
+    )
+    .map(Some)
 }
 
 enum ReviewStoreError {
@@ -232,13 +243,14 @@ pub async fn review_candidate(
     let result = tokio::task::spawn_blocking(move || {
         let store = cached_store(&data_dir).map_err(ReviewStoreError::Open)?;
         store
-            .review_candidate_with_text(
+            .review_candidate_with_expected_head(
                 &candidate,
                 action,
                 "operator",
                 note.as_deref(),
                 narrowed.as_deref(),
                 final_text.as_deref(),
+                body.expected_head.as_ref(),
                 now_unix(),
             )
             .map_err(ReviewStoreError::Review)
@@ -249,6 +261,11 @@ pub async fn review_candidate(
         Ok(Err(ReviewStoreError::Review(rusqlite::Error::QueryReturnedNoRows))) => {
             error_json(StatusCode::NOT_FOUND, "unknown candidate id")
         }
+        Ok(Err(ReviewStoreError::Review(ref error))) if is_user_model_head_conflict(error) => (
+            StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({"code": "head_conflict"})),
+        )
+            .into_response(),
         Ok(Err(ReviewStoreError::Review(ref error))) if is_candidate_already_reviewed(error) => (
             StatusCode::CONFLICT,
             axum::Json(serde_json::json!({
@@ -428,6 +445,96 @@ mod tests {
             .await,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn expected_head_conflict_and_capability_cross_the_http_boundary() {
+        let (dir, state) = state_with_tempdir();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        for key in ["changed", "appeared"] {
+            let expected = if key == "changed" {
+                Some(
+                    store
+                        .record_owner_statement(UserModelKind::Preference, "A", key, "global", 1)
+                        .unwrap()
+                        .id,
+                )
+            } else {
+                None
+            };
+            let candidate = store
+                .record_observation(UserModelKind::Preference, "C", key, "[]", 2)
+                .unwrap();
+            let latest = store
+                .record_owner_statement(UserModelKind::Preference, "B", key, "global", 3)
+                .unwrap();
+            for (id, status) in [
+                (expected, StatusCode::CONFLICT),
+                (Some(latest.id), StatusCode::OK),
+            ] {
+                let (actual, response) = json_of(
+                    review_candidate(
+                        State(state.clone()),
+                        ConnectInfo(loopback_peer()),
+                        operator_headers(),
+                        Path(candidate.id.clone()),
+                        body(&serde_json::json!({"action":"accept", "expected_head":{"id":id}})),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(actual, status);
+                if status == StatusCode::CONFLICT {
+                    assert_eq!(response["code"], "head_conflict");
+                    assert!(
+                        store
+                            .candidate_history(&candidate.id)
+                            .unwrap()
+                            .unwrap()
+                            .1
+                            .is_empty()
+                    );
+                }
+            }
+        }
+        let fresh = store
+            .record_observation(UserModelKind::Habit, "Fresh", "fresh", "[]", 4)
+            .unwrap();
+        for malformed in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({"id":42}),
+            serde_json::json!({"id":null,"unexpected":true}),
+        ] {
+            let response = review_candidate(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+                Path(fresh.id.clone()),
+                body(&serde_json::json!({"action":"accept", "expected_head":malformed})),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = review_candidate(
+            State(state.clone()),
+            ConnectInfo(loopback_peer()),
+            operator_headers(),
+            Path(fresh.id.clone()),
+            body(&serde_json::json!({"action":"accept", "expected_head":{"id":null}})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, response) = json_of(
+            list_heads(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(response["supports_expected_head"], true);
     }
 
     #[tokio::test]
