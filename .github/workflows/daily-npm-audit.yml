@@ -112,7 +112,6 @@ jobs:
             --title "ci: npm audit failed — $(date -u +%Y-%m-%d)" \
             --label "security" \
             --label "dependencies" \
-            --label "risk:high" \
             --body-file "${{ runner.temp }}/issue-body.md")
           echo "issue_url=$issue_url" >> "$GITHUB_OUTPUT"
 
