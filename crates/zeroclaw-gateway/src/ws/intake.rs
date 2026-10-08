@@ -249,35 +249,14 @@ pub(super) fn receive(
         };
         (json!({"disposition":disposition}).to_string(), disposition)
     };
-    if initial_state == "pending" {
+    if initial_state == "pending"
+        && let Some(surface) = scope.surface
+    {
         let Ok(mut body) = serde_json::from_str::<Value>(&payload) else {
             return failure(id, "INVALID_SOURCE_INPUT");
         };
-        let Ok(snapshot) = backend.bridge_resume(&source) else {
-            return failure(id, "SOURCE_RECEIPT_UNAVAILABLE");
-        };
-        if let Some(known) = snapshot
-            .inputs
-            .iter()
-            .find(|input| input.update_id == update_id)
-        {
-            let Ok(mut original) = serde_json::from_str::<Value>(&known.payload) else {
-                return failure(id, "SOURCE_NOT_RECORDED");
-            };
-            if let Some(fields) = original.as_object_mut() {
-                fields.remove("surface");
-            }
-            if original != body {
-                return failure(id, "SOURCE_NOT_RECORDED");
-            }
-            // The accepted input owns its register. A retry checks the same
-            // body and reuses the exact payload, including legacy no-surface
-            // rows; the backend's immutable-input checks remain in force.
-            payload = known.payload.clone();
-        } else if let Some(surface) = scope.surface {
-            body["surface"] = json!(surface);
-            payload = body.to_string();
-        }
+        body["surface"] = json!(surface);
+        payload = body.to_string();
     }
     let input = BridgeInput {
         update_id,
@@ -286,7 +265,7 @@ pub(super) fn receive(
         payload,
         state: initial_state.to_string(),
     };
-    let Ok(mut receipt) = backend.bridge_record(&source, &input) else {
+    let Ok(mut receipt) = record_input(backend.as_ref(), &source, &input) else {
         return failure(id, "SOURCE_NOT_RECORDED");
     };
     if register(state, &source, scope).is_err() {
@@ -316,6 +295,44 @@ pub(super) fn receive(
         None
     };
     (Some(ack(ns, &input, &receipt, turn)), start)
+}
+
+/// Let the recording transaction choose the first immutable register. A
+/// conflicting first submission or reconnect may retry once with that payload;
+/// every non-presentation field still goes through the backend's strict checks.
+fn record_input(
+    backend: &dyn zeroclaw_infra::session_backend::SessionBackend,
+    source: &BridgeSource,
+    input: &BridgeInput,
+) -> std::io::Result<BridgeReceipt> {
+    let error = match backend.bridge_record(source, input) {
+        Ok(receipt) => return Ok(receipt),
+        Err(error) => error,
+    };
+    if input.state != "pending" {
+        return Err(error);
+    }
+    let snapshot = backend.bridge_resume(source)?;
+    let Some(known) = snapshot
+        .inputs
+        .iter()
+        .find(|known| known.update_id == input.update_id)
+    else {
+        return Err(error);
+    };
+    let original_body = |payload: &str| -> std::io::Result<Value> {
+        let mut body: Value = serde_json::from_str(payload).map_err(std::io::Error::other)?;
+        if let Some(fields) = body.as_object_mut() {
+            fields.remove("surface");
+        }
+        Ok(body)
+    };
+    if original_body(&known.payload)? != original_body(&input.payload)? {
+        return Err(error);
+    }
+    let mut canonical = input.clone();
+    canonical.payload.clone_from(&known.payload);
+    backend.bridge_record(source, &canonical)
 }
 
 fn materialize(
