@@ -21,9 +21,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use zeroclaw_api::channel::ChannelApprovalResponse;
+use zeroclaw_api::chat_surface::ChatSurface;
 use zeroclaw_infra::session_backend::RequestReceipt;
 
 pub(crate) mod intake;
+mod surface;
 
 /// Default wall-clock budget for the operator to answer an
 /// `approval_request` frame before the channel auto-denies. Mirrors the
@@ -59,6 +61,8 @@ struct ConnectParams {
     /// Project root / working directory for this session.
     #[serde(default, alias = "workspaceDir", alias = "workspace_dir")]
     cwd: Option<String>,
+    #[serde(default)]
+    surface: Option<ChatSurface>,
 }
 
 /// The sub-protocol we support for the chat WebSocket.
@@ -82,6 +86,7 @@ pub struct WsQuery {
     pub cwd: Option<String>,
     #[serde(default, alias = "workspaceDir", alias = "workspace_dir")]
     pub workspace_dir: Option<String>,
+    pub surface: Option<String>,
 }
 
 pub(crate) fn extract_ws_token<'a>(
@@ -229,6 +234,16 @@ pub async fn handle_ws_chat(
         }
     }
 
+    let surface = match surface::resolve(None, params.surface.as_deref()) {
+        Ok(surface) => surface,
+        Err(()) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                zeroclaw_runtime::i18n::get_required_cli_string("gateway-invalid-surface"),
+            )
+                .into_response();
+        }
+    };
     let session_id = params.session_id;
     let session_name = params.name;
     let session_cwd = params.cwd.or(params.workspace_dir);
@@ -240,6 +255,7 @@ pub async fn handle_ws_chat(
             session_id,
             session_name,
             session_cwd,
+            surface,
             auth_subject,
             bridge_scope,
         )
@@ -279,6 +295,7 @@ async fn handle_socket(
     session_id: Option<String>,
     session_name: Option<String>,
     session_cwd: Option<String>,
+    mut surface: Option<ChatSurface>,
     // The transport-authenticated approval subject (paired-token hash), if the
     // connection was authenticated. Threaded to SOP approval frames so a policied
     // gate can be satisfied by an identified WS caller.
@@ -323,6 +340,8 @@ async fn handle_socket(
         "session_id": session_id,
         "resumed": resumed,
         "message_count": message_count,
+        "surface_version": surface::VERSION,
+        "surface": surface,
     });
     if let Some(ref name) = effective_name {
         session_start["name"] = serde_json::Value::String(name.clone());
@@ -337,8 +356,21 @@ async fn handle_socket(
     if let Some(first) = receiver.next().await {
         match first {
             Ok(Message::Text(text)) => {
+                if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text)
+                    && frame["type"] == "connect"
+                    && surface::connect_value(surface, &frame).is_err()
+                {
+                    let err = serde_json::json!({
+                        "type": "error",
+                        "message": zeroclaw_runtime::i18n::get_required_cli_string("gateway-invalid-surface"),
+                        "code": "INVALID_SURFACE"
+                    });
+                    let _ = sender.send(Message::Text(err.to_string().into())).await;
+                    return;
+                }
                 if let Ok(cp) = serde_json::from_str::<ConnectParams>(&text) {
                     if cp.msg_type == "connect" {
+                        surface = cp.surface.or(surface);
                         ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"session_id": cp.session_id, "device_name": cp.device_name, "capabilities": cp.capabilities, "cwd": cp.cwd})), "WebSocket connect params received");
                         if let (Some(sid), Some(scope)) = (&cp.session_id, &bridge_scope)
                             && !scope.allows_session(sid)
@@ -369,7 +401,9 @@ async fn handle_socket(
                         }
                         let ack = serde_json::json!({
                             "type": "connected",
-                            "message": "Connection established"
+                            "message": "Connection established",
+                            "surface_version": surface::VERSION,
+                            "surface": surface,
                         });
                         let _ = sender.send(Message::Text(ack.to_string().into())).await;
                     } else {
@@ -478,6 +512,7 @@ async fn handle_socket(
         session_key,
         session_id,
         auth_subject,
+        surface,
     };
 
     // Subscribe to the shared broadcast channel so events addressed to this
@@ -581,6 +616,7 @@ struct WsTurnScope {
     // The transport-authenticated approval subject (paired-token hash) of
     // the socket that opened the conversation, if it was authenticated.
     auth_subject: Option<String>,
+    surface: Option<ChatSurface>,
 }
 
 /// Build the agent for a new shared conversation and wire its approval
@@ -623,6 +659,7 @@ async fn build_ws_session(
             false,
         )
         .await?;
+    agent.add_prompt_section(Box::new(surface::Section));
     // Keep ONE ingress identity for the WebSocket turn: the turn span records
     // `channel = "wss"`, and observer events derive from `Agent.channel_name`,
     // so this must stay `wss` or a single turn is split across two names.
@@ -1162,6 +1199,7 @@ fn handle_message_frame(
         Submitted::Start(mut claim) => {
             claim.original_input = Some(original_input);
             claim.request_id = request_id.map(str::to_string);
+            claim.surface = scope.surface;
             (ack("started"), Some(claim))
         }
         Submitted::Steered => {
@@ -1283,8 +1321,10 @@ async fn run_ws_turns(
         generation,
         cancel,
         mut steering,
+        surface,
     }) = next.take()
     {
+        scope.surface = surface;
         let mut intake_started = intake.is_none();
         let mut allow_resume = false;
         let (late, outcome) = match state.session_queue.acquire(&scope.session_key).await {
@@ -1340,8 +1380,9 @@ async fn run_ws_turns(
             set_request_state(&state, &conversation, &scope.session_key, id, outcome);
         }
         if !late.is_empty()
-            && let Submitted::Start(claim) = conversation.submit(late.join("\n\n"))
+            && let Submitted::Start(mut claim) = conversation.submit(late.join("\n\n"))
         {
+            claim.surface = scope.surface;
             next = Some(claim);
         }
         if next.is_none()
@@ -1698,14 +1739,17 @@ async fn process_chat_message(
                 turn_usage.clone(),
                 zeroclaw_runtime::agent::cost::TOOL_LOOP_COST_TRACKING_CONTEXT.scope(
                     cost_tracking_context.clone(),
-                    agent
-                        .turn_streamed_with_steering_state(
-                            &content_owned,
-                            event_tx,
-                            Some(cancel_token.clone()),
-                            Some(&mut *steering_rx),
-                        )
-                        .instrument(span),
+                    surface::CURRENT.scope(
+                        scope.surface,
+                        agent
+                            .turn_streamed_with_steering_state(
+                                &content_owned,
+                                event_tx,
+                                Some(cancel_token.clone()),
+                                Some(&mut *steering_rx),
+                            )
+                            .instrument(span),
+                    ),
                 ),
             ),
         )
@@ -2736,6 +2780,10 @@ mod tests {
         include!("ws/intake_tests.rs");
     }
 
+    mod surface_tests {
+        include!("ws/surface_tests.rs");
+    }
+
     struct SharedChat {
         vision: bool,
         state: AppState,
@@ -2764,6 +2812,7 @@ mod tests {
                     session_key: "gw_shared".into(),
                     session_id: "shared".into(),
                     auth_subject: None,
+                    surface: None,
                 },
                 gate: Arc::new(tokio::sync::Semaphore::new(0)),
                 seen: Arc::default(),
@@ -2825,7 +2874,8 @@ mod tests {
                                 )
                                 .governed_turn_context(None);
                         }
-                        let agent = builder.build()?;
+                        let mut agent = builder.build()?;
+                        agent.add_prompt_section(Box::new(surface::Section));
                         Ok::<_, anyhow::Error>((
                             WsSession {
                                 agent,

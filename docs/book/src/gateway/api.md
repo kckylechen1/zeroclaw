@@ -64,6 +64,38 @@ agent, one history, one running turn.
 - A socket that falls far behind skips frames; the `done` frame still
   carries the full response.
 
+### Presentation surface (version 1)
+
+Clients may register `web`, `telegram` or `cli` through the `surface` query
+parameter or their first `connect` frame, for example
+`{"type":"connect","surface":"telegram"}`. Query and frame values must agree.
+Unknown names, non-string frame values and explicit null are refused; an invalid
+query receives HTTP 400 and an invalid frame receives `INVALID_SURFACE`.
+`session_start` and `connected` advertise `surface_version: 1` and echo the
+registered surface (null when omitted). Legacy clients may omit the field.
+
+The register belongs to the initiating connection and is resolved for each turn,
+not captured by the first socket's shared Agent. It adds one repository-owned
+`## Surface` line about length and Markdown. Identity, Soul and Voice stay
+identical; surface grants no authority and does not change authentication,
+allowlists, session identity or the `wss` runtime channel. All subscribers receive
+the same output. Steering and a late steering continuation retain the original
+turn's register. Durable source inputs retain the register accepted with their
+body, including after reconnect or restart.
+
+The Web client sends `surface=web`; the CLI and Telegram bridge use the connect
+frame and require a matching version 1 acknowledgement. Upgrade Gateway before
+those clients; an older Gateway cannot satisfy their surface handshake. A legacy
+client still uses the previous prompt without a Surface section. Reverting the
+clients removes their registration; reverting Gateway removes the presentation
+section. Pending source bodies can retain this optional field without a database
+migration, but an older Gateway will ignore its formatting meaning.
+
+Upstream commit `05f9fe95d4a9be5ab76124ed3a40da3fb9697f3a` was checked: its
+WebSocket handshake has no equivalent surface register. This bounded extension
+implements the surface slice of #377/#380; surface-based recall and worker
+projection rules remain separate work.
+
 ### Who can attach to a session
 
 A session id names a conversation; it is not a secret or a credential. With

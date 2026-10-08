@@ -954,6 +954,11 @@ impl Agent {
         self.refresh_system_prompt();
     }
 
+    /// Attach an adapter-owned section to the existing prompt pipeline.
+    pub fn add_prompt_section(&mut self, section: Box<dyn crate::agent::prompt::PromptSection>) {
+        self.prompt_builder = std::mem::take(&mut self.prompt_builder).add_section(section);
+    }
+
     fn refresh_system_prompt(&mut self) {
         let Some(ConversationMessage::Chat(first)) = self.history.first() else {
             return;

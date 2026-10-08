@@ -209,7 +209,7 @@ pub(super) fn receive(
     let Some(backend) = &state.session_backend else {
         return failure(id, "DURABLE_INTAKE_UNAVAILABLE");
     };
-    let (payload, initial_state) = if frame["type"] == "message" {
+    let (mut payload, initial_state) = if frame["type"] == "message" {
         let Some(content) = frame["content"].as_str() else {
             return failure(id, "INVALID_SOURCE_INPUT");
         };
@@ -249,6 +249,36 @@ pub(super) fn receive(
         };
         (json!({"disposition":disposition}).to_string(), disposition)
     };
+    if initial_state == "pending" {
+        let Ok(mut body) = serde_json::from_str::<Value>(&payload) else {
+            return failure(id, "INVALID_SOURCE_INPUT");
+        };
+        let Ok(snapshot) = backend.bridge_resume(&source) else {
+            return failure(id, "SOURCE_RECEIPT_UNAVAILABLE");
+        };
+        if let Some(known) = snapshot
+            .inputs
+            .iter()
+            .find(|input| input.update_id == update_id)
+        {
+            let Ok(mut original) = serde_json::from_str::<Value>(&known.payload) else {
+                return failure(id, "SOURCE_NOT_RECORDED");
+            };
+            if let Some(fields) = original.as_object_mut() {
+                fields.remove("surface");
+            }
+            if original != body {
+                return failure(id, "SOURCE_NOT_RECORDED");
+            }
+            // The accepted input owns its register. A retry checks the same
+            // body and reuses the exact payload, including legacy no-surface
+            // rows; the backend's immutable-input checks remain in force.
+            payload = known.payload.clone();
+        } else if let Some(surface) = scope.surface {
+            body["surface"] = json!(surface);
+            payload = body.to_string();
+        }
+    }
     let input = BridgeInput {
         update_id,
         previous_cursor,
@@ -341,6 +371,13 @@ fn schedule(
         .session_backend
         .as_ref()
         .ok_or_else(|| std::io::Error::other("durable backend unavailable"))?;
+    let body: Value = serde_json::from_str(&input.payload).map_err(std::io::Error::other)?;
+    let surface = body
+        .get("surface")
+        .cloned()
+        .map(serde_json::from_value::<ChatSurface>)
+        .transpose()
+        .map_err(std::io::Error::other)?;
     let key = (source.key.clone(), input.update_id);
     if !state
         .ws_conversations
@@ -384,6 +421,7 @@ fn schedule(
         return Err(std::io::Error::other("source authority revoked"));
     }
     if let Some(mut claim) = conversation.start_if_idle(content) {
+        claim.surface = surface;
         claim.request_id = Some(input.request_id.clone());
         claim.intake = Some(Claim {
             source: source.clone(),

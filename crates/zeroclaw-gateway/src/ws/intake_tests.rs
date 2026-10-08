@@ -675,3 +675,35 @@ async fn a_concurrent_socket_cannot_overtake_the_reserved_source_head() {
     assert!(chat.seen.lock()[0][0].ends_with("reserved first"));
     assert!(chat.seen.lock()[1][1].ends_with("second after reservation"));
 }
+
+#[tokio::test]
+async fn surface_recovery_uses_the_accepted_input_and_preserves_legacy_payloads() {
+    for original in [Some(ChatSurface::Telegram), None] {
+        let mut chat = intake_chat();
+        chat.scope.surface = original;
+        let socket = intake_socket(&chat).await;
+        let frame = source_message(1, 0, "persisted presentation");
+        let (_, claim) = receive_intake(&chat, &socket, frame.clone());
+        assert_eq!(claim.as_ref().unwrap().surface, original);
+        let payload = intake_snapshot(&chat).inputs[0].payload.clone();
+        drop(claim);
+        drop(socket);
+        reopen_intake(&mut chat);
+        chat.scope.surface = Some(ChatSurface::Cli);
+        let socket = intake_socket(&chat).await;
+        let (ack, claim) = receive_intake(&chat, &socket, frame.clone());
+        assert_eq!(ack["status"], "duplicate");
+        assert_eq!(intake_snapshot(&chat).inputs[0].payload, payload);
+        assert_eq!(claim.as_ref().unwrap().surface, original);
+        let mut changed = frame;
+        changed["content"] = json!("changed body");
+        let (ack, _) = receive_intake(&chat, &socket, changed);
+        assert_eq!(ack["type"], "error");
+        chat.gate.add_permits(1);
+        run_intake(&chat, &socket, claim.unwrap()).await;
+        let prompt = chat.systems.lock()[0].clone();
+        assert_eq!(prompt.contains("## Surface\n\nTelegram:"), original.is_some());
+        assert!(!prompt.contains("## Surface\n\nCLI:"));
+        assert_eq!(intake_snapshot(&chat).inputs[0].state, "done");
+    }
+}

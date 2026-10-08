@@ -85,6 +85,7 @@ export class WebSocketClient {
     if (token) params.set('token', token);
     params.set('session_id', sessionId);
     params.set('agent', this.agentAlias);
+    params.set('surface', 'web');
     const url = `${this.baseUrl}${basePath}/ws/chat?${params.toString()}`;
 
     const protocols: string[] = ['zeroclaw.v1'];

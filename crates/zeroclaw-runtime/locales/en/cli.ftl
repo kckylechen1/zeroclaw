@@ -1052,6 +1052,7 @@ gateway-attachment-unauthorized = Attachments require current device or bridge a
 gateway-attachment-unavailable = Attachment is expired, unavailable or outside this session
 
 gateway-intake-unavailable = The input could not be safely resumed. Reconnect to check its durable receipt before sending it again.
+gateway-invalid-surface = Invalid chat surface. Use web, telegram or cli; query and connect values must agree.
 
 # Generic review notice. Never interpolate Soul or owner evidence content.
 soul-weekly-review-notice = Weekly reflection created { $soul_count } Soul proposals and { $user_count } User Model candidates. Review: { $review_path }

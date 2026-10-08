@@ -377,7 +377,7 @@ impl Bridge {
     /// waiting (bad token, unknown agent) is returned as an error.
     async fn connect(&mut self) -> Result<()> {
         let error = match timeout(CONNECT_TIMEOUT, async {
-            let mut client = Client::connect(&self.options).await?;
+            let mut client = Client::connect_with_surface(&self.options, "telegram").await?;
             let ready = client.resume_source(&self.source).await?;
             if ready.receipts.len() > 128 || ready.unknown.len() > 128 {
                 bail!("source intake resume exceeded its receipt bound");

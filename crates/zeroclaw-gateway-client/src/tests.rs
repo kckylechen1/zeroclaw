@@ -291,3 +291,45 @@ async fn bridge_control_requires_server_selection_of_v2() {
         server.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn requested_surface_requires_the_matching_versioned_acknowledgement() {
+    for ack in [
+        serde_json::json!({"type":"connected"}),
+        serde_json::json!({"type":"connected", "surface_version":2, "surface":"telegram"}),
+        serde_json::json!({"type":"connected", "surface_version":1, "surface":"web"}),
+        serde_json::json!({"type":"connected", "surface_version":1, "surface":"telegram"}),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let options = ConnectOptions {
+            gateway: format!("ws://{}", listener.local_addr().unwrap()),
+            agent: "web".into(),
+            session_id: Some("shared".into()),
+            token: None,
+        };
+        let succeeds = ack["surface_version"] == 1 && ack["surface"] == "telegram";
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            send_json(&mut socket, &serde_json::json!({"type":"session_start", "session_id":"shared", "resumed":false, "message_count":0})).await.unwrap();
+            assert_eq!(
+                next_value(&mut socket).await.unwrap().unwrap(),
+                serde_json::json!({"type":"connect", "surface":"telegram"})
+            );
+            send_json(&mut socket, &ack).await.unwrap();
+            let _ = socket.next().await;
+        };
+        let exchange = async {
+            let result = Client::connect_with_surface(&options, "telegram").await;
+            assert_eq!(result.is_ok(), succeeds);
+            if let Ok(client) = result {
+                client.close().await.unwrap();
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(server, exchange);
+        })
+        .await
+        .unwrap();
+    }
+}

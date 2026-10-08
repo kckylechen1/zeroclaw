@@ -134,6 +134,7 @@ pub(crate) struct TurnClaim {
     pub(crate) request_id: Option<String>,
     /// Reference to the canonical durable bridge input, when this is one.
     pub(crate) intake: Option<crate::ws::intake::Claim>,
+    pub(crate) surface: Option<zeroclaw_api::chat_surface::ChatSurface>,
     pub(crate) generation: u64,
     pub(crate) cancel: CancellationToken,
     pub(crate) steering: mpsc::Receiver<String>,
@@ -231,6 +232,7 @@ impl<A> Conversation<A> {
             original_input: None,
             request_id: None,
             intake: None,
+            surface: None,
             generation,
             cancel,
             steering: steering_rx,
