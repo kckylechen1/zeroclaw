@@ -50,20 +50,22 @@ Fork-specific facts (type placement, upstream divergences, known gaps) are in [`
 
 ## Validation
 
+Use `scripts/dev/cargo-local.sh` for host-side Cargo checks across linked worktrees; it shares the main checkout target and defaults to non-incremental compilation. Serialize checks sharing that target. At delivery closeout, measure retained targets and retire unused workspace artifacts only after confirming no live users; see the testing guide.
+
 Validate in two tiers, and paste the commands and results in the PR.
 
 **Iterate** on the crates you are changing, with their default features:
 
 ```bash
-cargo check -p <crate>                  # or: cargo clippy -p <crate> --all-targets
-cargo test -p <crate> [--lib <filter> | --test <name>]
+scripts/dev/cargo-local.sh check -p <crate>  # or: scripts/dev/cargo-local.sh clippy -p <crate> --all-targets
+scripts/dev/cargo-local.sh test -p <crate> [--lib <filter> | --test <name>]
 ```
 
 **Before pushing**, run once:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked --features ci-all -- -D warnings   # alias: cargo lint-ci
+scripts/dev/cargo-local.sh fmt --all -- --check
+scripts/dev/cargo-local.sh clippy --workspace --all-targets --locked --features ci-all -- -D warnings   # alias: scripts/dev/cargo-local.sh lint-ci
 scripts/dev/leg.sh <leg>                # each test leg that owns a crate you touched
 bash scripts/ci/provider_dispatch_gate.sh   # model calls go through ProviderDispatch
 bash scripts/ci/docs_quality_gate.sh && bash scripts/ci/docs_links_gate.sh   # docs changes
