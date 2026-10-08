@@ -310,7 +310,9 @@ async fn requested_surface_requires_the_matching_versioned_acknowledgement() {
         let succeeds = ack["surface_version"] == 1 && ack["surface"] == "telegram";
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(MaybeTlsStream::Plain(stream))
+                .await
+                .unwrap();
             send_json(&mut socket, &serde_json::json!({"type":"session_start", "session_id":"shared", "resumed":false, "message_count":0})).await.unwrap();
             assert_eq!(
                 next_value(&mut socket).await.unwrap().unwrap(),
