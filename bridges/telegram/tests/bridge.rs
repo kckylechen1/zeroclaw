@@ -238,8 +238,14 @@ async fn attach_ready(gateway: &mut FakeGateway, ready: Value) -> Ws {
         json!({ "type": "session_start", "session_id": "main", "resumed": true }),
     )
     .await;
-    assert_eq!(recv(&mut ws).await["type"], "connect");
-    send(&mut ws, json!({ "type": "connected" })).await;
+    let connect = recv(&mut ws).await;
+    assert_eq!(connect["type"], "connect");
+    assert_eq!(connect["surface"], "telegram");
+    send(
+        &mut ws,
+        json!({ "type": "connected", "surface": "telegram", "surface_version": 1 }),
+    )
+    .await;
     assert_eq!(
         recv_raw(&mut ws).await,
         json!({"type":"source_resume","source":"telegram:9000:42"})

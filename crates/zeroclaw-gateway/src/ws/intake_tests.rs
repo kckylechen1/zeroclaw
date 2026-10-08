@@ -675,3 +675,169 @@ async fn a_concurrent_socket_cannot_overtake_the_reserved_source_head() {
     assert!(chat.seen.lock()[0][0].ends_with("reserved first"));
     assert!(chat.seen.lock()[1][1].ends_with("second after reservation"));
 }
+
+#[tokio::test]
+async fn surface_recovery_uses_the_accepted_input_and_preserves_legacy_payloads() {
+    for original in [Some(ChatSurface::Telegram), None] {
+        let mut chat = intake_chat();
+        chat.scope.surface = original;
+        let socket = intake_socket(&chat).await;
+        let frame = source_message(1, 0, "persisted presentation");
+        let (_, claim) = receive_intake(&chat, &socket, frame.clone());
+        assert_eq!(claim.as_ref().unwrap().surface, original);
+        let payload = intake_snapshot(&chat).inputs[0].payload.clone();
+        drop(claim);
+        drop(socket);
+        reopen_intake(&mut chat);
+        chat.scope.surface = Some(ChatSurface::Cli);
+        let socket = intake_socket(&chat).await;
+        let (ack, claim) = receive_intake(&chat, &socket, frame.clone());
+        assert_eq!(ack["status"], "duplicate");
+        assert_eq!(intake_snapshot(&chat).inputs[0].payload, payload);
+        assert_eq!(claim.as_ref().unwrap().surface, original);
+        let mut changed = frame;
+        changed["content"] = json!("changed body");
+        let (ack, _) = receive_intake(&chat, &socket, changed);
+        assert_eq!(ack["type"], "error");
+        chat.gate.add_permits(1);
+        run_intake(&chat, &socket, claim.unwrap()).await;
+        let prompt = chat.systems.lock()[0].clone();
+        assert_eq!(prompt.contains("## Surface\n\nTelegram:"), original.is_some());
+        assert!(!prompt.contains("## Surface\n\nCLI:"));
+        assert_eq!(intake_snapshot(&chat).inputs[0].state, "done");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn racing_surface_registrations_return_duplicate_and_execute_the_winner() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use zeroclaw_api::bridge_intake::{BridgeInput, BridgeReceipt};
+    use zeroclaw_api::model_provider::ChatMessage;
+    use zeroclaw_infra::session_backend::SessionBackend;
+
+    struct RacingBackend {
+        inner: Arc<dyn SessionBackend>,
+        records: AtomicUsize,
+        barrier: std::sync::Barrier,
+    }
+    impl SessionBackend for RacingBackend {
+        fn load(&self, key: &str) -> Vec<ChatMessage> {
+            self.inner.load(key)
+        }
+        fn append(&self, key: &str, message: &ChatMessage) -> std::io::Result<()> {
+            self.inner.append(key, message)
+        }
+        fn remove_last(&self, key: &str) -> std::io::Result<bool> {
+            self.inner.remove_last(key)
+        }
+        fn list_sessions(&self) -> Vec<String> {
+            self.inner.list_sessions()
+        }
+        fn bridge_resume(&self, source: &BridgeSource) -> std::io::Result<BridgeResume> {
+            self.inner.bridge_resume(source)
+        }
+        fn bridge_receipt(
+            &self,
+            source: &BridgeSource,
+            id: i64,
+        ) -> std::io::Result<Option<BridgeReceipt>> {
+            self.inner.bridge_receipt(source, id)
+        }
+        fn bridge_record(
+            &self,
+            source: &BridgeSource,
+            input: &BridgeInput,
+        ) -> std::io::Result<BridgeReceipt> {
+            // Both first submissions reach persistence before either can win.
+            // A canonical retry must bypass the barrier.
+            if self.records.fetch_add(1, Ordering::SeqCst) < 2 {
+                self.barrier.wait();
+            }
+            self.inner.bridge_record(source, input)
+        }
+        fn bridge_claim(&self, source: &BridgeSource, id: i64) -> std::io::Result<bool> {
+            self.inner.bridge_claim(source, id)
+        }
+        fn bridge_finish(
+            &self,
+            source: &BridgeSource,
+            id: i64,
+            state: &str,
+        ) -> std::io::Result<()> {
+            self.inner.bridge_finish(source, id, state)
+        }
+    }
+    let mut chat = intake_chat();
+    chat.state.session_backend = Some(Arc::new(RacingBackend {
+        inner: chat.state.session_backend.take().unwrap(),
+        records: AtomicUsize::new(0),
+        barrier: std::sync::Barrier::new(2),
+    }));
+    let chat = Arc::new(chat);
+    let a = intake_socket(&chat).await;
+    let b = intake_socket(&chat).await;
+    let mut workers = Vec::new();
+    for surface in [ChatSurface::Web, ChatSurface::Telegram] {
+        let chat = chat.clone();
+        let conversation = a.conversation.clone();
+        workers.push(tokio::task::spawn_blocking(move || {
+            let mut scope = chat.scope.clone();
+            scope.surface = Some(surface);
+            handle_client_text(
+                &chat.state,
+                &conversation,
+                &scope,
+                &source_message(1, 0, "racing presentation").to_string(),
+            )
+        }));
+    }
+    let mut accepted = 0;
+    let mut duplicate = 0;
+    let mut claims = Vec::new();
+    for worker in workers {
+        let (ack, claim) = tokio::time::timeout(Duration::from_secs(10), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        let ack = ack.unwrap();
+        assert_eq!(ack["durable"], true, "{ack}");
+        assert_eq!(ack["source"]["cursor"], 2);
+        match ack["status"].as_str() {
+            Some("accepted") => accepted += 1,
+            Some("duplicate") => duplicate += 1,
+            _ => panic!("unexpected intake receipt: {ack}"),
+        }
+        claims.extend(claim);
+    }
+    assert_eq!((accepted, duplicate, claims.len()), (1, 1, 1));
+    let snapshot = intake_snapshot(&chat);
+    assert_eq!(snapshot.inputs.len(), 1);
+    let payload = snapshot.inputs[0].payload.clone();
+    let winner: ChatSurface =
+        serde_json::from_value(serde_json::from_str::<Value>(&payload).unwrap()["surface"].clone())
+            .unwrap();
+    assert_eq!(claims[0].surface, Some(winner));
+
+    // Reusing presentation metadata must never relax the immutable input checks.
+    let mut changed = source_message(1, 0, "racing presentation");
+    changed["attachments"] = json!([uuid::Uuid::new_v4().to_string()]);
+    let (error, _) = receive_intake(&chat, &b, changed);
+    assert_eq!(error["code"], "SOURCE_NOT_RECORDED");
+    let (error, _) = receive_intake(&chat, &b, source_message(1, 1, "racing presentation"));
+    assert_eq!(error["code"], "SOURCE_NOT_RECORDED");
+    assert_eq!(intake_snapshot(&chat).inputs[0].payload, payload);
+
+    chat.gate.add_permits(1);
+    run_intake(&chat, &b, claims.pop().unwrap()).await;
+    assert_eq!(chat.seen.lock().len(), 1);
+    let prompt = chat.systems.lock()[0].clone();
+    assert_eq!(
+        prompt.contains("## Surface\n\nWeb:"),
+        winner == ChatSurface::Web
+    );
+    assert_eq!(
+        prompt.contains("## Surface\n\nTelegram:"),
+        winner == ChatSurface::Telegram
+    );
+    assert_eq!(intake_snapshot(&chat).inputs[0].state, "done");
+}

@@ -311,6 +311,16 @@ impl Client {
     /// Connect, read the gateway's `session_start`, and complete the
     /// handshake so the session is ready for messages.
     pub async fn connect(options: &ConnectOptions) -> Result<Self> {
+        Self::connect_inner(options, None).await
+    }
+
+    /// Request a presentation register and require its versioned handshake.
+    /// This does not change the client's authentication or session scope.
+    pub async fn connect_with_surface(options: &ConnectOptions, surface: &str) -> Result<Self> {
+        Self::connect_inner(options, Some(surface)).await
+    }
+
+    async fn connect_inner(options: &ConnectOptions, surface: Option<&str>) -> Result<Self> {
         let mut socket = open(
             &options.chat_url(),
             PROTOCOL,
@@ -330,10 +340,22 @@ impl Client {
 
         // The gateway builds the agent after the first client frame; a
         // `connect` frame lets it do so before the first message.
-        send_json(&mut socket, &serde_json::json!({ "type": "connect" })).await?;
+        let mut connect = serde_json::json!({ "type": "connect" });
+        if let Some(surface) = surface {
+            connect["surface"] = surface.into();
+        }
+        send_json(&mut socket, &connect).await?;
         loop {
             match next_value(&mut socket).await? {
-                Some(value) if value["type"] == "connected" => break,
+                Some(value) if value["type"] == "connected" => {
+                    if let Some(surface) = surface
+                        && (value["surface_version"].as_u64() != Some(1)
+                            || value["surface"].as_str() != Some(surface))
+                    {
+                        bail!("gateway did not acknowledge the requested chat surface");
+                    }
+                    break;
+                }
                 Some(value) if value["type"] == "error" => {
                     bail!(
                         "gateway refused the session: {}",

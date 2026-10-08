@@ -291,3 +291,47 @@ async fn bridge_control_requires_server_selection_of_v2() {
         server.await.unwrap();
     }
 }
+
+#[tokio::test]
+#[allow(clippy::result_large_err)] // tungstenite handshake callback error type
+async fn requested_surface_requires_the_matching_versioned_acknowledgement() {
+    for ack in [
+        serde_json::json!({"type":"connected"}),
+        serde_json::json!({"type":"connected", "surface_version":2, "surface":"telegram"}),
+        serde_json::json!({"type":"connected", "surface_version":1, "surface":"web"}),
+        serde_json::json!({"type":"connected", "surface_version":1, "surface":"telegram"}),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let options = ConnectOptions {
+            gateway: format!("ws://{}", listener.local_addr().unwrap()),
+            agent: "web".into(),
+            session_id: Some("shared".into()),
+            token: None,
+        };
+        let succeeds = ack["surface_version"] == 1 && ack["surface"] == "telegram";
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(MaybeTlsStream::Plain(stream),
+                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static(PROTOCOL));
+                    Ok(response)
+                }).await.unwrap();
+            send_json(&mut socket, &serde_json::json!({"type":"session_start", "session_id":"shared", "resumed":false, "message_count":0})).await.unwrap();
+            assert_eq!(
+                next_value(&mut socket).await.unwrap().unwrap(),
+                serde_json::json!({"type":"connect", "surface":"telegram"})
+            );
+            send_json(&mut socket, &ack).await.unwrap();
+            let _ = socket.next().await;
+        };
+        let exchange = async {
+            let result = Client::connect_with_surface(&options, "telegram").await;
+            assert_eq!(result.is_ok(), succeeds);
+            if let Ok(client) = result {
+                client.close().await.unwrap();
+            }
+        };
+        tokio::join!(server, exchange);
+    }
+}

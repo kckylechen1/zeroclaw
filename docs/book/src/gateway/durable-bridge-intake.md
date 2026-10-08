@@ -40,6 +40,13 @@ committed observed prefix. The ACK contains the matching ID, `status`
 acceptance semantics never release an update. The bridge only confirms Telegram
 updates by polling with a safe offset after this durable handoff.
 
+The accepted input payload also stores its optional chat surface. Recovery
+resolves presentation from that immutable payload, not the most recently
+attached socket. A duplicate under a different surface retains the original
+payload; changed content or attachment handles remain conflicts. Older payloads
+without a surface retain legacy presentation even when a new client registers
+one. No schema migration or separate register store is needed.
+
 Ordinary source inputs wait as `pending` and run as separate turns in source
 order. A gap can be persisted but cannot execute or advance the prefix. An atomic
 `pending` to `running` claim precedes the Agent call. Restart resumes only

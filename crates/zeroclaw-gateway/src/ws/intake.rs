@@ -209,7 +209,7 @@ pub(super) fn receive(
     let Some(backend) = &state.session_backend else {
         return failure(id, "DURABLE_INTAKE_UNAVAILABLE");
     };
-    let (payload, initial_state) = if frame["type"] == "message" {
+    let (mut payload, initial_state) = if frame["type"] == "message" {
         let Some(content) = frame["content"].as_str() else {
             return failure(id, "INVALID_SOURCE_INPUT");
         };
@@ -249,6 +249,15 @@ pub(super) fn receive(
         };
         (json!({"disposition":disposition}).to_string(), disposition)
     };
+    if initial_state == "pending"
+        && let Some(surface) = scope.surface
+    {
+        let Ok(mut body) = serde_json::from_str::<Value>(&payload) else {
+            return failure(id, "INVALID_SOURCE_INPUT");
+        };
+        body["surface"] = json!(surface);
+        payload = body.to_string();
+    }
     let input = BridgeInput {
         update_id,
         previous_cursor,
@@ -256,7 +265,7 @@ pub(super) fn receive(
         payload,
         state: initial_state.to_string(),
     };
-    let Ok(mut receipt) = backend.bridge_record(&source, &input) else {
+    let Ok(mut receipt) = record_input(backend.as_ref(), &source, &input) else {
         return failure(id, "SOURCE_NOT_RECORDED");
     };
     if register(state, &source, scope).is_err() {
@@ -286,6 +295,44 @@ pub(super) fn receive(
         None
     };
     (Some(ack(ns, &input, &receipt, turn)), start)
+}
+
+/// Let the recording transaction choose the first immutable register. A
+/// conflicting first submission or reconnect may retry once with that payload;
+/// every non-presentation field still goes through the backend's strict checks.
+fn record_input(
+    backend: &dyn zeroclaw_infra::session_backend::SessionBackend,
+    source: &BridgeSource,
+    input: &BridgeInput,
+) -> std::io::Result<BridgeReceipt> {
+    let error = match backend.bridge_record(source, input) {
+        Ok(receipt) => return Ok(receipt),
+        Err(error) => error,
+    };
+    if input.state != "pending" {
+        return Err(error);
+    }
+    let snapshot = backend.bridge_resume(source)?;
+    let Some(known) = snapshot
+        .inputs
+        .iter()
+        .find(|known| known.update_id == input.update_id)
+    else {
+        return Err(error);
+    };
+    let original_body = |payload: &str| -> std::io::Result<Value> {
+        let mut body: Value = serde_json::from_str(payload).map_err(std::io::Error::other)?;
+        if let Some(fields) = body.as_object_mut() {
+            fields.remove("surface");
+        }
+        Ok(body)
+    };
+    if original_body(&known.payload)? != original_body(&input.payload)? {
+        return Err(error);
+    }
+    let mut canonical = input.clone();
+    canonical.payload.clone_from(&known.payload);
+    backend.bridge_record(source, &canonical)
 }
 
 fn materialize(
@@ -341,6 +388,13 @@ fn schedule(
         .session_backend
         .as_ref()
         .ok_or_else(|| std::io::Error::other("durable backend unavailable"))?;
+    let body: Value = serde_json::from_str(&input.payload).map_err(std::io::Error::other)?;
+    let surface = body
+        .get("surface")
+        .cloned()
+        .map(serde_json::from_value::<ChatSurface>)
+        .transpose()
+        .map_err(std::io::Error::other)?;
     let key = (source.key.clone(), input.update_id);
     if !state
         .ws_conversations
@@ -384,6 +438,7 @@ fn schedule(
         return Err(std::io::Error::other("source authority revoked"));
     }
     if let Some(mut claim) = conversation.start_if_idle(content) {
+        claim.surface = surface;
         claim.request_id = Some(input.request_id.clone());
         claim.intake = Some(Claim {
             source: source.clone(),

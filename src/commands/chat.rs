@@ -81,7 +81,7 @@ pub async fn run(
         session_id: Some(session),
         token: resolve_gateway_bearer_token(config),
     };
-    let mut client = match Client::connect(&options).await {
+    let mut client = match Client::connect_with_surface(&options, "cli").await {
         Ok(client) => client,
         Err(e) => {
             ::zeroclaw_log::record!(
