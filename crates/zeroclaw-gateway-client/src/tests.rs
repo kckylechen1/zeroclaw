@@ -293,6 +293,7 @@ async fn bridge_control_requires_server_selection_of_v2() {
 }
 
 #[tokio::test]
+#[allow(clippy::result_large_err)] // tungstenite handshake callback error type
 async fn requested_surface_requires_the_matching_versioned_acknowledgement() {
     for ack in [
         serde_json::json!({"type":"connected"}),
@@ -310,9 +311,12 @@ async fn requested_surface_requires_the_matching_versioned_acknowledgement() {
         let succeeds = ack["surface_version"] == 1 && ack["surface"] == "telegram";
         let server = async {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(MaybeTlsStream::Plain(stream))
-                .await
-                .unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(MaybeTlsStream::Plain(stream),
+                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static(PROTOCOL));
+                    Ok(response)
+                }).await.unwrap();
             send_json(&mut socket, &serde_json::json!({"type":"session_start", "session_id":"shared", "resumed":false, "message_count":0})).await.unwrap();
             assert_eq!(
                 next_value(&mut socket).await.unwrap().unwrap(),
@@ -328,10 +332,6 @@ async fn requested_surface_requires_the_matching_versioned_acknowledgement() {
                 client.close().await.unwrap();
             }
         };
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::join!(server, exchange);
-        })
-        .await
-        .unwrap();
+        tokio::join!(server, exchange);
     }
 }

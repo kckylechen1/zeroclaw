@@ -182,6 +182,9 @@ mod tests {
                 match ws.recv().await {
                     Some(Ok(Message::Text(text))) => {
                         let frame: Value = serde_json::from_str(&text).unwrap();
+                        if frame["type"] == "connect" {
+                            assert_eq!(frame["surface"], "telegram");
+                        }
                         if frame["type"] == "source_disposition" {
                             let mut source = frame["source"].clone();
                             source["cursor"] = json!(0);
@@ -200,6 +203,10 @@ mod tests {
         .unwrap()
     }
     async fn send(ws: &mut WebSocket, mut v: Value) {
+        if v["type"] == "connected" {
+            v["surface_version"] = json!(1);
+            v["surface"] = json!("telegram");
+        }
         if v["type"] == "ack" {
             let update_id: i64 = v["id"]
                 .as_str()
