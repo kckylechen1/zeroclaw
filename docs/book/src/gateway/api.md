@@ -91,7 +91,10 @@ Gateway ignores the Web client's optional query and uses legacy presentation. A 
 client still uses the previous prompt without a Surface section. Reverting the
 clients removes their registration; reverting Gateway removes the presentation
 section. Pending source bodies can retain this optional field without a database
-migration, but an older Gateway will ignore its formatting meaning.
+migration, but an older Gateway will ignore its formatting meaning. Retries of
+surface-bearing inputs can conflict with an older Gateway's immutable payload
+comparison. Resume from durable receipts; never rewrite accepted bodies or
+force replay to make a downgrade succeed.
 
 Upstream commit `05f9fe95d4a9be5ab76124ed3a40da3fb9697f3a` was checked: its
 WebSocket handshake has no equivalent surface register. This bounded extension
