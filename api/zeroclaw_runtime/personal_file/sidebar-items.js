@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_LIST_ENTRIES","MAX_TEXT_BYTES","TRASH_NAMESPACE"],"enum":["PersonalFileError","PersonalFileOperation","PersonalFileRefusal","PersonalFileResult","RootKind"],"struct":["ExpectedContentIdentity","ListedEntry","MoveDestination","MoveSource","PersonalFileService","PersonalRelativePath","PersonalRootRef"]};

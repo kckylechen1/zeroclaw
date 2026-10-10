@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NODE_V2_MINOR_2_0","SUPPORTED_NODE_V2_MINORS","WS_NODES_V1","WS_NODES_V2"],"enum":["GatewayToNode","GrantProof","NodeErrorCode","NodeToGateway"],"fn":["is_v1_register_frame","negotiate_v2_minor"]};

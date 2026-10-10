@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["VOICE_SECTION_MAX_BYTES"],"enum":["PersonaLevel"],"struct":["PersonaKnobs"]};

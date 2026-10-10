@@ -1,0 +1,73 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Procedure vertical V4 wire/domain types (frozen contract rev 3, KP-10/KP-11/KP-15/KP-17/KP-18/KP-19; the frozen bridge wire)."><title>zeroclaw_api::procedure_v1 - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="zeroclaw_api" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module procedure_v1</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../zeroclaw_api/index.html">zeroclaw_<wbr>api</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module procedure_<wbr>v1</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate zeroclaw_<wbr>api</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">zeroclaw_api</a></div><h1>Module <span>procedure_<wbr>v1</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Procedure vertical V4 wire/domain types (frozen contract rev 3,
+KP-10/KP-11/KP-15/KP-17/KP-18/KP-19; the frozen bridge wire).</p>
+<p>The split this module carries:</p>
+<ul>
+<li><strong>ProcedureDefinitionV1 is ZeroClaw-owned authored state</strong> (KP-10,
+RULING-207 §3): authoring, revision creation, applicability, and
+review state stay in the ZeroClaw definitions tree. There is no
+second mutable definition catalogue here — Tachi-side retention is
+of the immutable SNAPSHOT only.</li>
+<li><strong>ProcedureSnapshotV1 is immutable run input</strong> (KP-11): minted at run
+creation from a PUBLISHED revision, content-addressed by canonical
+digest, carrying the full KP-11 field set. It is provenance/input —
+never a second canonical definition.</li>
+<li><strong>ProcedureRunBinding (KP-15)</strong> is the four-field run binding
+<code>(procedure_id, revision, digest, snapshot_ref)</code>. Deliberately NOT
+named <code>ProcedureRunRef</code>: the KP-15 tuple is a definition-side
+identity projection carried on the ZeroClaw side; it is never used
+as a Tachi task ref and never reuses a run-state CAS or
+gate-presentation revision counter as a definition revision.</li>
+<li><strong>CompiledProcedureGuidanceV1 (KP-17)</strong> is data, not authority: it
+can only NARROW — the required capability it names must already be
+within the requester’s own admitted set, and oversize input is a
+typed refusal, never silent truncation.</li>
+<li><strong>LearningCandidateV1 (KP-18/KP-19)</strong> is candidate-only output: zero
+apply paths exist for any target kind; sensitive sources carry a
+mandatory <code>derivation_ref</code>.</li>
+</ul>
+<p>Privacy law (KP-20/RULING-207 §11): the snapshot and guidance admit
+only privacy-admitted projections — Private Dyad content/ids/counts
+are structurally unrepresentable here (no field carries them; the
+mint refuses Private-Dyad-markered definition content with an
+existence-blind error).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ArtifactExpectationV1.html" title="struct zeroclaw_api::procedure_v1::ArtifactExpectationV1">Artifact<wbr>Expectation<wbr>V1</a></dt><dd>One expected artifact/evidence entry (drives TB-13-style contract
+satisfaction checks on the Tachi side).</dd><dt><a class="struct" href="struct.CompiledProcedureGuidanceV1.html" title="struct zeroclaw_api::procedure_v1::CompiledProcedureGuidanceV1">Compiled<wbr>Procedure<wbr>Guidance<wbr>V1</a></dt><dd>Compiled task guidance (KP-17): the bounded, digest-bound projection
+of a procedure (plus applicable skills) into the task intent. Data,
+not authority — it can only NARROW the work.</dd><dt><a class="struct" href="struct.DefinitionProvenance.html" title="struct zeroclaw_api::procedure_v1::DefinitionProvenance">Definition<wbr>Provenance</a></dt><dd>Provenance of a captured definition revision. Deliberately carries
+NO capture timestamp: the snapshot digest must be a pure function of
+the captured CONTENT, so re-minting unchanged bytes yields the same
+content-addressed ref and a TB-7 replay after a ZeroClaw restart
+reconciles instead of conflicting.</dd><dt><a class="struct" href="struct.EvaluationContractRef.html" title="struct zeroclaw_api::procedure_v1::EvaluationContractRef">Evaluation<wbr>Contract<wbr>Ref</a></dt><dd>Evaluation contract identity (KP-11 <code>evaluation contract revision/digest</code>; KP-21: Tachi owns adjudication of results against
+this contract — ZeroClaw selects it, never grades against it).</dd><dt><a class="struct" href="struct.LearningCandidateV1.html" title="struct zeroclaw_api::procedure_v1::LearningCandidateV1">Learning<wbr>Candidate<wbr>V1</a></dt><dd>A run/evidence-derived improvement candidate (KP-18/KP-19).
+Candidate-only: NO apply path exists for any target kind — promotion
+is a separate, named, HUMAN/operator-gated action. <code>derivation_ref</code>
+is MANDATORY when the candidate’s source material is sensitive
+(personal-memory-adjacent inputs, Private-Dyad-derived analysis,
+personal data) — keyed on derivation provenance, not target kind.</dd><dt><a class="struct" href="struct.ProcedureDefinitionV1.html" title="struct zeroclaw_api::procedure_v1::ProcedureDefinitionV1">Procedure<wbr>Definition<wbr>V1</a></dt><dd>The ZeroClaw-owned authored definition projection (KP-10 field freeze:
+procedure_id, revision, digest, name, purpose, applicability, steps,
+dependencies, approvals, constraints, expected_artifacts,
+evidence_contract, evaluation_contract, privacy_class, provenance,
+review_state — dependencies/evidence_contract fold into the snapshot
+expectations where the SOP format carries them).</dd><dt><a class="struct" href="struct.ProcedureGateV1.html" title="struct zeroclaw_api::procedure_v1::ProcedureGateV1">Procedure<wbr>Gate<wbr>V1</a></dt><dd>A gate a procedure step declares (drives the Tachi-side approval
+authority and the intent’s <code>approval_requirement</code> consistency).</dd><dt><a class="struct" href="struct.ProcedureRunBinding.html" title="struct zeroclaw_api::procedure_v1::ProcedureRunBinding">Procedure<wbr>RunBinding</a></dt><dd>The KP-15 four-field run binding. A definition-side identity
+projection: <code>(procedure_id, revision, digest, snapshot_ref)</code>.</dd><dt><a class="struct" href="struct.ProcedureSnapshotV1.html" title="struct zeroclaw_api::procedure_v1::ProcedureSnapshotV1">Procedure<wbr>Snapshot<wbr>V1</a></dt><dd>The immutable procedure snapshot (KP-11 full field set). Constructed
+only by the runtime mint; carries the COMPLETE captured definition
+bytes (DECISION KP-16/E option (b): the bytes ride the submit
+envelope; the retained Tachi-side ref is content-addressed and never
+resolves through the mutable definitions directory).</dd><dt><a class="struct" href="struct.ProcedureStepV1.html" title="struct zeroclaw_api::procedure_v1::ProcedureStepV1">Procedure<wbr>Step<wbr>V1</a></dt><dd>One procedure step projected into the definition/snapshot (the
+runtime-side <code>SopStep</code> mapped onto the wire shape; machine-independent
+— no paths, no commands-as-authority, prose plus typed tool hints).</dd><dt><a class="struct" href="struct.SourceSkillRefV1.html" title="struct zeroclaw_api::procedure_v1::SourceSkillRefV1">Source<wbr>Skill<wbr>RefV1</a></dt><dd>A source SkillDefinition reference folded into the snapshot (KP-11:
+<code>source SkillDefinition refs + revisions + digests</code>). Absent when the
+procedure does not bind skills.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CandidatePolicyDisposition.html" title="enum zeroclaw_api::procedure_v1::CandidatePolicyDisposition">Candidate<wbr>Policy<wbr>Disposition</a></dt><dd>Policy disposition of a candidate (how the review queue should treat
+it before any human decision).</dd><dt><a class="enum" href="enum.DefinitionReviewState.html" title="enum zeroclaw_api::procedure_v1::DefinitionReviewState">Definition<wbr>Review<wbr>State</a></dt><dd>Review state of a procedure definition revision (KP-11 publication
+rule 1: a snapshot mint from a DRAFT revision is refused).</dd><dt><a class="enum" href="enum.LearningTargetKind.html" title="enum zeroclaw_api::procedure_v1::LearningTargetKind">Learning<wbr>Target<wbr>Kind</a></dt><dd>Target kind of a learning candidate (KP-18 field set).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.PROCEDURE_SNAPSHOT_MAX_BYTES.html" title="constant zeroclaw_api::procedure_v1::PROCEDURE_SNAPSHOT_MAX_BYTES">PROCEDURE_<wbr>SNAPSHOT_<wbr>MAX_<wbr>BYTES</a></dt><dd>Maximum serialized size of one procedure snapshot (KP-11 additional
+constraints / KP-17 bounded-carrier law: oversize is a typed refusal,
+never silent truncation). 256 KiB covers SOP packages (manifest +
+steps markdown) plus the compiled guidance projection with ample
+headroom while keeping the DECISION KP-16/E option-(b) embedded
+submit envelope bounded.</dd><dt><a class="constant" href="constant.PROCEDURE_SNAPSHOT_REF_PREFIX.html" title="constant zeroclaw_api::procedure_v1::PROCEDURE_SNAPSHOT_REF_PREFIX">PROCEDURE_<wbr>SNAPSHOT_<wbr>REF_<wbr>PREFIX</a></dt><dd>Wire prefix of a Tachi-retained content-addressed snapshot ref
+(DECISION KP-16/E common denominator: the retained ref is a CAS ref
+held Tachi-side and NEVER resolves through the mutable definitions
+directory).</dd><dt><a class="constant" href="constant.PROCEDURE_SNAPSHOT_SCHEMA.html" title="constant zeroclaw_api::procedure_v1::PROCEDURE_SNAPSHOT_SCHEMA">PROCEDURE_<wbr>SNAPSHOT_<wbr>SCHEMA</a></dt><dd>Schema tag of the immutable procedure snapshot.</dd></dl></section></div></main></body></html>

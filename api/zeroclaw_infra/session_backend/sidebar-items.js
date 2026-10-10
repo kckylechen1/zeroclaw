@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REQUEST_RECEIPT_PROTECTION_MINUTES"],"enum":["RequestReceipt"],"struct":["SessionContext","SessionMetadata","SessionQuery","SessionState","TimestampedMessage"],"trait":["SessionBackend"]};

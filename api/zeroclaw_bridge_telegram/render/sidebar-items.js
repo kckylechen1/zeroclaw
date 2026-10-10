@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CALLBACK_DATA_LIMIT","EDIT_INTERVAL"],"fn":["decode_callback","edit_due","encode_callback","split_message"],"struct":["ApprovalKeys"]};

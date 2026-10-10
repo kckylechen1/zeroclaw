@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CancelOutcome","ForbiddenCategory","RunState","StaffingReason","TachiStaffError"],"mod":["client","compose","procedure","staff"],"struct":["CancelReceipt","RunResult","RunStatus","StaffReceipt","StaffRefs","TachiStaffClient","TachiStaffSettings"]};

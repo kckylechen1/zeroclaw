@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ADVISOR_HARNESS_PREFIX","ADVISOR_MODEL_PREFIX","DEFAULT_ADVISOR_MAX_CALLS_PER_TURN"],"enum":["AdvisorTarget"],"struct":["AdvisorTargetParseError"]};

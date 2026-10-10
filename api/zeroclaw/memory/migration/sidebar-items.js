@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SQLITE_MEMORY_SCHEMA_VERSION"],"fn":["migrate_sqlite_memory_to_v3","sqlite_ensure_agent_uuid","sqlite_ensure_default_agent_uuid"]};
