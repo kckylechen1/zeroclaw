@@ -1142,3 +1142,69 @@ async fn missing_turn_control_contract_never_starts_telegram_polling() {
     running.abort();
     server.abort();
 }
+
+#[tokio::test]
+async fn stop_waiter_capacity_refuses_the_33rd_wire_request_and_recovers_after_timeout() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config));
+    let mut ws = attach(&mut gateway).await;
+    for _ in 0..32 {
+        FakeTelegram::text(&tg, OWNER, "/stop");
+        let disposition = recv_raw(&mut ws).await;
+        assert_eq!(disposition["disposition"], "control");
+        let mut ack = intake_ack(&disposition, 0);
+        ack["state"] = json!("control");
+        raw_send(&mut ws, ack).await;
+        let cancel = recv_raw(&mut ws).await;
+        assert_eq!(cancel["type"], "cancel");
+        assert_eq!(cancel["id"], disposition["id"]);
+        assert_eq!(cancel["turn_id"], TURN_A);
+    }
+    FakeTelegram::text(&tg, OWNER, "/stop");
+    let disposition = recv_raw(&mut ws).await;
+    let mut ack = intake_ack(&disposition, 0);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack).await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "Stop not sent").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err(),
+        "full capacity must not send another cancel"
+    );
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(16)).await;
+    tokio::time::resume();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let count = tg
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|(m, b)| {
+                m == "sendMessage" && b["text"] == "Stop outcome unknown; not replayed"
+            })
+            .count();
+        if count == 32 {
+            break;
+        }
+        assert!(
+            count < 32 && tokio::time::Instant::now() < deadline,
+            "all 32 sent commands need individual timeout outcomes; got {count}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    FakeTelegram::text(&tg, OWNER, "/stop");
+    let disposition = recv_raw(&mut ws).await;
+    let mut ack = intake_ack(&disposition, 0);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack).await;
+    assert_eq!(
+        recv_raw(&mut ws).await["type"],
+        "cancel",
+        "expired waiters release capacity for a fresh explicit command"
+    );
+    running.abort();
+    server.abort();
+}

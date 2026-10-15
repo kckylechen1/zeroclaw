@@ -574,7 +574,7 @@ impl Bridge {
                 let turn_id = self
                     .client
                     .as_ref()
-                    .and_then(|_| self.turn_control.as_ref())
+                    .and(self.turn_control.as_ref())
                     .and_then(|control| control.state.turn_id.clone());
                 self.queue_disposition(source, "control", Some(Control::Stop { turn_id }))
                     .await
@@ -677,10 +677,12 @@ impl Bridge {
     }
 
     async fn expire_stops(&mut self) {
+        let now = Instant::now();
         let before = self.pending_stops.len();
-        self.pending_stops
-            .retain(|_, stop| stop.deadline > Instant::now());
-        if before != self.pending_stops.len() {
+        self.pending_stops.retain(|_, stop| stop.deadline > now);
+        // Each waiter represents a separate owner command. Keep the singular
+        // outcome notice one-to-one even when several deadlines expire together.
+        for _ in 0..before - self.pending_stops.len() {
             self.stop_unknown().await;
         }
     }
@@ -710,10 +712,10 @@ impl Bridge {
                         ack.status.as_str(),
                         "requested" | "stale" | "no_active" | "unauthorized" | "invalid"
                     )
-                    || !self
+                    || self
                         .pending_stops
                         .get(&ack.id)
-                        .is_some_and(|stop| stop.turn_id == ack.turn_id)
+                        .is_none_or(|stop| stop.turn_id != ack.turn_id)
                 {
                     return;
                 }
@@ -1218,6 +1220,142 @@ fn log_send_failure(method: &str, error: &anyhow::Error) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type Notices = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    async fn record_notice(
+        axum::extract::State(notices): axum::extract::State<Notices>,
+        axum::Json(body): axum::Json<serde_json::Value>,
+    ) -> axum::Json<serde_json::Value> {
+        notices
+            .lock()
+            .unwrap()
+            .push(body["text"].as_str().unwrap().to_string());
+        axum::Json(json!({"ok":true,"result":{"message_id":1}}))
+    }
+
+    // This fixture has no production attribution context.
+    #[allow(clippy::disallowed_methods)]
+    async fn timeout_fixture() -> (Bridge, Notices, tokio::task::JoinHandle<()>) {
+        let notices = Notices::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new()
+            .route("/botTEST/sendMessage", axum::routing::post(record_notice))
+            .with_state(notices.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (cursor, _) = watch::channel(PollState::default());
+        let bridge = Bridge {
+            api: Api::new(&base, "TEST").unwrap(),
+            source: "telegram:7:9".into(),
+            bot_id: 7,
+            cursor,
+            receipts: HashMap::new(),
+            owner_id: 9,
+            options: ConnectOptions {
+                gateway: "ws://127.0.0.1:9".into(),
+                agent: "fixture".into(),
+                session_id: Some("fixture".into()),
+                token: None,
+            },
+            client: None,
+            backoff: Backoff::new(BACKOFF_INITIAL, BACKOFF_MAX),
+            reconnect_at: Instant::now(),
+            unacked: VecDeque::new(),
+            upload: None,
+            upload_source: None,
+            after_upload: VecDeque::new(),
+            stream: None,
+            typing_at: None,
+            keys: ApprovalKeys::default(),
+            questions: HashMap::new(),
+            turn_control: Some(ControlReady {
+                state: TurnState {
+                    control_version: 1,
+                    revision: 1,
+                    turn_id: None,
+                },
+                idle_message: "idle".into(),
+                unknown_message: "Stop outcome unknown".into(),
+                not_sent_message: "not sent".into(),
+            }),
+            pending_stops: HashMap::new(),
+        };
+        (bridge, notices, server)
+    }
+
+    #[tokio::test]
+    async fn stop_timeouts_report_each_command_at_deadline_once() {
+        let (mut bridge, notices, server) = timeout_fixture().await;
+        tokio::time::pause();
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        for (id, at) in [
+            ("first", deadline),
+            ("second", deadline),
+            ("later", deadline + STOP_TIMEOUT),
+        ] {
+            bridge.pending_stops.insert(
+                id.into(),
+                PendingStop {
+                    turn_id: "a0000000-0000-4000-8000-000000000001".into(),
+                    deadline: at,
+                },
+            );
+        }
+        tokio::time::advance(STOP_TIMEOUT - Duration::from_millis(1)).await;
+        bridge.expire_stops().await;
+        assert_eq!(bridge.pending_stops.len(), 3);
+        assert!(notices.lock().unwrap().is_empty());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(Instant::now(), deadline);
+        {
+            let expiry = bridge.expire_stops();
+            tokio::pin!(expiry);
+            // Capture the exact paused deadline before the first HTTP await.
+            // Resume for socket I/O so virtual connect timeouts cannot race it.
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(expiry.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            tokio::time::resume();
+            expiry.await;
+        }
+        assert_eq!(
+            &*notices.lock().unwrap(),
+            &["Stop outcome unknown", "Stop outcome unknown"]
+        );
+        assert_eq!(bridge.pending_stops.len(), 1);
+        assert!(bridge.pending_stops.contains_key("later"));
+        bridge.expire_stops().await;
+        assert_eq!(
+            notices.lock().unwrap().len(),
+            2,
+            "expired commands must not notify twice"
+        );
+        tokio::time::pause();
+        tokio::time::advance(bridge.pending_stops["later"].deadline - Instant::now()).await;
+        {
+            let expiry = bridge.expire_stops();
+            tokio::pin!(expiry);
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(expiry.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            tokio::time::resume();
+            expiry.await;
+        }
+        assert!(bridge.pending_stops.is_empty());
+        assert_eq!(
+            notices.lock().unwrap().len(),
+            3,
+            "staggered command needs its own outcome"
+        );
+        bridge.expire_stops().await;
+        assert_eq!(notices.lock().unwrap().len(), 3);
+        server.abort();
+    }
 
     #[test]
     fn only_client_errors_stop_the_bridge() {
