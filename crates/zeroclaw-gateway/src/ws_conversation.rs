@@ -115,7 +115,7 @@ struct ActiveTurn {
 /// What happened to a message submitted to a conversation.
 pub(crate) enum Submitted {
     /// No turn was running; the caller must run this one.
-    Start(TurnClaim),
+    Start(Box<TurnClaim>),
     /// A turn is running and the message was queued as steering for it.
     Steered,
     /// A turn is running and its steering queue is full.
@@ -218,7 +218,7 @@ impl<A> Conversation<A> {
             return None;
         }
         match self.start_locked(&mut turn, content) {
-            Submitted::Start(claim) => Some(claim),
+            Submitted::Start(claim) => Some(*claim),
             _ => unreachable!("an idle slot always starts a turn"),
         }
     }
@@ -236,7 +236,7 @@ impl<A> Conversation<A> {
             steering: steering_tx,
         });
         self.publish_turn_state(turn);
-        Submitted::Start(TurnClaim {
+        Submitted::Start(Box::new(TurnClaim {
             input: content,
             original_input: None,
             request_id: None,
@@ -246,7 +246,7 @@ impl<A> Conversation<A> {
             turn_id,
             cancel,
             steering: steering_rx,
-        })
+        }))
     }
 
     /// A successful steering submission invalidates the initial ingress as

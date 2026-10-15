@@ -1252,7 +1252,7 @@ fn handle_message_frame(
             claim.original_input = Some(original_input);
             claim.request_id = request_id.map(str::to_string);
             claim.surface = scope.surface;
-            (ack("started"), Some(claim))
+            (ack("started"), Some(*claim))
         }
         Submitted::Steered => {
             if let Some(id) = request_id {
@@ -1437,7 +1437,7 @@ async fn run_ws_turns(
             && let Submitted::Start(mut claim) = conversation.submit(late.join("\n\n"))
         {
             claim.surface = scope.surface;
-            next = Some(claim);
+            next = Some(*claim);
         }
         if next.is_none()
             && allow_resume
@@ -2146,7 +2146,7 @@ async fn process_chat_message(
 
             // Set session state to error
             if let Some(ref backend) = state.session_backend {
-                let _ = backend.set_session_state(session_key, "error", Some(&turn_id));
+                let _ = backend.set_session_state(session_key, "error", Some(turn_id));
             }
 
             ::zeroclaw_log::record!(
