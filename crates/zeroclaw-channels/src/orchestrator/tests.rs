@@ -7024,7 +7024,7 @@ impl Memory for RecallMemory {
         &self,
         _query: &str,
         _limit: usize,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _since: Option<&str>,
         _until: Option<&str>,
     ) -> anyhow::Result<Vec<zeroclaw_memory::MemoryEntry>> {
@@ -7034,7 +7034,7 @@ impl Memory for RecallMemory {
             content: "Age is 45".to_string(),
             category: zeroclaw_memory::MemoryCategory::Conversation,
             timestamp: "2026-02-20T00:00:00Z".to_string(),
-            session_id: None,
+            session_id: session_id.map(str::to_owned),
             score: Some(0.9),
             namespace: "default".into(),
             importance: None,
@@ -11588,7 +11588,7 @@ async fn process_channel_message_memory_recall_difference_keeps_system_byte_iden
             &self,
             query: &str,
             _limit: usize,
-            _session_id: Option<&str>,
+            session_id: Option<&str>,
             _since: Option<&str>,
             _until: Option<&str>,
         ) -> anyhow::Result<Vec<zeroclaw_memory::MemoryEntry>> {
@@ -11598,7 +11598,7 @@ async fn process_channel_message_memory_recall_difference_keeps_system_byte_iden
                 content: format!("memory-for-{}", query),
                 category: zeroclaw_memory::MemoryCategory::Conversation,
                 timestamp: "2026-02-20T00:00:00Z".to_string(),
-                session_id: None,
+                session_id: session_id.map(str::to_owned),
                 score: Some(0.9),
                 namespace: "default".into(),
                 importance: None,
@@ -11649,11 +11649,11 @@ async fn process_channel_message_memory_recall_difference_keeps_system_byte_iden
             _allowed_agent_ids: &[&str],
             query: &str,
             _limit: usize,
-            _session_id: Option<&str>,
+            session_id: Option<&str>,
             _since: Option<&str>,
             _until: Option<&str>,
         ) -> anyhow::Result<Vec<zeroclaw_memory::MemoryEntry>> {
-            self.recall(query, 5, None, None, None).await
+            self.recall(query, 5, session_id, None, None).await
         }
     }
     impl ::zeroclaw_api::attribution::Attributable for QueryAwareMemory {
