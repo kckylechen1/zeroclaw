@@ -255,12 +255,6 @@ pub async fn render_memory_context(
 ) -> String {
     let backend = mem.name().to_string();
     let query_summary = make_query_summary(user_msg);
-    let canonical_sessions: Vec<String> = sessions
-        .iter()
-        .flatten()
-        .filter(|session| !session.trim().is_empty())
-        .map(|session| (*session).to_string())
-        .collect();
     let read_policy = if exclude_conversation {
         zeroclaw_api::memory_traits::MemoryReadPolicy::NonConversation
     } else {
@@ -291,6 +285,13 @@ pub async fn render_memory_context(
         sessions
     };
     for session_id in scopes {
+        // Enforce the current query scope, not the union: an admitted secondary
+        // sender returned early by a weak backend must not shadow the group.
+        let query_sessions: Vec<String> = session_id
+            .iter()
+            .filter(|session| !session.trim().is_empty())
+            .map(|session| (*session).to_string())
+            .collect();
         match mem
             .recall(user_msg, recall_limit, *session_id, None, None)
             .await
@@ -301,7 +302,7 @@ pub async fn render_memory_context(
                     if zeroclaw_memory::admissibility::entry_is_admissible(
                         &entry,
                         mem.name(),
-                        &canonical_sessions,
+                        &query_sessions,
                         read_policy,
                     ) && seen_keys.insert(entry.key.clone())
                     {
@@ -1981,5 +1982,44 @@ mod tests {
         .await;
         assert!(rendered.contains("DURABLE_FACT"), "{rendered}");
         assert!(!rendered.contains("CHAT_CANARY"), "{rendered}");
+    }
+    #[tokio::test]
+    async fn secondary_session_cannot_poison_group_key_precedence() {
+        let group = MemoryEntry {
+            session_id: Some("group".into()),
+            ..entry("shared", "GROUP_FACT", MemoryCategory::Core, Some(1.0))
+        };
+        let sender = MemoryEntry {
+            session_id: Some("sender".into()),
+            ..entry("shared", "SENDER_CANARY", MemoryCategory::Core, Some(1.0))
+        };
+        // This backend ignores the requested session, returning the secondary
+        // row first even during the primary group's query.
+        let mem = FixtureMemory::with_sessions(HashMap::from([
+            (Some("group".into()), vec![sender.clone(), group.clone()]),
+            (Some("sender".into()), vec![sender, group]),
+        ]));
+        for rerank_enabled in [false, true] {
+            let rendered = render_memory_context(
+                &mem,
+                &RecordingObserver::default(),
+                "query",
+                &[Some("group"), Some("sender")],
+                &MemoryInjectConfig {
+                    rerank_enabled,
+                    ..MemoryInjectConfig::default()
+                },
+                false,
+                TurnMeta {
+                    parent_agent_alias: None,
+                    agent_alias: None,
+                    turn_id: "t",
+                    channel_name: "test",
+                },
+            )
+            .await;
+            assert!(rendered.contains("GROUP_FACT"), "{rendered}");
+            assert!(!rendered.contains("SENDER_CANARY"), "{rendered}");
+        }
     }
 }
