@@ -289,6 +289,8 @@ export default function Review() {
         if (candidateRequest.current || busy || loading) return;
         const cursor = firstPage ? null : pastCandidates?.next_cursor;
         if (!firstPage && !cursor) return;
+        // A new list invalidates detail reads started from the previous list.
+        if (firstPage) readSequence.current++;
         const request = generation.current;
         const read = ++candidateRead.current;
         const controller = new AbortController();

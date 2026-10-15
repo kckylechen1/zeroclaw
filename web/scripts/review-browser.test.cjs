@@ -33,6 +33,9 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     let candidatePageEmpty = false;
     let delayCandidatePage = false;
     let candidatePageRelease;
+    let delayCandidateDetail = false;
+    let candidateDetailRelease;
+    let candidateDetailStarted;
     const candidatePageReads = [];
     const actions = [];
     const proposal = { id: 'soul:nova:7', kind: 'soul_proposal', agent: 'nova', item: { id: 7, layer: 'growth', proposal: 'Retire the old shared shorthand', rationale: 'Synthetic stale-target fixture', retire_index: 0, retire_target: { kind: 'bond', text: 'Actual canonical shared shorthand' }, target_revision: 17, created_at_unix: now } };
@@ -129,8 +132,13 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
                 : { candidates: [rejected], next_cursor: { created_at_unix: now, id: rejected.id } }
                 : { candidates: [rejected], next_cursor: null });
         }
-        if (url.pathname === '/api/user-model/candidates/42')
+        if (url.pathname === '/api/user-model/candidates/42') {
+            if (delayCandidateDetail) {
+                delayCandidateDetail = false;
+                await new Promise(resolve => { candidateDetailRelease = resolve; candidateDetailStarted(); });
+            }
             return send({ candidate: rejected, review_state: reviewState, review_receipts: [{ id: 'r1', action: 'reject', at_unix: now }] });
+        }
         return send({});
     });
     const page = await context.newPage();
@@ -312,6 +320,23 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     await page.getByText('No candidate history yet.', { exact: true }).waitFor();
     candidatePageEmpty = false;
     candidatePaging = false;
+    // Reloading page one invalidates detail reads started from the old list.
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await page.getByRole('button', { name: 'History and sources', exact: true }).waitFor();
+    delayCandidateDetail = true;
+    const detailStarted = new Promise(resolve => { candidateDetailStarted = resolve; });
+    await page.getByRole('button', { name: 'History and sources', exact: true }).click();
+    await detailStarted;
+    const freshListResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/user-model/candidates');
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await freshListResponse;
+    await page.getByRole('status').filter({ hasText: 'Loading canonical records' }).waitFor({ state: 'detached' });
+    const oldDetailResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/user-model/candidates/42');
+    candidateDetailRelease();
+    await oldDetailResponse;
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.getByRole('heading', { name: 'History and sources', exact: true }).count(), 0, 'a detail response from the old list must not restore stale evidence');
+    assert.equal(await page.getByText(rejected.evidence, { exact: true }).count(), 0);
     // A server without the capability must never receive guarded approvals.
     supportsExpectedHead = false;
     await page.getByRole('button', { name: 'Inbox', exact: true }).click();
@@ -381,7 +406,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.equal(await page.getByRole('heading', { name: addition.item.proposal, exact: true }).count(), 0);
     assert.equal(await userCard.count(), 0);
     assert.deepEqual(failures, []);
-    console.log(JSON.stringify({ result: 'PASS', bounded_candidate_pages: true, page_error_retry: true, page_dedup_and_end: true, page_refresh_and_agent_reset: true, page_legacy_upgrade: true, pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, voice_validation_refresh: true, heads_failure_preserves_inbox: true, heads_auth_failure_clears_data: true, actions }));
+    console.log(JSON.stringify({ result: 'PASS', page_reload_invalidates_detail: true, bounded_candidate_pages: true, page_error_retry: true, page_dedup_and_end: true, page_refresh_and_agent_reset: true, page_legacy_upgrade: true, pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, voice_validation_refresh: true, heads_failure_preserves_inbox: true, heads_auth_failure_clears_data: true, actions }));
     await browser.close();
     server.close();
 })().catch(async e => { console.error(e); server.close(); if (browser) await browser.close(); process.exitCode = 1; });
