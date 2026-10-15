@@ -181,15 +181,17 @@ impl RunStatus {
 /// A run's report (`result.md`), as far as Tachi serves it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunResult {
-    /// Canonical execution state from `run_status`, never the task read-model state.
+    /// Canonical execution state from the Staff result receipt, never a task projection.
     pub state: RunState,
     /// Canonical receipt served alongside the report.
     pub status: RunStatus,
-    /// Task facade projection; it may differ from canonical run truth.
-    pub task_state: RunState,
-    /// Why the task facade inferred its state, when provided.
+    /// Legacy Task facade projection. Staff result reads leave this `None`;
+    /// canonical execution state must not be substituted for an absent projection.
+    pub task_state: Option<RunState>,
+    /// Legacy Task state basis; absent on the Staff result path.
     pub state_basis: Option<String>,
-    /// Tachi same-receipt management/recovery projection, when provided.
+    /// Legacy Task management projection; absent on the Staff result path.
+    /// Same-receipt Staff recovery facts remain in `status.read_projection`.
     pub managed_run: Option<serde_json::Value>,
     /// Report text; `None` when the run has not written one.
     pub body: Option<String>,
