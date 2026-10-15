@@ -11,7 +11,7 @@
 //! wires this module (uniform rigour: a per-path difference is an error
 //! unless documented).
 //!
-//! Pipeline: recall (per session, key-deduped) -> time decay OR the gated
+//! Pipeline: recall -> host-origin/session admissibility -> key deduplication -> time decay OR the gated
 //! rerank stage (`rerank_enabled`: over-fetched candidate pool, then
 //! recency/importance blend + duplicate collapse + optional MMR + trim,
 //! replacing decay on that arm) -> relevance filter -> skip set (autosave
@@ -27,8 +27,7 @@ use std::time::Instant;
 
 use zeroclaw_api::ingress::TurnOrigin;
 use zeroclaw_memory::{
-    self, MEMORY_CONTEXT_CLOSE, MEMORY_CONTEXT_OPEN, Memory, MemoryCategory, MemoryEntry, decay,
-    rerank,
+    self, MEMORY_CONTEXT_CLOSE, MEMORY_CONTEXT_OPEN, Memory, MemoryEntry, decay, rerank,
 };
 
 use super::loop_::make_query_summary;
@@ -205,28 +204,13 @@ pub fn resolve_inject_policy(
     if suppress {
         return InjectPolicy::Skip;
     }
-    match origin {
-        TurnOrigin::SubTurn => InjectPolicy::Skip,
-        TurnOrigin::Cron | TurnOrigin::Daemon => InjectPolicy::Inject {
-            exclude_conversation: true,
+    match zeroclaw_memory::admissibility::policy_for_turn(origin, has_session) {
+        zeroclaw_api::memory_traits::MemoryReadPolicy::Disabled => InjectPolicy::Skip,
+        policy => InjectPolicy::Inject {
+            exclude_conversation: policy
+                != zeroclaw_api::memory_traits::MemoryReadPolicy::SessionScoped,
         },
-        TurnOrigin::Interactive | TurnOrigin::Channel | TurnOrigin::AgentDirect => {
-            InjectPolicy::Inject {
-                exclude_conversation: !has_session,
-            }
-        }
     }
-}
-
-/// Soul rows (namespace exactly `"soul"`, written by the AgentSoul seam
-/// in `zeroclaw-memory`) are identity-bound domain state, never ambient
-/// recall material. They are excluded from model context at every
-/// entry-selection site: Soul reaches the model only through the
-/// dedicated bounded persona projection channel (the later projection leaf), not here.
-const SOUL_NAMESPACE: &str = "soul";
-
-fn is_soul_entry(entry: &MemoryEntry) -> bool {
-    entry.namespace == SOUL_NAMESPACE
 }
 
 /// The uniform skip set: entries no path wants in a preamble. Union of the
@@ -271,6 +255,17 @@ pub async fn render_memory_context(
 ) -> String {
     let backend = mem.name().to_string();
     let query_summary = make_query_summary(user_msg);
+    let canonical_sessions: Vec<String> = sessions
+        .iter()
+        .flatten()
+        .filter(|session| !session.trim().is_empty())
+        .map(|session| (*session).to_string())
+        .collect();
+    let read_policy = if exclude_conversation {
+        zeroclaw_api::memory_traits::MemoryReadPolicy::NonConversation
+    } else {
+        zeroclaw_api::memory_traits::MemoryReadPolicy::SessionScoped
+    };
 
     // Over-fetch a larger candidate pool only when reranking is enabled;
     // otherwise recall exactly `limit` so the default path is unchanged.
@@ -303,7 +298,13 @@ pub async fn render_memory_context(
             Ok(recalled) => {
                 any_ok = true;
                 for entry in recalled {
-                    if seen_keys.insert(entry.key.clone()) {
+                    if zeroclaw_memory::admissibility::entry_is_admissible(
+                        &entry,
+                        mem.name(),
+                        &canonical_sessions,
+                        read_policy,
+                    ) && seen_keys.insert(entry.key.clone())
+                    {
                         entries.push(entry);
                     }
                 }
@@ -335,14 +336,6 @@ pub async fn render_memory_context(
         // renderer's skip set so ineligible rows are dropped before the trim,
         // not after, letting over-fetched candidates fill the freed slots.
         entries = rerank::run(entries, &cfg.rerank, |entry| {
-            if exclude_conversation && matches!(entry.category, MemoryCategory::Conversation) {
-                return false;
-            }
-            // Soul rows never render through ambient recall (the later projection leaf owns
-            // the projection channel).
-            if is_soul_entry(entry) {
-                return false;
-            }
             !should_skip_entry(&entry.key, &entry.content)
         });
     } else {
@@ -360,14 +353,6 @@ pub async fn render_memory_context(
     }) {
         if included >= cfg.max_entries {
             break;
-        }
-        if exclude_conversation && matches!(entry.category, MemoryCategory::Conversation) {
-            continue;
-        }
-        // Soul rows never render through ambient recall (the later projection leaf owns the
-        // projection channel).
-        if is_soul_entry(entry) {
-            continue;
         }
         if should_skip_entry(&entry.key, &entry.content) {
             continue;
@@ -409,6 +394,7 @@ mod tests {
     use async_trait::async_trait;
     use parking_lot::Mutex;
     use std::collections::HashMap;
+    use zeroclaw_memory::MemoryCategory;
 
     fn entry(
         key: &str,
@@ -1208,14 +1194,17 @@ mod tests {
                 Some(0.5),
                 now,
             ),
-            scored_entry(
-                "chat",
-                "user said hello",
-                MemoryCategory::Conversation,
-                None,
-                None,
-                now,
-            ),
+            MemoryEntry {
+                session_id: Some("golden".into()),
+                ..scored_entry(
+                    "chat",
+                    "user said hello",
+                    MemoryCategory::Conversation,
+                    None,
+                    None,
+                    now,
+                )
+            },
             scored_entry(
                 "stale",
                 "quarterly report workflow uses legacy tool",
@@ -1253,7 +1242,7 @@ mod tests {
                     mem,
                     &RecordingObserver::default(),
                     "query",
-                    &[],
+                    if has_session { &[Some("golden")] } else { &[] },
                     cfg,
                     exclude_conversation,
                     TurnMeta {
@@ -1414,7 +1403,10 @@ mod tests {
         ];
 
         for (name, origin, has_session, suppress, cfg, want) in cases {
-            let mem = FixtureMemory::with(golden_corpus());
+            let mem = FixtureMemory::with_sessions(HashMap::from([
+                (None, golden_corpus()),
+                (Some("golden".into()), golden_corpus()),
+            ]));
             let got = render_for_origin(origin, has_session, suppress, &mem, &cfg).await;
             assert_eq!(got, want, "golden mismatch for case {name}");
         }
@@ -1904,5 +1896,90 @@ mod tests {
             .find("- supporting_match: ")
             .expect("the weaker relevant entry survives the configured floor");
         assert!(best < supporting, "BM25 relevance order survives blending");
+    }
+    #[tokio::test]
+    async fn inadmissible_rows_cannot_shadow_scoped_rows_before_reranking() {
+        let bad = MemoryEntry {
+            session_id: Some("foreign".into()),
+            ..entry("shared", "FOREIGN_CANARY", MemoryCategory::Core, Some(1.0))
+        };
+        let good = MemoryEntry {
+            session_id: Some("allowed".into()),
+            ..entry("shared", "SCOPED_FACT", MemoryCategory::Core, Some(1.0))
+        };
+        let soul = entry(
+            "soul::identity",
+            "SOUL_CANARY",
+            MemoryCategory::Core,
+            Some(1.0),
+        );
+        let unattributed = entry(
+            "chat",
+            "UNATTRIBUTED_CHAT",
+            MemoryCategory::Conversation,
+            Some(1.0),
+        );
+        let mem = FixtureMemory::with_sessions(HashMap::from([
+            (Some("first".into()), vec![bad, soul, unattributed]),
+            (Some("allowed".into()), vec![good]),
+        ]));
+        for rerank_enabled in [false, true] {
+            let rendered = render_memory_context(
+                &mem,
+                &RecordingObserver::default(),
+                "query",
+                &[Some("first"), Some("allowed")],
+                &MemoryInjectConfig {
+                    rerank_enabled,
+                    ..MemoryInjectConfig::default()
+                },
+                false,
+                TurnMeta {
+                    parent_agent_alias: None,
+                    agent_alias: None,
+                    turn_id: "t",
+                    channel_name: "test",
+                },
+            )
+            .await;
+            assert!(rendered.contains("SCOPED_FACT"), "{rendered}");
+            for denied in ["FOREIGN_CANARY", "SOUL_CANARY", "UNATTRIBUTED_CHAT"] {
+                assert!(!rendered.contains(denied), "{rendered}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn markdown_auto_recall_does_not_reclassify_private_daily_rows_as_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = zeroclaw_memory::MarkdownMemory::new("test", dir.path());
+        mem.store(
+            "private_chat",
+            "CHAT_CANARY",
+            MemoryCategory::Conversation,
+            Some("foreign"),
+        )
+        .await
+        .unwrap();
+        mem.store("public_fact", "DURABLE_FACT", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        let rendered = render_memory_context(
+            &mem,
+            &RecordingObserver::default(),
+            "*",
+            &[Some("allowed")],
+            &MemoryInjectConfig::default(),
+            false,
+            TurnMeta {
+                parent_agent_alias: None,
+                agent_alias: None,
+                turn_id: "t",
+                channel_name: "test",
+            },
+        )
+        .await;
+        assert!(rendered.contains("DURABLE_FACT"), "{rendered}");
+        assert!(!rendered.contains("CHAT_CANARY"), "{rendered}");
     }
 }

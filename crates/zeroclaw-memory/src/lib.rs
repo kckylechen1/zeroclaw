@@ -6,6 +6,7 @@ pub const MEMORY_CONTEXT_OPEN: &str = "[Memory context]";
 /// Closing delimiter for recalled memory injected into provider context.
 pub const MEMORY_CONTEXT_CLOSE: &str = "[/Memory context]";
 
+pub mod admissibility;
 pub mod agent_scoped;
 pub mod agent_scoped_markdown;
 pub mod audit;
