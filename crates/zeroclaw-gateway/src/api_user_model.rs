@@ -78,7 +78,7 @@ pub async fn list_candidates(
         return error_json(StatusCode::BAD_REQUEST, "invalid candidate page");
     }
     let data_dir = data_dir_of(&state);
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let store = cached_store(&data_dir)?;
         if let Some(limit) = query.limit {
             let before = query.before_created_at.zip(query.before_id.as_deref());
