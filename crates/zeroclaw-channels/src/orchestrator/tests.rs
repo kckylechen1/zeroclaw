@@ -7024,7 +7024,7 @@ impl Memory for RecallMemory {
         &self,
         _query: &str,
         _limit: usize,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _since: Option<&str>,
         _until: Option<&str>,
     ) -> anyhow::Result<Vec<zeroclaw_memory::MemoryEntry>> {
@@ -7034,7 +7034,7 @@ impl Memory for RecallMemory {
             content: "Age is 45".to_string(),
             category: zeroclaw_memory::MemoryCategory::Conversation,
             timestamp: "2026-02-20T00:00:00Z".to_string(),
-            session_id: None,
+            session_id: session_id.map(str::to_owned),
             score: Some(0.9),
             namespace: "default".into(),
             importance: None,
@@ -10746,7 +10746,14 @@ async fn channel_memory_tools_keep_same_sender_group_writes_separate() {
     let recall = MemoryRecallTool::new(memory);
     for (sessions, local_visible) in [(a, true), (b, false)] {
         let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
-            .scope(sessions, recall.execute(serde_json::json!({"query":"*"})))
+            .scope(
+                sessions,
+                // Match the ordinary channel ToolLoop's explicit host policy.
+                zeroclaw_api::TOOL_LOOP_MEMORY_READ_POLICY.scope(
+                    zeroclaw_api::memory_traits::MemoryReadPolicy::SessionScoped,
+                    recall.execute(serde_json::json!({"query":"*"})),
+                ),
+            )
             .await
             .unwrap();
         assert!(result.success);
@@ -11581,7 +11588,7 @@ async fn process_channel_message_memory_recall_difference_keeps_system_byte_iden
             &self,
             query: &str,
             _limit: usize,
-            _session_id: Option<&str>,
+            session_id: Option<&str>,
             _since: Option<&str>,
             _until: Option<&str>,
         ) -> anyhow::Result<Vec<zeroclaw_memory::MemoryEntry>> {
@@ -11591,7 +11598,7 @@ async fn process_channel_message_memory_recall_difference_keeps_system_byte_iden
                 content: format!("memory-for-{}", query),
                 category: zeroclaw_memory::MemoryCategory::Conversation,
                 timestamp: "2026-02-20T00:00:00Z".to_string(),
-                session_id: None,
+                session_id: session_id.map(str::to_owned),
                 score: Some(0.9),
                 namespace: "default".into(),
                 importance: None,
@@ -11642,11 +11649,11 @@ async fn process_channel_message_memory_recall_difference_keeps_system_byte_iden
             _allowed_agent_ids: &[&str],
             query: &str,
             _limit: usize,
-            _session_id: Option<&str>,
+            session_id: Option<&str>,
             _since: Option<&str>,
             _until: Option<&str>,
         ) -> anyhow::Result<Vec<zeroclaw_memory::MemoryEntry>> {
-            self.recall(query, 5, None, None, None).await
+            self.recall(query, 5, session_id, None, None).await
         }
     }
     impl ::zeroclaw_api::attribution::Attributable for QueryAwareMemory {

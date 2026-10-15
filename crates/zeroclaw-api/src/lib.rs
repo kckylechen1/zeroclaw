@@ -56,6 +56,11 @@ tokio::task_local! {
     /// An empty scope admits only unscoped non-Conversation recall results.
     pub static TOOL_LOOP_MEMORY_SESSIONS: Vec<String>;
 
+    /// Host-origin read policy, replaced on every nested ToolLoop invocation.
+    /// Missing policy conservatively excludes Conversation; sessions remain
+    /// independently constrained by TOOL_LOOP_MEMORY_SESSIONS.
+    pub static TOOL_LOOP_MEMORY_READ_POLICY: crate::memory_traits::MemoryReadPolicy;
+
     /// Native extended thinking parameters, set by the outer orchestration
     /// functions and read by `run_tool_call_loop` when building `ChatRequest`.
     pub static NATIVE_THINKING_OVERRIDE: Option<crate::model_provider::NativeThinkingParams>;
