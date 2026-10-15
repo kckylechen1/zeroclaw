@@ -107,6 +107,7 @@ pub(crate) struct Seed {
 struct ActiveTurn {
     correction_invalidated: Arc<AtomicBool>,
     generation: u64,
+    id: String,
     cancel: CancellationToken,
     steering: mpsc::Sender<String>,
 }
@@ -136,6 +137,7 @@ pub(crate) struct TurnClaim {
     pub(crate) intake: Option<crate::ws::intake::Claim>,
     pub(crate) surface: Option<zeroclaw_api::chat_surface::ChatSurface>,
     pub(crate) generation: u64,
+    pub(crate) turn_id: String,
     pub(crate) cancel: CancellationToken,
     pub(crate) steering: mpsc::Receiver<String>,
 }
@@ -149,6 +151,8 @@ pub(crate) struct Conversation<A> {
     pub(crate) questions: Arc<super::ws_question::Questions>,
     turn: parking_lot::Mutex<Option<ActiveTurn>>,
     next_generation: AtomicU64,
+    turn_revision: AtomicU64,
+    controls_enabled: AtomicBool,
 }
 
 impl<A> Conversation<A> {
@@ -166,6 +170,8 @@ impl<A> Conversation<A> {
             questions,
             turn: parking_lot::Mutex::new(None),
             next_generation: AtomicU64::new(1),
+            turn_revision: AtomicU64::new(0),
+            controls_enabled: AtomicBool::new(false),
         }
     }
 
@@ -219,14 +225,17 @@ impl<A> Conversation<A> {
 
     fn start_locked(&self, turn: &mut Option<ActiveTurn>, content: String) -> Submitted {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        let turn_id = uuid::Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
         let (steering_tx, steering_rx) = mpsc::channel(STEERING_BUFFER);
         *turn = Some(ActiveTurn {
             correction_invalidated: Arc::new(AtomicBool::new(false)),
             generation,
+            id: turn_id.clone(),
             cancel: cancel.clone(),
             steering: steering_tx,
         });
+        self.publish_turn_state(turn);
         Submitted::Start(TurnClaim {
             input: content,
             original_input: None,
@@ -234,6 +243,7 @@ impl<A> Conversation<A> {
             intake: None,
             surface: None,
             generation,
+            turn_id,
             cancel,
             steering: steering_rx,
         })
@@ -255,6 +265,7 @@ impl<A> Conversation<A> {
         if turn.as_ref().is_some_and(|t| t.generation == generation) {
             self.questions.drain();
             *turn = None;
+            self.publish_turn_state(&turn);
         }
     }
 
@@ -267,6 +278,44 @@ impl<A> Conversation<A> {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Opt in to turn control while taking a snapshot under the same owner lock
+    /// as admission and completion. Revisions order buffered reconnect events.
+    pub(crate) fn enable_turn_controls(&self) -> serde_json::Value {
+        let turn = self.turn.lock();
+        self.controls_enabled.store(true, Ordering::Relaxed);
+        self.turn_state_frame(&turn)
+    }
+
+    fn turn_state_frame(&self, turn: &Option<ActiveTurn>) -> serde_json::Value {
+        serde_json::json!({
+            "type":"turn_state", "control_version":1,
+            "revision":self.turn_revision.load(Ordering::Relaxed),
+            "turn_id":turn.as_ref().map(|turn| turn.id.as_str()),
+        })
+    }
+
+    fn publish_turn_state(&self, turn: &Option<ActiveTurn>) {
+        self.turn_revision.fetch_add(1, Ordering::Relaxed);
+        if self.controls_enabled.load(Ordering::Relaxed) {
+            self.publish(&self.turn_state_frame(turn));
+        }
+    }
+
+    /// Compare and cancel under the admission lock. A stale UUID can never
+    /// signal the token of a later turn, including after conversation recreation.
+    pub(crate) fn cancel_turn(&self, target: &str) -> &'static str {
+        let turn = self.turn.lock();
+        match turn.as_ref() {
+            None => "no_active",
+            Some(active) if active.id != target => "stale",
+            Some(active) => {
+                active.cancel.cancel();
+                self.questions.drain();
+                "requested"
+            }
         }
     }
 

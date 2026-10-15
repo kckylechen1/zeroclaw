@@ -10,7 +10,8 @@ use serde_json::json;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep, sleep_until, timeout};
 use zeroclaw_gateway_client::{
-    Backoff, Client, ConnectOptions, Decision, Frame, Rejected, SourceInput, SourceRecord,
+    Backoff, CancelAck, Client, ConnectOptions, ControlReady, Decision, Frame, Rejected,
+    SourceInput, SourceRecord, TurnState,
 };
 use zeroclaw_log::{Action, Event, EventOutcome, record};
 
@@ -24,6 +25,8 @@ const TYPING_INTERVAL: Duration = Duration::from_secs(4);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_PENDING_STOPS: usize = 32;
 
 /// Replies the bridge writes itself. English only: the bridge carries no
 /// Fluent catalogue (it does not link the runtime).
@@ -123,6 +126,8 @@ pub async fn run(config: BridgeConfig) -> Result<()> {
         typing_at: None,
         keys: ApprovalKeys::default(),
         questions: HashMap::new(),
+        turn_control: None,
+        pending_stops: HashMap::new(),
     };
     bridge.run(&mut updates).await
 }
@@ -283,6 +288,8 @@ struct Bridge {
     keys: ApprovalKeys,
     // Platform reply mapping only. The Gateway owns acceptance/expiry.
     questions: HashMap<i64, QuestionReply>,
+    turn_control: Option<ControlReady>,
+    pending_stops: HashMap<String, PendingStop>,
 }
 
 #[derive(Clone)]
@@ -292,7 +299,21 @@ struct PendingMessage {
     attachments: Vec<String>,
     source: SourceInput,
     disposition: Option<&'static str>,
-    control: Option<Inbound>,
+    control: Option<Control>,
+}
+
+#[derive(Clone)]
+enum Control {
+    /// Captured before waiting for a source receipt; never resolved again later.
+    Stop {
+        turn_id: Option<String>,
+    },
+    Platform(Inbound),
+}
+
+struct PendingStop {
+    turn_id: String,
+    deadline: Instant,
 }
 
 impl Drop for Bridge {
@@ -339,6 +360,7 @@ impl Bridge {
             }
             let flush_at = self.stream.as_ref().and_then(Stream::flush_at);
             let typing_at = self.typing_at;
+            let stop_at = self.pending_stops.values().map(|stop| stop.deadline).min();
             let reconnect_at = self.client.is_none().then_some(self.reconnect_at);
             tokio::select! {
                 update = updates.recv() => {
@@ -366,6 +388,7 @@ impl Bridge {
                     Ok(None) => self.disconnected("the gateway closed the connection".into()),
                     Err(e) => self.disconnected(format!("{e:#}")),
                 },
+                () = sleep_until_some(stop_at) => self.expire_stops().await,
                 () = sleep_until_some(flush_at) => self.flush().await,
                 () = sleep_until_some(typing_at) => self.show_typing().await,
                 () = sleep_until_some(reconnect_at) => {}
@@ -378,7 +401,7 @@ impl Bridge {
     async fn connect(&mut self) -> Result<()> {
         let error = match timeout(CONNECT_TIMEOUT, async {
             let mut client = Client::connect_with_surface(&self.options, "telegram").await?;
-            let ready = client.resume_source(&self.source).await?;
+            let ready = client.resume_source_with_control(&self.source).await?;
             if ready.receipts.len() > 128 || ready.unknown.len() > 128 {
                 bail!("source intake resume exceeded its receipt bound");
             }
@@ -412,6 +435,7 @@ impl Bridge {
                     "attached to the gateway"
                 );
                 self.backoff.reset();
+                self.turn_control = ready.control;
                 self.receipts = ready
                     .receipts
                     .into_iter()
@@ -483,6 +507,9 @@ impl Bridge {
             "gateway connection lost; reconnecting"
         );
         self.client = None;
+        if let Some(control) = &mut self.turn_control {
+            control.state.turn_id = None;
+        }
         self.cursor.send_modify(|state| state.cursor = None);
         self.reconnect_at = Instant::now() + delay;
         // A turn in flight keeps running on the gateway; its frames are
@@ -499,7 +526,7 @@ impl Bridge {
         &mut self,
         source: SourceInput,
         disposition: &'static str,
-        control: Option<Inbound>,
+        control: Option<Control>,
     ) {
         self.queue_message(PendingMessage {
             id: self.request_id(source.update_id),
@@ -543,8 +570,13 @@ impl Bridge {
             Inbound::Text { text, .. } if text.trim() == "/start" => {
                 self.queue_disposition(source, "ignored", None).await
             }
-            Inbound::Text { chat_id, text } if text.trim() == "/cancel" => {
-                self.queue_disposition(source, "control", Some(Inbound::Text { chat_id, text }))
+            Inbound::Text { text, .. } if matches!(text.trim(), "/stop" | "/cancel") => {
+                let turn_id = self
+                    .client
+                    .as_ref()
+                    .and_then(|_| self.turn_control.as_ref())
+                    .and_then(|control| control.state.turn_id.clone());
+                self.queue_disposition(source, "control", Some(Control::Stop { turn_id }))
                     .await
             }
             Inbound::Text { text, .. } => self.on_text(source, text).await,
@@ -584,35 +616,110 @@ impl Bridge {
                 self.on_text(source, text).await;
             }
             control @ (Inbound::Reply { .. } | Inbound::Callback { .. }) => {
-                self.queue_disposition(source, "control", Some(control))
+                self.queue_disposition(source, "control", Some(Control::Platform(control)))
                     .await
             }
         }
     }
 
-    async fn execute_control(&mut self, control: Inbound) {
+    async fn execute_control(&mut self, id: String, control: Control) {
         match control {
-            Inbound::Text { .. } => {
-                let Some(client) = &mut self.client else {
-                    self.reply(text::OFFLINE).await;
+            Control::Stop { turn_id } => {
+                let Some(turn_id) = turn_id else {
+                    if let Some(control) = &self.turn_control {
+                        self.reply(&control.idle_message).await;
+                    }
                     return;
                 };
-                if let Err(e) = client.cancel().await {
+                if self.pending_stops.len() >= MAX_PENDING_STOPS || self.client.is_none() {
+                    if let Some(control) = &self.turn_control {
+                        self.reply(&control.not_sent_message).await;
+                    }
+                    return;
+                }
+                let Some(client) = &mut self.client else {
+                    return;
+                };
+                self.pending_stops.insert(
+                    id.clone(),
+                    PendingStop {
+                        turn_id: turn_id.clone(),
+                        deadline: Instant::now() + STOP_TIMEOUT,
+                    },
+                );
+                if let Err(e) = client.cancel_turn(&id, &turn_id).await {
+                    // The write might have reached the gateway. Keep only the
+                    // outcome waiter; reconnect must never send this control.
                     self.disconnected(format!("{e:#}"));
                 }
             }
-            Inbound::Reply {
+            Control::Platform(Inbound::Reply {
                 message_id, text, ..
-            } => self.on_answer(message_id, &text).await,
-            Inbound::Callback {
+            }) => self.on_answer(message_id, &text).await,
+            Control::Platform(Inbound::Callback {
                 id,
                 chat_id,
                 message_id,
                 message_text,
                 data,
-            } => {
+            }) => {
                 self.on_callback(&id, chat_id, message_id, &message_text, &data)
                     .await
+            }
+            _ => {}
+        }
+    }
+
+    async fn stop_unknown(&self) {
+        if let Some(control) = &self.turn_control {
+            self.reply(&control.unknown_message).await;
+        }
+    }
+
+    async fn expire_stops(&mut self) {
+        let before = self.pending_stops.len();
+        self.pending_stops
+            .retain(|_, stop| stop.deadline > Instant::now());
+        if before != self.pending_stops.len() {
+            self.stop_unknown().await;
+        }
+    }
+
+    async fn on_turn_control(&mut self, value: serde_json::Value) {
+        match value["type"].as_str() {
+            Some("turn_state") => {
+                // Missing target is malformed; explicit null denotes idle.
+                if value.get("turn_id").is_none() {
+                    return;
+                }
+                if let Ok(state) = serde_json::from_value::<TurnState>(value)
+                    && state.supported()
+                    && let Some(control) = &mut self.turn_control
+                    && state.revision > control.state.revision
+                {
+                    control.state = state;
+                }
+            }
+            Some("cancel_ack") => {
+                let Ok(ack) = serde_json::from_value::<CancelAck>(value) else {
+                    return;
+                };
+                if ack.control_version != 1
+                    || ack.message.is_empty()
+                    || !matches!(
+                        ack.status.as_str(),
+                        "requested" | "stale" | "no_active" | "unauthorized" | "invalid"
+                    )
+                    || !self
+                        .pending_stops
+                        .get(&ack.id)
+                        .is_some_and(|stop| stop.turn_id == ack.turn_id)
+                {
+                    return;
+                }
+                self.pending_stops.remove(&ack.id);
+                // A requested receipt must not end streaming or claim aborted.
+                self.reply(&ack.message).await;
             }
             _ => {}
         }
@@ -899,7 +1006,7 @@ impl Bridge {
                 });
                 if let Some(control) = message.control {
                     if status == "accepted" && state.as_deref() == Some("control") {
-                        self.execute_control(control).await;
+                        self.execute_control(id.clone(), control).await;
                     } else {
                         self.reply("This control was already recorded; its outcome may be unknown and it will not be replayed").await;
                     }
@@ -964,7 +1071,7 @@ impl Bridge {
                 self.end_turn().await;
                 self.reply(&text::error(&message)).await;
             }
-            Frame::Other(_) => {}
+            Frame::Other(value) => self.on_turn_control(value).await,
         }
     }
 

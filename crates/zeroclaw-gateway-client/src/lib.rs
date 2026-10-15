@@ -119,6 +119,47 @@ pub struct SourceReady {
     pub cursor: i64,
     pub unknown: Vec<String>,
     pub receipts: Vec<SourceRecord>,
+    #[serde(default)]
+    pub control: Option<ControlReady>,
+}
+
+/// Authoritative ephemeral turn state. Revisions only compare within one
+/// attachment; reconnect replaces this baseline with its source-ready snapshot.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TurnState {
+    pub control_version: u32,
+    pub revision: u64,
+    pub turn_id: Option<String>,
+}
+
+impl TurnState {
+    pub fn supported(&self) -> bool {
+        self.control_version == 1
+            && self
+                .turn_id
+                .as_deref()
+                .is_none_or(|id| uuid::Uuid::parse_str(id).is_ok())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ControlReady {
+    #[serde(flatten)]
+    pub state: TurnState,
+    /// Gateway-localized notices for outcomes without a server response.
+    pub idle_message: String,
+    pub unknown_message: String,
+    pub not_sent_message: String,
+}
+
+/// A signal receipt, never proof that the turn or its effects have stopped.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CancelAck {
+    pub control_version: u32,
+    pub id: String,
+    pub turn_id: String,
+    pub status: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -305,6 +346,7 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub struct Client {
     socket: Socket,
     session: SessionStart,
+    controls_negotiated: bool,
 }
 
 impl Client {
@@ -367,7 +409,11 @@ impl Client {
                 None => bail!("gateway closed the connection during the handshake"),
             }
         }
-        Ok(Self { socket, session })
+        Ok(Self {
+            socket,
+            session,
+            controls_negotiated: false,
+        })
     }
 
     pub fn session(&self) -> &SessionStart {
@@ -407,18 +453,46 @@ impl Client {
 
     /// Negotiate persisted source intake. The caller bounds the handshake wait.
     pub async fn resume_source(&mut self, source: &str) -> Result<SourceReady> {
-        send_json(
-            &mut self.socket,
-            &serde_json::json!({"type":"source_resume","source":source}),
-        )
-        .await?;
+        self.resume_source_inner(source, false).await
+    }
+
+    /// Require v1 target-bound controls; an old gateway cannot silently downgrade.
+    pub async fn resume_source_with_control(&mut self, source: &str) -> Result<SourceReady> {
+        self.resume_source_inner(source, true).await
+    }
+
+    async fn resume_source_inner(&mut self, source: &str, control: bool) -> Result<SourceReady> {
+        if control {
+            self.controls_negotiated = false;
+        }
+        let mut frame = serde_json::json!({"type":"source_resume","source":source});
+        if control {
+            frame["control_version"] = 1.into();
+        }
+        send_json(&mut self.socket, &frame).await?;
         loop {
             match self.next_frame().await? {
                 Some(Frame::Other(value)) if value["type"] == "source_ready" => {
+                    if control && value["control"].get("turn_id").is_none() {
+                        bail!("gateway omitted the turn-control snapshot");
+                    }
                     let ready: SourceReady =
                         serde_json::from_value(value).context("malformed source_ready frame")?;
                     if ready.intake_version != 1 || ready.source != source || ready.cursor < 0 {
                         bail!("unsupported source intake contract");
+                    }
+                    if control
+                        && !ready.control.as_ref().is_some_and(|control| {
+                            control.state.supported()
+                                && !control.idle_message.is_empty()
+                                && !control.unknown_message.is_empty()
+                                && !control.not_sent_message.is_empty()
+                        })
+                    {
+                        bail!("unsupported turn-control contract");
+                    }
+                    if control {
+                        self.controls_negotiated = true;
                     }
                     return Ok(ready);
                 }
@@ -454,6 +528,23 @@ impl Client {
     /// Ask the gateway to stop the session's running turn.
     pub async fn cancel(&mut self) -> Result<()> {
         send_json(&mut self.socket, &serde_json::json!({ "type": "cancel" })).await
+    }
+
+    /// Request cancellation of exactly the observed turn. Socket write success
+    /// is not the gateway's cancel_ack and the operation must not be replayed.
+    pub async fn cancel_turn(&mut self, id: &str, turn_id: &str) -> Result<()> {
+        // Old gateways ignore added fields on their bare-cancel handler. Never
+        // send a targeted request until this socket has proved the v1 contract.
+        if !self.controls_negotiated {
+            bail!("turn controls were not negotiated");
+        }
+        send_json(
+            &mut self.socket,
+            &serde_json::json!({
+                "type":"cancel", "control_version":1, "id":id, "turn_id":turn_id
+            }),
+        )
+        .await
     }
 
     /// Send an answer; only AnswerAck(status=accepted) confirms consumption.
