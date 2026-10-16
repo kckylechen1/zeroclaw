@@ -74,6 +74,9 @@ const translations: Record<Locale, Record<string, string>> = {
     "review.stored": "已存 Voice",
 
     "review.review_history": "所有候选的审核历史",
+    "review.older_candidates": "读取更早的候选",
+    "review.no_history": "暂无候选历史。",
+    "review.upgrade_history": "此网关尚不支持分页读取候选历史。请升级网关后重试。",
     "nav.review": "审核",
     "review.title": "我们共同积累的理解",
     "review.owner_space": "所有者审核",
@@ -574,6 +577,9 @@ const translations: Record<Locale, Record<string, string>> = {
     "review.stored": "Stored Voice",
 
     "review.review_history": "All candidate review history",
+    "review.older_candidates": "Load older candidates",
+    "review.no_history": "No candidate history yet.",
+    "review.upgrade_history": "This gateway does not support candidate history pages yet. Upgrade the gateway, then retry.",
     "nav.review": "Review",
     "review.title": "What we learn together",
     "review.owner_space": "Owner review",

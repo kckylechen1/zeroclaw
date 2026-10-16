@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Button, ConfirmDialog } from '@/components/ui';
 import { useAuth } from '@/hooks/useAuth';
 import { t } from '@/lib/i18n';
-import { reflectionOutcome, validationMessage, displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, ReviewError, type Candidate, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
+import { reflectionOutcome, validationMessage, displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, loadCandidatePage, appendCandidatePage, ReviewError, type CandidatePage, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
 const field = 'w-full min-h-11 rounded-md border border-pc-border bg-pc-base p-3 text-pc-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]';
 const date = (value: number) => new Date(value * 1000).toLocaleString();
 const layers: Layer[] = ['identity', 'principles', 'growth', 'voice'];
@@ -127,7 +127,8 @@ export default function Review() {
         layer: Layer;
         revisions: Revision[];
     } | null>(null);
-    const [pastCandidates, setPastCandidates] = useState<Candidate[]>([]);
+    const [pastCandidates, setPastCandidates] = useState<CandidatePage | null>(null);
+    const [historyLoading, setHistoryLoading] = useState(false);
     const [candidate, setCandidate] = useState<CandidateHistory | null>(null);
     const [needsPair, setNeedsPair] = useState(!token);
     const [pairingEnabled, setPairingEnabled] = useState<boolean | null>(null);
@@ -147,6 +148,15 @@ export default function Review() {
     const generation = useRef(0);
     const inAction = useRef(false);
     const readSequence = useRef(0);
+    const candidateRead = useRef(0);
+    const candidateRequest = useRef<AbortController | null>(null);
+    const resetCandidateHistory = () => {
+        candidateRequest.current?.abort();
+        candidateRequest.current = null;
+        candidateRead.current++;
+        setPastCandidates(null);
+        setHistoryLoading(false);
+    };
     const report = (err: unknown) => {
         if (err instanceof ReviewError && (err.status === 401 || err.status === 403)) {
             setNeedsPair(true);
@@ -155,9 +165,9 @@ export default function Review() {
             setHeadRead(null);
             setHistory(null);
             setCandidate(null);
-            setPastCandidates([]);
+            resetCandidateHistory();
         }
-        setError(t(err instanceof ReviewError && err.status === 400 && err.code === 'invalid' ? validationMessage(err) : err instanceof ReviewError ? `review.error_${[401, 403, 409, 429, 503].includes(err.status) ? err.status : 'other'}` : 'review.error_other'));
+        setError(t(err instanceof ReviewError && err.code === 'pagination_unavailable' ? 'review.upgrade_history' : err instanceof ReviewError && err.status === 400 && err.code === 'invalid' ? validationMessage(err) : err instanceof ReviewError ? `review.error_${[401, 403, 409, 429, 503].includes(err.status) ? err.status : 'other'}` : 'review.error_other'));
     };
     useEffect(() => {
         if (!needsPair) return;
@@ -176,11 +186,11 @@ export default function Review() {
         setHeadRead(null);
         setHistory(null);
         setCandidate(null);
-        setPastCandidates([]);
+        resetCandidateHistory();
         setError('');
         if (!token) {
             setNeedsPair(true);
-            return () => { controller.abort(); generation.current++; };
+            return () => { controller.abort(); candidateRequest.current?.abort(); generation.current++; };
         }
         setLoading(true);
         // Resolve stale bookmarks from current options, then verify operator
@@ -222,7 +232,7 @@ export default function Review() {
             report(err); })
             .finally(() => { if (request === generation.current)
             setLoading(false); });
-        return () => { controller.abort(); generation.current++; };
+        return () => { controller.abort(); candidateRequest.current?.abort(); generation.current++; };
     }, [agent, token, tab, version, setParams]);
     const perform = async (work: () => Promise<unknown>, recordDecision = true, onFailure?: (error: unknown) => void) => {
         if (inAction.current)
@@ -273,6 +283,33 @@ export default function Review() {
         catch (err) {
             if (request === generation.current && read === readSequence.current)
                 report(err);
+        }
+    };
+    const loadCandidates = async (firstPage = false) => {
+        if (candidateRequest.current || busy || loading) return;
+        const cursor = firstPage ? null : pastCandidates?.next_cursor;
+        if (!firstPage && !cursor) return;
+        // A new list invalidates detail reads started from the previous list.
+        if (firstPage) readSequence.current++;
+        const request = generation.current;
+        const read = ++candidateRead.current;
+        const controller = new AbortController();
+        candidateRequest.current = controller;
+        setHistoryLoading(true);
+        setError('');
+        try {
+            const page = await loadCandidatePage(cursor ?? null, controller.signal);
+            if (request === generation.current && read === candidateRead.current) {
+                setPastCandidates(current => firstPage || !current ? page : appendCandidatePage(current, page));
+                if (firstPage) setCandidate(null);
+            }
+        } catch (err) {
+            if (request === generation.current && read === candidateRead.current && !controller.signal.aborted) report(err);
+        } finally {
+            if (candidateRequest.current === controller) {
+                candidateRequest.current = null;
+                setHistoryLoading(false);
+            }
         }
     };
     return <div className="max-w-3xl mx-auto p-4 sm:p-8 pb-16 space-y-6 [&_button]:min-h-11 [&_button]:whitespace-normal [&_button:active]:scale-[0.98]">
@@ -326,12 +363,13 @@ export default function Review() {
                             <Value value={revision.value}/>{head && revision.revision !== head.revision && <Button variant="ghost" disabled={busy} onClick={() => setRollback({ agent, layer, revision: revision.revision, expected: head.revision })}>{t('review.rollback')}</Button>}</div>)}</div>}</article>;
                 })}</section>}
       {tab === 'user_model' && <section className="space-y-5">
-            <Button variant="ghost" onClick={() => void inspect('/api/user-model/candidates', value => setPastCandidates((value as {
-                candidates: Candidate[];
-            }).candidates))}>{t('review.review_history')}</Button>{pastCandidates.map(item => <div key={item.id} className="border-b border-pc-border pb-3 space-y-2">
+            <Button variant="ghost" disabled={busy || loading || historyLoading} onClick={() => void loadCandidates(true)}>{t('review.review_history')}</Button>
+            {historyLoading && <p role="status">{t('review.loading')}</p>}
+            {pastCandidates?.candidates.length === 0 && <p>{t('review.no_history')}</p>}
+            {pastCandidates?.candidates.map(item => <div key={item.id} className="border-b border-pc-border pb-3 space-y-2">
                 <p className="break-words">{item.statement}</p>
                 <Button variant="ghost" onClick={() => void inspect(`/api/user-model/candidates/${encodeURIComponent(item.id)}`, value => setCandidate(value as CandidateHistory))}>{t('review.history')}</Button>
-                </div>)}<p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{heads.length === 0 && !loading && <p>{t('review.no_heads')}</p>}{heads.map(head => <article key={head.id} className="space-y-3 border-b border-pc-border py-5">
+                </div>)}{pastCandidates?.next_cursor && <Button variant="ghost" disabled={busy || loading || historyLoading} onClick={() => void loadCandidates()}>{t('review.older_candidates')}</Button>}<p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{heads.length === 0 && !loading && <p>{t('review.no_heads')}</p>}{heads.map(head => <article key={head.id} className="space-y-3 border-b border-pc-border py-5">
                 <h2 className="text-lg break-words">{head.statement}</h2>
                 <p className="text-sm text-pc-text-muted">{head.scope} · {t(`review.${head.authority}`)}</p>{head.source_candidate && <Button variant="ghost" onClick={() => void inspect(`/api/user-model/candidates/${encodeURIComponent(head.source_candidate!)}`, value => setCandidate(value as CandidateHistory))}>{t('review.history')}</Button>}</article>)}{candidate && <article className="border border-pc-border p-4 space-y-3">
                 <h3 className="font-medium">{t('review.history')}</h3>
