@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GROWTH_FRAMING_LINE","GROWTH_SECTION_MAX_BYTES","IDENTITY_HONESTY_LINE","IDENTITY_SECTION_MAX_BYTES","IDENTITY_UNAVAILABLE_LINE","LEGACY_PERSONA_FILES","PRINCIPLES_SECTION_MAX_BYTES"],"enum":["LegacyPersonaFiles"],"fn":["persona_projection","render_growth","render_identity","render_principles"],"struct":["PersonaProjection"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_ROWS_PER_BRIDGE","ROW_TTL"],"struct":["BridgeOutbox","OutboxItem"]};

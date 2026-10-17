@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["entry_is_admissible","policy_for_turn"]};

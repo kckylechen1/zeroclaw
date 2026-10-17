@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SupervisorAdmissionError","SupervisorFlowError","SupervisorPhase"],"struct":["JudgmentProposalV1","ResultObservation","ReviewLineageRecord","SupervisorInventory","SupervisorSessionV1"]};
