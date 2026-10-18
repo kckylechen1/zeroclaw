@@ -381,7 +381,7 @@ pub async fn run(
         );
     }
 
-    // Weekly Soul reflection (ADR-016 §4): proposes growth, applies nothing.
+    // Weekly Soul reflection (ADR-016 §4): proposes Story changes, applies nothing.
     if !config.agents.is_empty() {
         let reflection_cfg = config.clone();
         let reflection_cancel = channels_cancel.clone();

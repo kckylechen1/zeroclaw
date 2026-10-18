@@ -82,12 +82,29 @@ async fn tick_agent(
     let since_unix = match reflection_due(store.last_reflection(agent_alias)?.as_ref(), now_unix) {
         ReflectionDue::NotYet => return Ok(()),
         ReflectionDue::StartClock => {
+            // Drift is advisory: a failure to compute it (for example one
+            // corrupt revision body) starts the clock without drift instead
+            // of blocking the cadence until the store is repaired.
             let drift = current_drift(
                 store,
                 agent_alias,
                 &|| configured_tone(config, agent_alias),
                 now_unix,
-            )?;
+            )
+            .unwrap_or_else(|error| {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_category(::zeroclaw_log::EventCategory::Agent)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "agent": agent_alias,
+                            "error": error.to_string()
+                        })),
+                    "Soul drift computation failed; clock starts without drift"
+                );
+                None
+            });
             store.record_reflection(
                 agent_alias,
                 &SoulReflectionReceipt {

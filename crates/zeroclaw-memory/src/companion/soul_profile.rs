@@ -1791,6 +1791,27 @@ impl SoulProfileStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Test-only: append a raw revision row with an invalid body so tests can
+    /// prove readers fail closed against corrupt history without reaching
+    /// into the private connection.
+    #[cfg(test)]
+    pub(crate) fn insert_corrupt_revision_for_test(
+        &self,
+        agent: &str,
+        layer: &str,
+        revision: u64,
+        created_at_unix: u64,
+    ) {
+        self.conn
+            .lock()
+            .execute(
+                "INSERT INTO soul_revisions (agent, layer, revision, source, body, created_at_unix)
+             VALUES (?1, ?2, ?3, 'owner', 'not-json', ?4)",
+                rusqlite::params![agent, layer, revision, created_at_unix],
+            )
+            .unwrap();
+    }
+
     /// Append a reflection receipt (ADR-016 §4).
     pub fn record_reflection(
         &self,

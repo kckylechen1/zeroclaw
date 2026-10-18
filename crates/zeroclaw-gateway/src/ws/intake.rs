@@ -116,6 +116,9 @@ pub(super) fn resume(
     scope: &WsTurnScope,
     frame: &Value,
 ) -> Reply {
+    if frame.get("control_version").is_some() && frame["control_version"].as_u64() != Some(1) {
+        return failure(None, "UNSUPPORTED_CONTROL_VERSION");
+    }
     let Some(namespace) = frame["source"].as_str() else {
         return failure(None, "INVALID_SOURCE");
     };
@@ -156,13 +159,19 @@ pub(super) fn resume(
     let receipts:Vec<_> = snapshot.inputs.iter().map(|input|json!({
         "update_id":input.update_id,"previous_cursor":input.previous_cursor,"id":input.request_id,"state":input.state
     })).collect();
-    (
-        Some(
-            json!({"type":"source_ready","intake_version":VERSION,"source":namespace,
-        "cursor":snapshot.cursor,"unknown":unknown,"receipts":receipts}),
-        ),
-        start,
-    )
+    let mut ready = json!({"type":"source_ready","intake_version":VERSION,"source":namespace,
+        "cursor":snapshot.cursor,"unknown":unknown,"receipts":receipts});
+    if frame["control_version"].as_u64() == Some(1) {
+        let mut control = conversation.enable_turn_controls();
+        control["idle_message"] =
+            zeroclaw_runtime::i18n::get_required_cli_string("gateway-cancel-idle").into();
+        control["unknown_message"] =
+            zeroclaw_runtime::i18n::get_required_cli_string("gateway-cancel-unknown").into();
+        control["not_sent_message"] =
+            zeroclaw_runtime::i18n::get_required_cli_string("gateway-cancel-not-sent").into();
+        ready["control"] = control;
+    }
+    (Some(ready), start)
 }
 
 fn ack(namespace: &str, input: &BridgeInput, receipt: &BridgeReceipt, turn: Option<&str>) -> Value {

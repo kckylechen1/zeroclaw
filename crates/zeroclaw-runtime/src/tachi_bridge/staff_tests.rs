@@ -579,46 +579,180 @@ async fn status_reads_the_canonical_receipt_and_ignores_extra_fields() {
     );
 }
 
+// Staff result wire shape: Tachi #2039, pinned at b3d82a0287b52b793876ab5bc883741feea66adf,
+// tools/workflow_facade.rs:90 and tools/task_facade.rs:104,205. The separate
+// external-staffing golden above freezes start/lifecycle, not this read shape.
 #[tokio::test]
-async fn result_reads_result_md_through_tachi_task() {
-    let (fake, endpoint) = serve(|_, args| match args["dispatch_id"].as_str() {
-        Some("done") => Reply::Ok(json!({
-            "status": "ok",
-            "dispatch_id": "done",
-            "terminal": true,
-            "state": "TASK_STATE_COMPLETED",
-            "task": {},
-            "run_status": {"dispatch_id":"done", "state":"TASK_STATE_COMPLETED", "status_revision":4},
-            "result": {
-                "body": "# Verdict\n\nAll tests pass.",
-                "truncated": true,
-                "full_size_chars": 9000,
-                "full_size_bytes": 9000
-            }
-        })),
-        _ => Reply::Ok(json!({
-            "status": "ok",
-            "state": "TASK_STATE_WORKING",
-            "run_status": {"dispatch_id":"pending", "state":"TASK_STATE_WORKING"},
-            "result": { "body": null, "note": "no result.md found in run directory" }
-        })),
+async fn result_reads_full_unicode_report_through_staff_and_preserves_absence() {
+    let unicode = "报告🙂\n".repeat(2_500);
+    assert!(unicode.chars().count() > 8_000);
+    let expected = unicode.clone();
+    let (fake, endpoint) = serve(move |tool, args| {
+        assert_eq!(tool, TACHI_STAFF_TOOL);
+        assert_eq!(args["action"], "result");
+        let body = match args["dispatch_id"].as_str() {
+            Some("done") => json!({
+                "body":unicode, "truncated":false,
+                "full_size_chars":unicode.chars().count(), "full_size_bytes":unicode.len()
+            }),
+            Some("empty") => json!({"body":"", "truncated":false}),
+            Some("truncated") => json!({"body":"报告🙂", "truncated":true}),
+            _ => json!({"body":null, "note":"no result.md found in run directory"}),
+        };
+        Reply::Ok(json!({
+            "dispatch_id":args["dispatch_id"],
+            "state":if args["dispatch_id"] == "pending" {"TASK_STATE_WORKING"} else {"TASK_STATE_COMPLETED"},
+            "status_revision":4,
+            "result":body
+        }))
     })
     .await;
     let client = client(&endpoint);
 
     let done = client.result("done").await.expect("result");
     assert_eq!(done.state, RunState::Completed);
-    assert_eq!(done.body.as_deref(), Some("# Verdict\n\nAll tests pass."));
-    assert!(done.truncated);
+    assert_eq!(done.status.revision, Some(4));
+    assert_eq!(done.body.as_deref(), Some(expected.as_str()));
+    assert!(!done.truncated);
 
     let pending = client.result("pending").await.expect("result");
+    assert_eq!(pending.state, RunState::Working);
+    assert!(!pending.status.is_terminal());
     assert_eq!(pending.body, None);
     assert!(!pending.truncated);
+    let empty = client.result("empty").await.expect("empty report");
+    assert_eq!(empty.body.as_deref(), Some(""));
+    let truncated = client
+        .result("truncated")
+        .await
+        .expect("reported truncation");
+    assert_eq!(truncated.body.as_deref(), Some("报告🙂"));
+    assert!(truncated.truncated);
 
-    let (tool, args) = &fake.calls()[0];
-    assert_eq!(tool, TACHI_TASK_TOOL);
-    assert_eq!(args["action"], "status");
-    assert_eq!(args["include_result"], true);
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(
+        calls[0],
+        (
+            TACHI_STAFF_TOOL.to_string(),
+            json!({"action":"result", "format":"json", "dispatch_id":"done"})
+        )
+    );
+    assert!(calls.iter().all(|(tool, args)| tool == TACHI_STAFF_TOOL
+        && args["action"] == "result"
+        && args.get("include_result").is_none()));
+}
+
+#[tokio::test]
+async fn result_enforces_the_full_report_byte_bound_without_cutting_unicode() {
+    let full = "🙂".repeat(16 * 1024);
+    assert_eq!(full.len(), 64 * 1024);
+    let expected = full.clone();
+    let (fake, endpoint) = serve(move |_, args| {
+        let body = if args["dispatch_id"] == "at-limit" {
+            full.clone()
+        } else {
+            format!("{full}a")
+        };
+        Reply::Ok(json!({
+            "dispatch_id":args["dispatch_id"], "state":"TASK_STATE_COMPLETED",
+            "result":{"body":body, "truncated":false}
+        }))
+    })
+    .await;
+    let client = client(&endpoint);
+    let at_limit = client.result("at-limit").await.unwrap();
+    assert_eq!(at_limit.body.as_deref(), Some(expected.as_str()));
+    assert!(!at_limit.truncated);
+    let over_limit = client.result("over-limit").await.unwrap_err();
+    assert!(
+        matches!(over_limit, TachiStaffError::Protocol(_)),
+        "{over_limit:?}"
+    );
+    assert_eq!(fake.calls().len(), 2, "no report fallback or retry");
+}
+
+#[tokio::test]
+async fn result_requires_the_canonical_receipt_and_explicit_report_body() {
+    let (fake, endpoint) = serve(|_, args| {
+        let mut payload = json!({
+            "dispatch_id":args["dispatch_id"], "state":"TASK_STATE_COMPLETED",
+            "result":{"body":"report", "truncated":false}
+        });
+        let object = payload.as_object_mut().unwrap();
+        match args["dispatch_id"].as_str().unwrap() {
+            "missing-dispatch" => {
+                object.remove("dispatch_id");
+            }
+            "missing-state" => {
+                object.remove("state");
+            }
+            "missing-result" => {
+                object.remove("result");
+            }
+            "null-result" => {
+                object.insert("result".into(), Value::Null);
+            }
+            "missing-body" => {
+                object.insert("result".into(), json!({"truncated":false}));
+            }
+            "non-text-body" => {
+                object.insert("result".into(), json!({"body":7}));
+            }
+            "legacy-task" => {
+                object.remove("dispatch_id");
+                object.insert(
+                    "run_status".into(),
+                    json!({"dispatch_id":"legacy-task", "state":"TASK_STATE_COMPLETED"}),
+                );
+            }
+            _ => panic!("unexpected result case"),
+        }
+        Reply::Ok(payload)
+    })
+    .await;
+    let client = client(&endpoint);
+    let cases = [
+        "missing-dispatch",
+        "missing-state",
+        "missing-result",
+        "null-result",
+        "missing-body",
+        "non-text-body",
+        "legacy-task",
+    ];
+    for case in cases {
+        let error = client.result(case).await.unwrap_err();
+        assert!(
+            matches!(error, TachiStaffError::Protocol(_)),
+            "{case}: {error:?}"
+        );
+    }
+    let calls = fake.calls();
+    assert_eq!(calls.len(), cases.len());
+    assert!(
+        calls
+            .iter()
+            .all(|(tool, args)| tool == TACHI_STAFF_TOOL && args["action"] == "result")
+    );
+}
+
+#[tokio::test]
+async fn result_reopens_a_stale_read_session_at_most_once() {
+    let (fake, endpoint) = serve(|_, _| Reply::Http(StatusCode::NOT_FOUND)).await;
+    let error = client(&endpoint).result("d-stale").await.unwrap_err();
+    assert!(
+        matches!(error, TachiStaffError::Unavailable(_)),
+        "{error:?}"
+    );
+    assert_eq!(fake.sessions_opened.load(Ordering::SeqCst), 2);
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls
+            .iter()
+            .all(|(tool, args)| tool == TACHI_STAFF_TOOL && args["action"] == "result")
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1103,31 +1237,57 @@ async fn transmitted_start_on_stale_session_is_unknown_and_never_replayed() {
 }
 
 #[tokio::test]
-async fn result_retains_canonical_receipt_and_inferred_projection_provenance() {
-    let (_, endpoint) = serve(|_, _| {
+async fn result_keeps_one_canonical_receipt_and_never_fabricates_task_projections() {
+    let projection = json!({
+        "execution_state":"orphaned", "control_state":"unavailable", "outcome_state":"unknown"
+    });
+    let expected = projection.clone();
+    let (fake, endpoint) = serve(move |_, _| {
         Reply::Ok(json!({
-            "state":"TASK_STATE_FAILED", "task":{"state_basis":"run_stale_timeout"},
-            "run_status":{"dispatch_id":"d-1","state":"TASK_STATE_WORKING","status_revision":9},
-            "managed_run":{"classification":"managed_custom","cancel_available":false},
-            "result":{"body":"Tests pass according to worker", "truncated":false}
+            "dispatch_id":"d-1", "state":"TASK_STATE_WORKING", "status_revision":9,
+            "read_projection":projection,
+            "result":{"body":"Tests pass according to worker", "truncated":false},
+            "receipt_result":{"exit_code":0},
+            "run_status":{"dispatch_id":"other", "state":"TASK_STATE_COMPLETED"},
+            "task":{"state_basis":"run_stale_timeout"},
+            "managed_run":{"classification":"managed_custom", "cancel_available":true}
         }))
     })
     .await;
     let report = client(&endpoint).result("d-1").await.unwrap();
     assert_eq!(report.state, RunState::Working);
+    assert_eq!(report.status.dispatch_id, "d-1");
+    assert_eq!(report.status.state, RunState::Working);
     assert_eq!(report.status.revision, Some(9));
-    assert_eq!(report.task_state, RunState::Failed);
-    assert_eq!(report.state_basis.as_deref(), Some("run_stale_timeout"));
-    assert_eq!(report.managed_run.unwrap()["cancel_available"], false);
+    assert_eq!(report.status.read_projection, Some(expected));
+    assert!(!report.status.is_terminal());
+    assert_eq!(
+        report.body.as_deref(),
+        Some("Tests pass according to worker")
+    );
+    assert_eq!(report.task_state, None);
+    assert_eq!(report.state_basis, None);
+    assert_eq!(report.managed_run, None);
+    let wire = serde_json::to_value(report).unwrap();
+    for key in ["task_state", "state_basis", "managed_run"] {
+        assert_eq!(
+            wire.get(key),
+            Some(&Value::Null),
+            "retain the legacy key {key}"
+        );
+    }
+    assert_eq!(fake.calls().len(), 1, "all facts come from one response");
 }
 
 #[tokio::test]
 async fn mismatched_dispatch_receipts_are_not_admitted() {
-    let (_, endpoint) = serve(|tool, _| if tool == TACHI_STAFF_TOOL {
-        Reply::Ok(json!({"dispatch_id":"wrong", "state":"TASK_STATE_COMPLETED"}))
-    } else {
-        Reply::Ok(json!({"state":"TASK_STATE_COMPLETED", "run_status":{"dispatch_id":"wrong", "state":"TASK_STATE_COMPLETED"}, "result":{"body":"success"}}))
-    }).await;
+    let (fake, endpoint) = serve(|_, _| {
+        Reply::Ok(json!({
+            "dispatch_id":"wrong", "state":"TASK_STATE_COMPLETED",
+            "result":{"body":"success", "truncated":false}
+        }))
+    })
+    .await;
     let client = client(&endpoint);
     assert!(matches!(
         client.status("d-1").await.unwrap_err(),
@@ -1137,6 +1297,26 @@ async fn mismatched_dispatch_receipts_are_not_admitted() {
         client.result("d-1").await.unwrap_err(),
         TachiStaffError::Protocol(_)
     ));
+    assert_eq!(
+        fake.calls().len(),
+        2,
+        "no alternate source for mismatched receipts"
+    );
+}
+
+#[tokio::test]
+async fn result_preserves_unknown_canonical_states() {
+    let (_, endpoint) = serve(|_, _| {
+        Reply::Ok(json!({
+            "dispatch_id":"d-new", "state":"TASK_STATE_FUTURE",
+            "result":{"body":null}
+        }))
+    })
+    .await;
+    let report = client(&endpoint).result("d-new").await.unwrap();
+    assert_eq!(report.state, RunState::Other("TASK_STATE_FUTURE".into()));
+    assert_eq!(report.status.state, report.state);
+    assert!(!report.status.is_terminal());
 }
 
 #[tokio::test]
@@ -1243,16 +1423,20 @@ async fn production_content_block_diagnostics_preserve_start_status_result_and_w
                     "status_revision":if terminal {5} else {4}
                 })
             }
-            (TACHI_TASK_TOOL, Some("status")) => json!({
-                "state":"TASK_STATE_COMPLETED",
-                "run_status":{"dispatch_id":"d-blocks", "state":"TASK_STATE_WORKING", "status_revision":4},
-                "result":{"body":"Worker report"}
+            (TACHI_STAFF_TOOL, Some("result")) => json!({
+                "dispatch_id":"d-blocks", "state":"TASK_STATE_WORKING", "status_revision":4,
+                "read_projection":{"execution_state":"orphaned", "outcome_state":"unknown"},
+                "result":{"body":"Worker report ghp_fixtureOnly123", "truncated":false}
             }),
             _ => panic!("unexpected call {tool} {args}"),
         };
         Reply::ToolResult(json!({"content":[
             {"type":"text", "text":payload.to_string()},
-            {"type":"text", "text":"Soft stuck warning: repeated call"}
+            {"type":"text", "text":"Soft stuck warning: repeated call"},
+            {"type":"text", "text":json!({
+                "dispatch_id":"wrong", "state":"TASK_STATE_COMPLETED", "status_revision":99,
+                "result":{"body":"untrusted replacement", "truncated":false}
+            }).to_string()}
         ], "isError":false}))
     })
     .await;
@@ -1284,8 +1468,15 @@ async fn production_content_block_diagnostics_preserve_start_status_result_and_w
     assert!(result.success, "{:?}", result.error);
     let report = result.output.data().unwrap();
     assert_eq!(report["result"]["state"], "TASK_STATE_WORKING");
-    assert_eq!(report["result"]["task_state"], "TASK_STATE_COMPLETED");
-    assert_eq!(report["result"]["body"], "Worker report");
+    assert_eq!(report["result"]["status"]["status_revision"], 4);
+    assert_eq!(
+        report["result"]["status"]["read_projection"]["execution_state"],
+        "orphaned"
+    );
+    assert_eq!(report["result"]["body"], "Worker report [REDACTED]");
+    for key in ["task_state", "state_basis", "managed_run"] {
+        assert_eq!(report["result"].get(key), Some(&Value::Null));
+    }
     assert_eq!(report["accepted_by_body"], false);
     assert_eq!(report["trust"], "untrusted_external_report");
     let watch = invoke(
@@ -1307,7 +1498,47 @@ async fn production_content_block_diagnostics_preserve_start_status_result_and_w
             .count(),
         1
     );
-    assert!(calls.iter().all(|(_, args)| args["format"] == "json"));
+    assert!(
+        calls
+            .iter()
+            .all(|(tool, args)| tool == TACHI_STAFF_TOOL && args["format"] == "json")
+    );
+}
+
+#[tokio::test]
+async fn production_result_refusal_from_an_older_peer_has_no_task_fallback() {
+    let (fake, endpoint) = serve(|tool, args| match (tool, args["action"].as_str()) {
+        (TACHI_STAFF_TOOL, Some("start")) => Reply::Ok(working_receipt("d-old-peer")),
+        (TACHI_STAFF_TOOL, Some("result")) => {
+            Reply::ToolError("tachi_staff: unsupported action 'result'".into())
+        }
+        _ => panic!("old-peer refusal must not fall back: {tool} {args}"),
+    })
+    .await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
+    let started = invoke(&tools, "tachi_start", start_args("old-peer")).await;
+    assert!(started.success);
+    let result = invoke(&tools, "tachi_result", json!({"request_id":"old-peer"})).await;
+    assert!(!result.success);
+    assert_eq!(result.output.data().unwrap()["code"], "refused");
+    let calls = fake.calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "one start and one refused result, no fallback"
+    );
+    assert_eq!(calls[0].0, TACHI_STAFF_TOOL);
+    assert_eq!(calls[0].1["action"], "start");
+    assert_eq!(
+        calls[1],
+        (
+            TACHI_STAFF_TOOL.into(),
+            json!({"action":"result", "format":"json", "dispatch_id":"d-old-peer"})
+        )
+    );
+    assert!(calls.iter().all(|(tool, _)| tool != TACHI_TASK_TOOL));
 }
 
 #[tokio::test]
@@ -1370,7 +1601,7 @@ async fn production_registry_starts_once_and_reads_controls_through_same_request
             assert_eq!(args["expected_status_revision"], 4);
             Reply::Ok(json!({"receipt":"cancellation_requested", "state":"TASK_STATE_WORKING"}))
         }
-        (TACHI_TASK_TOOL, _) => Reply::Ok(json!({"state":"TASK_STATE_COMPLETED", "run_status":{"dispatch_id":"d-prod","state":"TASK_STATE_COMPLETED","status_revision":4}, "result":{"body":"Worker report"}})),
+        (TACHI_STAFF_TOOL, Some("result")) => Reply::Ok(json!({"dispatch_id":"d-prod", "state":"TASK_STATE_COMPLETED", "status_revision":4, "result":{"body":"Worker report", "truncated":false}})),
         _ => panic!("unexpected call {tool} {args}")
     }).await;
     let temp = tempfile::TempDir::new().unwrap();

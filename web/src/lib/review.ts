@@ -54,6 +54,40 @@ export interface SoulDrift {
     story_retired: number;
     approved_proposals_since_anchor: number;
 }
+export interface CandidateCursor {
+    created_at_unix: number;
+    id: string;
+}
+export interface CandidatePage {
+    candidates: Candidate[];
+    next_cursor: CandidateCursor | null;
+}
+export const CANDIDATE_PAGE_LIMIT = 50;
+export function candidatePagePath(cursor: CandidateCursor | null = null): string {
+    return `/api/user-model/candidates?limit=${CANDIDATE_PAGE_LIMIT}${cursor ? `&before_created_at=${cursor.created_at_unix}&before_id=${encodeURIComponent(cursor.id)}` : ''}`;
+}
+export function appendCandidatePage(current: CandidatePage, page: CandidatePage): CandidatePage {
+    const seen = new Set(current.candidates.map(candidate => candidate.id));
+    return { ...page, candidates: [...current.candidates, ...page.candidates.filter(candidate => {
+        if (seen.has(candidate.id)) return false;
+        seen.add(candidate.id);
+        return true;
+    })] };
+}
+export async function loadCandidatePage(cursor: CandidateCursor | null, signal: AbortSignal): Promise<CandidatePage> {
+    const page = await reviewFetch<CandidatePage>(candidatePagePath(cursor), signal);
+    // Old gateways ignore unknown query fields and return unbounded history.
+    // Require the opted-in contract rather than rendering that legacy response.
+    if (!page || !Object.prototype.hasOwnProperty.call(page, 'next_cursor')) throw new ReviewError(409, 'pagination_unavailable');
+    if (!Array.isArray(page.candidates) || page.candidates.length > CANDIDATE_PAGE_LIMIT) throw new Error('Invalid candidate page');
+    const next = page.next_cursor;
+    if (next !== null) {
+        const last = page.candidates[page.candidates.length - 1];
+        if (!next || !Number.isSafeInteger(next.created_at_unix) || next.created_at_unix < 0 || typeof next.id !== 'string' || !next.id || !last || next.id !== last.id || next.created_at_unix !== last.created_at_unix
+            || (cursor && (next.created_at_unix > cursor.created_at_unix || (next.created_at_unix === cursor.created_at_unix && next.id >= cursor.id)))) throw new Error('Invalid candidate cursor');
+    }
+    return page;
+}
 export interface Receipt {
     period_from_unix: number;
     ran_at_unix: number;

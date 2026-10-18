@@ -571,7 +571,23 @@ pub async fn reflect(
     now_unix: u64,
 ) -> anyhow::Result<SoulReflectionReceipt> {
     // The receipt carries the drift as it stood when this reflection ran.
-    let drift = current_drift(store, agent_alias, &configured_tone, now_unix)?;
+    // Drift is advisory: when it cannot be computed (for example one corrupt
+    // revision body), the reflection continues without it instead of
+    // failing the whole run.
+    let drift =
+        current_drift(store, agent_alias, &configured_tone, now_unix).unwrap_or_else(|error| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(serde_json::json!({
+                        "agent": agent_alias,
+                        "error": error.to_string()
+                    })),
+                "Soul drift computation failed; reflection continues without drift"
+            );
+            None
+        });
     let receipt = |outcome: String, proposals_created: u64, user_model_candidates_created: u64| {
         SoulReflectionReceipt {
             period_from_unix: since_unix,
@@ -1473,6 +1489,42 @@ mod tests {
         .unwrap();
         assert_eq!(receipt.outcome, OUTCOME_NOTHING_TO_REFLECT_ON);
         assert_eq!(store.last_reflection(AGENT).unwrap(), Some(receipt));
+    }
+
+    #[tokio::test]
+    async fn a_drift_computation_failure_downgrades_to_none_instead_of_aborting() {
+        let (_dir, store) = store();
+        // A corrupt non-head Story body breaks drift computation but not the
+        // heads the reflection itself reads: drift reads every revision, the
+        // reflection only the current head.
+        store.insert_corrupt_revision_for_test(AGENT, "growth", 1, 1);
+        store
+            .set_story(
+                AGENT,
+                crate::companion::SoulStory {
+                    entries: vec![crate::companion::StoryEntry {
+                        kind: crate::companion::StoryKind::Bond,
+                        text: "We share a shorthand for reviews.".into(),
+                    }],
+                },
+                1,
+                NOW,
+            )
+            .unwrap();
+        let receipt = reflect(
+            &store,
+            AGENT,
+            &UserModelStore::open(_dir.path()).unwrap(),
+            || Some(PersonaKnobs::default()),
+            &OwnerMessages::default(),
+            never_called,
+            NOW - REFLECTION_PERIOD_SECS,
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt.outcome, OUTCOME_NOTHING_TO_REFLECT_ON);
+        assert!(receipt.drift.is_none());
     }
 
     #[tokio::test]

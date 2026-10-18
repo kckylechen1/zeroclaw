@@ -1083,3 +1083,13 @@ soul-check-disagree-title = Targets two or more levels apart
 soul-check-summary = Summary: { $targets } targets, { $scenarios } scenarios, { $calls } model calls; { $off_by_two } off by two, { $floor_failed } floors failed, { $disagree } providers disagree, { $errors } errors.
 soul-check-caveat = The judge is a model: treat these results as a signal, not proof. Nothing is stored.
 cli-doctor-soul-check-hint = Agent { $alias } has a Soul. After changing its provider or model, run `zeroclaw soul check --agent { $alias }` to confirm it still behaves like itself.
+
+# Scoped chat turn cancellation. Requested is not a completed cancellation.
+gateway-cancel-requested = Stop requested for that turn; it has not yet confirmed cancellation.
+gateway-cancel-stale = That turn has ended. The newer turn was not stopped.
+gateway-cancel-no-active = That turn is no longer running.
+gateway-cancel-unauthorized = Current device or scoped bridge authority is required to stop this turn.
+gateway-cancel-invalid = This stop request has no supported version or valid turn target.
+gateway-cancel-idle = No running turn was observed; no stop was sent.
+gateway-cancel-unknown = The stop outcome is unknown. It will not be sent again automatically.
+gateway-cancel-not-sent = The stop was not sent. Reconnect or wait for pending stop outcomes before trying again.

@@ -1329,7 +1329,7 @@ fn check_bootstrap_truncation(config: &Config, items: &mut Vec<DiagItem>) {
 }
 
 /// Personality file cap visibility: workspace personality files
-/// loaded via [`crate::agent::personality::load_personality`] are capped at
+/// loaded via [`crate::agent::personality::load_personality_files`] are capped at
 /// [`crate::agent::personality::MAX_FILE_CHARS`] Unicode characters. Check
 /// all well-known personality files regardless of compact context mode and
 /// report any file that exceeds the cap after trimming.
