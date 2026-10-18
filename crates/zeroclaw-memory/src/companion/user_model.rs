@@ -581,6 +581,63 @@ impl UserModelStore {
         Ok(candidates)
     }
 
+    /// An opt-in history page, newest first. Only the limited ID selection
+    /// participates in the metadata sort; evidence is read for at most
+    /// `limit + 1` candidates. No history, authority or receipt is changed.
+    pub fn list_candidates_page(
+        &self,
+        pending: bool,
+        limit: usize,
+        before: Option<(u64, &str)>,
+    ) -> Result<(Vec<UserModelCandidate>, bool), rusqlite::Error> {
+        if !(1..=200).contains(&limit) {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "limit must be 1..200".into(),
+            ));
+        }
+        let before_time = before
+            .map(|(at, _)| i64::try_from(at).map_err(|_| rusqlite::Error::InvalidQuery))
+            .transpose()?;
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.kind, c.statement, c.semantic_key, c.scope, c.evidence, c.created_at_unix
+             FROM user_model_candidates c
+             WHERE c.id IN (
+                 SELECT p.id FROM user_model_candidates p
+                 WHERE (?1 = 0 OR NOT EXISTS (
+                     SELECT 1 FROM user_model_review_receipts r WHERE r.candidate_id = p.id
+                 )) AND (?2 IS NULL OR p.created_at_unix < ?2
+                     OR (p.created_at_unix = ?2 AND p.id < ?3))
+                 ORDER BY p.created_at_unix DESC, p.id DESC LIMIT ?4
+             )
+             ORDER BY c.created_at_unix DESC, c.id DESC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                pending,
+                before_time,
+                before.map(|(_, id)| id),
+                (limit + 1) as i64
+            ],
+            |row| {
+                let kind_raw: String = row.get(1)?;
+                Ok(UserModelCandidate {
+                    id: row.get(0)?,
+                    kind: kind_from_str(&kind_raw).ok_or(rusqlite::Error::InvalidQuery)?,
+                    statement: row.get(2)?,
+                    semantic_key: row.get(3)?,
+                    scope: row.get(4)?,
+                    evidence: row.get(5)?,
+                    created_at_unix: row.get::<_, i64>(6)?.max(0) as u64,
+                })
+            },
+        )?;
+        let mut candidates = rows.collect::<Result<Vec<_>, _>>()?;
+        let has_more = candidates.len() > limit;
+        candidates.truncate(limit);
+        Ok((candidates, has_more))
+    }
+
     /// One candidate and its committed review receipts in insertion order.
     /// The read transaction keeps the candidate and receipts on one
     /// committed snapshot, including after a store reopen.
@@ -2127,6 +2184,122 @@ mod tests {
         assert_eq!(after[1].len(), 1);
         assert_eq!(after[2].len(), 2);
     }
+    #[test]
+    fn candidate_pages_keep_ties_and_newer_inserts_out_of_older_pages() {
+        let (_dir, store) = store();
+        assert_eq!(
+            store.list_candidates_page(false, 2, None).unwrap(),
+            (vec![], false)
+        );
+        for (index, at) in [100, 100, 100, 99, 0].into_iter().enumerate() {
+            store
+                .record_observation(
+                    UserModelKind::Habit,
+                    &format!("Candidate {index}"),
+                    &format!("key.{index}"),
+                    &format!("evidence {index}"),
+                    at,
+                )
+                .unwrap();
+        }
+        let expected = store.list_candidates().unwrap();
+        let (first, more) = store.list_candidates_page(false, 2, None).unwrap();
+        assert_eq!(first, expected[..2]);
+        assert!(more);
+        store
+            .record_observation(UserModelKind::Habit, "Newer", "newer", "new evidence", 101)
+            .unwrap();
+        let before = review_scope_snapshot(&store);
+        let last = first.last().unwrap();
+        let (second, more) = store
+            .list_candidates_page(false, 2, Some((last.created_at_unix, &last.id)))
+            .unwrap();
+        assert_eq!(second, expected[2..4]);
+        assert!(more);
+        let last = second.last().unwrap();
+        let (end, more) = store
+            .list_candidates_page(false, 2, Some((last.created_at_unix, &last.id)))
+            .unwrap();
+        assert_eq!(end, expected[4..]);
+        assert!(!more);
+        let last = end.last().unwrap();
+        assert_eq!(
+            store
+                .list_candidates_page(false, 2, Some((last.created_at_unix, &last.id)))
+                .unwrap(),
+            (vec![], false)
+        );
+        assert_eq!(review_scope_snapshot(&store), before);
+        for limit in [0, 201, usize::MAX] {
+            assert!(store.list_candidates_page(false, limit, None).is_err());
+        }
+        assert!(
+            store
+                .list_candidates_page(false, 2, Some((u64::MAX, "x")))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn candidate_pages_filter_committed_reviews_and_only_read_limited_evidence() {
+        let (_dir, store) = store();
+        for at in 1..=4 {
+            store
+                .record_observation(
+                    UserModelKind::Habit,
+                    &format!("Candidate {at}"),
+                    &format!("key.{at}"),
+                    "private evidence",
+                    at,
+                )
+                .unwrap();
+        }
+        let expected = store.list_candidates().unwrap();
+        store
+            .review_candidate(
+                &expected[0].id,
+                ReviewAction::Reject,
+                "owner",
+                None,
+                None,
+                10,
+            )
+            .unwrap();
+        let before = review_scope_snapshot(&store);
+        let (pending, more) = store.list_candidates_page(true, 2, None).unwrap();
+        assert_eq!(pending, expected[1..3]);
+        assert!(more);
+        let last = pending.last().unwrap();
+        assert_eq!(
+            store
+                .list_candidates_page(true, 2, Some((last.created_at_unix, &last.id)))
+                .unwrap(),
+            (expected[3..].to_vec(), false)
+        );
+        assert_eq!(review_scope_snapshot(&store), before);
+        // The oldest row is outside the first page and its one-row lookahead.
+        // A full evidence read would fail on its deliberately invalid SQL type.
+        store
+            .conn
+            .lock()
+            .execute(
+                "UPDATE user_model_candidates SET evidence = X'00' WHERE id = ?1",
+                [&expected[3].id],
+            )
+            .unwrap();
+        assert!(store.list_candidates().is_err());
+        assert_eq!(
+            store.list_candidates_page(false, 2, None).unwrap(),
+            (expected[..2].to_vec(), true)
+        );
+        let last = &expected[1];
+        assert!(
+            store
+                .list_candidates_page(false, 2, Some((last.created_at_unix, &last.id)))
+                .is_err()
+        );
+    }
+
     #[test]
     fn pending_candidates_derive_only_from_committed_receipts() {
         let (_dir, store) = store();

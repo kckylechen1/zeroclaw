@@ -27,6 +27,16 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     let delayHistory = false;
     let unknownReads = 0;
     let reviewState = 'rejected';
+    let candidatePaging = false;
+    let candidatePageStatus = 200;
+    let candidatePageLegacy = false;
+    let candidatePageEmpty = false;
+    let delayCandidatePage = false;
+    let candidatePageRelease;
+    let delayCandidateDetail = false;
+    let candidateDetailRelease;
+    let candidateDetailStarted;
+    const candidatePageReads = [];
     const actions = [];
     const proposal = { id: 'soul:nova:7', kind: 'soul_proposal', agent: 'nova', item: { id: 7, layer: 'growth', proposal: 'Retire the old shared shorthand', rationale: 'Synthetic stale-target fixture', retire_index: 0, retire_target: { kind: 'bond', text: 'Actual canonical shared shorthand' }, target_revision: 17, created_at_unix: now } };
     const user = { id: 'user_model:8', kind: 'user_model_candidate', item: { id: '8', kind: 'preference', statement: 'Shorter planning replies', scope: 'global', evidence: 'Synthetic owner evidence', semantic_key: 'style', created_at_unix: now } };
@@ -106,10 +116,29 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
         }
         if (url.pathname === '/api/user-model/heads')
             return headsUnavailable ? send({ code: 'heads_unavailable' }, headsFailureStatus) : send({ heads: [currentHead], ...(supportsExpectedHead ? { supports_expected_head: true } : {}) });
-        if (url.pathname === '/api/user-model/candidates')
-            return send({ candidates: [rejected] });
-        if (url.pathname === '/api/user-model/candidates/42')
+        if (url.pathname === '/api/user-model/candidates') {
+            candidatePageReads.push(url.search);
+            assert.equal(url.searchParams.get('limit'), '50');
+            if (delayCandidatePage) {
+                delayCandidatePage = false;
+                await new Promise(resolve => { candidatePageRelease = resolve; });
+            }
+            if (candidatePageStatus !== 200) return send({ error: 'Synthetic page failure' }, candidatePageStatus);
+            if (candidatePageLegacy) return send({ candidates: [rejected] });
+            if (candidatePageEmpty) return send({ candidates: [], next_cursor: null });
+            const older = { ...rejected, id: 'older', statement: 'Older synthetic candidate', created_at_unix: now - 1 };
+            return send(candidatePaging ? url.searchParams.has('before_id')
+                ? { candidates: [rejected, older], next_cursor: null }
+                : { candidates: [rejected], next_cursor: { created_at_unix: now, id: rejected.id } }
+                : { candidates: [rejected], next_cursor: null });
+        }
+        if (url.pathname === '/api/user-model/candidates/42') {
+            if (delayCandidateDetail) {
+                delayCandidateDetail = false;
+                await new Promise(resolve => { candidateDetailRelease = resolve; candidateDetailStarted(); });
+            }
             return send({ candidate: rejected, review_state: reviewState, review_receipts: [{ id: 'r1', action: 'reject', at_unix: now }] });
+        }
         return send({});
     });
     const page = await context.newPage();
@@ -228,6 +257,86 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.equal(await page.getByRole('button', { name: 'Limit scope' }).count(), 0);
     await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-history-narrowed-375.png') });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    // History uses explicit bounded pages and retains its cursor after failures.
+    candidatePaging = true;
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await page.getByRole('button', { name: 'Load older candidates', exact: true }).waitFor();
+    for (const status of [429, 503]) {
+        candidatePageStatus = status;
+        await page.getByRole('button', { name: 'Load older candidates', exact: true }).click();
+        await page.getByRole('alert').waitFor();
+        assert.equal(await page.getByText(rejected.statement, { exact: true }).count(), 1);
+        assert.equal(await page.getByRole('button', { name: 'Load older candidates', exact: true }).isEnabled(), true);
+        assert.equal(new URLSearchParams(candidatePageReads.at(-1)).get('before_id'), rejected.id);
+    }
+    candidatePageStatus = 200;
+    delayCandidatePage = true;
+    const previousPageReads = candidatePageReads.length;
+    await page.getByRole('button', { name: 'Load older candidates', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: 'Loading canonical records' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Load older candidates', exact: true }).isEnabled(), false);
+    assert.equal(candidatePageReads.length, previousPageReads + 1);
+    candidatePageRelease();
+    await page.getByText('Older synthetic candidate', { exact: true }).waitFor();
+    assert.equal(await page.getByText(rejected.statement, { exact: true }).count(), 1);
+    assert.equal(await page.getByRole('button', { name: 'Load older candidates', exact: true }).count(), 0);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-history-paged-375.png') });
+    // A refresh aborts a pending page and a late response cannot restore it.
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await page.getByRole('button', { name: 'Load older candidates', exact: true }).waitFor();
+    delayCandidatePage = true;
+    await page.getByRole('button', { name: 'Load older candidates', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: 'Loading canonical records' }).waitFor();
+    const stalePageRelease = candidatePageRelease;
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await page.getByRole('heading', { name: currentHead.statement, exact: true }).waitFor();
+    stalePageRelease();
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await page.getByRole('button', { name: 'Load older candidates', exact: true }).waitFor();
+    assert.equal(await page.getByText('Older synthetic candidate', { exact: true }).count(), 0);
+    // Changing Agent also resets the shared-history view and cancels the read.
+    delayCandidatePage = true;
+    await page.getByRole('button', { name: 'Load older candidates', exact: true }).click();
+    await page.getByRole('status').filter({ hasText: 'Loading canonical records' }).waitFor();
+    const staleAgentRelease = candidatePageRelease;
+    await page.getByRole('combobox', { name: 'Agent', exact: true }).selectOption('atlas');
+    await page.waitForURL('**/review?agent=atlas');
+    await page.getByRole('heading', { name: currentHead.statement, exact: true }).waitFor();
+    staleAgentRelease();
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await page.getByRole('button', { name: 'Load older candidates', exact: true }).waitFor();
+    assert.equal(await page.getByText('Older synthetic candidate', { exact: true }).count(), 0);
+    await page.getByRole('combobox', { name: 'Agent', exact: true }).selectOption('nova');
+    await page.waitForURL('**/review?agent=nova');
+    await page.getByRole('heading', { name: currentHead.statement, exact: true }).waitFor();
+    candidatePageLegacy = true;
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await page.getByText('This gateway does not support candidate history pages yet.', { exact: false }).waitFor();
+    assert.equal(await page.getByText(rejected.statement, { exact: true }).count(), 0);
+    candidatePageLegacy = false;
+    candidatePageEmpty = true;
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await page.getByText('No candidate history yet.', { exact: true }).waitFor();
+    candidatePageEmpty = false;
+    candidatePaging = false;
+    // Reloading page one invalidates detail reads started from the old list.
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await page.getByRole('button', { name: 'History and sources', exact: true }).waitFor();
+    delayCandidateDetail = true;
+    const detailStarted = new Promise(resolve => { candidateDetailStarted = resolve; });
+    await page.getByRole('button', { name: 'History and sources', exact: true }).click();
+    await detailStarted;
+    const freshListResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/user-model/candidates');
+    await page.getByRole('button', { name: 'All candidate review history' }).click();
+    await freshListResponse;
+    await page.getByRole('status').filter({ hasText: 'Loading canonical records' }).waitFor({ state: 'detached' });
+    const oldDetailResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/user-model/candidates/42');
+    candidateDetailRelease();
+    await oldDetailResponse;
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.getByRole('heading', { name: 'History and sources', exact: true }).count(), 0, 'a detail response from the old list must not restore stale evidence');
+    assert.equal(await page.getByText(rejected.evidence, { exact: true }).count(), 0);
     // A server without the capability must never receive guarded approvals.
     supportsExpectedHead = false;
     await page.getByRole('button', { name: 'Inbox', exact: true }).click();
@@ -297,7 +406,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.equal(await page.getByRole('heading', { name: addition.item.proposal, exact: true }).count(), 0);
     assert.equal(await userCard.count(), 0);
     assert.deepEqual(failures, []);
-    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, voice_validation_refresh: true, heads_failure_preserves_inbox: true, heads_auth_failure_clears_data: true, actions }));
+    console.log(JSON.stringify({ result: 'PASS', page_reload_invalidates_detail: true, bounded_candidate_pages: true, page_error_retry: true, page_dedup_and_end: true, page_refresh_and_agent_reset: true, page_legacy_upgrade: true, pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_growth_target: true, growth_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_voice_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, voice_validation_refresh: true, heads_failure_preserves_inbox: true, heads_auth_failure_clears_data: true, actions }));
     await browser.close();
     server.close();
 })().catch(async e => { console.error(e); server.close(); if (browser) await browser.close(); process.exitCode = 1; });
