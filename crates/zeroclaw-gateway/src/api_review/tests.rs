@@ -165,6 +165,14 @@ async fn actual_http_reflection_inbox_review_reword_narrow_dismiss_and_reopen() 
         .find(|i| i["kind"] == "reflection_receipt")
         .unwrap();
     assert_eq!(receipt["item"]["user_model_candidates_created"], 1);
+    // ADR-018 §4.3: the receipt carries the drift against the (default) anchor.
+    assert_eq!(receipt["item"]["drift"]["anchor"]["source"], "default");
+    assert_eq!(receipt["item"]["drift"]["anchor"]["set_at_unix"], 100);
+    assert_eq!(
+        receipt["item"]["drift"]["dials"].as_array().unwrap().len(),
+        5
+    );
+    assert_eq!(receipt["item"]["drift"]["story_added"], 0);
     assert_eq!(user_item["item"]["evidence"], candidate.evidence);
     assert_eq!(request(address,"POST",proposal["review_url"].as_str().unwrap(),OPERATOR,Some(serde_json::json!({"agent":"nova","resolution":"accepted","final_text":"Owner chosen shorthand"}))).await.0,StatusCode::OK);
     let review_path = user_item["review_url"].as_str().unwrap();

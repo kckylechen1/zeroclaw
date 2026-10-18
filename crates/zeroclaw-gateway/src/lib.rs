@@ -1559,6 +1559,12 @@ pub async fn run_gateway(
         .route("/api/soul/identity", put(api_soul::put_identity))
         .route("/api/soul/principles", put(api_soul::put_principles))
         .route("/api/soul/rollback", post(api_soul::post_rollback))
+        .route("/api/soul/drift", get(api_soul::get_drift))
+        .route("/api/soul/anchor", post(api_soul::post_anchor))
+        .route(
+            "/api/soul/anchor/rollback",
+            post(api_soul::post_anchor_rollback),
+        )
         .route("/api/soul/story", put(api_soul::put_story))
         .route("/api/soul/tone", put(api_soul::put_tone))
         .route("/api/soul/proposals", get(api_soul::get_proposals))

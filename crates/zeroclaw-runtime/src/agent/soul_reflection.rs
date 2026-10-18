@@ -45,6 +45,19 @@ fn reflection_provider(config: &Config, agent_alias: &str) -> anyhow::Result<Ref
     Ok((provider, model.to_string()))
 }
 
+/// The agent's configured Tone dials, the base every stored head layers over.
+fn configured_tone(
+    config: &Config,
+    agent_alias: &str,
+) -> Option<zeroclaw_config::persona::PersonaKnobs> {
+    Some(
+        config
+            .persona_for_agent(agent_alias)
+            .copied()
+            .unwrap_or_default(),
+    )
+}
+
 /// One cadence check for one agent: start the clock, skip, or reflect.
 async fn tick_agent(
     config: &Config,
@@ -56,6 +69,29 @@ async fn tick_agent(
     let since_unix = match reflection_due(store.last_reflection(agent_alias)?.as_ref(), now_unix) {
         ReflectionDue::NotYet => return Ok(()),
         ReflectionDue::StartClock => {
+            // Drift is advisory: a failure to compute it (for example one
+            // corrupt revision body) starts the clock without drift instead
+            // of blocking the cadence until the store is repaired.
+            let drift = current_drift(
+                store,
+                agent_alias,
+                &|| configured_tone(config, agent_alias),
+                now_unix,
+            )
+            .unwrap_or_else(|error| {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_category(::zeroclaw_log::EventCategory::Agent)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "agent": agent_alias,
+                            "error": error.to_string()
+                        })),
+                    "Soul drift computation failed; clock starts without drift"
+                );
+                None
+            });
             store.record_reflection(
                 agent_alias,
                 &SoulReflectionReceipt {
@@ -65,6 +101,7 @@ async fn tick_agent(
                     user_model_candidates_created: 0,
                     outcome: OUTCOME_CLOCK_STARTED.to_string(),
                     ran_at_unix: now_unix,
+                    drift,
                 },
             )?;
             return Ok(());
@@ -84,14 +121,7 @@ async fn tick_agent(
         store,
         agent_alias,
         &user_model,
-        || {
-            Some(
-                config
-                    .persona_for_agent(agent_alias)
-                    .copied()
-                    .unwrap_or_default(),
-            )
-        },
+        || configured_tone(config, agent_alias),
         &messages,
         || reflection_provider(config, agent_alias),
         since_unix,

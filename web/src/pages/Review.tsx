@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { Button, ConfirmDialog } from '@/components/ui';
 import { useAuth } from '@/hooks/useAuth';
 import { t } from '@/lib/i18n';
-import { reflectionOutcome, validationMessage, displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, loadCandidatePage, appendCandidatePage, ReviewError, type CandidatePage, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
+import { reflectionOutcome, validationMessage, displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, loadCandidatePage, appendCandidatePage, anchorRequest, driftIsEmpty, readDrift, signedSteps, ReviewError, type CandidatePage, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul, type SoulDrift } from '@/lib/review';
 const field = 'w-full min-h-11 rounded-md border border-pc-border bg-pc-base p-3 text-pc-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]';
 const date = (value: number) => new Date(value * 1000).toLocaleString();
 const layers: Layer[] = ['identity', 'principles', 'tone', 'story'];
@@ -31,6 +31,40 @@ function ToneSource({ source }: { source?: NonNullable<Soul['tone']['sources']>[
         {source.kind === 'stored' && ` · ${t('review.revision')} ${source.revision}`}
         {source.kind === 'persona' && ` · ${source.persona}${source.card ? ` (${source.card})` : ''}`}
     </span>;
+}
+// ADR-018 §4.3: how far Tone and Story sit from the owner's anchor. Keep moves
+// the anchor to what the owner is looking at; roll back appends revisions equal
+// to the anchor. Both are the owner's call and neither happens automatically.
+function DriftCard({ drift, busy, onKeep, onRollback }: {
+    drift: SoulDrift;
+    busy: boolean;
+    onKeep: () => void;
+    onRollback: () => void;
+}) {
+    const empty = driftIsEmpty(drift);
+    return <section aria-labelledby="review-drift" className="rounded-md border border-pc-border bg-pc-surface p-4 space-y-4">
+    <div>
+    <h2 id="review-drift" className="text-lg font-medium">{t('review.drift')}</h2>
+    <p className="text-sm text-pc-text-secondary mt-1">{t('review.drift_hint')}</p>
+    </div>
+    <p className="text-sm">{t('review.anchor')} · {t(`review.anchor_${drift.anchor.source}`)} · {date(drift.anchor.set_at_unix)}</p>
+    <dl className="space-y-3">{drift.dials.map(dial => <div key={dial.key} className="flex flex-wrap items-baseline gap-x-3">
+        <dt className="basis-full text-sm text-pc-text-secondary">{t(`review.${dial.key}`)}</dt>
+        <dd className="font-medium">{t(`review.${dial.anchor_level}`)} → {t(`review.${dial.current_level}`)}</dd>
+        <dd className="text-sm text-pc-text-muted" aria-label={`${t('review.steps')}: ${signedSteps(dial.steps)}`}>{signedSteps(dial.steps)}</dd>
+        </div>)}</dl>
+    <div className="space-y-1 text-sm">
+    <h3 className="font-medium">{t('review.since_anchor')}</h3>
+    <p>{t('review.story_added')}: {drift.story_added}</p>
+    <p>{t('review.story_retired')}: {drift.story_retired}</p>
+    <p>{t('review.approved_since_anchor')}: {drift.approved_proposals_since_anchor}</p>
+    </div>
+    {empty && <p className="text-sm text-pc-text-secondary">{t('review.drift_none')}</p>}
+    <div className="flex flex-wrap gap-2">
+    <Button disabled={busy} onClick={onKeep}>{t('review.keep_anchor')}</Button>
+    <Button variant="ghost" disabled={busy || empty} onClick={onRollback}>{t('review.rollback_anchor')}</Button>
+    </div>
+    </section>;
 }
 function ProposalCard({ item, act, busy, heads, headsAvailable, canApproveUserModel, stale = false, rejectedOnly = false }: {
     item: InboxItem;
@@ -145,6 +179,8 @@ export default function Review() {
         revision: number;
         expected: number;
     } | null>(null);
+    const [driftRead, setDriftRead] = useState<{ agent: string; soul: Soul; drift: SoulDrift } | null>(null);
+    const [anchorRollback, setAnchorRollback] = useState(false);
     const generation = useRef(0);
     const inAction = useRef(false);
     const readSequence = useRef(0);
@@ -166,6 +202,7 @@ export default function Review() {
             setHistory(null);
             setCandidate(null);
             resetCandidateHistory();
+            setDriftRead(null);
         }
         setError(t(err instanceof ReviewError && err.code === 'pagination_unavailable' ? 'review.upgrade_history' : err instanceof ReviewError && err.status === 400 && err.code === 'invalid' ? validationMessage(err) : err instanceof ReviewError && err.status === 429 && err.code === 'tone_dial_cooldown' ? 'review.dial_cooldown' : err instanceof ReviewError ? `review.error_${[401, 403, 409, 429, 503].includes(err.status) ? err.status : 'other'}` : 'review.error_other'));
     };
@@ -234,6 +271,27 @@ export default function Review() {
             setLoading(false); });
         return () => { controller.abort(); candidateRequest.current?.abort(); generation.current++; };
     }, [agent, token, tab, version, setParams]);
+    // The drift card has its own read, so an old gateway or a failing drift
+    // route never blocks the inbox or the profile. The Soul is read first: its
+    // revisions are what keep and roll back check, so a write landing between
+    // the two reads makes the action stale (409) rather than wrong.
+    useEffect(() => {
+        if (needsPair || !token || !agent || (tab !== 'inbox' && tab !== 'profile')) return;
+        const controller = new AbortController();
+        void (async () => {
+            try {
+                const current = await reviewFetch<Soul>(`/api/soul?agent=${encodeURIComponent(agent)}`, controller.signal);
+                const drift = readDrift(await reviewFetch<unknown>(`/api/soul/drift?agent=${encodeURIComponent(agent)}`, controller.signal));
+                if (!controller.signal.aborted) setDriftRead(drift ? { agent, soul: current, drift } : null);
+            }
+            catch (err) {
+                if (controller.signal.aborted) return;
+                setDriftRead(null);
+                if (err instanceof ReviewError && (err.status === 401 || err.status === 403)) report(err);
+            }
+        })();
+        return () => controller.abort();
+    }, [agent, token, tab, version, needsPair]);
     const perform = async (work: () => Promise<unknown>, recordDecision = true, onFailure?: (error: unknown) => void) => {
         if (inAction.current)
             return;
@@ -343,6 +401,7 @@ export default function Review() {
         </div>
       <nav aria-label={t('review.sections')} className="flex flex-wrap gap-2">{(['inbox', 'profile', 'user_model'] as const).map(section => <Button key={section} variant={tab === section ? 'primary' : 'ghost'} disabled={busy} aria-pressed={tab === section} onClick={() => setTab(section)}>{t(`review.${section}`)}</Button>)}</nav>
       {loading && <p role="status">{t('review.loading')}</p>}
+      {(tab === 'inbox' || tab === 'profile') && driftRead?.agent === agent && <DriftCard drift={driftRead.drift} busy={busy} onKeep={() => { const request = anchorRequest(driftRead.soul, 'keep'); void perform(() => reviewFetch(request.path, undefined, request.body)); }} onRollback={() => setAnchorRollback(true)}/>}
       {tab === 'inbox' && inbox && <section>
             <p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{inbox.items.length === 0 && <p className="py-10 text-pc-text-secondary">{t('review.empty')}</p>}{inbox.items.map(item => <ProposalCard key={item.id} item={item} heads={heads} headsAvailable={headRead !== null} canApproveUserModel={canApproveUserModel} busy={busy} act={act} stale={staleProposals.has(item.id)}/>)}{inbox.next_offset !== null && <Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/review/inbox?limit=100&offset=${inbox.next_offset}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, value => setInbox(value as Inbox))}>{t('review.next')}</Button>}</section>}
       {tab === 'profile' && soul && <section className="space-y-8">{layers.map(layer => {
@@ -378,6 +437,8 @@ export default function Review() {
                 {candidate.review_state === 'rejected' && <ProposalCard key={candidate.candidate.id} item={{ id: `user_model:${candidate.candidate.id}`, kind: 'user_model_candidate', item: candidate.candidate }} heads={heads} headsAvailable={headRead !== null} canApproveUserModel={canApproveUserModel} busy={busy} act={act} rejectedOnly/>}
                 <Value value={candidate.candidate.evidence}/>{candidate.review_receipts.map(receipt => <p key={receipt.id}>{t(`review.action_${receipt.action}`)} · {date(receipt.at_unix)} {receipt.note}</p>)}</article>}</section>}
     </>}
+    <ConfirmDialog open={anchorRollback} title={t('review.rollback_anchor')} message={t('review.rollback_anchor_hint')} confirmLabel={t('review.rollback_anchor')} onClose={() => setAnchorRollback(false)} onConfirm={() => { setAnchorRollback(false); if (!driftRead || driftRead.agent !== agent)
+        return; const request = anchorRequest(driftRead.soul, 'rollback'); void perform(() => reviewFetch(request.path, undefined, request.body)); }}/>
     <ConfirmDialog open={rollback !== null} title={t('review.rollback')} message={t('review.rollback_hint')} confirmLabel={t('review.rollback')} onClose={() => setRollback(null)} onConfirm={() => { if (!rollback)
         return; const choice = rollback; setRollback(null); void perform(() => reviewFetch('/api/soul/rollback', undefined, { agent: choice.agent, layer: choice.layer, to_revision: choice.revision, expected_revision: choice.expected })); }}/>
   </div>;

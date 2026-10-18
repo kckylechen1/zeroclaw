@@ -21,8 +21,8 @@
 use std::time::Duration;
 
 use crate::companion::{
-    NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SoulProfile, SoulProfileError, SoulProfileStore,
-    SoulProposalLayer, SoulProposalOutcome, SoulReflectionReceipt, StoryKind,
+    NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SoulDrift, SoulProfile, SoulProfileError,
+    SoulProfileStore, SoulProposalLayer, SoulProposalOutcome, SoulReflectionReceipt, StoryKind,
 };
 use crate::companion::{USER_MODEL_MAX_OPEN_REFLECTION_CANDIDATES, UserModelKind, UserModelStore};
 use serde::Deserialize;
@@ -256,6 +256,8 @@ Rules:
 - You cannot change your name or identity, and you cannot remove or weaken your principles.
 - Propose at most 3 Soul changes and at most 3 User Model candidates, and only ones worth your owner's time. Proposing nothing is fine.
 - Do not repeat a pending proposal.
+- The anchor is the Tone and Story your owner last marked as the agent they want. The Tone section shows each dial's anchor level next to its current level, and the Story section says how many entries the anchor had.
+- Moving back toward the anchor is as valid as moving away from it.
 
 Soul layers, one question each:
 - Identity: who I am. Only your owner writes it; you cannot propose it.
@@ -286,6 +288,7 @@ pub fn reflection_input(
     tone: zeroclaw_config::persona::PersonaKnobs,
     pending: &[crate::companion::SoulProposal],
     messages: &OwnerMessages,
+    drift: Option<&SoulDrift>,
 ) -> String {
     let mut out = String::from("# Who you are now\n\n");
     if let Some(identity) = &profile.identity {
@@ -313,14 +316,28 @@ pub fn reflection_input(
         }
         _ => out.push_str("(none yet)\n"),
     }
-    out.push_str(&format!(
-        "\n## Tone\nwarmth: {}\ndirectness: {}\nexplanation_density: {}\nchallenge: {}\nhumor: {}\n",
-        tone.warmth.as_str(),
-        tone.directness.as_str(),
-        tone.explanation_density.as_str(),
-        tone.challenge.as_str(),
-        tone.humor.as_str(),
-    ));
+    if let Some(drift) = drift {
+        // The anchor's entries are the current ones, minus those added since
+        // and plus those retired since.
+        let current = profile
+            .story
+            .as_ref()
+            .map_or(0, |head| head.value.entries.len());
+        let anchored =
+            (current + drift.story_retired as usize).saturating_sub(drift.story_added as usize);
+        out.push_str(&format!("The anchor's Story had {anchored} entries.\n"));
+    }
+    out.push_str("\n## Tone\n");
+    for key in crate::companion::SOUL_TONE_TRAIT_KEYS {
+        let Some(level) = tone.level(key) else {
+            continue;
+        };
+        let anchor = drift
+            .and_then(|drift| drift.dials.iter().find(|dial| dial.key == *key))
+            .map(|dial| format!(" (anchor: {})", dial.anchor_level))
+            .unwrap_or_default();
+        out.push_str(&format!("{key}: {}{anchor}\n", level.as_str()));
+    }
     out.push_str("\n# Pending proposals\n");
     if pending.is_empty() {
         out.push_str("(none)\n");
@@ -504,6 +521,19 @@ fn record_user_model_reflection(
     Ok(created)
 }
 
+/// Drift of `agent` against its anchor for a reflection receipt, or `None`
+/// when the configured Tone is unavailable (it is the base of every dial level).
+pub fn current_drift(
+    store: &SoulProfileStore,
+    agent: &str,
+    configured_tone: &impl Fn() -> Option<zeroclaw_config::persona::PersonaKnobs>,
+    now_unix: u64,
+) -> Result<Option<SoulDrift>, SoulProfileError> {
+    configured_tone()
+        .map(|tone| store.drift(agent, tone, now_unix))
+        .transpose()
+}
+
 /// The model a reflection calls: a provider and the model name to pass it.
 pub type ReflectionModel = (Box<dyn ModelProvider>, String);
 
@@ -521,6 +551,24 @@ pub async fn reflect(
     since_unix: u64,
     now_unix: u64,
 ) -> anyhow::Result<SoulReflectionReceipt> {
+    // The receipt carries the drift as it stood when this reflection ran.
+    // Drift is advisory: when it cannot be computed (for example one corrupt
+    // revision body), the reflection continues without it instead of
+    // failing the whole run.
+    let drift =
+        current_drift(store, agent_alias, &configured_tone, now_unix).unwrap_or_else(|error| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(serde_json::json!({
+                        "agent": agent_alias,
+                        "error": error.to_string()
+                    })),
+                "Soul drift computation failed; reflection continues without drift"
+            );
+            None
+        });
     let receipt = |outcome: String, proposals_created: u64, user_model_candidates_created: u64| {
         SoulReflectionReceipt {
             period_from_unix: since_unix,
@@ -529,6 +577,7 @@ pub async fn reflect(
             user_model_candidates_created,
             outcome,
             ran_at_unix: now_unix,
+            drift: drift.clone(),
         }
     };
     let storage_failure = |error: anyhow::Error, soul_created, user_created| {
@@ -571,7 +620,7 @@ pub async fn reflect(
             .tone
             .as_ref()
             .map_or(tone, |head| head.value.layered_over(tone));
-        let mut input = reflection_input(&profile, tone, &pending, messages);
+        let mut input = reflection_input(&profile, tone, &pending, messages, drift.as_ref());
         input.push_str("\n# Current owner model\n");
         input.push_str(
             &crate::companion::project_active_heads(
@@ -777,6 +826,7 @@ mod tests {
             user_model_candidates_created: 0,
             outcome: OUTCOME_CLOCK_STARTED.into(),
             ran_at_unix: NOW,
+            drift: None,
         };
         assert_eq!(
             reflection_due(Some(&last), NOW + REFLECTION_PERIOD_SECS - 1),
@@ -797,6 +847,7 @@ mod tests {
             user_model_candidates_created: 0,
             outcome: format!("{OUTCOME_MODEL_FAILED}: timeout"),
             ran_at_unix: NOW,
+            drift: None,
         };
         assert_eq!(
             reflection_due(Some(&last), NOW + REFLECTION_RETRY_SECS - 1),
@@ -825,6 +876,7 @@ mod tests {
                         user_model_candidates_created: 0,
                         outcome: OUTCOME_CLOCK_STARTED.into(),
                         ran_at_unix: NOW,
+                        drift: None,
                     },
                 )
                 .unwrap();
@@ -1083,6 +1135,7 @@ mod tests {
             "Familiarity alone is not consent",
             "You cannot change your name or identity",
             "Do not repeat a pending proposal.",
+            "Moving back toward the anchor is as valid as moving away from it.",
         ] {
             assert!(prompt.contains(line), "missing {line:?}");
         }
@@ -1093,6 +1146,98 @@ mod tests {
             "within the last {} days",
             crate::companion::SOUL_TONE_DIAL_COOLDOWN_SECS / (24 * 60 * 60)
         )));
+    }
+
+    /// ADR-018 §4.3: reflection sees the anchor's values next to the current
+    /// ones, and the receipt keeps the drift that was true at that moment.
+    #[tokio::test]
+    async fn reflection_shows_the_anchor_next_to_the_current_values_and_the_receipt_keeps_the_drift()
+     {
+        use zeroclaw_config::persona::PersonaLevel::{High, Medium};
+        let (dir, store) = store();
+        let tone = |level| crate::companion::SoulTone {
+            heads: [("warmth".to_string(), level)].into(),
+        };
+        store.set_tone(AGENT, tone(Medium), 0, NOW - 300).unwrap();
+        store
+            .set_story(
+                AGENT,
+                crate::companion::SoulStory {
+                    entries: vec![
+                        crate::companion::StoryEntry {
+                            kind: StoryKind::Bond,
+                            text: "Fridays are ship day.".into(),
+                        },
+                        crate::companion::StoryEntry {
+                            kind: StoryKind::SelfView,
+                            text: "I double-check dates.".into(),
+                        },
+                    ],
+                },
+                0,
+                NOW - 300,
+            )
+            .unwrap();
+        let anchor = store.set_anchor_to_current(AGENT, 1, 1, NOW - 200).unwrap();
+        store.set_tone(AGENT, tone(High), 1, NOW - 100).unwrap();
+        store
+            .set_story(
+                AGENT,
+                crate::companion::SoulStory {
+                    entries: vec![crate::companion::StoryEntry {
+                        kind: StoryKind::Bond,
+                        text: "Fridays are ship day.".into(),
+                    }],
+                },
+                1,
+                NOW - 100,
+            )
+            .unwrap();
+        let (model, seen) = fake(Ok(r#"{"proposals":[]}"#));
+        let receipt = reflect(
+            &store,
+            AGENT,
+            &UserModelStore::open(dir.path()).unwrap(),
+            || Some(PersonaKnobs::default()),
+            &messages(&["hello"]),
+            model,
+            NOW - REFLECTION_PERIOD_SECS,
+            NOW,
+        )
+        .await
+        .unwrap();
+
+        let drift = receipt.drift.clone().expect("receipt carries the drift");
+        assert_eq!(drift.anchor, anchor);
+        assert_eq!(drift.max_abs_steps(), 1);
+        assert_eq!((drift.story_added, drift.story_retired), (0, 1));
+        assert_eq!(store.last_reflection(AGENT).unwrap(), Some(receipt));
+
+        let seen = seen.lock().unwrap();
+        let input = &seen[0].1;
+        assert!(input.contains("warmth: high (anchor: medium)"), "{input}");
+        assert!(input.contains("humor: medium (anchor: medium)"), "{input}");
+        assert!(
+            input.contains("The anchor's Story had 2 entries."),
+            "{input}"
+        );
+    }
+
+    /// With no configured Tone there is nothing to compare, so the prompt
+    /// carries no anchor lines and the receipt no drift.
+    #[test]
+    fn the_prompt_omits_anchor_lines_without_a_drift() {
+        let (_dir, store) = store();
+        let profile = store.profile(AGENT).unwrap();
+        let input = reflection_input(
+            &profile,
+            PersonaKnobs::default(),
+            &[],
+            &OwnerMessages::default(),
+            None,
+        );
+        assert!(input.contains("warmth: medium\n"));
+        assert!(!input.contains("anchor"));
     }
 
     /// Reflection output goes through the same intake: a dial in cooldown or
@@ -1215,6 +1360,42 @@ mod tests {
         .unwrap();
         assert_eq!(receipt.outcome, OUTCOME_NOTHING_TO_REFLECT_ON);
         assert_eq!(store.last_reflection(AGENT).unwrap(), Some(receipt));
+    }
+
+    #[tokio::test]
+    async fn a_drift_computation_failure_downgrades_to_none_instead_of_aborting() {
+        let (_dir, store) = store();
+        // A corrupt non-head Story body breaks drift computation but not the
+        // heads the reflection itself reads: drift reads every revision, the
+        // reflection only the current head.
+        store.insert_corrupt_revision_for_test(AGENT, "growth", 1, 1);
+        store
+            .set_story(
+                AGENT,
+                crate::companion::SoulStory {
+                    entries: vec![crate::companion::StoryEntry {
+                        kind: crate::companion::StoryKind::Bond,
+                        text: "We share a shorthand for reviews.".into(),
+                    }],
+                },
+                1,
+                NOW,
+            )
+            .unwrap();
+        let receipt = reflect(
+            &store,
+            AGENT,
+            &UserModelStore::open(_dir.path()).unwrap(),
+            || Some(PersonaKnobs::default()),
+            &OwnerMessages::default(),
+            never_called,
+            NOW - REFLECTION_PERIOD_SECS,
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt.outcome, OUTCOME_NOTHING_TO_REFLECT_ON);
+        assert!(receipt.drift.is_none());
     }
 
     #[tokio::test]

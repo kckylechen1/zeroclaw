@@ -1,4 +1,5 @@
-//! Materialize recent canonical reflection receipts into the existing outbox.
+//! Materialize recent canonical reflection receipts, and the deterministic Soul
+//! drift report (ADR-018 §4.3), into the existing outbox.
 //! No model calls, destination inference, delivery ledger or approval authority.
 
 use std::path::{Path, PathBuf};
@@ -8,8 +9,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use zeroclaw_config::schema::Config;
 use zeroclaw_infra::bridge_outbox::BridgeOutbox;
-use zeroclaw_memory::companion::{SOUL_PROFILE_DB_FILE, SoulProfileStore};
+use zeroclaw_memory::companion::{SOUL_PROFILE_DB_FILE, SoulDrift, SoulProfileStore};
 
+const WEEKLY_REVIEW: &str = "weekly_review";
+const SOUL_DRIFT: &str = "soul_drift";
+/// A dial this many steps (either direction) from the anchor is reported.
+const DRIFT_THRESHOLD_STEPS: u8 = 2;
+/// Drift that exists is reported again once per this period since the anchor.
+const DRIFT_PERIOD_SECONDS: u64 = 28 * 24 * 60 * 60;
 const RECENT_SECONDS: u64 = 24 * 60 * 60;
 const RECEIPTS_PER_AGENT: usize = 200;
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
@@ -84,43 +91,130 @@ pub(crate) fn reconcile(
                     ("review_path", &review_path),
                 ],
             );
-            // Resolve and hold the current destination through enqueue. A
-            // simultaneous config swap cannot send to a superseded target.
-            let current = config.read();
-            if stop.is_cancelled() {
-                return Ok(reconciled);
-            }
-            if !eligible(&current, data_dir)
-                || !current.agents.get(&agent).is_some_and(|a| a.enabled)
-            {
-                return Ok(reconciled);
-            }
-            let Some(target) = current.companion_memory.review_notification.as_ref() else {
-                return Ok(reconciled);
-            };
-            BridgeOutbox::shared(data_dir)?.enqueue_source(
-                &target.bridge,
-                &target.recipient,
-                target.thread_id.as_deref(),
-                &content,
-                "weekly_review",
+            if !enqueue_notice(
+                config,
+                data_dir,
+                stop,
                 &agent,
+                &content,
+                WEEKLY_REVIEW,
                 &id.to_string(),
-            )?;
+            )? {
+                return Ok(reconciled);
+            }
+            reconciled += 1;
+        }
+        let configured = config
+            .read()
+            .persona_for_agent(&agent)
+            .copied()
+            .unwrap_or_default();
+        let drift = store.drift(&agent, configured, now)?;
+        for event_id in drift_event_ids(&drift, now) {
+            let content = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                "soul-drift-notice",
+                &[
+                    ("dials_moved", &moved_dials(&drift).to_string()),
+                    ("max_steps", &drift.max_abs_steps().to_string()),
+                    ("story_added", &drift.story_added.to_string()),
+                    ("story_retired", &drift.story_retired.to_string()),
+                    ("review_path", &review_path),
+                ],
+            );
+            if !enqueue_notice(
+                config, data_dir, stop, &agent, &content, SOUL_DRIFT, &event_id,
+            )? {
+                return Ok(reconciled);
+            }
             reconciled += 1;
         }
     }
     Ok(reconciled)
 }
 
-/// Only unclaimed weekly-review candidates follow this opt-in destination.
-/// Existing transport receipts remain authoritative once delivery is in flight.
+/// Resolve and hold the current destination through enqueue. A simultaneous
+/// config swap cannot send to a superseded target. Returns `false` when the
+/// pass must stop (cancelled, or the destination or agent is no longer
+/// eligible); the notice is then not queued.
+fn enqueue_notice(
+    config: &RwLock<Config>,
+    data_dir: &Path,
+    stop: &tokio_util::sync::CancellationToken,
+    agent: &str,
+    content: &str,
+    source_kind: &str,
+    event_id: &str,
+) -> anyhow::Result<bool> {
+    let current = config.read();
+    if stop.is_cancelled() {
+        return Ok(false);
+    }
+    if !eligible(&current, data_dir) || !current.agents.get(agent).is_some_and(|a| a.enabled) {
+        return Ok(false);
+    }
+    let Some(target) = current.companion_memory.review_notification.as_ref() else {
+        return Ok(false);
+    };
+    BridgeOutbox::shared(data_dir)?.enqueue_source(
+        &target.bridge,
+        &target.recipient,
+        target.thread_id.as_deref(),
+        content,
+        source_kind,
+        agent,
+        event_id,
+    )?;
+    Ok(true)
+}
+
+fn moved_dials(drift: &SoulDrift) -> usize {
+    drift.dials.iter().filter(|dial| dial.steps != 0).count()
+}
+
+/// Event ids of the drift reports due for `drift` at `now`. Each id names a
+/// state, so the outbox's `(bridge, recipient, source_kind, source_id,
+/// event_id)` de-duplication reports it once.
+///
+/// - threshold: any dial `DRIFT_THRESHOLD_STEPS` or more from the anchor;
+///   `threshold:{anchor_key}:{fingerprint}`, where the fingerprint lists every
+///   dial's current level, so a new state is reported again.
+/// - periodic: any drift at all, once a full 28-day bucket since the anchor
+///   was set has elapsed; `periodic:{anchor_key}:{bucket}`.
+///
+/// `anchor_key` is the anchor row id, or `default` for a derived anchor.
+fn drift_event_ids(drift: &SoulDrift, now: u64) -> Vec<String> {
+    let anchor_key = drift
+        .anchor
+        .id
+        .map_or_else(|| "default".to_string(), |id| id.to_string());
+    let mut ids = Vec::new();
+    if drift.max_abs_steps() >= DRIFT_THRESHOLD_STEPS {
+        let fingerprint = drift
+            .dials
+            .iter()
+            .map(|dial| format!("{}={}", dial.key, dial.current_level))
+            .collect::<Vec<_>>()
+            .join(",");
+        ids.push(format!("threshold:{anchor_key}:{fingerprint}"));
+    }
+    if !drift.is_empty() {
+        let bucket = now.saturating_sub(drift.anchor.set_at_unix) / DRIFT_PERIOD_SECONDS;
+        if bucket >= 1 {
+            ids.push(format!("periodic:{anchor_key}:{bucket}"));
+        }
+    }
+    ids
+}
+
+/// Only unclaimed weekly-review and Soul-drift candidates follow this opt-in
+/// destination. Existing transport receipts remain authoritative once delivery
+/// is in flight.
 pub(crate) fn permits_delivery(
     config: &Config,
     outbox: &BridgeOutbox,
     row: &zeroclaw_infra::bridge_outbox::OutboxItem,
 ) -> bool {
-    if row.source_kind != "weekly_review" {
+    if row.source_kind != WEEKLY_REVIEW && row.source_kind != SOUL_DRIFT {
         return true;
     }
     outbox.is_for_data_dir(&config.data_dir)
@@ -270,6 +364,7 @@ mod tests {
                 user_model_candidates_created: count,
                 outcome: outcome.into(),
                 ran_at_unix: at,
+                drift: None,
             },
         )
         .unwrap();
@@ -421,5 +516,307 @@ mod tests {
         reconcile(&config, dir.path(), NOW).unwrap();
         assert_eq!(outbox.len("tg").unwrap(), 1);
         assert_eq!(soul.reflections("nova", 200).unwrap().len(), 1);
+    }
+
+    // ADR-018 §4.3: Soul drift report.
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    fn tone(level: zeroclaw_config::persona::PersonaLevel) -> zeroclaw_memory::companion::SoulTone {
+        zeroclaw_memory::companion::SoulTone {
+            heads: [("warmth".to_string(), level)].into(),
+        }
+    }
+
+    fn story(texts: &[&str]) -> zeroclaw_memory::companion::SoulStory {
+        zeroclaw_memory::companion::SoulStory {
+            entries: texts
+                .iter()
+                .map(|text| zeroclaw_memory::companion::StoryEntry {
+                    kind: zeroclaw_memory::companion::StoryKind::Bond,
+                    text: (*text).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The default anchor is Tone revision 1 (warmth `medium`) at `at`.
+    fn anchored_at(soul: &SoulProfileStore, at: u64) {
+        use zeroclaw_config::persona::PersonaLevel::Medium;
+        soul.set_tone("nova", tone(Medium), 0, at).unwrap();
+    }
+
+    fn drift_rows(dir: &Path) -> Vec<zeroclaw_infra::bridge_outbox::OutboxItem> {
+        BridgeOutbox::open(dir)
+            .unwrap()
+            .pending("tg", 0, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.source_kind == "soul_drift")
+            .collect()
+    }
+
+    #[test]
+    fn a_two_step_drift_is_reported_once_per_state() {
+        use zeroclaw_config::persona::PersonaLevel::{High, Minimal, Xhigh};
+        let (dir, config, soul) = fixture();
+        anchored_at(&soul, NOW - 1000);
+        // One step is below the threshold.
+        soul.set_tone("nova", tone(High), 1, NOW - 900).unwrap();
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 0);
+        assert!(!dir.path().join("sessions/bridge_outbox.db").exists());
+
+        soul.set_tone("nova", tone(Xhigh), 2, NOW - 800).unwrap();
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 1);
+        assert_eq!(reconcile(&config, dir.path(), NOW + 60).unwrap(), 1);
+        let rows = drift_rows(dir.path());
+        assert_eq!(rows.len(), 1, "the same state is reported once");
+        assert_eq!(rows[0].source_id, "nova");
+        assert_eq!(
+            rows[0].event_id,
+            "threshold:default:warmth=xhigh,directness=medium,explanation_density=medium,challenge=medium,humor=medium"
+        );
+        assert!(rows[0].content.contains("/review"), "{}", rows[0].content);
+        assert!(
+            rows[0].content.contains("1 Tone dials moved"),
+            "{}",
+            rows[0].content
+        );
+        assert!(
+            rows[0].content.contains("largest move: 2 steps"),
+            "{}",
+            rows[0].content
+        );
+        assert!(!rows[0].content.contains("nova"));
+        assert!(permits_delivery(
+            &config.read(),
+            &BridgeOutbox::open(dir.path()).unwrap(),
+            &rows[0]
+        ));
+
+        // A new state is reported again, also in the other direction.
+        soul.set_tone("nova", tone(Minimal), 3, NOW + 10).unwrap();
+        assert_eq!(reconcile(&config, dir.path(), NOW + 120).unwrap(), 1);
+        let rows = drift_rows(dir.path());
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[1]
+                .event_id
+                .starts_with("threshold:default:warmth=minimal,")
+        );
+    }
+
+    #[test]
+    fn an_owner_anchor_keys_the_threshold_event_and_resets_the_state() {
+        use zeroclaw_config::persona::PersonaLevel::{Minimal, Xhigh};
+        let (dir, config, soul) = fixture();
+        anchored_at(&soul, NOW - 1000);
+        soul.set_tone("nova", tone(Xhigh), 1, NOW - 900).unwrap();
+        reconcile(&config, dir.path(), NOW).unwrap();
+        // Keeping the current Soul as the anchor ends the drift.
+        let anchor = soul.set_anchor_to_current("nova", 2, 0, NOW + 1).unwrap();
+        assert_eq!(reconcile(&config, dir.path(), NOW + 60).unwrap(), 0);
+        assert_eq!(drift_rows(dir.path()).len(), 1);
+        // Drifting away from the new anchor is a new report under its row id.
+        soul.set_tone("nova", tone(Minimal), 2, NOW + 100).unwrap();
+        assert_eq!(reconcile(&config, dir.path(), NOW + 120).unwrap(), 1);
+        let rows = drift_rows(dir.path());
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows[1]
+                .event_id
+                .starts_with(&format!("threshold:{}:warmth=minimal,", anchor.id.unwrap()))
+        );
+    }
+
+    #[test]
+    fn nonzero_drift_is_reported_once_per_elapsed_28_day_bucket_and_not_before() {
+        use zeroclaw_config::persona::PersonaLevel::High;
+        let (dir, config, soul) = fixture();
+        let set_at = NOW - 100 * DAY;
+        anchored_at(&soul, set_at);
+        soul.set_tone("nova", tone(High), 1, set_at + DAY).unwrap();
+        // One step: below the threshold, so only the periodic report applies.
+        assert_eq!(
+            reconcile(&config, dir.path(), set_at + 28 * DAY - 1).unwrap(),
+            0
+        );
+        assert_eq!(
+            reconcile(&config, dir.path(), set_at + 28 * DAY).unwrap(),
+            1
+        );
+        assert_eq!(
+            reconcile(&config, dir.path(), set_at + 41 * DAY).unwrap(),
+            1
+        );
+        assert_eq!(drift_rows(dir.path()).len(), 1);
+        assert_eq!(drift_rows(dir.path())[0].event_id, "periodic:default:1");
+        assert_eq!(
+            reconcile(&config, dir.path(), set_at + 56 * DAY).unwrap(),
+            1
+        );
+        let rows = drift_rows(dir.path());
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.event_id.as_str())
+                .collect::<Vec<_>>(),
+            ["periodic:default:1", "periodic:default:2"]
+        );
+    }
+
+    #[test]
+    fn a_story_only_drift_is_periodic_and_zero_drift_enqueues_nothing() {
+        let (dir, config, soul) = fixture();
+        let set_at = NOW - 100 * DAY;
+        soul.set_story("nova", story(&["a", "b"]), 0, set_at)
+            .unwrap();
+        // No drift at all, however old the anchor.
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 0);
+        // A reordering is not drift either.
+        soul.set_story("nova", story(&["b", "a"]), 1, set_at + DAY)
+            .unwrap();
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 0);
+        assert!(!dir.path().join("sessions/bridge_outbox.db").exists());
+
+        soul.set_story("nova", story(&["b"]), 2, set_at + 2 * DAY)
+            .unwrap();
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 1);
+        let rows = drift_rows(dir.path());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, format!("periodic:default:{}", 100 / 28));
+        assert!(
+            rows[0].content.contains("0 Story entries added, 1 retired"),
+            "{}",
+            rows[0].content
+        );
+    }
+
+    #[test]
+    fn drift_uses_the_same_opt_in_target_and_fails_closed() {
+        use zeroclaw_config::persona::PersonaLevel::Xhigh;
+        let (dir, config, soul) = fixture();
+        anchored_at(&soul, NOW - 1000);
+        soul.set_tone("nova", tone(Xhigh), 1, NOW - 900).unwrap();
+        let target = config
+            .write()
+            .companion_memory
+            .review_notification
+            .take()
+            .unwrap();
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 0);
+        config.write().companion_memory.review_notification = Some(ReviewNotificationConfig {
+            recipient: " ".into(),
+            ..target.clone()
+        });
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 0);
+        config.write().companion_memory.review_notification = Some(ReviewNotificationConfig {
+            bridge: "missing".into(),
+            ..target.clone()
+        });
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 0);
+        config.write().companion_memory.review_notification = Some(target.clone());
+        config.write().agents.get_mut("nova").unwrap().enabled = false;
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 0);
+        config.write().agents.get_mut("nova").unwrap().enabled = true;
+        config.write().data_dir = dir.path().join("new-root");
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 0);
+        assert!(!dir.path().join("sessions/bridge_outbox.db").exists());
+        assert!(!dir.path().join("new-root").exists());
+
+        config.write().data_dir = dir.path().to_path_buf();
+        assert_eq!(reconcile(&config, dir.path(), NOW).unwrap(), 1);
+        let outbox = BridgeOutbox::shared(dir.path()).unwrap();
+        let row = drift_rows(dir.path()).remove(0);
+        assert!(permits_delivery(&config.read(), &outbox, &row));
+        // Delivery of an unclaimed drift row follows the live target exactly
+        // like a weekly review row.
+        config
+            .write()
+            .companion_memory
+            .review_notification
+            .as_mut()
+            .unwrap()
+            .recipient = "other-owner-target".into();
+        assert!(!permits_delivery(&config.read(), &outbox, &row));
+        config.write().companion_memory.review_notification = Some(target.clone());
+        config
+            .write()
+            .companion_memory
+            .review_notification
+            .as_mut()
+            .unwrap()
+            .thread_id = Some("new-thread".into());
+        assert!(!permits_delivery(&config.read(), &outbox, &row));
+        config.write().companion_memory.review_notification = Some(target.clone());
+        config.write().agents.get_mut("nova").unwrap().enabled = false;
+        assert!(!permits_delivery(&config.read(), &outbox, &row));
+        config.write().agents.get_mut("nova").unwrap().enabled = true;
+        config.write().companion_memory.review_notification = None;
+        assert!(!permits_delivery(&config.read(), &outbox, &row));
+        config.write().companion_memory.review_notification = Some(target);
+        assert!(permits_delivery(&config.read(), &outbox, &row));
+        // Other sources are not this module's to gate.
+        let other = zeroclaw_infra::bridge_outbox::OutboxItem {
+            source_kind: "cron".into(),
+            ..row
+        };
+        config.write().companion_memory.review_notification = None;
+        assert!(permits_delivery(&config.read(), &outbox, &other));
+    }
+
+    #[test]
+    fn drift_event_ids_follow_the_documented_scheme() {
+        use zeroclaw_memory::companion::{AnchorSource, DialDrift, SoulAnchor};
+        let drift = |id: Option<i64>, set_at: u64, steps: [i8; 2], story: u32| SoulDrift {
+            anchor: SoulAnchor {
+                id,
+                tone_revision_id: None,
+                story_revision_id: None,
+                set_at_unix: set_at,
+                source: if id.is_some() {
+                    AnchorSource::Owner
+                } else {
+                    AnchorSource::Default
+                },
+            },
+            dials: ["warmth", "humor"]
+                .iter()
+                .zip(steps)
+                .map(|(key, steps)| DialDrift {
+                    key: (*key).to_string(),
+                    anchor_level: "medium".into(),
+                    current_level: if steps == 0 { "medium" } else { "high" }.into(),
+                    steps,
+                })
+                .collect(),
+            story_added: story,
+            story_retired: 0,
+            approved_proposals_since_anchor: 0,
+        };
+        // Approved proposals alone are not drift.
+        let mut idle = drift(None, 0, [0, 0], 0);
+        idle.approved_proposals_since_anchor = 9;
+        assert!(drift_event_ids(&idle, 1000 * DAY).is_empty());
+        assert_eq!(
+            drift_event_ids(&drift(Some(7), 10, [-2, 0], 0), 10),
+            ["threshold:7:warmth=high,humor=medium"]
+        );
+        assert_eq!(
+            drift_event_ids(&drift(Some(7), 10, [0, 1], 0), 10 + 28 * DAY * 3 + 5),
+            ["periodic:7:3"]
+        );
+        assert_eq!(
+            drift_event_ids(&drift(None, 0, [0, 0], 1), 28 * DAY),
+            ["periodic:default:1"]
+        );
+        assert_eq!(
+            drift_event_ids(&drift(None, 0, [2, 0], 0), 28 * DAY),
+            [
+                "threshold:default:warmth=high,humor=medium",
+                "periodic:default:1"
+            ]
+        );
+        // A set time in the future never underflows into a bucket.
+        assert!(drift_event_ids(&drift(None, 500, [1, 0], 0), 100).is_empty());
     }
 }
