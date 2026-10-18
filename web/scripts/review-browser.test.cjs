@@ -38,6 +38,9 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     let candidateDetailStarted;
     const candidatePageReads = [];
     const actions = [];
+    // ADR-018 §3 Tone exemplars: the head the gateway holds, and every PUT it receives.
+    let exemplarHead = null;
+    const writes = [];
     // ADR-018 §4.3 drift fixture; an older gateway answers the route with {}.
     let driftEnabled = false;
     let anchorConflictOnce = true;
@@ -123,10 +126,21 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
             }
             return send({ ok: true });
         }
+        if (req.method() === 'PUT' && url.pathname === '/api/soul/tone/exemplars') {
+            const body = req.postDataJSON();
+            writes.push({ path: url.pathname, body });
+            if (body.exemplars.some(item => item.owner_line === 'SERVER-REJECTS-THIS'))
+                return send({ code: 'invalid', field: 'owner_line', reason: 'soul-tone-exemplar-too-long', error: 'untrusted validation detail' }, 400);
+            const current = exemplarHead?.revision ?? 0;
+            if (body.expected_revision !== current)
+                return send({ code: 'revision_conflict', current_revision: current, error: 'untrusted conflict detail' }, 409);
+            exemplarHead = { revision: current + 1, source: 'owner', created_at_unix: now, value: { exemplars: body.exemplars } };
+            return send(exemplarHead);
+        }
         if (url.pathname === '/api/soul/drift')
             return driftEnabled ? send({ agent: url.searchParams.get('agent'), anchor: driftState.anchor, drift: driftState }) : send({});
         if (url.pathname === '/api/soul')
-            return soulUnavailable ? send({ code: 'store_unavailable' }, 503) : send(soul);
+            return soulUnavailable ? send({ code: 'store_unavailable' }, 503) : send({ ...soul, tone: { ...soul.tone, exemplars: exemplarHead } });
         if (url.pathname === '/api/soul/history') {
             if (delayHistory && url.searchParams.get('layer') === 'identity') {
                 oldHistoryRelease = () => send({ code: 'unauthorized', error: 'late failure' }, 401);
@@ -248,6 +262,147 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.match(await toneCard.innerText(), /high/);
     assert.match(await toneCard.innerText(), /low/);
     await toneCard.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-tone-fallback-375.png') });
+    // Tone exemplars (ADR-018 §3): list, edit with live UTF-8 counters, CAS save, conflict and server rejection.
+    const exemplarRegion = toneCard.getByRole('region', { name: 'Tone exemplars', exact: true });
+    await exemplarRegion.getByText('No exemplars yet.', { exact: true }).waitFor();
+    await exemplarRegion.getByRole('button', { name: 'Add exemplar', exact: true }).click();
+    const exemplarEditor = toneCard.getByRole('form', { name: 'Edit exemplars', exact: true });
+    const exemplarRow = (n) => exemplarEditor.getByRole('group', { name: `Exemplar ${n}`, exact: true });
+    const exemplarSave = exemplarEditor.getByRole('button', { name: 'Save exemplars', exact: true });
+    const first = exemplarRow(1);
+    assert.equal(await first.getByLabel('Situation', { exact: true }).evaluate(el => el === document.activeElement), true);
+    assert.equal(await exemplarSave.isDisabled(), true, 'empty fields cannot be saved');
+    await first.getByText('0 / 80 bytes · Required.', { exact: true }).waitFor();
+    // CJK counts three bytes a character: 27 characters are 81 bytes, over the cap of 80.
+    await first.getByLabel('Situation', { exact: true }).fill('累'.repeat(27));
+    await first.getByText('81 / 80 bytes · Over the byte limit.', { exact: true }).waitFor();
+    await first.getByLabel('Owner', { exact: true }).fill('今天好累。');
+    await first.getByLabel('You', { exact: true }).fill('辛苦了。先坐一会儿,剩下的我来。');
+    assert.equal(await exemplarSave.isDisabled(), true, 'over the situation cap');
+    await first.getByLabel('Situation', { exact: true }).fill('主人下班后很累');
+    await first.getByText('21 / 80 bytes', { exact: true }).waitFor();
+    await first.getByText('15 / 160 bytes', { exact: true }).waitFor();
+    assert.equal(await exemplarSave.isDisabled(), false);
+    // A line break is shown, flagged, and blocks saving until the owner fixes it.
+    await first.getByLabel('You', { exact: true }).fill('第一行\n第二行');
+    await first.getByText('Must be a single line: remove the line breaks.', { exact: false }).waitFor();
+    assert.equal(await first.getByLabel('You', { exact: true }).inputValue(), '第一行\n第二行');
+    assert.equal(await exemplarSave.isDisabled(), true, 'a newline blocks saving');
+    await toneCard.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-exemplar-editor-375.png') });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await first.getByLabel('You', { exact: true }).fill('辛苦了。先坐一会儿,剩下的我来。');
+    assert.equal(await exemplarSave.isDisabled(), false);
+    // Cancel writes nothing.
+    await exemplarEditor.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await exemplarRegion.getByText('No exemplars yet.', { exact: true }).waitFor();
+    assert.equal(writes.length, 0);
+    await exemplarRegion.getByRole('button', { name: 'Add exemplar', exact: true }).click();
+    await first.getByLabel('Situation', { exact: true }).fill('主人下班后很累');
+    await first.getByLabel('Owner', { exact: true }).fill('今天好累。');
+    await first.getByLabel('You', { exact: true }).fill('辛苦了。先坐一会儿,剩下的我来。');
+    await exemplarSave.click();
+    await page.getByRole('status').getByText('Exemplars saved.', { exact: false }).waitFor();
+    await exemplarRegion.getByText('辛苦了。先坐一会儿,剩下的我来。', { exact: true }).waitFor();
+    assert.deepEqual(writes, [{ path: '/api/soul/tone/exemplars', body: { agent: 'nova', expected_revision: 0, exemplars: [{ situation: '主人下班后很累', owner_line: '今天好累。', agent_line: '辛苦了。先坐一会儿,剩下的我来。' }] } }]);
+    assert.match(await exemplarRegion.innerText(), /Revision 1 · Owner/);
+    assert.equal(await exemplarEditor.count(), 0, 'the editor closes after saving');
+    // A change made elsewhere since the editor opened is the existing 409: nothing is overwritten.
+    await exemplarRegion.getByRole('button', { name: 'Edit exemplars', exact: true }).click();
+    await first.getByLabel('Owner', { exact: true }).fill('今天特别累。');
+    exemplarHead = { ...exemplarHead, revision: 5, value: { exemplars: [{ situation: '别处改的', owner_line: '别处', agent_line: '别处的回复' }] } };
+    await exemplarSave.click();
+    await page.getByRole('status').getByText('The current revision changed.', { exact: false }).waitFor();
+    await exemplarRegion.getByText('别处的回复', { exact: true }).waitFor();
+    assert.equal(writes.at(-1).body.expected_revision, 1, 'the save names the revision the editor started from');
+    assert.equal(exemplarHead.revision, 5, 'the conflicting save wrote nothing');
+    assert.equal(await exemplarEditor.count(), 0);
+    // The gateway stays the authority: a rejected save keeps the owner's text and shows the reason.
+    await exemplarRegion.getByRole('button', { name: 'Edit exemplars', exact: true }).click();
+    await first.getByLabel('Owner', { exact: true }).fill('SERVER-REJECTS-THIS');
+    await exemplarSave.click();
+    await page.getByRole('status').getByText('An exemplar field is over its byte limit; nothing was saved.', { exact: true }).waitFor();
+    await first.getByLabel('Owner', { exact: true }).waitFor();
+    assert.equal(await first.getByLabel('Owner', { exact: true }).inputValue(), 'SERVER-REJECTS-THIS');
+    assert.equal(exemplarHead.revision, 5);
+    // At most four: add up to the cap, then adding is disabled; removing frees a slot.
+    for (const n of [2, 3, 4]) {
+        await exemplarEditor.getByRole('button', { name: 'Add exemplar', exact: true }).click();
+        const row = exemplarRow(n);
+        assert.equal(await row.getByLabel('Situation', { exact: true }).evaluate(el => el === document.activeElement), true);
+        await row.getByLabel('Situation', { exact: true }).fill(`s${n}`);
+        await row.getByLabel('Owner', { exact: true }).fill(`o${n}`);
+        await row.getByLabel('You', { exact: true }).fill(`a${n}`);
+    }
+    assert.equal(await exemplarEditor.getByRole('button', { name: 'Add exemplar', exact: true }).isDisabled(), true);
+    await first.getByLabel('Owner', { exact: true }).fill('o1');
+    await exemplarEditor.getByRole('button', { name: 'Remove exemplar 4', exact: true }).click();
+    assert.equal(await exemplarEditor.getByRole('button', { name: 'Add exemplar', exact: true }).isDisabled(), false);
+    assert.equal(await exemplarRow(4).count(), 0);
+    await exemplarEditor.getByRole('button', { name: 'Cancel', exact: true }).click();
+    assert.deepEqual(exemplarHead.value.exemplars.map(item => item.situation), ['别处改的'], 'cancelling wrote nothing');
+
+    // Pin from chat: the reply's exact text and the owner's message before it travel as router state.
+    const ownerMessage = '今天好累。\n还有很多事';
+    const replyText = '辛苦了。\n先歇一会儿,剩下的我来。';
+    await page.evaluate(([owner, reply]) => {
+        const at = new Date().toISOString();
+        localStorage.setItem('zeroclaw_session_id.nova', 'pin-session');
+        localStorage.setItem('zeroclaw_chat_history_v1:pin-session', JSON.stringify({ messages: [
+            { id: 'm1', role: 'user', content: 'Earlier question', local: true, timestamp: at },
+            { id: 'm2', role: 'agent', content: 'Earlier answer', markdown: false, timestamp: at },
+            { id: 'm3', role: 'user', content: owner, local: true, timestamp: at },
+            { id: 'm4', role: 'agent', content: reply, markdown: false, timestamp: at },
+        ] }));
+    }, [ownerMessage, replyText]);
+    const chatMessage = (text) => page.locator('div.group').filter({ hasText: text });
+    const pinAction = (text) => chatMessage(text).getByRole('button', { name: 'Use as tone example', exact: true });
+    await page.goto(origin + '/agent/nova');
+    await pinAction('剩下的我来').waitFor();
+    // Only the agent's replies offer it, never the owner's own messages.
+    assert.equal(await chatMessage('Earlier question').getByRole('button', { name: 'Use as tone example' }).count(), 0);
+    assert.equal(await pinAction('Earlier answer').count(), 1);
+    const writesBeforePin = writes.length;
+    await pinAction('剩下的我来').click();
+    const pinEditor = page.getByRole('form', { name: 'Edit exemplars', exact: true });
+    await pinEditor.waitFor();
+    assert.equal(page.url(), `${origin}/review?agent=nova`, 'the draft is not in the URL');
+    assert.equal(await page.evaluate(() => (history.state && history.state.usr) ?? null), null, 'the navigation state is dropped once the editor opens');
+    assert.deepEqual(await page.evaluate(needle => Object.keys(localStorage).filter(key => !key.startsWith('zeroclaw_chat_history_v1:') && (localStorage.getItem(key) ?? '').includes(needle)), '先歇一会儿'), [], 'the draft is not in storage');
+    await pinEditor.getByText('Prefilled from the chat.', { exact: false }).waitFor();
+    const pinnedRow = pinEditor.getByRole('group', { name: 'Exemplar 2', exact: true });
+    assert.equal(await pinEditor.getByRole('group', { name: 'Exemplar 1', exact: true }).getByLabel('Owner', { exact: true }).inputValue(), '别处');
+    assert.equal(await pinnedRow.getByLabel('Situation', { exact: true }).inputValue(), '');
+    assert.equal(await pinnedRow.getByLabel('Owner', { exact: true }).inputValue(), ownerMessage);
+    assert.equal(await pinnedRow.getByLabel('You', { exact: true }).inputValue(), replyText);
+    assert.equal(await pinnedRow.getByLabel('Situation', { exact: true }).evaluate(el => el === document.activeElement), true);
+    await pinnedRow.getByText('Must be a single line: remove the line breaks.', { exact: false }).first().waitFor();
+    assert.equal(await pinEditor.getByRole('button', { name: 'Save exemplars', exact: true }).isDisabled(), true);
+    assert.equal(writes.length, writesBeforePin, 'nothing is saved until the owner presses save');
+    await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-exemplar-pinned-375.png') });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await pinnedRow.getByLabel('Situation', { exact: true }).fill('owner is tired');
+    await pinnedRow.getByLabel('Owner', { exact: true }).fill('今天好累。还有很多事');
+    await pinnedRow.getByLabel('You', { exact: true }).fill('辛苦了。先歇一会儿,剩下的我来。');
+    await pinEditor.getByRole('button', { name: 'Save exemplars', exact: true }).click();
+    await page.getByRole('status').getByText('Exemplars saved.', { exact: false }).waitFor();
+    assert.deepEqual(writes.at(-1), { path: '/api/soul/tone/exemplars', body: { agent: 'nova', expected_revision: 5, exemplars: [{ situation: '别处改的', owner_line: '别处', agent_line: '别处的回复' }, { situation: 'owner is tired', owner_line: '今天好累。还有很多事', agent_line: '辛苦了。先歇一会儿,剩下的我来。' }] } });
+    await exemplarRegion.getByText('owner is tired', { exact: true }).waitFor();
+    // With four already stored, a pinned reply makes a fifth row: it cannot be saved until one is removed.
+    exemplarHead = { ...exemplarHead, revision: 9, value: { exemplars: ['a', 'b', 'c', 'd'].map(x => ({ situation: `s-${x}`, owner_line: `o-${x}`, agent_line: `a-${x}` })) } };
+    await page.goto(origin + '/agent/nova');
+    await pinAction('剩下的我来').click();
+    await pinEditor.waitFor();
+    await pinEditor.getByText('At most 4 exemplars. Remove one to save.', { exact: true }).waitFor();
+    assert.equal(await pinEditor.getByRole('button', { name: 'Save exemplars', exact: true }).isDisabled(), true);
+    assert.equal(await pinEditor.getByRole('button', { name: 'Add exemplar', exact: true }).isDisabled(), true);
+    await pinEditor.getByRole('button', { name: 'Remove exemplar 1', exact: true }).click();
+    await pinEditor.getByText('At most 4 exemplars. Remove one to save.', { exact: true }).waitFor({ state: 'detached' });
+    await pinEditor.getByRole('group', { name: 'Exemplar 4', exact: true }).getByLabel('Situation', { exact: true }).fill('tired again');
+    await pinEditor.getByRole('group', { name: 'Exemplar 4', exact: true }).getByLabel('Owner', { exact: true }).fill('今天好累。还有很多事');
+    await pinEditor.getByRole('group', { name: 'Exemplar 4', exact: true }).getByLabel('You', { exact: true }).fill('辛苦了。');
+    assert.equal(await pinEditor.getByRole('button', { name: 'Save exemplars', exact: true }).isDisabled(), false);
+    await pinEditor.getByRole('button', { name: 'Cancel', exact: true }).click();
+    assert.equal(exemplarHead.revision, 9, 'cancelling writes nothing');
     // Drift card: provenance, signed per-dial distance, keep and roll back by CAS.
     driftEnabled = true;
     await page.getByRole('button', { name: 'Refresh', exact: true }).click();
@@ -435,6 +590,23 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.match(await zhDrift.innerText(), /亲切度\s+中 → 极高\s+\+2/);
     await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-drift-zh-375.png') });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    // Tone exemplars and the chat action in Chinese.
+    await page.goto(origin + '/agent/nova');
+    await chatMessage('剩下的我来').getByRole('button', { name: '用作语气示范', exact: true }).waitFor();
+    await page.goto(origin + '/review?agent=nova');
+    await page.getByRole('button', { name: '我的智能体', exact: true }).click();
+    const zhExemplars = page.getByRole('region', { name: '示范片段', exact: true });
+    await zhExemplars.getByText('s-a', { exact: true }).waitFor();
+    await zhExemplars.getByRole('button', { name: '编辑示范片段', exact: true }).click();
+    const zhEditor = page.getByRole('form', { name: '编辑示范片段', exact: true });
+    const zhRow = zhEditor.getByRole('group', { name: '示范片段 1', exact: true });
+    for (const label of ['情境', '主人', '你']) await zhRow.getByLabel(label, { exact: true }).waitFor();
+    await zhRow.getByLabel('情境', { exact: true }).fill('累'.repeat(27));
+    await zhRow.getByText('81 / 80 字节 · 超出字节限制。', { exact: true }).waitFor();
+    await zhEditor.getByRole('button', { name: '保存示范片段', exact: true }).waitFor();
+    await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-exemplar-editor-zh-375.png') });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await zhEditor.getByRole('button', { name: '取消', exact: true }).click();
     await page.getByRole('button', { name: '关于我', exact: true }).click();
     await page.getByRole('button', { name: '所有候选的审核历史' }).click();
     await page.getByRole('button', { name: '历史与来源', exact: true }).click();
@@ -482,7 +654,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.equal(await page.getByRole('heading', { name: addition.item.proposal, exact: true }).count(), 0);
     assert.equal(await userCard.count(), 0);
     assert.deepEqual(failures, []);
-    console.log(JSON.stringify({ result: 'PASS', page_reload_invalidates_detail: true, bounded_candidate_pages: true, page_error_retry: true, page_dedup_and_end: true, page_refresh_and_agent_reset: true, page_legacy_upgrade: true, pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_story_target: true, story_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_tone_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, tone_validation_refresh: true, heads_failure_preserves_inbox: true, heads_auth_failure_clears_data: true, drift_card_cas_keep_and_confirmed_rollback: true, drift_card_localized: true, actions }));
+    console.log(JSON.stringify({ result: 'PASS', page_reload_invalidates_detail: true, bounded_candidate_pages: true, page_error_retry: true, page_dedup_and_end: true, page_refresh_and_agent_reset: true, page_legacy_upgrade: true, pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_story_target: true, story_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_tone_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, tone_validation_refresh: true, heads_failure_preserves_inbox: true, heads_auth_failure_clears_data: true, drift_card_cas_keep_and_confirmed_rollback: true, drift_card_localized: true, tone_exemplars_editor_counters_cas_and_server_rejection: true, tone_exemplar_pin_from_chat_via_router_state: true, tone_exemplars_localized: true, actions }));
     await browser.close();
     server.close();
 })().catch(async e => { console.error(e); server.close(); if (browser) await browser.close(); process.exitCode = 1; });

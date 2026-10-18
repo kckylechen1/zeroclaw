@@ -1062,7 +1062,10 @@ soul-tone-unavailable = Current configured Tone is unavailable.
 soul-tone-step-limit = Tone proposals may move a dial by at most one level.
 soul-tone-challenge-up-only = The challenge dial may only be proposed upward; only your owner can lower it.
 soul-tone-dial-cooldown = The { $dial } dial was changed by an approved proposal less than { $days } days ago, so it cannot be proposed again yet.
-
+soul-tone-exemplars-too-many = A Tone can hold at most four exemplars.
+soul-tone-exemplar-empty = Each exemplar needs a situation, your line, and the agent's line.
+soul-tone-exemplar-single-line = An exemplar field must be a single line of text without line breaks or control characters.
+soul-tone-exemplar-too-long = An exemplar field is over its limit: situation 80 bytes, your line 160 bytes, the agent's line 320 bytes.
 # Scoped chat turn cancellation. Requested is not a completed cancellation.
 gateway-cancel-requested = Stop requested for that turn; it has not yet confirmed cancellation.
 gateway-cancel-stale = That turn has ended. The newer turn was not stopped.

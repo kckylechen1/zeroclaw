@@ -108,6 +108,15 @@ the gateway and the card says why; the proposal stays pending for dismissal.
 History shows proposal IDs and restored revision IDs when present, and
 candidate state/action labels follow the UI locale.
 
+The Tone card lists the owner's Tone exemplars and edits them (at most four,
+with live UTF-8 byte counters per field; saving is disabled over a limit or when
+a field has a line break). A save names the exemplars revision the editor started
+from, so a change made elsewhere is a conflict and nothing is overwritten.
+"Use as tone example" on an assistant reply in the chat opens this editor on My
+Agent, prefilled with that reply and the owner's message before it. The draft
+travels in router state only (not the URL or storage), line breaks stay visible
+for the owner to remove, and nothing is stored until the owner saves.
+
 These pages add no background notification channel or offline record cache.
 They do not establish PWA installability or closed-app delivery. Deploy the web
 bundle alongside a gateway with the review APIs. Rolling back the web bundle

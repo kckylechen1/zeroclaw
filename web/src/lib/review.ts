@@ -124,6 +124,8 @@ export interface Soul {
     tone: {
         configured: unknown;
         stored?: Revision;
+        /** Tone exemplars head (ADR-018 §3); absent on an older gateway, null when there are none. */
+        exemplars?: Revision | null;
         effective?: Record<string, string>;
         sources?: Record<string, {
             kind: string;
@@ -179,15 +181,105 @@ export function anchorRequest(soul: Soul, action: 'keep' | 'rollback'): {
         body: { agent: soul.agent, expected_tone_revision: soul.tone.stored?.revision ?? 0, expected_story_revision: soul.story?.revision ?? 0 },
     };
 }
+// ADR-018 §3 Tone exemplars. The owner writes them; the bounds mirror the
+// gateway's, which stays the authority and answers 400 for anything else.
+export interface ToneExemplar {
+    situation: string;
+    owner_line: string;
+    agent_line: string;
+}
+export type ExemplarField = keyof ToneExemplar;
+export const EXEMPLAR_FIELDS: readonly ExemplarField[] = ['situation', 'owner_line', 'agent_line'];
+export const EXEMPLAR_MAX_BYTES: Record<ExemplarField, number> = { situation: 80, owner_line: 160, agent_line: 320 };
+export const MAX_EXEMPLARS = 4;
+export type ExemplarProblem = 'empty' | 'too_long' | 'single_line';
+// Bytes of the trimmed UTF-8 text: CJK characters count three, as on the gateway.
+export function exemplarBytes(value: string): number {
+    return new TextEncoder().encode(value.trim()).length;
+}
+// Same order as the gateway: line breaks and other control characters first
+// (after trimming), then empty, then too long.
+export function exemplarProblem(field: ExemplarField, value: string): ExemplarProblem | null {
+    const text = value.trim();
+    if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(text))
+        return 'single_line';
+    if (!text)
+        return 'empty';
+    return exemplarBytes(text) > EXEMPLAR_MAX_BYTES[field] ? 'too_long' : null;
+}
+export function exemplarsSavable(drafts: readonly ToneExemplar[]): boolean {
+    return drafts.length <= MAX_EXEMPLARS && drafts.every(draft => EXEMPLAR_FIELDS.every(field => exemplarProblem(field, draft[field]) === null));
+}
+// The head of the stored exemplars; anything that is not the gateway's own
+// shape reads as none, so an older gateway shows an empty list.
+export function readExemplars(soul: Soul): ToneExemplar[] {
+    const value = soul.tone.exemplars?.value;
+    const list = value && typeof value === 'object' && 'exemplars' in value ? value.exemplars : null;
+    if (!Array.isArray(list))
+        return [];
+    return list.flatMap((item: unknown) => item && typeof item === 'object' && EXEMPLAR_FIELDS.every(field => typeof (item as Record<string, unknown>)[field] === 'string')
+        ? [{ situation: (item as ToneExemplar).situation, owner_line: (item as ToneExemplar).owner_line, agent_line: (item as ToneExemplar).agent_line }]
+        : []);
+}
+// Saving names the head the editor started from, so a change made elsewhere
+// since then is a 409 and not an overwrite. Text is sent trimmed, as stored.
+export function exemplarsRequest(agent: string, expectedRevision: number, drafts: readonly ToneExemplar[]): {
+    path: string;
+    method: 'PUT';
+    body: unknown;
+} {
+    if (!exemplarsSavable(drafts))
+        throw new Error('Invalid exemplars');
+    return {
+        path: '/api/soul/tone/exemplars',
+        method: 'PUT',
+        body: { agent, expected_revision: expectedRevision, exemplars: drafts.map(draft => ({ situation: draft.situation.trim(), owner_line: draft.owner_line.trim(), agent_line: draft.agent_line.trim() })) },
+    };
+}
+// Router state of "Use as tone example" in the chat. It travels in memory with
+// the navigation, never in the URL or in storage.
+export interface ExemplarDraftState {
+    toneExemplarDraft: {
+        agent: string;
+    } & ToneExemplar;
+}
+export function readExemplarDraftState(state: unknown): ExemplarDraftState['toneExemplarDraft'] | null {
+    const draft = state && typeof state === 'object' && 'toneExemplarDraft' in state ? state.toneExemplarDraft : null;
+    if (!draft || typeof draft !== 'object')
+        return null;
+    const record = draft as Record<string, unknown>;
+    return typeof record.agent === 'string' && record.agent && EXEMPLAR_FIELDS.every(field => typeof record[field] === 'string')
+        ? { agent: record.agent, situation: record.situation as string, owner_line: record.owner_line as string, agent_line: record.agent_line as string }
+        : null;
+}
+// "Use as tone example" in the chat: the reply's exact text becomes `agent_line`
+// and the owner's latest message before it `owner_line`. Nothing is trimmed or
+// cut to fit; the owner edits the draft to the bounds in the editor. `plain` is
+// false for tool activity, lifecycle notices and local command output, which
+// are neither the agent's reply nor the owner's words.
+export interface ChatRow {
+    id: string;
+    role: 'user' | 'agent';
+    text: string;
+    plain: boolean;
+}
+export function pinnedExemplarDraft(rows: readonly ChatRow[], id: string): ToneExemplar | null {
+    const at = rows.findIndex(row => row.id === id);
+    const reply = rows[at];
+    if (!reply || reply.role !== 'agent' || !reply.plain || !reply.text.trim())
+        return null;
+    const owner = rows.slice(0, at).reverse().find(row => row.role === 'user' && row.plain);
+    return { situation: '', owner_line: owner?.text ?? '', agent_line: reply.text };
+}
 export class ReviewError extends Error {
     constructor(public status: number, public code?: string, public field?: string, public reason?: string) { super(`Review HTTP ${status}`); }
 }
 // Owner-only responses have several legacy envelopes. Preserve the status,
 // and keep re-pair local to this surface instead of changing anonymous routes.
-export async function reviewFetch<T>(path: string, signal?: AbortSignal, body?: unknown): Promise<T> {
+export async function reviewFetch<T>(path: string, signal?: AbortSignal, body?: unknown, method: 'POST' | 'PUT' = 'POST'): Promise<T> {
     const token = getToken();
     const response = await fetch(`${apiOrigin}${basePath}${path}`, {
-        method: body === undefined ? 'GET' : 'POST', signal,
+        method: body === undefined ? 'GET' : method, signal,
         headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         cache: 'no-store',
@@ -238,6 +330,12 @@ export function reflectionOutcome(outcome: string): { key: string; detail: strin
         ? { key: `review.outcome_${prefix}`, detail: separator < 0 ? '' : outcome.slice(separator + 1).trim() }
         : { key: 'review.outcome_unknown', detail: outcome };
 }
+const exemplarReasons: Record<string, string> = {
+    'soul-tone-exemplars-too-many': 'review.invalid_exemplars_too_many',
+    'soul-tone-exemplar-empty': 'review.invalid_exemplar_empty',
+    'soul-tone-exemplar-single-line': 'review.invalid_exemplar_single_line',
+    'soul-tone-exemplar-too-long': 'review.invalid_exemplar_too_long',
+};
 export function validationMessage(error: ReviewError): string {
-    return error.reason === 'soul-tone-challenge-up-only' ? 'review.invalid_challenge_up_only' : error.field === 'tone' ? 'review.invalid_tone' : error.field === 'level' ? 'review.invalid_level' : 'review.invalid';
+    return error.reason === 'soul-tone-challenge-up-only' ? 'review.invalid_challenge_up_only' : (error.reason && exemplarReasons[error.reason]) || (error.field === 'tone' ? 'review.invalid_tone' : error.field === 'level' ? 'review.invalid_level' : 'review.invalid');
 }
