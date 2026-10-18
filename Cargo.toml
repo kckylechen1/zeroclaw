@@ -130,7 +130,7 @@ indicatif = "0.18"
 tempfile = "3.26"
 
 # Zip extraction (self-update archives)
-zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0", default-features = false, features = ["deflate-flate2"] }
 
 # Error handling
 anyhow = "1.0"
