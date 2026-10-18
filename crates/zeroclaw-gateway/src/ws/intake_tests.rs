@@ -702,7 +702,10 @@ async fn surface_recovery_uses_the_accepted_input_and_preserves_legacy_payloads(
         chat.gate.add_permits(1);
         run_intake(&chat, &socket, claim.unwrap()).await;
         let prompt = chat.systems.lock()[0].clone();
-        assert_eq!(prompt.contains("## Surface\n\nTelegram:"), original.is_some());
+        assert_eq!(
+            prompt.contains("## Surface\n\nTelegram:"),
+            original.is_some()
+        );
         assert!(!prompt.contains("## Surface\n\nCLI:"));
         assert_eq!(intake_snapshot(&chat).inputs[0].state, "done");
     }
@@ -840,4 +843,44 @@ async fn racing_surface_registrations_return_duplicate_and_execute_the_winner() 
         winner == ChatSurface::Telegram
     );
     assert_eq!(intake_snapshot(&chat).inputs[0].state, "done");
+}
+
+#[tokio::test]
+async fn control_resume_has_the_owner_snapshot_and_rejects_unknown_versions() {
+    let chat = intake_chat();
+    let a = intake_socket(&chat).await;
+    let mut frame = resume_frame();
+    frame["control_version"] = json!(2);
+    assert_eq!(
+        receive_intake(&chat, &a, frame.clone()).0["code"],
+        "UNSUPPORTED_CONTROL_VERSION"
+    );
+    frame["control_version"] = json!(1);
+    let (ready, _) = receive_intake(&chat, &a, frame.clone());
+    assert_eq!(ready["control"]["control_version"], 1);
+    assert_eq!(ready["control"]["revision"], 0);
+    assert!(ready["control"]["turn_id"].is_null());
+    assert!(
+        !ready["control"]["unknown_message"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    let Submitted::Start(turn) = a.conversation.submit("from another subscriber".into()) else {
+        panic!()
+    };
+    let (ready, _) = receive_intake(&chat, &a, frame.clone());
+    assert_eq!(ready["control"]["turn_id"], turn.turn_id);
+    let revision = ready["control"]["revision"].as_u64().unwrap();
+    a.conversation.finish_turn(turn.generation);
+    let (idle, _) = receive_intake(&chat, &a, frame);
+    assert!(idle["control"]["turn_id"].is_null());
+    assert!(idle["control"]["revision"].as_u64().unwrap() > revision);
+    // Ordinary source resume and bare chat remain their prior contract.
+    assert!(
+        receive_intake(&chat, &a, resume_frame())
+            .0
+            .get("control")
+            .is_none()
+    );
 }
