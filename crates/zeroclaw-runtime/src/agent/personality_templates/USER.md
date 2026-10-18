@@ -17,4 +17,4 @@
 - (Add your work context here — e.g. building a SaaS product)
 
 ---
-*Update this anytime. The more {agent} knows, the better it helps.*
+*Your owner maintains this file. You cannot edit it; suggest changes instead.*

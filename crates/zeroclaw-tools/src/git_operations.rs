@@ -171,6 +171,10 @@ impl GitOperationsTool {
             );
         }
 
+        if let Err(message) = self.security.check_model_write_target(&resolved_target) {
+            anyhow::bail!("{message}");
+        }
+
         Ok(resolved_target)
     }
 
@@ -1159,6 +1163,19 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn worktree_add_target_refuses_persona_file_names_in_workspace_root() {
+        let tmp = TempDir::new().unwrap();
+        let tool = test_tool(tmp.path());
+        for name in ["SOUL.md", "USER.md", "identity.md"] {
+            let error = tool
+                .ensure_worktree_add_target_allowed(name)
+                .expect_err("persona file name must be refused")
+                .to_string();
+            assert!(error.contains("persona file"), "{name}: {error}");
+        }
     }
 
     #[test]

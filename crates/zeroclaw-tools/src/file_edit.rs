@@ -179,25 +179,11 @@ impl FileEditTool {
 
         let resolved_target = resolved_parent.join(file_name);
 
-        if self.security.is_runtime_config_path(&resolved_target) {
+        if let Err(message) = self.security.check_model_write_target(&resolved_target) {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
-                error: Some(
-                    self.security
-                        .runtime_config_violation_message(&resolved_target),
-                ),
-            });
-        }
-
-        if self.security.is_protected_persona_path(&resolved_target) {
-            return Ok(ToolResult {
-                success: false,
-                output: ToolOutput::default(),
-                error: Some(
-                    self.security
-                        .persona_file_violation_message(&resolved_target),
-                ),
+                error: Some(message),
             });
         }
 
@@ -995,29 +981,33 @@ mod tests {
     async fn file_edit_refuses_persona_files_in_workspace_root() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().to_path_buf();
-        tokio::fs::write(workspace.join("SOUL.md"), "Be honest.")
-            .await
-            .unwrap();
         let tool = test_tool(workspace.clone());
-        let result = tool
-            .execute(json!({
-                "path": "SOUL.md",
-                "old_string": "Be honest.",
-                "new_string": "Say whatever pleases."
-            }))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(
-            result
-                .error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("persona file")
-        );
-        let content = tokio::fs::read_to_string(workspace.join("SOUL.md"))
-            .await
-            .unwrap();
-        assert_eq!(content, "Be honest.");
+        for name in ["SOUL.md", "IDENTITY.md", "USER.md", "soul.md"] {
+            tokio::fs::write(workspace.join(name), "Be honest.")
+                .await
+                .unwrap();
+            let result = tool
+                .execute(json!({
+                    "path": name,
+                    "old_string": "Be honest.",
+                    "new_string": "Say whatever pleases."
+                }))
+                .await
+                .unwrap();
+            assert!(!result.success, "{name} must be refused");
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("persona file"),
+                "{name}: {:?}",
+                result.error
+            );
+            let content = tokio::fs::read_to_string(workspace.join(name))
+                .await
+                .unwrap();
+            assert_eq!(content, "Be honest.", "{name} must stay unchanged");
+        }
     }
 }

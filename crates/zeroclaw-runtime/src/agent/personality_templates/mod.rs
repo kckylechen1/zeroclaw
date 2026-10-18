@@ -116,6 +116,16 @@ mod tests {
         }
     }
 
+    /// `USER.md` is owner-maintained (model file tools refuse it), so the
+    /// shipped template must not invite the agent to update it.
+    #[test]
+    fn user_template_is_owner_maintained() {
+        let ctx = TemplateContext::default();
+        let user = render("USER.md", &ctx).expect("USER.md template");
+        assert!(user.contains("Your owner maintains this file."), "{user}");
+        assert!(!user.contains("Update this anytime"), "{user}");
+    }
+
     #[test]
     fn bootstrap_is_not_a_template() {
         let ctx = TemplateContext::default();

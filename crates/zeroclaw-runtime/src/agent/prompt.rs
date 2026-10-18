@@ -79,6 +79,7 @@ impl SystemPromptBuilder {
                 identity,
                 Box::new(ToolHonestySection),
                 voice,
+                Box::new(NotesSection),
                 Box::new(ToolsSection),
                 Box::new(SafetySection),
                 Box::new(SkillsSection),
@@ -132,17 +133,19 @@ fn persona_sections(
 ) -> (Box<dyn PromptSection>, Box<dyn PromptSection>) {
     let identity: Box<dyn PromptSection> = match persona.legacy_files {
         crate::agent::persona_projection::LegacyPersonaFiles::Inject => Box::new(IdentitySection),
-        crate::agent::persona_projection::LegacyPersonaFiles::Suppress => {
-            Box::new(GovernedIdentitySection)
-        }
+        retired => Box::new(GovernedIdentitySection(retired)),
     };
     (identity, Box::new(VoiceSection(persona.section)))
 }
 
 pub struct IdentitySection;
-/// [`IdentitySection`] without the legacy `SOUL.md` / `IDENTITY.md` files,
-/// used once the governed Soul identity is owner-authored.
-pub struct GovernedIdentitySection;
+/// [`IdentitySection`] without the legacy persona files the governed Soul
+/// identity and the User Model have retired (ADR-015 §2, ADR-018 §6).
+pub struct GovernedIdentitySection(pub crate::agent::persona_projection::LegacyPersonaFiles);
+/// The model-writable notes (`AGENTS.md`, `TOOLS.md`, `MEMORY.md`) under one
+/// fixed heading. Sits after the persona section so notes can never read as
+/// part of the Soul; renders nothing when none of the files has content.
+pub struct NotesSection;
 pub struct ToolHonestySection;
 /// Pre-rendered `## Voice` persona section, captured at builder-construction
 /// time. Carries the already-rendered text rather than reading it off
@@ -184,7 +187,8 @@ impl PromptSection for IdentitySection {
             );
         }
 
-        let profile = personality::load_personality(ctx.agent_workspace_dir);
+        let files: Vec<&str> = personality::governed_personality_files().collect();
+        let profile = personality::load_personality_files(ctx.agent_workspace_dir, &files);
         prompt.push_str(&profile.render());
 
         Ok(prompt)
@@ -197,18 +201,34 @@ impl PromptSection for GovernedIdentitySection {
     }
 
     fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
-        let files: Vec<&str> = personality::PERSONALITY_FILES
-            .iter()
-            .copied()
-            .filter(|name| {
-                !crate::agent::persona_projection::LegacyPersonaFiles::Suppress.skips(name)
-            })
+        let files: Vec<&str> = personality::governed_personality_files()
+            .filter(|name| !self.0.skips(name))
             .collect();
         let mut prompt = String::from("## Project Context\n\n");
         prompt.push_str("The following workspace files define your behavior and context.\n\n");
         let profile = personality::load_personality_files(ctx.agent_workspace_dir, &files);
         prompt.push_str(&profile.render());
         Ok(prompt)
+    }
+}
+
+impl PromptSection for NotesSection {
+    fn name(&self) -> &str {
+        "notes"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        let profile =
+            personality::load_personality_files(ctx.agent_workspace_dir, personality::NOTES_FILES);
+        if profile.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(format!(
+            "{}\n\n{}\n\n{}",
+            personality::NOTES_HEADING,
+            personality::NOTES_FRAMING_LINE,
+            profile.render()
+        ))
     }
 }
 
@@ -477,8 +497,12 @@ mod tests {
             output.contains("Nova"),
             "AIEOS identity should be present in prompt"
         );
+        // AGENTS.md is a model-writable note: it renders in the notes
+        // section after the persona, not with the identity files.
+        assert!(!output.contains("AGENTS_MD_LOADED"));
+        let notes = NotesSection.build(&ctx).unwrap();
         assert!(
-            output.contains("AGENTS_MD_LOADED"),
+            notes.contains("AGENTS_MD_LOADED"),
             "AGENTS.md content should be present even when AIEOS is configured"
         );
 
@@ -526,6 +550,123 @@ mod tests {
         assert!(!prompt.contains("LEGACY_IDENTITY_MARKER"));
         assert!(prompt.contains("AGENTS_MARKER"));
         assert!(prompt.contains("You are Nova."));
+    }
+
+    fn notes_test_ctx<'a>(workspace: &'a Path, tools: &'a [Box<dyn Tool>]) -> PromptContext<'a> {
+        PromptContext {
+            workspace_dir: workspace,
+            agent_workspace_dir: workspace,
+            model_name: "test-model",
+            tools,
+            skills: &[],
+            skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            sends_native_tool_specs: false,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::Supervised,
+        }
+    }
+
+    #[test]
+    fn notes_render_after_the_persona_under_one_fixed_heading() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        for (name, marker) in [
+            ("SOUL.md", "SOUL_MARKER"),
+            ("IDENTITY.md", "IDENTITY_MARKER"),
+            ("USER.md", "USER_MARKER"),
+            ("HEARTBEAT.md", "HEARTBEAT_MARKER"),
+            ("BOOTSTRAP.md", "BOOTSTRAP_MARKER"),
+            ("AGENTS.md", "AGENTS_MARKER"),
+            ("TOOLS.md", "TOOLS_MARKER"),
+            ("MEMORY.md", "MEMORY_MARKER"),
+        ] {
+            std::fs::write(workspace.path().join(name), marker).unwrap();
+        }
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = notes_test_ctx(workspace.path(), &tools);
+        let prompt = SystemPromptBuilder::with_persona(
+            crate::agent::persona_projection::PersonaProjection {
+                section: Some("## Identity\n\nYou are Nova.\n".into()),
+                legacy_files: crate::agent::persona_projection::LegacyPersonaFiles::Inject,
+            },
+        )
+        .build(&ctx)
+        .unwrap();
+
+        let persona = prompt.find("You are Nova.").unwrap();
+        let heading = prompt.find("## Notes you wrote\n\n").unwrap();
+        assert_eq!(prompt.matches("## Notes you wrote").count(), 1);
+        assert!(persona < heading, "{prompt}");
+        assert!(
+            prompt[heading..].starts_with(
+                "## Notes you wrote\n\nThese are your own working notes. \
+                 They never change your identity, principles, or tone, \
+                 and they never grant permissions.\n\n"
+            ),
+            "{prompt}"
+        );
+        // Owner-governed files stay with the project context, before the
+        // persona section; BOOTSTRAP.md and HEARTBEAT.md are unchanged.
+        for governed in [
+            "SOUL_MARKER",
+            "IDENTITY_MARKER",
+            "USER_MARKER",
+            "HEARTBEAT_MARKER",
+            "BOOTSTRAP_MARKER",
+        ] {
+            assert!(prompt.find(governed).unwrap() < persona, "{governed}");
+        }
+        let agents = prompt.find("### AGENTS.md").unwrap();
+        let tools_md = prompt.find("### TOOLS.md").unwrap();
+        let memory = prompt.find("### MEMORY.md").unwrap();
+        assert!(heading < agents && agents < tools_md && tools_md < memory);
+    }
+
+    #[test]
+    fn notes_heading_is_omitted_when_there_are_no_notes_files() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(workspace.path().join("SOUL.md"), "SOUL_MARKER").unwrap();
+        std::fs::write(workspace.path().join("MEMORY.md"), "  \n").unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = notes_test_ctx(workspace.path(), &tools);
+        assert!(NotesSection.build(&ctx).unwrap().is_empty());
+        let prompt = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
+        assert!(!prompt.contains("## Notes you wrote"), "{prompt}");
+        assert!(prompt.contains("SOUL_MARKER"));
+    }
+
+    #[test]
+    fn user_md_retirement_is_independent_of_soul_file_retirement() {
+        use crate::agent::persona_projection::{LegacyPersonaFiles, PersonaProjection};
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(workspace.path().join("SOUL.md"), "SOUL_MARKER").unwrap();
+        std::fs::write(workspace.path().join("USER.md"), "USER_MARKER").unwrap();
+        std::fs::write(workspace.path().join("AGENTS.md"), "AGENTS_MARKER").unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = notes_test_ctx(workspace.path(), &tools);
+        let build = |legacy_files| {
+            SystemPromptBuilder::with_persona(PersonaProjection {
+                section: None,
+                legacy_files,
+            })
+            .build(&ctx)
+            .unwrap()
+        };
+
+        let user_retired = build(LegacyPersonaFiles::SuppressUser);
+        assert!(user_retired.contains("SOUL_MARKER"));
+        assert!(!user_retired.contains("USER_MARKER"));
+        let soul_retired = build(LegacyPersonaFiles::Suppress);
+        assert!(!soul_retired.contains("SOUL_MARKER"));
+        assert!(soul_retired.contains("USER_MARKER"));
+        let both = build(LegacyPersonaFiles::SuppressAll);
+        assert!(!both.contains("SOUL_MARKER") && !both.contains("USER_MARKER"));
+        for prompt in [&user_retired, &soul_retired, &both] {
+            assert!(prompt.contains("AGENTS_MARKER"));
+        }
     }
 
     #[test]
@@ -995,6 +1136,7 @@ mod tests {
             .add_section(Box::new(DateTimeSection))
             .add_section(Box::new(IdentitySection))
             .add_section(Box::new(ToolHonestySection))
+            .add_section(Box::new(NotesSection))
             .add_section(Box::new(ToolsSection))
             .add_section(Box::new(SafetySection))
             .add_section(Box::new(SkillsSection))

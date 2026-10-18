@@ -8907,8 +8907,11 @@ fn prompt_missing_file_markers() {
     let prompt = build_system_prompt(tmp.path(), "model", &[], &[], None, None);
 
     assert!(prompt.contains("[File not found: SOUL.md]"));
-    assert!(prompt.contains("[File not found: AGENTS.md]"));
     assert!(prompt.contains("[File not found: IDENTITY.md]"));
+    // Model-writable notes (AGENTS.md, TOOLS.md, MEMORY.md) have no marker:
+    // without any of them the `## Notes you wrote` heading is omitted too.
+    assert!(!prompt.contains("[File not found: AGENTS.md]"));
+    assert!(!prompt.contains("## Notes you wrote"));
 }
 
 #[test]
