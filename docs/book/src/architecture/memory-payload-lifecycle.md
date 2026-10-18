@@ -63,13 +63,25 @@ control.
 
 ## Prompt context and recall
 
-At turn start, the runtime can recall relevant memories and inject a bounded
-`[Memory context]` block into the user-visible prompt context. Related entry
-points do not all apply identical filters. The channel/interactive loop filters
-generated autosave noise, stale `<tool_result>` blocks, and Conversation entries
-when the turn has no safe session scope or is not user-initiated. Generic memory
-loading filters autosave noise and relevance, but does not by itself enforce
-that channel-loop Conversation exclusion.
+At turn start, the common tool loop can recall relevant memories and inject a
+bounded `[Memory context]` block. Automatic injection, `memory_recall`, and
+model-facing `memory_export` share the same host-origin and canonical-session
+admissibility checks. Backend rows are checked before deduplication, reranking,
+or output; a backend's session filter alone is not sufficient evidence of scope.
+The renderer additionally filters generated autosave noise, stale tool-result
+blocks, relevance, and size.
+
+| Host-stamped turn origin | Ambient memory reads |
+| --- | --- |
+| Interactive, Channel, AgentDirect | Conversation rows require a matching canonical memory session; without one, only unscoped non-Conversation rows qualify. |
+| Cron, Daemon | Conversation rows are excluded even when the job reuses a chat session; other rows still require their admitted session or global scope. |
+| SubTurn | Automatic injection and both model-facing read tools are disabled, including unscoped durable facts. The child receives its bounded task context. |
+| Tool called outside a stamped turn | Conservative non-Conversation fallback; canonical-session, Soul, and backend-attribution checks still apply. |
+
+Each nested tool loop replaces the parent's ephemeral read policy. Model tool
+arguments cannot choose origin or authority. `suppress_memory_inject` only opts
+out of the automatic preamble; it does not disable otherwise-admitted explicit
+recall. Memory-free cron jobs retain their separate backend/tool exclusion.
 
 The provider request can therefore contain recalled memory without making the
 current turn a new memory. Review prompt-assembly changes by asking:
@@ -82,7 +94,8 @@ current turn a new memory. Review prompt-assembly changes by asking:
 
 ## Companion privacy boundaries
 
-The ordinary `memory_recall` tool derives its allowed memory sessions from the
+Automatic injection and the `memory_recall` / `memory_export` tools derive their
+allowed memory sessions from the
 executing turn's canonical memory input, not its transport/history key. WebSocket
 history and memory IDs differ; channel turns may have multiple sender/group
 scopes. Model arguments cannot select another conversation. Results outside
@@ -101,9 +114,17 @@ legacy sender-scoped reads remain available. Markdown cannot preserve
 conversation scope, so that tool refuses Conversation writes to it, and ordinary
 recall omits its unattributed daily-file rows (which mix daily notes and conversation
 autosaves). Its Core file remains globally recallable; existing files are not rewritten.
-Reserved Soul entries remain excluded even if a backend returns them. This is
-session isolation, not a new surface taxonomy: surface/task-specific recall
-policy still belongs to the owning ingress and memory-injection contract.
+Reserved Soul entries (namespace `soul` or key prefix `soul::`) remain excluded
+even if a backend returns them. A model-selected export session/category can
+only narrow the host scope. Operator archive exports through owner APIs retain
+their existing contract; the model tool is not an authority to export all data.
+Standalone hosts that need Conversation reads must explicitly scope a
+`MemoryReadPolicy::SessionScoped` policy and the canonical memory sessions.
+
+These checks reuse existing origin/session metadata; they do not add durable
+surface or task tags. A chat surface remains a presentation choice, not a new
+authorization boundary. More detailed scene taxonomy and installed two-harness
+privacy acceptance remain open under issues #380 and #381.
 
 Generic file access cannot read or write `soul.db`, `user_model.db`, or their
 SQLite WAL/SHM/journal files (including recased names) in the configured runtime
