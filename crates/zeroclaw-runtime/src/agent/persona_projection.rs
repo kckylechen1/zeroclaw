@@ -7,7 +7,8 @@
 //!    store, plus a fixed honesty line (ADR-015 §5);
 //! 2. `## Principles`: the owner-governed Principles layer;
 //! 3. `## Tone`: the configured persona dials ([`PersonaKnobs`]) with any
-//!    stored Tone heads layered over them key by key;
+//!    stored Tone heads layered over them key by key, then the owner's Tone
+//!    exemplars (ADR-018 §3) under a fixed framing line;
 //! 4. `## Our story so far`: the Story layer (ADR-016), changed only by
 //!    owner-approved proposals or by the owner. It comes after Tone because
 //!    Tone decides how the agent sounds when the two disagree.
@@ -49,6 +50,14 @@ pub const IDENTITY_SECTION_MAX_BYTES: usize = 512;
 pub const PRINCIPLES_SECTION_MAX_BYTES: usize = 2048;
 /// Byte ceiling of the rendered `## Our story so far` section.
 pub const STORY_SECTION_MAX_BYTES: usize = 2048;
+/// Byte ceiling of the Tone exemplar block, framing line included. The block
+/// sits inside `## Tone`.
+pub const TONE_EXEMPLARS_MAX_BYTES: usize = 1536;
+
+/// Fixed framing of the Tone exemplars: they show a manner, never content
+/// (ADR-018 §3).
+pub const TONE_EXEMPLARS_FRAMING_LINE: &str =
+    "Examples of how you sound. Copy the tone, never the facts or claims in them.";
 
 /// Fixed framing of the Story section: shared history, never tone or
 /// authority (ADR-018 §2).
@@ -218,6 +227,8 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
     }
     parts.extend(tone);
     if let Some(profile) = &profile {
+        // Inside the Tone range: after the dial lines, before the Story.
+        parts.extend(render_tone_exemplars(profile));
         parts.extend(render_story(profile));
     }
     let section = (!parts.is_empty()).then(|| {
@@ -310,6 +321,40 @@ pub fn render_principles(profile: &SoulProfile) -> Option<String> {
             break;
         }
         out.push_str(&line);
+    }
+    Some(out)
+}
+
+/// Render the Tone exemplar block (no heading of its own: it follows the dial
+/// lines inside `## Tone`), or `None` when there are no exemplars.
+///
+/// Whole exemplars only, in stored order, within [`TONE_EXEMPLARS_MAX_BYTES`]
+/// counting the framing line; the ones that do not fit are replaced by an
+/// elision marker, as in the other sections.
+#[must_use]
+pub fn render_tone_exemplars(profile: &SoulProfile) -> Option<String> {
+    let exemplars = &profile.tone_exemplars.as_ref()?.value.exemplars;
+    if exemplars.is_empty() {
+        return None;
+    }
+    let mut out = format!("{TONE_EXEMPLARS_FRAMING_LINE}\n\n");
+    for (index, exemplar) in exemplars.iter().enumerate() {
+        let entry = format!(
+            "- Situation: {}\n  Owner: {}\n  You: {}\n",
+            exemplar.situation, exemplar.owner_line, exemplar.agent_line
+        );
+        if out.len() + entry.len() > TONE_EXEMPLARS_MAX_BYTES {
+            if index == 0 {
+                // Unreachable under the write bounds; never frame nothing.
+                return None;
+            }
+            let marker = format!("(+{} exemplars elided)\n", exemplars.len() - index);
+            if out.len() + marker.len() <= TONE_EXEMPLARS_MAX_BYTES {
+                out.push_str(&marker);
+            }
+            break;
+        }
+        out.push_str(&entry);
     }
     Some(out)
 }
@@ -448,7 +493,7 @@ mod tests {
     use zeroclaw_memory::companion::{
         DEFAULT_PRINCIPLES, SOUL_MAX_PRINCIPLES, SOUL_NAME_MAX_BYTES, SOUL_PRINCIPLE_MAX_BYTES,
         SOUL_PROFILE_DB_FILE, SOUL_SELF_DESCRIPTION_MAX_BYTES, SOUL_SHORT_FIELD_MAX_BYTES,
-        SoulIdentity, SoulPrinciples,
+        SoulIdentity, SoulPrinciples, SoulToneExemplars, ToneExemplar,
     };
 
     fn config_in(dir: &Path) -> Config {
@@ -734,6 +779,142 @@ mod tests {
             section.contains("Use natural wit without obscuring the answer."),
             "{section}"
         );
+    }
+
+    fn set_exemplars(store: &SoulProfileStore, items: &[(&str, &str, &str)]) {
+        let head = store.profile("nova").unwrap().tone_exemplars;
+        store
+            .set_tone_exemplars(
+                "nova",
+                SoulToneExemplars {
+                    exemplars: items
+                        .iter()
+                        .map(|(situation, owner_line, agent_line)| ToneExemplar {
+                            situation: (*situation).into(),
+                            owner_line: (*owner_line).into(),
+                            agent_line: (*agent_line).into(),
+                        })
+                        .collect(),
+                },
+                head.map_or(0, |head| head.revision),
+                5,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn exemplars_render_inside_tone_after_the_dials_and_before_the_story() {
+        use zeroclaw_memory::companion::{StoryEntry, StoryKind};
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        let store = SoulProfileStore::shared(&config.data_dir).unwrap();
+        store.ensure_seeded("nova", "nova", 1).unwrap();
+        store
+            .set_story(
+                "nova",
+                zeroclaw_memory::companion::SoulStory {
+                    entries: vec![StoryEntry {
+                        kind: StoryKind::Bond,
+                        text: "Fridays are ship day.".into(),
+                    }],
+                },
+                0,
+                2,
+            )
+            .unwrap();
+
+        // Nothing renders, and nothing is framed, while there are none.
+        let none = persona_projection(&config, "nova").section.unwrap();
+        assert!(!none.contains("Examples of how you sound"), "{none}");
+        set_exemplars(&store, &[]);
+        assert_eq!(persona_projection(&config, "nova").section.unwrap(), none);
+
+        set_exemplars(
+            &store,
+            &[
+                (
+                    "主人下班后很累",
+                    "今天好累。",
+                    "辛苦了。先坐一会儿,剩下的我来。",
+                ),
+                (
+                    "owner is excited",
+                    "We shipped it!",
+                    "Nice. What should we check first?",
+                ),
+            ],
+        );
+        let section = persona_projection(&config, "nova").section.unwrap();
+        assert_eq!(
+            TONE_EXEMPLARS_FRAMING_LINE,
+            "Examples of how you sound. Copy the tone, never the facts or claims in them."
+        );
+        let block = "Examples of how you sound. Copy the tone, never the facts or claims in them.\n\n\
+             - Situation: 主人下班后很累\n  Owner: 今天好累。\n  You: 辛苦了。先坐一会儿,剩下的我来。\n\
+             - Situation: owner is excited\n  Owner: We shipped it!\n  You: Nice. What should we check first?\n";
+        // The last dial line, a blank line, the block, a blank line, the Story.
+        let humor = section.find("- humor (").unwrap();
+        let dials_end = humor + section[humor..].find('\n').unwrap() + 1;
+        assert_eq!(
+            &section[dials_end..dials_end + 1 + block.len()],
+            format!("\n{block}")
+        );
+        let story = section.find("\n\n## Our story so far\n").unwrap();
+        assert_eq!(story, dials_end + 1 + block.len() - 1);
+        assert_eq!(section.matches("## Tone").count(), 1);
+        assert!(section.contains("- Between us: Fridays are ship day.\n"));
+
+        // Byte-identical for the same profile, whatever surface carries the turn.
+        assert_eq!(
+            persona_projection(&config, "nova"),
+            persona_projection(&config, "nova")
+        );
+        // Rolling back to "none" removes the block again.
+        store
+            .rollback(
+                "nova",
+                zeroclaw_memory::companion::SoulLayer::ToneExemplars,
+                1,
+                2,
+                9,
+            )
+            .unwrap();
+        assert_eq!(persona_projection(&config, "nova").section.unwrap(), none);
+    }
+
+    #[test]
+    fn exemplars_are_cut_by_whole_exemplar_under_their_own_cap() {
+        use zeroclaw_memory::companion::{
+            SOUL_MAX_TONE_EXEMPLARS, SOUL_TONE_EXEMPLAR_AGENT_LINE_MAX_BYTES,
+            SOUL_TONE_EXEMPLAR_OWNER_LINE_MAX_BYTES, SOUL_TONE_EXEMPLAR_SITUATION_MAX_BYTES,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = SoulProfileStore::open(dir.path()).unwrap();
+        let (situation, owner, agent) = (
+            "s".repeat(SOUL_TONE_EXEMPLAR_SITUATION_MAX_BYTES),
+            "o".repeat(SOUL_TONE_EXEMPLAR_OWNER_LINE_MAX_BYTES),
+            "a".repeat(SOUL_TONE_EXEMPLAR_AGENT_LINE_MAX_BYTES),
+        );
+        let worst = [(situation.as_str(), owner.as_str(), agent.as_str()); SOUL_MAX_TONE_EXEMPLARS];
+        // `set_exemplars` writes for "nova".
+        set_exemplars(&store, &worst);
+        let profile = store.profile("nova").unwrap();
+        let block = render_tone_exemplars(&profile).unwrap();
+        assert!(block.len() <= TONE_EXEMPLARS_MAX_BYTES, "{}", block.len());
+        assert!(block.starts_with(TONE_EXEMPLARS_FRAMING_LINE));
+        // Two fit with the framing line; the other two become one marker.
+        assert_eq!(block.matches("- Situation: ").count(), 2);
+        assert_eq!(block.matches("  You: ").count(), 2, "no half exemplar");
+        assert!(block.ends_with("(+2 exemplars elided)\n"), "{block}");
+
+        // Short exemplars all fit and need no marker.
+        set_exemplars(&store, &[("s", "o", "a"); SOUL_MAX_TONE_EXEMPLARS]);
+        let block = render_tone_exemplars(&store.profile("nova").unwrap()).unwrap();
+        assert_eq!(
+            block.matches("- Situation: ").count(),
+            SOUL_MAX_TONE_EXEMPLARS
+        );
+        assert!(!block.contains("elided"));
     }
 
     #[test]

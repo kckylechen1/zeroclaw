@@ -22,6 +22,15 @@ use zeroclaw_memory::companion::{
 /// The dial cooldown in days, for owner- and model-facing text.
 const SOUL_TONE_DIAL_COOLDOWN_DAYS: u64 = SOUL_TONE_DIAL_COOLDOWN_SECS / (24 * 60 * 60);
 
+/// Arguments that would carry a Tone exemplar. The tool refuses them.
+const EXEMPLAR_ARGUMENT_KEYS: &[&str] = &[
+    "exemplars",
+    "exemplar",
+    "situation",
+    "owner_line",
+    "agent_line",
+];
+
 /// Fixed reply on success. Nothing changes until the owner approves.
 pub const PROPOSAL_RECORDED_REPLY: &str =
     "Proposal recorded for owner review. Nothing about me has changed yet.";
@@ -145,6 +154,17 @@ impl Tool for ProposeSoulChangeTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        // Tone exemplars are free-form prompt text that only the owner writes
+        // (ADR-018 §3). No layer value or argument of this tool carries one.
+        if let Some(key) = EXEMPLAR_ARGUMENT_KEYS
+            .iter()
+            .find(|key| args.get(**key).is_some())
+        {
+            return Ok(Self::failure(format!(
+                "'{key}' is not accepted: Tone exemplars are written by your owner only. \
+                 If an example would help, say so in the rationale of a tone proposal."
+            )));
+        }
         let Some(layer) = str_arg(&args, "layer")
             .as_deref()
             .and_then(SoulProposalLayer::parse)
@@ -500,6 +520,8 @@ mod tests {
         );
         assert!(schema["properties"].get("story_kind").is_some());
         assert!(schema["properties"].get("growth_kind").is_none());
+        assert!(schema["properties"].get("exemplars").is_none());
+        assert!(!description.contains("exemplar"));
         // The old layer names are not accepted.
         for old in ["growth", "voice"] {
             let rejected = tool
@@ -508,5 +530,37 @@ mod tests {
                 .unwrap();
             assert!(!rejected.success, "{old}");
         }
+    }
+
+    /// ADR-018 §3: the agent cannot propose exemplars. The layer enum has no
+    /// such value, the layer name is refused, and exemplar arguments are
+    /// refused even beside an otherwise valid proposal. Nothing is stored.
+    #[tokio::test]
+    async fn exemplars_cannot_be_proposed() {
+        let (dir, tool) = tool();
+        let exemplar = json!([{
+            "situation": "owner is tired",
+            "owner_line": "long day",
+            "agent_line": "EXEMPLAR-CANARY"
+        }]);
+        let attempts = [
+            json!({"layer": "tone_exemplars", "proposal": "Sound like this.", "rationale": ""}),
+            json!({"layer": "tone_exemplar", "proposal": "Sound like this.", "rationale": ""}),
+            json!({"layer": "tone_exemplars", "exemplars": exemplar, "proposal": "x", "rationale": ""}),
+            json!({"layer": "tone", "trait_key": "humor", "level": "high",
+                   "proposal": "More humor.", "rationale": "", "exemplars": exemplar}),
+            json!({"layer": "story", "story_kind": "bond", "proposal": "x", "rationale": "",
+                   "situation": "s", "owner_line": "o", "agent_line": "EXEMPLAR-CANARY"}),
+            json!({"layer": "principles", "proposal": "x", "rationale": "", "agent_line": "a"}),
+        ];
+        for attempt in attempts {
+            let result = tool.execute(attempt.clone()).await.unwrap();
+            assert!(!result.success, "{attempt}");
+        }
+        let store = SoulProfileStore::open(dir.path()).unwrap();
+        assert!(store.proposals("nova", false).unwrap().is_empty());
+        assert!(store.profile("nova").unwrap().tone_exemplars.is_none());
+        let schema = tool.parameters_schema().to_string();
+        assert!(!schema.contains("exemplar") && !schema.contains("agent_line"));
     }
 }

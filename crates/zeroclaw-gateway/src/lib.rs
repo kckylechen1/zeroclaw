@@ -1567,6 +1567,10 @@ pub async fn run_gateway(
         )
         .route("/api/soul/story", put(api_soul::put_story))
         .route("/api/soul/tone", put(api_soul::put_tone))
+        .route(
+            "/api/soul/tone/exemplars",
+            put(api_soul::put_tone_exemplars),
+        )
         .route("/api/soul/proposals", get(api_soul::get_proposals))
         .route(
             "/api/soul/proposals/{id}/resolve",

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, ConfirmDialog } from '@/components/ui';
 import { useAuth } from '@/hooks/useAuth';
 import { t } from '@/lib/i18n';
-import { reflectionOutcome, validationMessage, displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, ReviewError, anchorRequest, driftIsEmpty, readDrift, signedSteps, type Candidate, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul, type SoulDrift } from '@/lib/review';
+import { reflectionOutcome, validationMessage, EXEMPLAR_FIELDS, EXEMPLAR_MAX_BYTES, MAX_EXEMPLARS, exemplarBytes, exemplarProblem, exemplarsRequest, exemplarsSavable, readExemplarDraftState, readExemplars, type ExemplarField, type ToneExemplar, displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, ReviewError, anchorRequest, driftIsEmpty, readDrift, signedSteps, type Candidate, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul, type SoulDrift } from '@/lib/review';
 const field = 'w-full min-h-11 rounded-md border border-pc-border bg-pc-base p-3 text-pc-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]';
 const date = (value: number) => new Date(value * 1000).toLocaleString();
 const layers: Layer[] = ['identity', 'principles', 'tone', 'story'];
@@ -65,6 +65,53 @@ function DriftCard({ drift, busy, onKeep, onRollback }: {
     <Button variant="ghost" disabled={busy || empty} onClick={onRollback}>{t('review.rollback_anchor')}</Button>
     </div>
     </section>;
+}
+const bytesLabel = (used: number, max: number) => t('review.exemplar_bytes').replace('{used}', String(used)).replace('{max}', String(max));
+const exemplarLabel: Record<ExemplarField, string> = { situation: 'review.exemplar_situation', owner_line: 'review.exemplar_owner', agent_line: 'review.exemplar_agent' };
+// ADR-018 §3: the owner's examples of how the agent sounds. The editor keeps
+// newlines visible (a textarea, never a single-line input) so text pinned from
+// the chat can be fixed by hand; the gateway stays the authority on the limits.
+function ExemplarEditor({ drafts, prefilled, busy, onChange, onAdd, onRemove, onSave, onCancel }: {
+    drafts: ToneExemplar[];
+    prefilled: boolean;
+    busy: boolean;
+    onChange: (index: number, name: ExemplarField, value: string) => void;
+    onAdd: () => void;
+    onRemove: (index: number) => void;
+    onSave: () => void;
+    onCancel: () => void;
+}) {
+    const rows = useRef<(HTMLTextAreaElement | null)[]>([]);
+    const [focusRow, setFocusRow] = useState<number | null>(prefilled ? drafts.length - 1 : 0);
+    useEffect(() => {
+        if (focusRow === null) return;
+        rows.current[focusRow]?.focus();
+        setFocusRow(null);
+    }, [focusRow]);
+    const tooMany = drafts.length > MAX_EXEMPLARS;
+    return <form aria-label={t('review.exemplar_edit')} className="space-y-4" onSubmit={e => { e.preventDefault(); if (!busy && exemplarsSavable(drafts)) onSave(); }}>
+    {prefilled && <p role="status" className="text-sm text-pc-text-secondary">{t('review.exemplar_prefilled')}</p>}
+    {drafts.map((draft, index) => <fieldset key={index} className="min-w-0 space-y-3 rounded-md border border-pc-border p-3">
+        <legend className="px-1 text-sm font-medium">{t('review.exemplar_item')} {index + 1}</legend>
+        {EXEMPLAR_FIELDS.map(name => {
+            const problem = exemplarProblem(name, draft[name]);
+            const max = EXEMPLAR_MAX_BYTES[name];
+            const id = `exemplar-${index}-${name}`;
+            return <div key={name} className="space-y-1">
+            <label htmlFor={id} className="block text-sm">{t(exemplarLabel[name])}</label>
+            <textarea id={id} ref={node => { if (name === 'situation') rows.current[index] = node; }} className={field} rows={2} value={draft[name]} aria-invalid={problem !== null} aria-describedby={`${id}-note`} onChange={e => onChange(index, name, e.target.value)}/>
+            <span id={`${id}-note`} className={`text-xs block ${problem ? 'text-status-error' : 'text-pc-text-muted'}`}>{bytesLabel(exemplarBytes(draft[name]), max)}{problem && ` · ${t(`review.exemplar_problem_${problem}`)}`}</span>
+            </div>;
+        })}
+        <Button type="button" variant="ghost" disabled={busy} aria-label={`${t('review.exemplar_remove')} ${index + 1}`} onClick={() => onRemove(index)}>{t('review.exemplar_remove')}</Button>
+        </fieldset>)}
+    {tooMany && <p role="status" className="text-sm text-status-error">{t('review.exemplars_too_many')}</p>}
+    <div className="flex flex-wrap gap-2">
+    <Button type="button" variant="ghost" disabled={busy || drafts.length >= MAX_EXEMPLARS} onClick={() => { setFocusRow(drafts.length); onAdd(); }}>{t('review.exemplar_add')}</Button>
+    <Button type="submit" disabled={busy || !exemplarsSavable(drafts)}>{t('review.exemplar_save')}</Button>
+    <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>{t('common.cancel')}</Button>
+    </div>
+    </form>;
 }
 function ProposalCard({ item, act, busy, heads, headsAvailable, canApproveUserModel, stale = false, rejectedOnly = false }: {
     item: InboxItem;
@@ -151,7 +198,17 @@ export default function Review() {
     const [params, setParams] = useSearchParams();
     const agent = params.get('agent') ?? '';
     const [agents, setAgents] = useState<string[]>([]);
-    const [tab, setTab] = useState<'inbox' | 'profile' | 'user_model'>('inbox');
+    const location = useLocation();
+    const navigate = useNavigate();
+    // "Use as tone example" in the chat arrives as router state: in memory only,
+    // read once, and dropped from the history entry as soon as the editor opens.
+    const [pinned, setPinned] = useState(() => readExemplarDraftState(location.state));
+    const [tab, setTab] = useState<'inbox' | 'profile' | 'user_model'>(pinned ? 'profile' : 'inbox');
+    const [editing, setEditing] = useState<{
+        base: number;
+        drafts: ToneExemplar[];
+        prefilled: boolean;
+    } | null>(null);
     const [inbox, setInbox] = useState<Inbox | null>(null);
     const [soul, setSoul] = useState<Soul | null>(null);
     const [headRead, setHeadRead] = useState<{ heads: Head[]; supports_expected_head?: boolean } | null>(null);
@@ -282,7 +339,7 @@ export default function Review() {
         })();
         return () => controller.abort();
     }, [agent, token, tab, version, needsPair]);
-    const perform = async (work: () => Promise<unknown>, recordDecision = true, onFailure?: (error: unknown) => void) => {
+    const perform = async (work: () => Promise<unknown>, recordDecision = true, onFailure?: (error: unknown) => void, savedKey = 'review.saved') => {
         if (inAction.current)
             return;
         inAction.current = true;
@@ -293,7 +350,7 @@ export default function Review() {
         try {
             await work();
             if (request === generation.current) {
-                setNotice(recordDecision ? t('review.saved') : '');
+                setNotice(recordDecision ? t(savedKey) : '');
                 setVersion(v => v + 1);
             }
         }
@@ -315,6 +372,29 @@ export default function Review() {
             inAction.current = false;
             setBusy(false);
         }
+    };
+    // An editor belongs to one agent; switching agents drops its draft.
+    useEffect(() => { setEditing(null); }, [agent]);
+    // Open the editor on the pinned reply once this agent's Soul is read, so the
+    // draft is based on the exemplars head the owner is looking at.
+    useEffect(() => {
+        if (!pinned || !soul || soul.agent !== pinned.agent || agent !== pinned.agent) return;
+        setEditing({ base: soul.tone.exemplars?.revision ?? 0, drafts: [...readExemplars(soul), { situation: pinned.situation, owner_line: pinned.owner_line, agent_line: pinned.agent_line }], prefilled: true });
+        setPinned(null);
+        navigate({ pathname: location.pathname, search: location.search }, { replace: true, state: null });
+    }, [pinned, soul, agent, navigate, location.pathname, location.search]);
+    const openExemplars = () => {
+        if (!soul) return;
+        const current = readExemplars(soul);
+        setEditing({ base: soul.tone.exemplars?.revision ?? 0, drafts: current.length ? current : [{ situation: '', owner_line: '', agent_line: '' }], prefilled: false });
+    };
+    const changeDraft = (index: number, name: ExemplarField, value: string) => setEditing(previous => previous && { ...previous, drafts: previous.drafts.map((draft, i) => i === index ? { ...draft, [name]: value } : draft) });
+    const saveExemplars = () => {
+        if (!editing) return;
+        const request = exemplarsRequest(agent, editing.base, editing.drafts);
+        void perform(async () => { await reviewFetch(request.path, undefined, request.body, request.method); setEditing(null); }, true, err => {
+            if (err instanceof ReviewError && [401, 403, 409].includes(err.status)) setEditing(null);
+        }, 'review.exemplars_saved');
     };
     const act = (item: InboxItem, decision: Decision, text: string, scope: string) => void perform(() => { if (item.kind === 'user_model_candidate' && decision !== 'dismiss' && !canApproveUserModel) throw new Error('Head guard unavailable'); const request = decisionRequest(item, decision, text, scope, heads); return reviewFetch(request.path, undefined, request.body); }, true, err => {
         if (err instanceof ReviewError && err.code === 'proposal_stale') setStaleProposals(previous => new Set([...previous, item.id]));
@@ -376,7 +456,20 @@ export default function Review() {
                             <dd className="text-xs text-pc-text-muted">
                             <ToneSource source={soul.tone.sources?.[dial]}/>
                             </dd>
-                            </div>)}</dl> : <div className="space-y-4"><p>{t('review.tone_unavailable')}</p><h3 className="font-medium">{t('review.configured')}</h3><Value value={soul.tone.configured}/><h3 className="font-medium">{t('review.stored')}</h3><Value value={soul.tone.stored?.value}/></div> : <Value value={head?.value}/>}{head && <p className="text-xs text-pc-text-muted">{t('review.revision')} {head.revision} · {t(`review.${head.source}`)} · {date(head.created_at_unix)}</p>}<Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/soul/history?agent=${encodeURIComponent(agent)}&layer=${layer}`, value => setHistory(value as {
+                            </div>)}</dl> : <div className="space-y-4"><p>{t('review.tone_unavailable')}</p><h3 className="font-medium">{t('review.configured')}</h3><Value value={soul.tone.configured}/><h3 className="font-medium">{t('review.stored')}</h3><Value value={soul.tone.stored?.value}/></div> : <Value value={head?.value}/>}{head && <p className="text-xs text-pc-text-muted">{t('review.revision')} {head.revision} · {t(`review.${head.source}`)} · {date(head.created_at_unix)}</p>}{layer === 'tone' && <section aria-labelledby="review-exemplars" className="space-y-3">
+                    <h3 id="review-exemplars" className="font-medium">{t('review.exemplars')}</h3>
+                    <p className="text-sm text-pc-text-secondary">{t('review.exemplars_hint')}</p>
+                    {editing ? <ExemplarEditor drafts={editing.drafts} prefilled={editing.prefilled} busy={busy} onChange={changeDraft} onAdd={() => setEditing(previous => previous && { ...previous, drafts: [...previous.drafts, { situation: '', owner_line: '', agent_line: '' }] })} onRemove={index => setEditing(previous => previous && { ...previous, drafts: previous.drafts.filter((_, i) => i !== index) })} onSave={saveExemplars} onCancel={() => setEditing(null)}/> : <>
+                    {readExemplars(soul).length === 0 ? <p className="text-pc-text-muted">{t('review.exemplars_none')}</p> : <ol className="space-y-3">{readExemplars(soul).map((exemplar, index) => <li key={index} className="rounded-md border border-pc-border p-3">
+                        <dl className="space-y-2">{EXEMPLAR_FIELDS.map(name => <div key={name}>
+                            <dt className="text-xs text-pc-text-muted">{t(exemplarLabel[name])}</dt>
+                            <dd className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{exemplar[name]}</dd>
+                            </div>)}</dl>
+                        </li>)}</ol>}
+                    {soul.tone.exemplars && <p className="text-xs text-pc-text-muted">{t('review.revision')} {soul.tone.exemplars.revision} · {t(`review.${soul.tone.exemplars.source}`)} · {date(soul.tone.exemplars.created_at_unix)}</p>}
+                    <Button variant="ghost" disabled={busy} onClick={openExemplars}>{t(readExemplars(soul).length ? 'review.exemplar_edit' : 'review.exemplar_add')}</Button>
+                    </>}
+                    </section>}<Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/soul/history?agent=${encodeURIComponent(agent)}&layer=${layer}`, value => setHistory(value as {
                         layer: Layer;
                         revisions: Revision[];
                     }))}>{t('review.history')}</Button>{history?.layer === layer && <div className="space-y-5 pl-3 border-l border-pc-border">{history.revisions.slice().reverse().map(revision => <div key={revision.revision} className="space-y-3">

@@ -381,7 +381,20 @@ struct RawProposal {
     retire_index: Option<u32>,
     #[serde(default)]
     evidence_indices: Vec<usize>,
+    /// Tone exemplars are written by the owner only (ADR-018 §3). These keys
+    /// are never read; a proposal that carries any of them is dropped whole.
+    #[serde(default, flatten)]
+    extra: std::collections::HashMap<String, serde_json::Value>,
 }
+
+/// Keys that mark a proposal as an attempt at a Tone exemplar.
+const EXEMPLAR_PROPOSAL_KEYS: &[&str] = &[
+    "exemplars",
+    "exemplar",
+    "situation",
+    "owner_line",
+    "agent_line",
+];
 
 /// Parse the model's reply into at most [`REFLECTION_MAX_PROPOSALS`]
 /// proposals. Malformed entries are dropped; a malformed reply yields none.
@@ -403,6 +416,12 @@ pub fn parse_reflection(reply: &str, messages: &OwnerMessages) -> Vec<NewSoulPro
         .into_iter()
         .take(REFLECTION_MAX_PROPOSALS)
         .filter_map(|raw| {
+            if EXEMPLAR_PROPOSAL_KEYS
+                .iter()
+                .any(|key| raw.extra.contains_key(*key))
+            {
+                return None;
+            }
             let layer = SoulProposalLayer::parse(raw.layer.trim())?;
             let story_kind = match raw.story_kind.as_deref().map(str::trim) {
                 None | Some("") => None,
@@ -1325,6 +1344,116 @@ mod tests {
         assert_eq!(seen[0].0, REFLECTION_SYSTEM_PROMPT);
         assert!(seen[0].1.contains("I prefer short answers"));
         assert!(seen[0].1.contains("Name: ZeroClaw"));
+    }
+
+    /// ADR-018 §3: the agent cannot propose exemplars. A proposal for the
+    /// exemplar layer, or one carrying exemplar fields, is dropped whole; the
+    /// ordinary proposal beside them survives.
+    #[tokio::test]
+    async fn reflection_drops_exemplar_shaped_proposals() {
+        let (dir, store) = store();
+        let reply = r#"{"proposals":[
+ {"layer":"tone_exemplars","proposal":"Sound like this.","rationale":"x"},
+ {"layer":"tone_exemplars","exemplars":[{"situation":"s","owner_line":"o","agent_line":"a"}],"rationale":"x"},
+ {"layer":"tone","trait_key":"humor","level":"high","proposal":"more levity","rationale":"x","evidence_indices":[0],
+  "exemplars":[{"situation":"s","owner_line":"o","agent_line":"EXEMPLAR-CANARY"}]},
+ {"layer":"story","story_kind":"bond","proposal":"We call Fridays ship day.","rationale":"x",
+  "situation":"s","owner_line":"o","agent_line":"EXEMPLAR-CANARY"},
+ {"layer":"principles","proposal":"Keep answers short.","rationale":"owner said so"}
+]}"#;
+        assert_eq!(
+            parse_reflection(reply, &messages(&["be funnier"]))
+                .iter()
+                .map(|proposal| proposal.proposal.as_str())
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new(),
+            "only the first three entries are read, and all three carry exemplars"
+        );
+
+        let reply = r#"{"proposals":[
+ {"layer":"tone_exemplars","proposal":"Sound like this.","rationale":"x"},
+ {"layer":"story","story_kind":"bond","proposal":"We call Fridays ship day.","rationale":"x",
+  "agent_line":"EXEMPLAR-CANARY"},
+ {"layer":"principles","proposal":"Keep answers short.","rationale":"owner said so"}
+]}"#;
+        let (model, _seen) = fake(Ok(reply));
+        let receipt = reflect(
+            &store,
+            AGENT,
+            &UserModelStore::open(dir.path()).unwrap(),
+            || Some(PersonaKnobs::default()),
+            &messages(&["be funnier"]),
+            model,
+            NOW - REFLECTION_PERIOD_SECS,
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt.proposals_created, 1);
+        let pending = store.proposals(AGENT, true).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].proposal, "Keep answers short.");
+        assert!(store.profile(AGENT).unwrap().tone_exemplars.is_none());
+        assert!(
+            !serde_json::to_string(&pending)
+                .unwrap()
+                .contains("EXEMPLAR-CANARY")
+        );
+    }
+
+    /// Exemplar text is free-form prompt text. Reflection reads the owner's
+    /// messages and the Soul summary, never the exemplars, so it cannot be
+    /// fed its own examples back.
+    #[tokio::test]
+    async fn reflection_input_does_not_include_exemplar_text() {
+        use crate::companion::{SoulToneExemplars, ToneExemplar};
+        let (dir, store) = store();
+        store
+            .set_tone_exemplars(
+                AGENT,
+                SoulToneExemplars {
+                    exemplars: vec![ToneExemplar {
+                        situation: "SITUATION-CANARY".into(),
+                        owner_line: "OWNER-LINE-CANARY".into(),
+                        agent_line: "AGENT-LINE-CANARY".into(),
+                    }],
+                },
+                0,
+                NOW - 5,
+            )
+            .unwrap();
+        let profile = store.profile(AGENT).unwrap();
+        assert!(profile.tone_exemplars.is_some());
+        let input = reflection_input(
+            &profile,
+            PersonaKnobs::default(),
+            &[],
+            &messages(&["I prefer short answers"]),
+            None,
+        );
+        assert!(input.contains("I prefer short answers"));
+
+        let (model, seen) = fake(Ok(r#"{"proposals":[]}"#));
+        reflect(
+            &store,
+            AGENT,
+            &UserModelStore::open(dir.path()).unwrap(),
+            || Some(PersonaKnobs::default()),
+            &messages(&["I prefer short answers"]),
+            model,
+            NOW - REFLECTION_PERIOD_SECS,
+            NOW,
+        )
+        .await
+        .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        for canary in ["SITUATION-CANARY", "OWNER-LINE-CANARY", "AGENT-LINE-CANARY"] {
+            assert!(!seen[0].0.contains(canary), "system prompt: {canary}");
+            assert!(!seen[0].1.contains(canary), "input: {canary}");
+            assert!(!input.contains(canary), "input: {canary}");
+        }
+        assert!(!seen[0].1.to_lowercase().contains("exemplar"));
     }
 
     #[tokio::test]

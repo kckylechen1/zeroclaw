@@ -24,6 +24,15 @@
 //! Tone and Story revisions, never content. Drift is computed on read from the
 //! revisions and the proposal resolutions; it is stored only inside a reflection
 //! receipt, as the summary that was true when the reflection ran.
+//!
+//! Tone exemplars (ADR-018 §3). The only durable state added for them is the
+//! append-only `soul_tone_exemplar_revisions` table, owned by
+//! [`SoulProfileStore`]. It is a separate table, not a `soul_revisions` layer:
+//! an earlier build's [`SoulProfileStore::export`] rejects any `layer` value it
+//! does not know, so a row of a new layer would break export after a downgrade.
+//! The table has the shape of `soul_revisions` without `layer`, and its
+//! revisions, compare-and-set, history, rollback and export behave the same.
+//! Only the owner writes it (`source = owner`, never a proposal).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -80,12 +89,18 @@ pub fn seed_name_for_agent(agent: &str) -> &str {
 ///   changes, so a store written by this build still reads under an older one.
 ///
 /// Every SQL read or write of a `layer` column uses the storage id.
+///
+/// [`Self::ToneExemplars`] is the exception: it is stored in its own table,
+/// `soul_tone_exemplar_revisions`, which has no `layer` column, so no
+/// `soul_revisions` row ever carries it (see [`Self::table`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SoulLayer {
     Identity,
     Principles,
     Tone,
+    /// The owner-written examples of how the agent sounds (ADR-018 §3).
+    ToneExemplars,
     Story,
 }
 
@@ -97,6 +112,7 @@ impl SoulLayer {
             Self::Identity => "identity",
             Self::Principles => "principles",
             Self::Tone => "tone",
+            Self::ToneExemplars => "tone_exemplars",
             Self::Story => "story",
         }
     }
@@ -107,23 +123,47 @@ impl SoulLayer {
             "identity" => Some(Self::Identity),
             "principles" => Some(Self::Principles),
             "tone" => Some(Self::Tone),
+            "tone_exemplars" => Some(Self::ToneExemplars),
             "story" => Some(Self::Story),
             _ => None,
         }
     }
 
-    /// Identifier stored in the `layer` column of `soul_revisions`.
+    /// Identifier stored in the `layer` column of `soul_revisions`. For
+    /// [`Self::ToneExemplars`] it is only a bound constant: that layer has its
+    /// own table and no `layer` column.
     #[must_use]
     pub fn storage_id(self) -> &'static str {
         match self {
             Self::Identity => "identity",
             Self::Principles => "principles",
             Self::Tone => "voice",
+            Self::ToneExemplars => "tone_exemplars",
             Self::Story => "growth",
         }
     }
 
-    /// Parse a `layer` column value written by this or an older build.
+    /// The table holding this layer's revisions.
+    fn table(self) -> &'static str {
+        match self {
+            Self::ToneExemplars => TONE_EXEMPLAR_REVISIONS_TABLE,
+            _ => "soul_revisions",
+        }
+    }
+
+    /// `WHERE` predicate for one agent's rows of this layer; binds the agent
+    /// as `?1` and [`Self::storage_id`] as `?2`. The exemplar table holds one
+    /// layer and has no `layer` column, so its predicate only checks that the
+    /// bound id is its own, which keeps one parameter shape for both tables.
+    fn rows_of_layer(self) -> &'static str {
+        match self {
+            Self::ToneExemplars => "agent = ?1 AND ?2 = 'tone_exemplars'",
+            _ => "agent = ?1 AND layer = ?2",
+        }
+    }
+
+    /// Parse a `layer` column value of `soul_revisions` written by this or an
+    /// older build. `tone_exemplars` is deliberately not one of them.
     fn from_storage_id(value: &str) -> Option<Self> {
         match value {
             "identity" => Some(Self::Identity),
@@ -367,6 +407,103 @@ impl SoulTone {
     }
 }
 
+/// Maximum number of Tone exemplars (ADR-018 §3).
+pub const SOUL_MAX_TONE_EXEMPLARS: usize = 4;
+/// Maximum bytes of an exemplar's situation.
+pub const SOUL_TONE_EXEMPLAR_SITUATION_MAX_BYTES: usize = 80;
+/// Maximum bytes of the owner's line in an exemplar.
+pub const SOUL_TONE_EXEMPLAR_OWNER_LINE_MAX_BYTES: usize = 160;
+/// Maximum bytes of the agent's line in an exemplar.
+pub const SOUL_TONE_EXEMPLAR_AGENT_LINE_MAX_BYTES: usize = 320;
+
+/// Table of Tone exemplar revisions, owned by [`SoulProfileStore`].
+const TONE_EXEMPLAR_REVISIONS_TABLE: &str = "soul_tone_exemplar_revisions";
+
+/// One short exchange that shows how the agent sounds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToneExemplar {
+    /// When this applies, for example "owner is tired after work".
+    pub situation: String,
+    pub owner_line: String,
+    pub agent_line: String,
+}
+
+/// The stored Tone exemplars: examples of tone to copy, never facts to repeat.
+/// Written by the owner only; the agent has no path to this layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SoulToneExemplars {
+    pub exemplars: Vec<ToneExemplar>,
+}
+
+impl SoulToneExemplars {
+    /// Trim every field and enforce the ADR-018 §3 bounds. Each field must be
+    /// one non-empty line without control characters, so an exemplar cannot
+    /// start a prompt heading or a list item of its own.
+    pub fn normalized(self) -> Result<Self, SoulProfileError> {
+        if self.exemplars.len() > SOUL_MAX_TONE_EXEMPLARS {
+            return Err(SoulProfileError::ToneValidation {
+                field: "exemplars",
+                key: "soul-tone-exemplars-too-many",
+            });
+        }
+        let mut exemplars = Vec::with_capacity(self.exemplars.len());
+        for exemplar in self.exemplars {
+            exemplars.push(ToneExemplar {
+                situation: checked_exemplar_field(
+                    "situation",
+                    &exemplar.situation,
+                    SOUL_TONE_EXEMPLAR_SITUATION_MAX_BYTES,
+                )?,
+                owner_line: checked_exemplar_field(
+                    "owner_line",
+                    &exemplar.owner_line,
+                    SOUL_TONE_EXEMPLAR_OWNER_LINE_MAX_BYTES,
+                )?,
+                agent_line: checked_exemplar_field(
+                    "agent_line",
+                    &exemplar.agent_line,
+                    SOUL_TONE_EXEMPLAR_AGENT_LINE_MAX_BYTES,
+                )?,
+            });
+        }
+        Ok(Self { exemplars })
+    }
+}
+
+fn checked_exemplar_field(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<String, SoulProfileError> {
+    let value = value.trim();
+    // Unicode line and paragraph separators are not control characters but
+    // still break a line for many readers.
+    if value
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(SoulProfileError::ToneValidation {
+            field,
+            key: "soul-tone-exemplar-single-line",
+        });
+    }
+    if value.is_empty() {
+        return Err(SoulProfileError::ToneValidation {
+            field,
+            key: "soul-tone-exemplar-empty",
+        });
+    }
+    if value.len() > max_bytes {
+        return Err(SoulProfileError::ToneValidation {
+            field,
+            key: "soul-tone-exemplar-too-long",
+        });
+    }
+    Ok(value.to_string())
+}
+
 /// Resolve effective values and per-key provenance from the canonical config
 /// selection and immutable stored Tone head. The result is never persisted.
 pub fn resolve_effective_tone(
@@ -426,6 +563,7 @@ pub struct SoulProfile {
     pub identity: Option<SoulRevision<SoulIdentity>>,
     pub principles: Option<SoulRevision<SoulPrinciples>>,
     pub tone: Option<SoulRevision<SoulTone>>,
+    pub tone_exemplars: Option<SoulRevision<SoulToneExemplars>>,
     pub story: Option<SoulRevision<SoulStory>>,
 }
 
@@ -436,6 +574,7 @@ struct SoulHistory {
     identity: Vec<SoulRevision<SoulIdentity>>,
     principles: Vec<SoulRevision<SoulPrinciples>>,
     tone: Vec<SoulRevision<SoulTone>>,
+    tone_exemplars: Vec<SoulRevision<SoulToneExemplars>>,
     story: Vec<SoulRevision<SoulStory>>,
     /// Stored anchor rows, oldest first. A default anchor is derived, not stored.
     anchors: Vec<SoulAnchor>,
@@ -892,6 +1031,22 @@ impl SoulProfileStore {
              CREATE TRIGGER IF NOT EXISTS soul_revisions_no_delete
                 BEFORE DELETE ON soul_revisions
                 BEGIN SELECT RAISE(ABORT, 'soul revisions are append-only'); END;
+             CREATE TABLE IF NOT EXISTS soul_tone_exemplar_revisions (
+                agent TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                source TEXT NOT NULL CHECK (source = 'owner'),
+                body TEXT NOT NULL,
+                rolled_back_from INTEGER,
+                proposal_id INTEGER CHECK (proposal_id IS NULL),
+                created_at_unix INTEGER NOT NULL,
+                PRIMARY KEY (agent, revision)
+             );
+             CREATE TRIGGER IF NOT EXISTS soul_tone_exemplar_revisions_no_update
+                BEFORE UPDATE ON soul_tone_exemplar_revisions
+                BEGIN SELECT RAISE(ABORT, 'soul tone exemplar revisions are append-only'); END;
+             CREATE TRIGGER IF NOT EXISTS soul_tone_exemplar_revisions_no_delete
+                BEFORE DELETE ON soul_tone_exemplar_revisions
+                BEGIN SELECT RAISE(ABORT, 'soul tone exemplar revisions are append-only'); END;
              CREATE TABLE IF NOT EXISTS soul_proposals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 agent TEXT NOT NULL,
@@ -994,14 +1149,15 @@ impl SoulProfileStore {
     }
 
     /// A cheap change marker for one agent's Soul: the number of stored
-    /// revisions across every layer. Revisions are append-only, so any owner
-    /// write, approved proposal, rollback, or seed moves it; resolving a
-    /// proposal without applying it does not.
+    /// revisions across every layer, Tone exemplars included. Revisions are
+    /// append-only, so any owner write, approved proposal, rollback, or seed
+    /// moves it; resolving a proposal without applying it does not.
     pub fn revision_stamp(&self, agent: &str) -> Result<u64, SoulProfileError> {
         let agent = checked_agent(agent)?;
         let conn = self.conn.lock();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM soul_revisions WHERE agent = ?1",
+            "SELECT (SELECT COUNT(*) FROM soul_revisions WHERE agent = ?1)
+                  + (SELECT COUNT(*) FROM soul_tone_exemplar_revisions WHERE agent = ?1)",
             params![agent],
             |row| row.get(0),
         )?;
@@ -1138,6 +1294,25 @@ impl SoulProfileStore {
         self.append_owner(agent, SoulLayer::Tone, tone, expected_revision, now_unix)
     }
 
+    /// Owner write of the Tone exemplars. There is no proposal path to this
+    /// layer: only an owner action on exact text can write it.
+    pub fn set_tone_exemplars(
+        &self,
+        agent: &str,
+        exemplars: SoulToneExemplars,
+        expected_revision: u64,
+        now_unix: u64,
+    ) -> Result<SoulRevision<SoulToneExemplars>, SoulProfileError> {
+        let exemplars = exemplars.normalized()?;
+        self.append_owner(
+            agent,
+            SoulLayer::ToneExemplars,
+            exemplars,
+            expected_revision,
+            now_unix,
+        )
+    }
+
     /// Every revision of one layer, oldest first.
     pub fn history(
         &self,
@@ -1146,10 +1321,12 @@ impl SoulProfileStore {
     ) -> Result<Vec<SoulRevision<serde_json::Value>>, SoulProfileError> {
         let agent = checked_agent(agent)?;
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT revision, source, body, rolled_back_from, created_at_unix, proposal_id
-             FROM soul_revisions WHERE agent = ?1 AND layer = ?2 ORDER BY revision ASC",
-        )?;
+             FROM {} WHERE {} ORDER BY revision ASC",
+            layer.table(),
+            layer.rows_of_layer()
+        ))?;
         let rows = stmt.query_map(params![agent, layer.storage_id()], raw_row)?;
         let mut out = Vec::new();
         for row in rows {
@@ -1187,7 +1364,9 @@ impl SoulProfileStore {
                 Some(SoulLayer::Principles) => history.principles.push(decode(row)?),
                 Some(SoulLayer::Tone) => history.tone.push(decode(row)?),
                 Some(SoulLayer::Story) => history.story.push(decode(row)?),
-                None => {
+                // Exemplars live in their own table; a `soul_revisions` row
+                // that claims them is as unknown as any other stray layer.
+                Some(SoulLayer::ToneExemplars) | None => {
                     return Err(SoulProfileError::Storage(format!(
                         "unknown soul layer {layer:?}"
                     )));
@@ -1195,11 +1374,20 @@ impl SoulProfileStore {
             }
         }
         drop(stmt);
+        let mut stmt = tx.prepare(&format!(
+            "SELECT revision, source, body, rolled_back_from, created_at_unix, proposal_id
+             FROM {TONE_EXEMPLAR_REVISIONS_TABLE} WHERE agent = ?1 ORDER BY revision ASC"
+        ))?;
+        for row in stmt.query_map(params![agent], raw_row)? {
+            history.tone_exemplars.push(decode(row?)?);
+        }
+        drop(stmt);
         history.anchors = anchor_rows(&tx, agent)?;
         let profile = SoulProfile {
             identity: history.identity.last().cloned(),
             principles: history.principles.last().cloned(),
             tone: history.tone.last().cloned(),
+            tone_exemplars: history.tone_exemplars.last().cloned(),
             story: history.story.last().cloned(),
         };
         let history =
@@ -1677,6 +1865,9 @@ fn profile_of(conn: &Connection, agent: &str) -> Result<SoulProfile, SoulProfile
         tone: head(conn, agent, SoulLayer::Tone)?
             .map(decode::<SoulTone>)
             .transpose()?,
+        tone_exemplars: head(conn, agent, SoulLayer::ToneExemplars)?
+            .map(decode::<SoulToneExemplars>)
+            .transpose()?,
         story: head(conn, agent, SoulLayer::Story)?
             .map(decode::<SoulStory>)
             .transpose()?,
@@ -2049,7 +2240,11 @@ fn rollback_in(
     let current = current_revision(conn, agent, layer, expected_revision)?;
     let target: Option<String> = conn
         .query_row(
-            "SELECT body FROM soul_revisions WHERE agent = ?1 AND layer = ?2 AND revision = ?3",
+            &format!(
+                "SELECT body FROM {} WHERE {} AND revision = ?3",
+                layer.table(),
+                layer.rows_of_layer()
+            ),
             params![agent, layer.storage_id(), to_revision],
             |row| row.get(0),
         )
@@ -2371,9 +2566,12 @@ fn head(
 ) -> Result<Option<RawRow>, SoulProfileError> {
     Ok(conn
         .query_row(
-            "SELECT revision, source, body, rolled_back_from, created_at_unix, proposal_id
-             FROM soul_revisions WHERE agent = ?1 AND layer = ?2
-             ORDER BY revision DESC LIMIT 1",
+            &format!(
+                "SELECT revision, source, body, rolled_back_from, created_at_unix, proposal_id
+                 FROM {} WHERE {} ORDER BY revision DESC LIMIT 1",
+                layer.table(),
+                layer.rows_of_layer()
+            ),
             params![agent, layer.storage_id()],
             raw_row,
         )
@@ -2427,6 +2625,26 @@ fn insert<T: Serialize>(
 ) -> Result<(), SoulProfileError> {
     let body =
         serde_json::to_string(value).map_err(|e| SoulProfileError::Storage(e.to_string()))?;
+    if new.layer == SoulLayer::ToneExemplars {
+        // The one place a row is routed away from `soul_revisions`.
+        conn.execute(
+            &format!(
+                "INSERT INTO {TONE_EXEMPLAR_REVISIONS_TABLE}
+                 (agent, revision, source, body, rolled_back_from, proposal_id, created_at_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            ),
+            params![
+                new.agent,
+                new.revision,
+                new.source.as_str(),
+                body,
+                new.rolled_back_from,
+                new.proposal_id,
+                new.now_unix
+            ],
+        )?;
+        return Ok(());
+    }
     conn.execute(
         "INSERT INTO soul_revisions
          (agent, layer, revision, source, body, rolled_back_from, proposal_id, created_at_unix)
@@ -3563,10 +3781,12 @@ mod tests {
         let (profile, history) = store.export("agent_a").unwrap();
         assert!(profile.identity.is_none() && profile.principles.is_none());
         assert!(profile.story.is_none() && profile.tone.is_none());
+        assert!(profile.tone_exemplars.is_none());
         assert_eq!(
             history,
             serde_json::json!({
-                "identity": [], "principles": [], "story": [], "tone": [], "anchors": []
+                "identity": [], "principles": [], "story": [], "tone": [],
+                "tone_exemplars": [], "anchors": []
             })
         );
         assert_eq!(store.revision_stamp("agent_a").unwrap(), 0);
@@ -3966,6 +4186,16 @@ mod tests {
         assert_eq!(SoulLayer::parse("growth"), None);
         assert_eq!(SoulLayer::from_storage_id("tone"), None);
         assert_eq!(SoulLayer::from_storage_id("story"), None);
+        // Tone exemplars have a public name but no `soul_revisions` layer id,
+        // and the agent cannot propose them.
+        assert_eq!(SoulLayer::ToneExemplars.as_str(), "tone_exemplars");
+        assert_eq!(
+            SoulLayer::parse("tone_exemplars"),
+            Some(SoulLayer::ToneExemplars)
+        );
+        assert_eq!(SoulLayer::from_storage_id("tone_exemplars"), None);
+        assert_eq!(SoulProposalLayer::parse("tone_exemplars"), None);
+        assert_eq!(SoulProposalLayer::from_storage_id("tone_exemplars"), None);
 
         for (layer, public, storage) in [
             (SoulProposalLayer::Principles, "principles", "principles"),
@@ -4969,5 +5199,454 @@ mod tests {
             .unwrap();
         // Reopening is idempotent.
         SoulProfileStore::open(dir.path()).unwrap();
+    }
+
+    fn exemplar(situation: &str, owner: &str, agent: &str) -> ToneExemplar {
+        ToneExemplar {
+            situation: situation.into(),
+            owner_line: owner.into(),
+            agent_line: agent.into(),
+        }
+    }
+
+    fn exemplars(items: Vec<ToneExemplar>) -> SoulToneExemplars {
+        SoulToneExemplars { exemplars: items }
+    }
+
+    fn one_exemplar() -> SoulToneExemplars {
+        exemplars(vec![exemplar(
+            "主人下班后很累",
+            "今天好累。",
+            "辛苦了。先坐一会儿,我来处理剩下的。",
+        )])
+    }
+
+    fn exemplar_error(value: SoulToneExemplars) -> (&'static str, &'static str) {
+        match value.normalized() {
+            Err(SoulProfileError::ToneValidation { field, key }) => (field, key),
+            other => panic!("expected a tone validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exemplars_are_trimmed_single_line_and_bounded_in_bytes() {
+        let ok = exemplars(vec![exemplar("  tired  ", " hi ", " hello\u{3000}")])
+            .normalized()
+            .unwrap();
+        assert_eq!(ok.exemplars[0], exemplar("tired", "hi", "hello"));
+
+        // Caps are bytes after trimming; each field at its cap is accepted.
+        let at_caps = exemplar(
+            &"s".repeat(SOUL_TONE_EXEMPLAR_SITUATION_MAX_BYTES),
+            &"o".repeat(SOUL_TONE_EXEMPLAR_OWNER_LINE_MAX_BYTES),
+            &"a".repeat(SOUL_TONE_EXEMPLAR_AGENT_LINE_MAX_BYTES),
+        );
+        assert!(exemplars(vec![at_caps.clone()]).normalized().is_ok());
+        for (field, over) in [
+            ("situation", exemplar(&"s".repeat(81), "o", "a")),
+            ("owner_line", exemplar("s", &"o".repeat(161), "a")),
+            ("agent_line", exemplar("s", "o", &"a".repeat(321))),
+        ] {
+            assert_eq!(
+                exemplar_error(exemplars(vec![over])),
+                (field, "soul-tone-exemplar-too-long")
+            );
+        }
+        // CJK counts three bytes a character: 27 characters fit 80 bytes, 28 do not.
+        assert!(
+            exemplars(vec![exemplar(&"累".repeat(26), "o", "a")])
+                .normalized()
+                .is_ok()
+        );
+        assert_eq!(
+            exemplar_error(exemplars(vec![exemplar(&"累".repeat(27), "o", "a")])),
+            ("situation", "soul-tone-exemplar-too-long")
+        );
+
+        // Empty after trimming.
+        for (field, empty) in [
+            ("situation", exemplar("  ", "o", "a")),
+            ("owner_line", exemplar("s", "", "a")),
+            ("agent_line", exemplar("s", "o", "\u{3000}")),
+        ] {
+            assert_eq!(
+                exemplar_error(exemplars(vec![empty])),
+                (field, "soul-tone-exemplar-empty")
+            );
+        }
+
+        // Anything that breaks a line is refused, in any field.
+        for bad in [
+            "a\nb",
+            "a\r\nb",
+            "a\rb",
+            "a\n## Heading",
+            "a\tb",
+            "a\u{0085}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+            "a\u{0}b",
+        ] {
+            for (field, value) in [
+                ("situation", exemplar(bad, "o", "a")),
+                ("owner_line", exemplar("s", bad, "a")),
+                ("agent_line", exemplar("s", "o", bad)),
+            ] {
+                assert_eq!(
+                    exemplar_error(exemplars(vec![value])),
+                    (field, "soul-tone-exemplar-single-line"),
+                    "{bad:?}"
+                );
+            }
+        }
+        // A heading marker on one line cannot start a heading in the prompt:
+        // the renderer always puts a label first.
+        assert!(
+            exemplars(vec![exemplar("## s", "## o", "## a")])
+                .normalized()
+                .is_ok()
+        );
+
+        // Count: four, not five. Zero clears them.
+        let four = vec![exemplar("s", "o", "a"); SOUL_MAX_TONE_EXEMPLARS];
+        assert!(exemplars(four.clone()).normalized().is_ok());
+        let mut five = four;
+        five.push(exemplar("s", "o", "a"));
+        assert_eq!(
+            exemplar_error(exemplars(five)),
+            ("exemplars", "soul-tone-exemplars-too-many")
+        );
+        assert!(exemplars(Vec::new()).normalized().is_ok());
+    }
+
+    #[test]
+    fn exemplar_json_refuses_unknown_fields() {
+        assert!(
+            serde_json::from_str::<SoulToneExemplars>(
+                r#"{"exemplars":[{"situation":"s","owner_line":"o","agent_line":"a","extra":1}]}"#
+            )
+            .is_err()
+        );
+        assert!(serde_json::from_str::<SoulToneExemplars>(r#"{"exemplars":[],"x":1}"#).is_err());
+        assert!(
+            serde_json::from_str::<SoulToneExemplars>(
+                r#"{"exemplars":[{"situation":"s","owner_line":"o"}]}"#
+            )
+            .is_err()
+        );
+    }
+
+    fn soul_revision_layers(dir: &tempfile::TempDir) -> Vec<String> {
+        raw_layers(dir, "soul_revisions")
+    }
+
+    fn exemplar_rows(dir: &tempfile::TempDir) -> i64 {
+        Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM soul_tone_exemplar_revisions",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn exemplar_writes_use_cas_history_and_rollback_in_their_own_table() {
+        let (dir, store) = store();
+        store.ensure_seeded("nova", "Nova", 1).unwrap();
+        assert!(store.profile("nova").unwrap().tone_exemplars.is_none());
+        let stamp = store.revision_stamp("nova").unwrap();
+
+        let first = store
+            .set_tone_exemplars("nova", one_exemplar(), 0, 10)
+            .unwrap();
+        assert_eq!(first.revision, 1);
+        assert_eq!(first.source, SoulSource::Owner);
+        assert_eq!(first.proposal_id, None);
+        assert_eq!(first.created_at_unix, 10);
+        assert!(
+            store.revision_stamp("nova").unwrap() > stamp,
+            "an exemplar write moves the prompt-cache stamp"
+        );
+
+        // Compare-and-set: a stale editor gets a typed conflict and writes nothing.
+        match store.set_tone_exemplars("nova", exemplars(Vec::new()), 0, 11) {
+            Err(SoulProfileError::Conflict {
+                layer,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(layer, SoulLayer::ToneExemplars);
+                assert_eq!((expected, actual), (0, 1));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Invalid input writes nothing either.
+        assert!(
+            store
+                .set_tone_exemplars("nova", exemplars(vec![exemplar("s", "o\nx", "a")]), 1, 12)
+                .is_err()
+        );
+        assert_eq!(exemplar_rows(&dir), 1);
+
+        let second = store
+            .set_tone_exemplars("nova", exemplars(Vec::new()), 1, 20)
+            .unwrap();
+        assert_eq!(second.revision, 2);
+        assert_eq!(
+            store
+                .profile("nova")
+                .unwrap()
+                .tone_exemplars
+                .unwrap()
+                .value
+                .exemplars,
+            Vec::new()
+        );
+
+        let history = store.history("nova", SoulLayer::ToneExemplars).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].revision, 1);
+        assert_eq!(
+            history[0].value,
+            serde_json::to_value(one_exemplar()).unwrap()
+        );
+
+        // Rollback appends a copy through the shared path.
+        assert!(matches!(
+            store.rollback("nova", SoulLayer::ToneExemplars, 1, 1, 30),
+            Err(SoulProfileError::Conflict { .. })
+        ));
+        assert!(matches!(
+            store.rollback("nova", SoulLayer::ToneExemplars, 9, 2, 30),
+            Err(SoulProfileError::NotFound { revision: 9, .. })
+        ));
+        let rolled = store
+            .rollback("nova", SoulLayer::ToneExemplars, 1, 2, 30)
+            .unwrap();
+        assert_eq!((rolled.revision, rolled.rolled_back_from), (3, Some(1)));
+        let head = store.profile("nova").unwrap().tone_exemplars.unwrap();
+        assert_eq!(head.value, one_exemplar());
+        assert_eq!(head.rolled_back_from, Some(1));
+        assert_eq!(head.source, SoulSource::Owner);
+        assert_eq!(
+            store
+                .history("nova", SoulLayer::ToneExemplars)
+                .unwrap()
+                .len(),
+            3
+        );
+
+        // Agents are isolated.
+        assert!(store.profile("other").unwrap().tone_exemplars.is_none());
+        assert!(
+            store
+                .history("other", SoulLayer::ToneExemplars)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .set_tone_exemplars("other", one_exemplar(), 0, 40)
+                .unwrap()
+                .revision,
+            1
+        );
+
+        // soul_revisions never saw a tone_exemplars row.
+        assert_eq!(soul_revision_layers(&dir), ["identity", "principles"]);
+        assert_eq!(exemplar_rows(&dir), 4);
+    }
+
+    #[test]
+    fn exemplar_writes_do_not_touch_the_other_layers_or_the_anchor() {
+        let (_dir, store) = store();
+        store.ensure_seeded("nova", "Nova", 1).unwrap();
+        let before = store.profile("nova").unwrap();
+        let anchor = store.anchor("nova").unwrap();
+        store
+            .set_tone_exemplars("nova", one_exemplar(), 0, 10)
+            .unwrap();
+        let after = store.profile("nova").unwrap();
+        assert_eq!(after.identity, before.identity);
+        assert_eq!(after.principles, before.principles);
+        assert_eq!(after.tone, before.tone);
+        assert_eq!(after.story, before.story);
+        assert_eq!(store.anchor("nova").unwrap(), anchor);
+        assert_eq!(stored_anchor_rows(&store), 0);
+    }
+
+    #[test]
+    fn the_exemplar_table_is_append_only_and_owner_only_even_with_raw_sql() {
+        let (dir, store) = store();
+        store
+            .set_tone_exemplars("nova", one_exemplar(), 0, 10)
+            .unwrap();
+        drop(store);
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        assert!(
+            conn.execute("UPDATE soul_tone_exemplar_revisions SET body = '{}'", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("DELETE FROM soul_tone_exemplar_revisions", [])
+                .is_err()
+        );
+        for (source, proposal_id) in [
+            ("approved_proposal", "NULL"),
+            ("seed", "NULL"),
+            ("owner", "7"),
+        ] {
+            assert!(
+                conn.execute(
+                    &format!(
+                        "INSERT INTO soul_tone_exemplar_revisions
+                         (agent, revision, source, body, rolled_back_from, proposal_id, created_at_unix)
+                         VALUES ('nova', 2, '{source}', '{{\"exemplars\":[]}}', NULL, {proposal_id}, 1)"
+                    ),
+                    [],
+                )
+                .is_err(),
+                "{source} {proposal_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_carries_exemplars_in_profile_and_history_from_one_snapshot() {
+        let (_dir, store) = store();
+        let (profile, history) = store.export("nova").unwrap();
+        assert!(profile.tone_exemplars.is_none());
+        assert_eq!(history["tone_exemplars"], serde_json::json!([]));
+
+        store.ensure_seeded("nova", "Nova", 1).unwrap();
+        store
+            .set_tone_exemplars("nova", one_exemplar(), 0, 10)
+            .unwrap();
+        store
+            .set_tone_exemplars("nova", exemplars(Vec::new()), 1, 20)
+            .unwrap();
+        store
+            .rollback("nova", SoulLayer::ToneExemplars, 1, 2, 30)
+            .unwrap();
+        store
+            .set_tone_exemplars("other", one_exemplar(), 0, 40)
+            .unwrap();
+        let stamp = store.revision_stamp("nova").unwrap();
+        let (profile, history) = store.export("nova").unwrap();
+        assert_eq!(profile, store.profile("nova").unwrap());
+        let rows = history["tone_exemplars"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "agents are isolated");
+        assert_eq!(rows[0]["revision"], 1);
+        assert_eq!(rows[0]["source"], "owner");
+        assert_eq!(rows[2]["rolled_back_from"], 1);
+        assert_eq!(
+            &serde_json::to_value(profile.tone_exemplars.as_ref().unwrap()).unwrap(),
+            rows.last().unwrap()
+        );
+        assert_eq!(
+            store.revision_stamp("nova").unwrap(),
+            stamp,
+            "export reads only"
+        );
+    }
+
+    #[test]
+    fn a_store_from_before_exemplars_opens_and_soul_revisions_never_receives_them() {
+        // The older format has no exemplar table.
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        conn.execute_batch(PRE_RENAME_DDL).unwrap();
+        conn.execute_batch(PRE_RENAME_ROWS).unwrap();
+        let has_table = |conn: &Connection| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'soul_tone_exemplar_revisions'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+                == 1
+        };
+        assert!(!has_table(&conn));
+        let before = raw_layers(&dir, "soul_revisions");
+        drop(conn);
+
+        let store = SoulProfileStore::open(dir.path()).unwrap();
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        assert!(has_table(&conn), "opening adds the table");
+        drop(conn);
+        // Existing rows are untouched and read back; there are no exemplars yet.
+        let profile = store.profile("a").unwrap();
+        assert!(profile.tone_exemplars.is_none());
+        assert_eq!(profile.tone.unwrap().revision, 2);
+        assert_eq!(profile.story.unwrap().revision, 1);
+        assert!(store.export("a").is_ok());
+
+        // Every kind of write, exemplars included.
+        store
+            .set_tone_exemplars("a", one_exemplar(), 0, 100)
+            .unwrap();
+        store
+            .rollback("a", SoulLayer::ToneExemplars, 1, 1, 101)
+            .unwrap();
+        store
+            .set_tone(
+                "a",
+                SoulTone {
+                    heads: [("warmth".into(), zeroclaw_config::persona::PersonaLevel::Low)].into(),
+                },
+                2,
+                102,
+            )
+            .unwrap();
+        let after = raw_layers(&dir, "soul_revisions");
+        assert_eq!(after, before, "no new layer value in soul_revisions");
+        assert!(
+            after.iter().all(
+                |layer| ["identity", "principles", "voice", "growth"].contains(&layer.as_str())
+            ),
+            "{after:?}"
+        );
+        assert_eq!(exemplar_rows(&dir), 2);
+
+        // An older reader that only knows `soul_revisions` still exports: its
+        // query finds the same four layer ids and nothing else.
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        let unknown: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM soul_revisions
+                 WHERE layer NOT IN ('identity','principles','voice','growth')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unknown, 0);
+        // Reopening is idempotent and keeps the revisions.
+        drop(store);
+        let store = SoulProfileStore::open(dir.path()).unwrap();
+        assert_eq!(
+            store.profile("a").unwrap().tone_exemplars.unwrap().revision,
+            2
+        );
+    }
+
+    #[test]
+    fn a_soul_revisions_row_claiming_exemplars_is_refused_not_read() {
+        let (dir, store) = store();
+        store.ensure_seeded("nova", "Nova", 1).unwrap();
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        conn.execute(
+            "INSERT INTO soul_revisions
+             (agent, layer, revision, source, body, rolled_back_from, proposal_id, created_at_unix)
+             VALUES ('nova', 'tone_exemplars', 1, 'owner', '{\"exemplars\":[]}', NULL, NULL, 1)",
+            [],
+        )
+        .unwrap();
+        assert!(store.profile("nova").unwrap().tone_exemplars.is_none());
+        assert!(matches!(
+            store.export("nova"),
+            Err(SoulProfileError::Storage(message)) if message.contains("unknown soul layer")
+        ));
     }
 }

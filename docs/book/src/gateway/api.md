@@ -567,19 +567,52 @@ those never appear in the API, and "voice" in this API means audio only.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/soul?agent=<alias>` | Current `identity`, `principles`, and `story` heads (each with `revision`, `source`, and `value`), `tone` (`configured` dials, `stored` heads, `effective` dials and per-key `sources`), `legacy_persona_files` (`injected` or `suppressed`), and `last_reflection`. Seeds missing layers on first read. |
-| `GET /api/soul/history?agent=<alias>&layer=identity\|principles\|tone\|story` | Every revision of one layer, oldest first. |
-| `GET /api/soul/export?agent=<alias>` | Download JSON (`format_version: 3`) containing `agent`, four current layers in `profile`, all four per-layer revision arrays and the stored `anchors` rows in `history` (oldest first), and `tone` (`configured`, `effective`, `sources`). Current heads and history come from one read snapshot. |
+| `GET /api/soul?agent=<alias>` | Current `identity`, `principles`, and `story` heads (each with `revision`, `source`, and `value`), `tone` (`configured` dials, `stored` heads, `effective` dials, per-key `sources`, and `exemplars`: the head revision of the Tone exemplars with `revision`, `source`, `created_at_unix` and `value`, or `null` when there are none), `legacy_persona_files` (`injected` or `suppressed`), and `last_reflection`. Seeds missing layers on first read. |
+| `GET /api/soul/history?agent=<alias>&layer=identity\|principles\|tone\|tone_exemplars\|story` | Every revision of one layer, oldest first. |
+| `GET /api/soul/export?agent=<alias>` | Download JSON (`format_version: 4`) containing `agent`, the current layers in `profile` (the four layers and `tone_exemplars`), the per-layer revision arrays (also including `tone_exemplars`) and the stored `anchors` rows in `history` (oldest first), and `tone` (`configured`, `effective`, `sources`). Current heads and history come from one read snapshot. |
 | `PUT /api/soul/identity` | Body `{ "agent", "expected_revision", "identity": { "name", "self_description"?, "primary_language"?, "pronouns"? } }`. |
 | `PUT /api/soul/principles` | Body `{ "agent", "expected_revision", "items": [ ... ] }`, at most 8 single-line items of up to 240 bytes. |
 | `PUT /api/soul/tone` | Body `{ "agent", "expected_revision", "tone": { "heads": { "<key>": "<level>" } } }`. Keys are the five persona dials; a stored head wins over the configured dial for its key. The owner may set any level, and an owner write starts no dial cooldown. |
+| `PUT /api/soul/tone/exemplars` | Body `{ "agent", "expected_revision", "exemplars": [ { "situation", "owner_line", "agent_line" } ] }`. At most 4 exemplars (an empty list clears them); `expected_revision` is `0` when there are none yet. Each field is one non-empty line without control characters, at most 80 (`situation`), 160 (`owner_line`) and 320 (`agent_line`) bytes after trimming. A violation returns 400 `code: "invalid"` with `field` and a localized `reason`; a stale revision returns the 409 `revision_conflict`. Owner-only: no model tool or reflection can write an exemplar. See [Tone exemplars](#tone-exemplars). |
 | `PUT /api/soul/story` | Body `{ "agent", "expected_revision", "story": { "entries": [ { "kind": "self" \| "bond", "text" } ] } }`, at most 12 single-line entries of up to 200 bytes. `self` is concerns, interests and working habits; `bond` is shared names, references, running jokes and ways of working. |
-| `POST /api/soul/rollback` | Body `{ "agent", "layer", "to_revision", "expected_revision" }`. Appends a copy of an earlier revision. |
+| `POST /api/soul/rollback` | Body `{ "agent", "layer", "to_revision", "expected_revision" }`; `layer` is `identity`, `principles`, `tone`, `tone_exemplars` or `story`. Appends a copy of an earlier revision. |
 | `GET /api/soul/drift?agent=<alias>` | `{ "agent", "anchor", "drift" }`: the current anchor and how far the Soul sits from it (see below). Read-only; it never stores a default anchor. |
 | `POST /api/soul/anchor` | Body `{ "agent", "expected_tone_revision", "expected_story_revision" }`. "Keep": appends an anchor at the current Tone and Story heads and returns `{ "agent", "anchor" }`. Each expected revision is the layer's current head (`0` when it has none); a stale one returns 409 `revision_conflict` and stores nothing. |
 | `POST /api/soul/anchor/rollback` | Same body. "Roll back": appends Tone and Story revisions equal to the anchor's, in one transaction, through the same path as `POST /api/soul/rollback` (`source: "owner"`, `rolled_back_from` set). Returns `{ "agent", "tone_revision", "story_revision" }`, each the new revision or `null` when that layer already equalled the anchor. An anchor with no Tone revision restores empty heads, and one with no Story revision restores no entries. The anchor stays where it was. A stale expected revision returns 409 `revision_conflict` and writes nothing. |
 | `GET /api/soul/proposals?agent=<alias>[&pending=true]` | The agent's own proposals to change its tone, story, or principles, oldest first. A story proposal carries `story_kind`. |
 | `POST /api/soul/proposals/{id}/resolve` | Body `{ "agent", "resolution": "accepted" \| "dismissed", "note"?, "final_text"? }`. Accepting applies the proposal and returns `applied_revision`. Each proposal resolves once; a repeat returns 409 with `code: "proposal_already_resolved"`. A Story retirement is bound to the entry it named when submitted (`retire_target`, read from `target_revision`); if the owner has since removed or reworded that entry, accepting returns 409 with `code: "proposal_stale"` and the proposal stays pending for dismissal. A Tone proposal that would lower `challenge` or change a dial inside its cooldown is refused when accepted, the same way (see below); the cooldown refusal returns 429 with `code: "tone_dial_cooldown"`, the `dial`, and `until_unix`. |
+
+### Tone exemplars
+
+Tone holds the five dials and up to four exemplars: short exchanges that show how
+the agent sounds
+([ADR-018](../architecture/decisions/ADR-018-soul-character-model.md) §3). They
+render inside `## Tone`, after the dial lines, as
+
+```text
+Examples of how you sound. Copy the tone, never the facts or claims in them.
+
+- Situation: <situation>
+  Owner: <owner_line>
+  You: <agent_line>
+```
+
+The block is capped at 1,536 bytes, framing line included. Whole exemplars are cut
+from the end, and an elision marker such as `(+2 exemplars elided)` replaces them.
+Nothing renders when there are none. When the prompt exceeds its budget the Tone
+section, exemplars with it, is dropped after Story.
+
+Exemplars are stored in their own append-only table, `soul_tone_exemplar_revisions`
+in `soul.db`, owned by the Soul profile store. It has the columns of
+`soul_revisions` without `layer`, and revisions, compare-and-set, history, rollback
+and export behave as for the other layers. `soul_revisions` never holds an
+exemplar row, so an earlier build still reads and exports the same store. Only the
+owner writes them (`source: "owner"`): `propose_soul_change` has no exemplar input
+and refuses one, reflection output that carries one is dropped, and reflection
+never reads exemplar text. The PWA's Review page (My Agent, Tone) lists and edits
+them and offers "Use as tone example" on an assistant reply in the chat, which
+opens the editor prefilled with that reply and the owner's message before it. Nothing
+is stored until the owner saves.
 
 ### Anchor and drift
 

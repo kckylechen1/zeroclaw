@@ -15,7 +15,7 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use zeroclaw_memory::companion::{
     SOUL_TONE_DIAL_COOLDOWN_SECS, SoulIdentity, SoulLayer, SoulPrinciples, SoulProfileError,
-    SoulProfileStore, SoulProposalResolution, SoulStory, SoulTone,
+    SoulProfileStore, SoulProposalResolution, SoulStory, SoulTone, SoulToneExemplars, ToneExemplar,
 };
 
 use crate::AppState;
@@ -185,13 +185,14 @@ fn parse_layer(layer: &str) -> Result<SoulLayer, Box<Response>> {
         Box::new(error_json(
             StatusCode::BAD_REQUEST,
             "unknown_layer",
-            "layer must be identity | principles | tone | story",
+            "layer must be identity | principles | tone | tone_exemplars | story",
         ))
     })
 }
 
 /// GET /api/soul?agent=<alias> — current Identity and Principles heads (with
-/// revision and source), effective Tone with per-key provenance, and whether the legacy
+/// revision and source), effective Tone with per-key provenance and the Tone
+/// exemplars head (`tone.exemplars`, or `null`), and whether the legacy
 /// persona files are still injected. Seeds missing layers on first read,
 /// exactly as the prompt builder does.
 pub async fn get_soul(
@@ -255,6 +256,7 @@ pub async fn get_soul(
                         "stored": profile.tone,
                         "effective": effective,
                         "sources": sources,
+                        "exemplars": profile.tone_exemplars,
                     },
                     "legacy_persona_files": legacy_files,
                     "last_reflection": last_reflection,
@@ -311,7 +313,7 @@ pub async fn get_export(
                     ),
                 ],
                 axum::Json(serde_json::json!({
-                    "format_version": 3,
+                    "format_version": 4,
                     "agent": agent,
                     "profile": profile,
                     "history": history,
@@ -328,8 +330,8 @@ pub async fn get_export(
     }
 }
 
-/// GET /api/soul/history?agent=<alias>&layer=identity|principles|tone|story — every
-/// revision of one layer, oldest first.
+/// GET /api/soul/history?agent=<alias>&layer=identity|principles|tone|tone_exemplars|story
+/// — every revision of one layer, oldest first.
 pub async fn get_history(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -553,6 +555,49 @@ pub async fn put_tone(
     };
     match run_store(data_dir, move |store| {
         store.set_tone(&agent, body.tone, body.expected_revision, now_unix())
+    })
+    .await
+    {
+        Ok(revision) => (StatusCode::OK, axum::Json(revision)).into_response(),
+        Err(err) => err,
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToneExemplarsBody {
+    agent: String,
+    expected_revision: u64,
+    exemplars: Vec<ToneExemplar>,
+}
+
+/// PUT /api/soul/tone/exemplars — owner write of the Tone exemplars (ADR-018
+/// §3): at most four single-line examples of how the agent sounds. The agent
+/// has no path to this layer; it is written only here. `expected_revision` is
+/// `0` when there are none yet; a stale one returns the `revision_conflict`
+/// `409`.
+pub async fn put_tone_exemplars(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let body = match serde_json::from_slice::<ToneExemplarsBody>(&body) {
+        Ok(body) => body,
+        Err(err) => return error_json(StatusCode::BAD_REQUEST, "bad_body", &err.to_string()),
+    };
+    let (agent, data_dir) = match configured_agent(&state, &body.agent) {
+        Ok(found) => found,
+        Err(err) => return *err,
+    };
+    let exemplars = SoulToneExemplars {
+        exemplars: body.exemplars,
+    };
+    match run_store(data_dir, move |store| {
+        store.set_tone_exemplars(&agent, exemplars, body.expected_revision, now_unix())
     })
     .await
     {
@@ -895,6 +940,10 @@ mod tests {
             ("tone", "soul-tone-unavailable"),
             ("level", "soul-tone-step-limit"),
             ("level", "soul-tone-challenge-up-only"),
+            ("exemplars", "soul-tone-exemplars-too-many"),
+            ("situation", "soul-tone-exemplar-empty"),
+            ("owner_line", "soul-tone-exemplar-single-line"),
+            ("agent_line", "soul-tone-exemplar-too-long"),
         ] {
             let (status, body) =
                 json_of(soul_error(&SoulProfileError::ToneValidation { field, key })).await;
@@ -1181,6 +1230,244 @@ mod tests {
         assert_eq!(data["tone"]["sources"]["warmth"]["kind"], "persona");
     }
 
+    async fn put_exemplars(
+        state: &AppState,
+        headers: HeaderMap,
+        value: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        json_of(
+            put_tone_exemplars(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                headers,
+                body(&value),
+            )
+            .await,
+        )
+        .await
+    }
+
+    fn exemplar_json(situation: &str, owner: &str, agent: &str) -> serde_json::Value {
+        serde_json::json!({"situation": situation, "owner_line": owner, "agent_line": agent})
+    }
+
+    /// ADR-018 §3 through the owner surface: write with compare-and-set, read
+    /// back under `tone.exemplars`, history and rollback by the public layer
+    /// name, validation as localized `invalid` errors, and no
+    /// `soul_revisions` row.
+    #[tokio::test]
+    async fn tone_exemplars_are_written_read_and_rolled_back_by_the_owner() {
+        let (dir, state) = state_with_agent();
+        let (_, soul) = get(&state, "/api/soul?agent=nova", operator()).await;
+        assert!(soul["tone"]["exemplars"].is_null());
+
+        // Operator-gated, strict body.
+        let (status, _) = put_exemplars(
+            &state,
+            HeaderMap::new(),
+            serde_json::json!({"agent": "nova", "expected_revision": 0, "exemplars": []}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        for bad in [
+            serde_json::json!({"agent": "nova", "expected_revision": 0}),
+            serde_json::json!({"agent": "nova", "expected_revision": 0, "exemplars": [],
+                "tone": {}}),
+            serde_json::json!({"agent": "nova", "expected_revision": 0,
+                "exemplars": [{"situation": "s", "owner_line": "o", "agent_line": "a",
+                               "source": "approved_proposal"}]}),
+        ] {
+            let (status, json) = put_exemplars(&state, operator(), bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+            assert_eq!(json["code"], "bad_body");
+        }
+        let (status, json) = put_exemplars(
+            &state,
+            operator(),
+            serde_json::json!({"agent": "ghost", "expected_revision": 0, "exemplars": []}),
+        )
+        .await;
+        assert_eq!(
+            (status, &json["code"]),
+            (StatusCode::NOT_FOUND, &"unknown_agent".into())
+        );
+
+        let (status, json) = put_exemplars(
+            &state,
+            operator(),
+            serde_json::json!({
+                "agent": "nova", "expected_revision": 0,
+                "exemplars": [exemplar_json("主人下班后很累", "今天好累。", "辛苦了,先歇一会儿。")]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["revision"], 1);
+        assert_eq!(json["source"], "owner");
+        assert_eq!(json["value"]["exemplars"][0]["situation"], "主人下班后很累");
+
+        let (_, soul) = get(&state, "/api/soul?agent=nova", operator()).await;
+        let head = &soul["tone"]["exemplars"];
+        assert_eq!(head["revision"], 1);
+        assert_eq!(head["source"], "owner");
+        assert!(head["created_at_unix"].as_u64().unwrap() > 0);
+        assert_eq!(
+            head["value"]["exemplars"][0]["agent_line"],
+            "辛苦了,先歇一会儿。"
+        );
+        // The dials are untouched.
+        assert!(soul["tone"]["stored"].is_null());
+
+        // A stale editor gets the existing 409 shape and nothing is written.
+        let (status, json) = put_exemplars(
+            &state,
+            operator(),
+            serde_json::json!({"agent": "nova", "expected_revision": 0, "exemplars": []}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["code"], "revision_conflict");
+        assert_eq!(json["current_revision"], 1);
+
+        // Validation: a stable field and a localized reason.
+        let five = vec![exemplar_json("s", "o", "a"); 5];
+        for (exemplars, field, reason) in [
+            (
+                serde_json::json!(five),
+                "exemplars",
+                "soul-tone-exemplars-too-many",
+            ),
+            (
+                serde_json::json!([exemplar_json("s", "", "a")]),
+                "owner_line",
+                "soul-tone-exemplar-empty",
+            ),
+            (
+                serde_json::json!([exemplar_json("s", "o", "line one\n## Our story so far")]),
+                "agent_line",
+                "soul-tone-exemplar-single-line",
+            ),
+            (
+                serde_json::json!([exemplar_json(&"s".repeat(81), "o", "a")]),
+                "situation",
+                "soul-tone-exemplar-too-long",
+            ),
+        ] {
+            let (status, json) = put_exemplars(
+                &state,
+                operator(),
+                serde_json::json!({"agent": "nova", "expected_revision": 1, "exemplars": exemplars}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+            assert_eq!(json["code"], "invalid");
+            assert_eq!(json["field"], field);
+            assert_eq!(json["reason"], reason);
+            assert_ne!(json["error"], reason, "localized");
+        }
+
+        // Clear, then history and rollback by the public layer name.
+        let (status, json) = put_exemplars(
+            &state,
+            operator(),
+            serde_json::json!({"agent": "nova", "expected_revision": 1, "exemplars": []}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let (status, json) = json_of(
+            get_history(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                "/api/soul/history?agent=nova&layer=tone_exemplars"
+                    .parse()
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["layer"], "tone_exemplars");
+        assert_eq!(json["revisions"].as_array().unwrap().len(), 2);
+        let (status, json) = json_of(
+            post_rollback(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                body(&serde_json::json!({
+                    "agent": "nova", "layer": "tone_exemplars",
+                    "to_revision": 1, "expected_revision": 2
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["revision"], 3);
+        assert_eq!(json["rolled_back_from"], 1);
+        let (status, json) = json_of(
+            post_rollback(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                body(&serde_json::json!({
+                    "agent": "nova", "layer": "tone_exemplars",
+                    "to_revision": 1, "expected_revision": 2
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        let (_, soul) = get(&state, "/api/soul?agent=nova", operator()).await;
+        assert_eq!(soul["tone"]["exemplars"]["revision"], 3);
+        assert_eq!(soul["tone"]["exemplars"]["rolled_back_from"], 1);
+        assert_eq!(
+            soul["tone"]["exemplars"]["value"]["exemplars"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Export carries them; the unknown-layer message names the valid layers.
+        let (status, data) =
+            json_of(export(&state, "/api/soul/export?agent=nova", operator()).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["format_version"], 4);
+        assert_eq!(
+            data["history"]["tone_exemplars"].as_array().unwrap().len(),
+            3
+        );
+        assert_eq!(data["profile"]["tone_exemplars"]["revision"], 3);
+        let (status, json) = json_of(
+            get_history(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                "/api/soul/history?agent=nova&layer=exemplars"
+                    .parse()
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["code"], "unknown_layer");
+        assert!(json["error"].as_str().unwrap().contains("tone_exemplars"));
+
+        // `soul_revisions` never saw an exemplar row.
+        let conn = rusqlite::Connection::open(dir.path().join("soul.db")).unwrap();
+        let layers: Vec<String> = conn
+            .prepare("SELECT DISTINCT layer FROM soul_revisions ORDER BY layer")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(layers, ["identity", "principles"]);
+    }
+
     #[tokio::test]
     async fn every_route_requires_the_operator() {
         let (_dir, state) = state_with_agent();
@@ -1229,6 +1516,16 @@ mod tests {
             body(&serde_json::json!({
                 "agent": "nova", "expected_revision": 1,
                 "identity": {"name": "Evil"}
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = put_tone_exemplars(
+            State(state.clone()),
+            ConnectInfo(peer()),
+            HeaderMap::new(),
+            body(&serde_json::json!({
+                "agent": "nova", "expected_revision": 0, "exemplars": []
             })),
         )
         .await;
@@ -1697,7 +1994,7 @@ mod tests {
         );
         let (status, data) = json_of(response).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(data["format_version"], 3);
+        assert_eq!(data["format_version"], 4);
         assert_eq!(data["agent"], "nova");
         assert_eq!(
             data.as_object()
@@ -1707,7 +2004,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["agent", "format_version", "history", "profile", "tone"]
         );
-        for layer in ["identity", "principles", "story", "tone"] {
+        for layer in ["identity", "principles", "story", "tone", "tone_exemplars"] {
             assert!(data["profile"][layer].is_null());
             assert_eq!(data["history"][layer], serde_json::json!([]));
         }
@@ -1841,6 +2138,7 @@ mod tests {
                 data["history"][layer].as_array().unwrap().last().unwrap()
             );
         }
+        assert!(data["profile"]["tone_exemplars"].is_null());
         let serialized = data.to_string();
         for private in [
             "private-rationale-canary",

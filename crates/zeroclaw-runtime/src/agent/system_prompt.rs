@@ -1039,8 +1039,23 @@ mod tests {
             ..Default::default()
         };
         // Story renders after Tone and is dropped first when the budget bites.
-        zeroclaw_memory::companion::SoulProfileStore::shared(&config.data_dir)
-            .unwrap()
+        // Tone exemplars sit inside the Tone range and leave with it.
+        let store = zeroclaw_memory::companion::SoulProfileStore::shared(&config.data_dir).unwrap();
+        store
+            .set_tone_exemplars(
+                "nova",
+                zeroclaw_memory::companion::SoulToneExemplars {
+                    exemplars: vec![zeroclaw_memory::companion::ToneExemplar {
+                        situation: "主人下班后很累".into(),
+                        owner_line: "今天好累。".into(),
+                        agent_line: "辛苦了,先歇一会儿。".into(),
+                    }],
+                },
+                0,
+                1,
+            )
+            .unwrap();
+        store
             .set_story(
                 "nova",
                 zeroclaw_memory::companion::SoulStory {
@@ -1057,6 +1072,17 @@ mod tests {
             .section
             .unwrap();
         assert!(with_tone.contains("\n\n## Our story so far\n"));
+        let exemplar_block = format!(
+            "{}\n\n- Situation: 主人下班后很累\n  Owner: 今天好累。\n  You: 辛苦了,先歇一会儿。\n",
+            crate::agent::persona_projection::TONE_EXEMPLARS_FRAMING_LINE
+        );
+        let tone_at = with_tone.find("## Tone\n").unwrap();
+        let exemplars_at = with_tone.find(&exemplar_block).unwrap();
+        let story_at = with_tone.find("## Our story so far").unwrap();
+        assert!(
+            tone_at < exemplars_at && exemplars_at < story_at,
+            "{with_tone}"
+        );
         let (governed, _) = with_tone.split_once("\n\n## Tone\n").unwrap();
         // The canonical projection joins trimmed layers and appends one newline.
         let identity = format!("{governed}\n");
@@ -1092,6 +1118,7 @@ mod tests {
             );
         }
         assert!(render(&with_tone, 0).contains(&tone));
+        assert!(render(&with_tone, 0).contains(&exemplar_block));
         assert!(render(&with_tone, 0).contains("- Between us: Fridays are ship day.\n"));
         // A budget that fits Tone but not Story drops Story only.
         let (before_story, _) = with_tone.split_once("\n\n## Our story so far\n").unwrap();
@@ -1099,8 +1126,12 @@ mod tests {
         let cap = render(&tone_only, 0).len();
         assert_eq!(render(&with_tone, cap), render(&tone_only, cap));
         assert!(render(&with_tone, cap).contains(&tone));
+        assert!(render(&with_tone, cap).contains(&exemplar_block));
         assert!(!render(&with_tone, cap).contains("Fridays are ship day."));
         assert!(!render(&with_tone, 4000).contains("Fridays are ship day."));
+        // Still over budget after Story: Tone goes, exemplars with it.
+        assert!(!render(&with_tone, 4000).contains(&exemplar_block));
+        assert!(!render(&with_tone, 4000).contains("Examples of how you sound."));
     }
 
     /// Regression guard: `build_system_prompt_with_mode_and_autonomy` (every

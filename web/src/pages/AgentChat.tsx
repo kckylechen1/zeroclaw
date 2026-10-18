@@ -1,11 +1,12 @@
 import { memo, useState, useEffect, useRef, useCallback } from 'react';
-import { Navigate, useParams } from 'react-router-dom';
-import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, BarChart2 } from 'lucide-react';
+import { Navigate, useNavigate, useParams } from 'react-router-dom';
+import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, BarChart2, Quote } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAgent, type ChatMessage } from '@/contexts/AgentContext';
 import { useDraft } from '@/hooks/useDraft';
 import { t } from '@/lib/i18n';
+import { pinnedExemplarDraft, type ChatRow } from '@/lib/review';
 import {
   COMMANDS,
   helpText,
@@ -326,6 +327,28 @@ export function AgentChatInner({
     }
   }, []);
 
+  // "Use as tone example": hand the reply and the owner's message before it to
+  // the Review page through router state (in memory, never the URL or storage).
+  // Nothing is saved here; the owner edits the draft to fit and saves there.
+  const navigate = useNavigate();
+  const messagesRef = useRef(messages);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  const handleUseAsToneExample = useCallback((msgId: string) => {
+    const rows: ChatRow[] = messagesRef.current.map((m) => ({
+      id: m.id,
+      role: m.role,
+      text: m.local || m.ephemeral ? m.content : stripServerTimestamp(m.content),
+      plain: !m.toolCall && !m.notice && !m.ephemeral,
+    }));
+    const draft = pinnedExemplarDraft(rows, msgId);
+    if (!draft) return;
+    navigate(`/review?agent=${encodeURIComponent(agentAlias)}`, {
+      state: { toneExemplarDraft: { agent: agentAlias, ...draft } },
+    });
+  }, [agentAlias, navigate]);
+
   const handleDeleteMessage = useCallback((msgId: string) => {
     deleteMessage(msgId);
   }, [deleteMessage]);
@@ -520,6 +543,7 @@ export function AgentChatInner({
               isCopied={copiedId === msg.id}
               onCopy={handleCopy}
               onDelete={handleDeleteMessage}
+              onToneExample={handleUseAsToneExample}
             />
           ))}
 
@@ -680,6 +704,7 @@ interface MessageItemProps {
   isCopied: boolean;
   onCopy: (id: string, content: string) => void;
   onDelete: (id: string) => void;
+  onToneExample: (id: string) => void;
 }
 
 const MessageItem = memo(function MessageItem({
@@ -689,6 +714,7 @@ const MessageItem = memo(function MessageItem({
   isCopied,
   onCopy,
   onDelete,
+  onToneExample,
 }: MessageItemProps) {
   // Locally-composed user input and locally-generated command output are
   // verbatim and never carry the gateway's `[timestamp]` prefix, so don't strip
@@ -751,7 +777,16 @@ const MessageItem = memo(function MessageItem({
             </p>
           )}
         </div>
-        <div className="flex items-center justify-end gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <div className="flex items-center justify-end gap-1 mt-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity">
+          {msg.role === 'agent' && !msg.toolCall && !msg.notice && !msg.ephemeral && cleanContent.trim() && (
+            <button
+              onClick={() => onToneExample(msg.id)}
+              className="flex items-center gap-1 p-1 text-[11px] rounded-[var(--radius-sm)] text-pc-text-muted hover:text-pc-text transition-colors"
+            >
+              <Quote className="h-3.5 w-3.5" />
+              {t('agent.use_as_tone_example')}
+            </button>
+          )}
           <button
             onClick={() => onCopy(msg.id, cleanContent)}
             aria-label={t('agent.copy_message')}
