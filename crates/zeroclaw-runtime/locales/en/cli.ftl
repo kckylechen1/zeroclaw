@@ -1070,7 +1070,7 @@ soul-tone-exemplar-too-long = An exemplar field is over its limit: situation 80 
 # Soul check (ADR-018 section 5). Labels and counts only; never interpolate Soul or owner content.
 cli-soul-about = Inspect and check the agent Soul
 cli-soul-check-about = Check that the Soul behaves the same on the selected models (spends real model calls)
-soul-check-notice = Soul check for agent { $agent }: this makes real model calls, up to { $calls } ({ $replies } scenario replies plus { $judgements } judge calls). Results are printed and not stored.
+soul-check-notice = Soul check for agent { $agent }: this makes real model calls, up to { $calls } ({ $replies } scenario replies plus { $judgements } judge calls). Each selected target receives the agent's real Soul projection as its system prompt — only choose targets you want to send it to. Results are printed and not stored (a data directory without a seeded Soul gets one, same as the first chat turn).
 soul-check-title = Soul check for agent { $agent } (judge: { $judge })
 soul-check-target = Target { $target }
 soul-check-col-scenario = SCENARIO
