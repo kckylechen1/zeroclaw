@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
+use zeroclaw_api::memory_traits::MemoryReadPolicy;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
+use zeroclaw_memory::admissibility::entry_is_admissible;
 use zeroclaw_memory::traits::ExportFilter;
 use zeroclaw_memory::{Memory, MemoryCategory};
 
@@ -17,6 +19,16 @@ impl MemoryExportTool {
 }
 
 fn entry_matches_filter(entry: &zeroclaw_memory::MemoryEntry, filter: &ExportFilter) -> bool {
+    if let Some(ref session) = filter.session_id
+        && entry.session_id.as_ref() != Some(session)
+    {
+        return false;
+    }
+    if let Some(ref category) = filter.category
+        && entry.category != *category
+    {
+        return false;
+    }
     if let Some(ref namespace) = filter.namespace
         && entry.namespace != *namespace
     {
@@ -77,6 +89,19 @@ impl Tool for MemoryExportTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        let policy = zeroclaw_api::TOOL_LOOP_MEMORY_READ_POLICY
+            .try_with(|policy| *policy)
+            .unwrap_or_default();
+        if policy == MemoryReadPolicy::Disabled {
+            return Ok(ToolResult {
+                success: true,
+                output: "[]".into(),
+                error: None,
+            });
+        }
+        let sessions = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .try_with(Clone::clone)
+            .unwrap_or_default();
         let namespace = args
             .get("namespace")
             .and_then(|v| v.as_str())
@@ -112,7 +137,11 @@ impl Tool for MemoryExportTool {
             .map(|entries| {
                 entries
                     .into_iter()
-                    .filter(|entry| entry_matches_filter(entry, &filter))
+                    .filter(|entry| {
+                        // Model filters may narrow the host's read scope, never grant it.
+                        entry_is_admissible(entry, self.memory.name(), &sessions, policy)
+                            && entry_matches_filter(entry, &filter)
+                    })
                     .collect::<Vec<_>>()
             }) {
             Ok(entries) => {
@@ -136,14 +165,289 @@ impl Tool for MemoryExportTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use zeroclaw_config::schema::MemoryPolicyConfig;
-    use zeroclaw_memory::{ScannedMemory, SqliteMemory};
+    use zeroclaw_memory::{MemoryEntry, ScannedMemory, SqliteMemory};
 
     fn test_mem() -> (TempDir, Arc<dyn Memory>) {
         let tmp = TempDir::new().unwrap();
         let mem = SqliteMemory::new("test", tmp.path()).unwrap();
         (tmp, Arc::new(mem))
+    }
+
+    struct UnfilteredListMemory {
+        entries: Vec<MemoryEntry>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Memory for UnfilteredListMemory {
+        fn name(&self) -> &str {
+            "unfiltered"
+        }
+        async fn store(
+            &self,
+            _key: &str,
+            _content: &str,
+            _category: MemoryCategory,
+            _session: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn recall(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _session: Option<&str>,
+            _since: Option<&str>,
+            _until: Option<&str>,
+        ) -> anyhow::Result<Vec<MemoryEntry>> {
+            Ok(Vec::new())
+        }
+        async fn get(&self, _key: &str) -> anyhow::Result<Option<MemoryEntry>> {
+            Ok(None)
+        }
+        async fn list(
+            &self,
+            _category: Option<&MemoryCategory>,
+            _session: Option<&str>,
+        ) -> anyhow::Result<Vec<MemoryEntry>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // Deliberately ignore every backend filter: the tool owns its boundary.
+            Ok(self.entries.clone())
+        }
+        async fn forget(&self, _key: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        async fn forget_for_agent(&self, _key: &str, _agent: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        async fn count(&self) -> anyhow::Result<usize> {
+            Ok(self.entries.len())
+        }
+        async fn health_check(&self) -> bool {
+            true
+        }
+        async fn store_with_agent(
+            &self,
+            _key: &str,
+            _content: &str,
+            _category: MemoryCategory,
+            _session: Option<&str>,
+            _namespace: Option<&str>,
+            _importance: Option<f64>,
+            _agent: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn recall_for_agents(
+            &self,
+            _agents: &[&str],
+            _query: &str,
+            _limit: usize,
+            _session: Option<&str>,
+            _since: Option<&str>,
+            _until: Option<&str>,
+        ) -> anyhow::Result<Vec<MemoryEntry>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl zeroclaw_api::attribution::Attributable for UnfilteredListMemory {
+        fn role(&self) -> zeroclaw_api::attribution::Role {
+            zeroclaw_api::attribution::Role::Memory(zeroclaw_api::attribution::MemoryKind::InMemory)
+        }
+        fn alias(&self) -> &str {
+            "UnfilteredListMemory"
+        }
+    }
+
+    fn entry(key: &str, category: MemoryCategory, session: Option<&str>) -> MemoryEntry {
+        MemoryEntry {
+            id: key.into(),
+            key: key.into(),
+            content: format!("fixture-{key}"),
+            category,
+            timestamp: "2026-10-15T12:00:00Z".into(),
+            session_id: session.map(String::from),
+            score: None,
+            namespace: "default".into(),
+            importance: None,
+            superseded_by: None,
+            kind: None,
+            pinned: false,
+            tenant_id: None,
+            agent_alias: None,
+            agent_id: None,
+        }
+    }
+
+    fn unfiltered_fixture() -> (MemoryExportTool, Arc<AtomicUsize>) {
+        let mut entries = vec![
+            entry("global", MemoryCategory::Core, None),
+            entry("a-core", MemoryCategory::Core, Some("A")),
+            entry("a-conversation", MemoryCategory::Conversation, Some("A")),
+            entry("b-core", MemoryCategory::Core, Some("B")),
+            entry("b-conversation", MemoryCategory::Conversation, Some("B")),
+            entry("unattributed", MemoryCategory::Conversation, None),
+            entry("protected-namespace", MemoryCategory::Core, None),
+            entry("soul::protected-key", MemoryCategory::Core, None),
+        ];
+        entries[1].namespace = "personal".into();
+        entries[2].namespace = "personal".into();
+        entries[2].timestamp = "2026-10-14T12:00:00Z".into();
+        entries[6].namespace = "soul".into();
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            MemoryExportTool::new(Arc::new(UnfilteredListMemory {
+                entries,
+                calls: Arc::clone(&calls),
+            })),
+            calls,
+        )
+    }
+
+    async fn execute_scoped(
+        tool: &MemoryExportTool,
+        policy: MemoryReadPolicy,
+        sessions: Vec<String>,
+        args: serde_json::Value,
+    ) -> ToolResult {
+        zeroclaw_api::TOOL_LOOP_MEMORY_READ_POLICY
+            .scope(
+                policy,
+                zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS.scope(sessions, tool.execute(args)),
+            )
+            .await
+            .unwrap()
+    }
+
+    fn keys(result: &ToolResult) -> Vec<String> {
+        assert!(result.success, "{:?}", result.error);
+        serde_json::from_str::<Vec<serde_json::Value>>(&result.output)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry["key"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn export_model_filters_only_narrow_host_scope_even_if_backend_ignores_them() {
+        let (tool, _) = unfiltered_fixture();
+        for (args, expected) in [
+            (json!({}), vec!["global", "a-core", "a-conversation"]),
+            (
+                json!({"session_id":"B", "origin":"interactive", "read_policy":"session_scoped", "surface":"web"}),
+                vec![],
+            ),
+            (
+                json!({"session_id":"A", "category":"conversation"}),
+                vec!["a-conversation"],
+            ),
+            (
+                json!({"namespace":"personal", "since":"2026-10-15T00:00:00Z", "until":"2026-10-15T23:59:59Z"}),
+                vec!["a-core"],
+            ),
+            (
+                json!({"namespace":"personal", "until":"2026-10-14T23:59:59Z"}),
+                vec!["a-conversation"],
+            ),
+            (json!({"namespace":"soul"}), vec![]),
+        ] {
+            let result = execute_scoped(
+                &tool,
+                MemoryReadPolicy::SessionScoped,
+                vec!["A".into()],
+                args.clone(),
+            )
+            .await;
+            assert_eq!(keys(&result), expected, "{args}");
+        }
+        // Even among host-admitted sessions the model's session filter only narrows.
+        let result = execute_scoped(
+            &tool,
+            MemoryReadPolicy::SessionScoped,
+            vec!["A".into(), "B".into()],
+            json!({"session_id":"B", "category":"core"}),
+        )
+        .await;
+        assert_eq!(keys(&result), ["b-core"]);
+    }
+
+    #[tokio::test]
+    async fn export_nonconversation_and_absent_policy_refuse_conversation_rows() {
+        let (tool, _) = unfiltered_fixture();
+        let result = execute_scoped(
+            &tool,
+            MemoryReadPolicy::NonConversation,
+            vec!["A".into()],
+            json!({}),
+        )
+        .await;
+        assert_eq!(keys(&result), ["global", "a-core"]);
+        let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], tool.execute(json!({})))
+            .await
+            .unwrap();
+        assert_eq!(keys(&result), ["global", "a-core"]);
+        let result = tool.execute(json!({"session_id":"A"})).await.unwrap();
+        assert!(
+            keys(&result).is_empty(),
+            "model session filter cannot establish host scope"
+        );
+        let result = tool.execute(json!({})).await.unwrap();
+        assert_eq!(keys(&result), ["global"]);
+    }
+
+    #[tokio::test]
+    async fn export_disabled_policy_returns_empty_without_calling_backend() {
+        let (tool, calls) = unfiltered_fixture();
+        let result = execute_scoped(
+            &tool,
+            MemoryReadPolicy::Disabled,
+            vec!["A".into()],
+            json!({"session_id":"A"}),
+        )
+        .await;
+        assert!(keys(&result).is_empty());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "disabled export must not list the backend"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_markdown_omits_unattributed_daily_conversation_rows() {
+        let dir = TempDir::new().unwrap();
+        let memory: Arc<dyn Memory> =
+            Arc::new(zeroclaw_memory::MarkdownMemory::new("test", dir.path()));
+        memory
+            .store("global", "global fixture", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        memory
+            .store(
+                "private",
+                "foreign conversation fixture",
+                MemoryCategory::Conversation,
+                Some("B"),
+            )
+            .await
+            .unwrap();
+        let tool = MemoryExportTool::new(memory);
+        let result = execute_scoped(
+            &tool,
+            MemoryReadPolicy::SessionScoped,
+            vec!["A".into()],
+            json!({}),
+        )
+        .await;
+        assert!(result.success);
+        assert!(result.output.contains("global fixture"));
+        assert!(!result.output.contains("foreign conversation fixture"));
+        assert_eq!(keys(&result).len(), 1);
     }
 
     #[test]
@@ -215,7 +519,16 @@ mod tests {
             .unwrap();
 
         let tool = MemoryExportTool::new(mem);
-        let result = tool.execute(json!({"session_id": "sess-a"})).await.unwrap();
+        let result = zeroclaw_api::TOOL_LOOP_MEMORY_READ_POLICY
+            .scope(
+                MemoryReadPolicy::SessionScoped,
+                zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS.scope(
+                    vec!["sess-a".into(), "sess-b".into()],
+                    tool.execute(json!({"session_id": "sess-a"})),
+                ),
+            )
+            .await
+            .unwrap();
         assert!(result.success);
         let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         let arr = parsed.as_array().unwrap();

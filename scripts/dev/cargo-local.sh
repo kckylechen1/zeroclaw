@@ -14,4 +14,14 @@ if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
 fi
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 bash scripts/ci/toolchain_gate.sh >&2
+# A managed machine has one host gate independent of this checkout or PATH.
+# Hosted CI and contributors without that installation keep normal Cargo.
+# Keep the marker separate: a broken/uninstalled client must not fall through.
+if [[ -e "$HOME/.local/state/host-build/managed.json" || -L "$HOME/.local/state/host-build/managed.json" ]]; then
+  if [[ ! -x "$HOME/bin/host-build" ]]; then
+    echo 'managed host admission is unavailable; refusing ungated Cargo' >&2
+    exit 70
+  fi
+  exec "$HOME/bin/host-build" -- cargo "$@"
+fi
 exec cargo "$@"

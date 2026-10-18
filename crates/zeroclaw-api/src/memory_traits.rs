@@ -1,6 +1,19 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Host-resolved, ephemeral read authority for one tool-loop turn.
+/// This is independent of automatic-preamble suppression and is never a tool argument.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MemoryReadPolicy {
+    /// Delegated sub-turns receive bounded task context, not ambient personal memory.
+    Disabled,
+    /// Scheduled or unattributed callers cannot read conversation history.
+    #[default]
+    NonConversation,
+    /// Conversation rows still require a matching canonical memory session.
+    SessionScoped,
+}
+
 /// Filter criteria for bulk memory export (GDPR Art. 20 data portability).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExportFilter {

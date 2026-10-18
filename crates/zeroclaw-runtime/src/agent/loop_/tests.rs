@@ -12333,3 +12333,125 @@ async fn recall_uses_canonical_memory_scopes_in_sequential_and_parallel_turns() 
         }
     }
 }
+
+// Additive scenario regression: the canonical-scope test above remains unchanged.
+#[tokio::test]
+async fn scheduled_and_delegated_tools_obey_host_memory_policy() {
+    use zeroclaw_api::ingress::TurnOrigin;
+    use zeroclaw_api::memory_traits::MemoryReadPolicy;
+    let dir = tempfile::tempdir().unwrap();
+    let mem: Arc<dyn zeroclaw_memory::Memory> =
+        Arc::new(zeroclaw_memory::SqliteMemory::new("test", dir.path()).unwrap());
+    mem.store(
+        "chat",
+        "PRIVATE_CHAT_CANARY",
+        zeroclaw_memory::MemoryCategory::Conversation,
+        Some("A"),
+    )
+    .await
+    .unwrap();
+    mem.store(
+        "fact",
+        "DURABLE_FACT",
+        zeroclaw_memory::MemoryCategory::Core,
+        None,
+    )
+    .await
+    .unwrap();
+    for origin in [TurnOrigin::Cron, TurnOrigin::Daemon, TurnOrigin::SubTurn] {
+        for parallel_tools in [false, true] {
+            let model_provider = ScriptedModelProvider::from_text_responses(vec![
+                r#"<tool_call>{"name":"memory_recall","arguments":{"query":"*","limit":20}}</tool_call>
+<tool_call>{"name":"memory_export","arguments":{"session_id":"A","origin":"interactive"}}</tool_call>"#,
+                "done",
+            ]);
+            let tools_registry: Vec<Box<dyn Tool>> = vec![
+                Box::new(crate::tools::MemoryRecallTool::new(Arc::clone(&mem))),
+                Box::new(crate::tools::MemoryExportTool::new(Arc::clone(&mem))),
+            ];
+            let mut history = vec![ChatMessage::user("recall fixture")];
+            let turn_id = uuid::Uuid::new_v4().to_string();
+            let multimodal = zeroclaw_config::schema::MultimodalConfig::default();
+            let pacing = zeroclaw_config::schema::PacingConfig::default();
+            let knobs = LoopKnobs::default();
+            let future = run_tool_call_loop(ToolLoop {
+                parent_agent_alias: None,
+                exec: ResolvedAgentExecution {
+                    model_access: ResolvedModelAccess {
+                        model_provider: &model_provider,
+                        provider_name: "scripted",
+                        model: "scripted-model",
+                        temperature: Some(0.0),
+                    },
+                    tools_registry: &tools_registry,
+                    observer: &NoopObserver,
+                    silent: true,
+                    approval: None,
+                    multimodal_config: &multimodal,
+                    config: None,
+                    max_tool_iterations: 3,
+                    hooks: None,
+                    excluded_tools: &[],
+                    dedup_exempt_tools: &[],
+                    activated_tools: None,
+                    model_switch_callback: None,
+                    pacing: &pacing,
+                    strict_tool_parsing: false,
+                    parallel_tools,
+                    max_tool_result_chars: 0,
+                    context_token_budget: 0,
+                    receipt_generator: None,
+                    knobs: &knobs,
+                },
+                history: &mut history,
+                channel_name: "wss",
+                channel_reply_target: None,
+                cancellation_token: None,
+                on_delta: None,
+                shared_budget: None,
+                channel: None,
+                collected_receipts: None,
+                event_tx: None,
+                steering: None,
+                new_messages_out: None,
+                image_cache: None,
+                memory: Some(crate::agent::memory_inject::TurnMemory {
+                    handle: mem.as_ref(),
+                    query: "*".into(),
+                    sessions: vec![Some("A".into())],
+                    suppress: true,
+                    cfg: crate::agent::memory_inject::MemoryInjectConfig::default(),
+                }),
+                ingress: IngressContext::from_origin(origin),
+                agent_alias: None,
+                turn_id: &turn_id,
+            });
+            // Even a permissive parent cannot confer its authority on a child.
+            zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                .scope(
+                    vec!["A".into()],
+                    zeroclaw_api::TOOL_LOOP_MEMORY_READ_POLICY
+                        .scope(MemoryReadPolicy::SessionScoped, future),
+                )
+                .await
+                .unwrap();
+            let results = history
+                .iter()
+                .filter(|m| m.content.starts_with("[Tool results]"))
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(results.contains("memory_recall"), "{results}");
+            assert!(results.contains("memory_export"), "{results}");
+            assert!(
+                !results.contains("PRIVATE_CHAT_CANARY"),
+                "{origin:?}: {results}"
+            );
+            assert_eq!(
+                results.contains("DURABLE_FACT"),
+                origin != TurnOrigin::SubTurn,
+                "{origin:?} parallel={parallel_tools}: {results}"
+            );
+        }
+    }
+}
