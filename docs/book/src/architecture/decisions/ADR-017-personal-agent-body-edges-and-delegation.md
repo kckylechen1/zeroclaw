@@ -139,7 +139,7 @@ The body keeps what makes it the owner's agent: identity, Soul and memory, conve
 
 ### 8. ZeroClaw ↔ `tachi_staff` mapping
 
-This section is the contract between the body and Tachi for L2 work (#381). The client is `TachiStaffClient` in `crates/zeroclaw-tools/src/tachi_staff.rs`, with shared receipts in `zeroclaw-api` and compatibility exports in `runtime/tachi_bridge/staff.rs`. It is checked against Tachi's golden fixture `external-staffing-contract-v1.fixture.json` and against a scripted MCP server in its tests.
+This section is the contract between the body and Tachi for L2 work (#381). The client is `TachiStaffClient` in `crates/zeroclaw-tools/src/tachi_staff.rs`, with shared receipts in `zeroclaw-api` and compatibility exports in `runtime/tachi_bridge/staff.rs`. Its start/terminal rules are checked against Tachi's golden fixture `external-staffing-contract-v1.fixture.json`; result reads and the remaining transport behavior use a scripted MCP server against the pinned source contract below.
 
 **Transport.** ZeroClaw calls the Tachi daemon over MCP streamable HTTP, using its own MCP transport. Each tool invocation resolves current policy and constructs a client; bounded watch reuses that client's session within its polling loop. Sessions are not cached across tool invocations. Reads may reopen a stale session once. Start and cancel are never automatically replayed after transmission. Each session sends these headers:
 
@@ -156,8 +156,20 @@ This section is the contract between the body and Tachi for L2 work (#381). The 
 |---|---|---|
 | `start(harness, task, reason, refs)` | `tachi_staff` `action=start`, with `task`, `staffing_reason`, `profile`, and the optional `project`, `issue_ref`, `pr_ref`, and `flow_id` | a receipt: `dispatch_id`, `state` (`TASK_STATE_WORKING`), `run_dir` |
 | `status(dispatch_id)` | `tachi_staff` `action=status` | the canonical `status.json`: `state`, `status_revision`, `closure_kind`, and more |
-| `result(dispatch_id)` | `tachi_task` `action=status`, `include_result=true` | the `result.md` text, capped by Tachi at 8000 characters |
+| `result(dispatch_id)` | `tachi_staff` `action=result` | canonical receipt and full UTF-8 `result.md`, bounded at 64 KiB of report bytes |
 | `cancel(dispatch_id, revision)` | `tachi_staff` `action=cancel`, `expected_status_revision` | a cancellation receipt, or a typed "unavailable" |
+
+Staff result requires Tachi containing [#2039](https://github.com/kckylechen1/Tachi/pull/2039),
+merge `ae659148a5d77455a418517ee5e51a8752315fb6`; a `2.0.0` version string alone
+is insufficient. Older peers return the existing typed refusal, with no Task
+fallback. The public `RunResult.task_state` changes from `RunState` to
+`Option<RunState>`; its JSON key, `state_basis` and `managed_run` remain present
+as `null` on this path. They are absent Task projections, never aliases for
+canonical state. The tool's `result.status.read_projection` preserves Staff
+recovery facts from the same response as `result.state` and `result.status`.
+An explicit null report body means no report is available; an empty text body
+remains an empty report. Neither implies a different execution outcome. Missing
+required response fields or a body above 64 KiB fails as a protocol error.
 
 A run is finished when its state is `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, or `TASK_STATE_CANCELED`, or when it is `TASK_STATE_INPUT_REQUIRED` with `closure_kind = "partial"`.
 
@@ -190,7 +202,6 @@ The client reads only the fields it uses and ignores the rest. Tachi refuses unk
 
 - Tachi cannot cancel CLI-backed Staff runs.
 - There is no event stream, so the body has to poll.
-- `result.md` is served by `tachi_task`, not by `tachi_staff`.
 - The HTTP endpoint does not authenticate callers.
 - A start has no idempotency key. If the connection drops after the request is sent, the body cannot tell whether the run started. A transmitted start with no trustworthy receipt reports `SubmissionUnknown` and is never replayed, including after a stale-session response. The production tools persist the local request claim before sending it; an unresolved claim blocks automatic resubmission after reconnect or restart. This prevents replay but does not recover the missing dispatch identity.
 
@@ -242,11 +253,11 @@ The tool mapping above was checked against Tachi `7873b720993cc10519db6232863f4d
 `tachi-server/src/staffing_ops/` and `tools/workflow_facade.rs`, result reads in
 `tools/task_facade.rs`, and the profile catalog in `tachi-dispatch/src/profiles.rs`.
 Start, canonical status, and revision-bound managed-custom cancel are real
-operations. Staff has no watch stream or durable caller request key. Result text
-is still read through Task; its inferred task state must not replace canonical
-`run_status`. Management/projection provenance is retained alongside the report.
-Status and bounded watch retain the same-response `read_projection`, including
-orphaned execution, unavailable control, and unknown outcome after a daemon
+operations. Staff has no watch stream or durable caller request key. At that pin,
+result text was read through Task and its inferred state was kept separate from
+canonical `run_status`. Status and bounded watch retain the same-response
+`read_projection`, including orphaned execution, unavailable control, and unknown
+outcome after a daemon
 restart. Those facts never rewrite canonical state into a terminal outcome.
 CLI cancellation and lost-submit identity reconciliation remain unsupported.
 The newer `preflight` action is advisory and is not execution/authentication proof.
@@ -257,11 +268,25 @@ profile runs OpenCode and does not prove DSH support. The
 provides headless and ACP profile carriers; selecting/admitting one belongs to
 Tachi, not a second launcher in this body.
 
+The result adapter was subsequently checked against Tachi
+`b3d82a0287b52b793876ab5bc883741feea66adf`, including #2039:
+[`workflow_facade.rs`](https://github.com/kckylechen1/Tachi/blob/b3d82a0287b52b793876ab5bc883741feea66adf/crates/tachi-server/src/tools/workflow_facade.rs#L90)
+reads one canonical receipt and its `read_projection`, then attaches the report;
+[`task_facade.rs`](https://github.com/kckylechen1/Tachi/blob/b3d82a0287b52b793876ab5bc883741feea66adf/crates/tachi-server/src/tools/task_facade.rs#L104)
+owns the shared bounded report reader and Unicode/missing/size assertions.
+The exact Staff action inventory is frozen in
+[`schema.rs`](https://github.com/kckylechen1/Tachi/blob/b3d82a0287b52b793876ab5bc883741feea66adf/crates/tachi-contract-tests/src/tests/facade_tests/schema.rs#L342).
+The existing external-staffing fixture is unchanged; it does not freeze the full
+result JSON schema. The adapter reads the top-level receipt, not a nested Task
+`run_status`; report text remains separate from receipt-owned `receipt_result`
+metadata, which is outside the fields this client projects.
+
 Reuse decision: reuse this fork's existing Staff MCP transport, its pinned
 golden contract and the existing session SQLite owner. Upstream ZeroClaw native
-CLI adapter/process code and Cindy maker-core adapters are not imported into
-this slice: launch ownership stays on Tachi and no local adapter is needed for
-the body's protocol surface. The original local multi-harness launch proposal
+CLI adapter/process code (checked at
+`329e66f76394b00af9d00b767e00ad298133961e`) and Cindy maker-core adapters are not
+imported into this slice: launch ownership stays on Tachi and no local adapter is
+needed for the body's protocol surface. The original local multi-harness launch proposal
 (#433) was closed. No external source code or dependency is added here. Real
 harness execution, result delivery and backend recovery still need their own
 end-to-end evidence before #381 can close or the duplicate driver can be removed.

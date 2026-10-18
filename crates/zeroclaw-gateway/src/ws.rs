@@ -971,6 +971,13 @@ fn handle_client_text(
             (None, None)
         }
         // ── cancel (stop the running turn for every subscriber) ──
+        "cancel"
+            if parsed.get("control_version").is_some()
+                || parsed.get("turn_id").is_some()
+                || parsed.get("id").is_some() =>
+        {
+            cancel_control(state, conversation, scope, &parsed)
+        }
         "cancel" => {
             if conversation.cancel_current() {
                 (None, None)
@@ -986,6 +993,51 @@ fn handle_client_text(
             "UNKNOWN_MESSAGE_TYPE",
         ),
     }
+}
+
+/// The additive v1 operation never falls back to cancelling whichever turn is
+/// current. Its acknowledgement reports a request, not completed cancellation.
+fn cancel_control(
+    state: &AppState,
+    conversation: &Conversation<WsSession>,
+    scope: &WsTurnScope,
+    frame: &serde_json::Value,
+) -> (Option<serde_json::Value>, Option<TurnClaim>) {
+    let id = frame["id"].as_str().unwrap_or("");
+    let target = frame["turn_id"].as_str().unwrap_or("");
+    let status = if frame["control_version"].as_u64() != Some(1)
+        || id.is_empty()
+        || id.len() > MAX_REQUEST_ID_LEN
+        || id.chars().any(char::is_control)
+        || uuid::Uuid::parse_str(target).is_err()
+    {
+        "invalid"
+    } else if !question_answer_authorized(state, scope)
+        || !conversation
+            .key()
+            .rsplit_once('\u{1f}')
+            .is_some_and(|(_, alias)| {
+                state
+                    .config
+                    .read()
+                    .agents
+                    .get(alias)
+                    .is_some_and(|agent| agent.enabled)
+            })
+    {
+        "unauthorized"
+    } else {
+        conversation.cancel_turn(target)
+    };
+    let key = format!("gateway-cancel-{}", status.replace('_', "-"));
+    (
+        Some(serde_json::json!({
+            "type":"cancel_ack", "control_version":1, "id":id, "turn_id":target,
+            "status":status,
+            "message":zeroclaw_runtime::i18n::get_required_cli_string(&key),
+        })),
+        None,
+    )
 }
 
 /// Resolve current device/bridge authority at answer time, including revocation.
@@ -1200,7 +1252,7 @@ fn handle_message_frame(
             claim.original_input = Some(original_input);
             claim.request_id = request_id.map(str::to_string);
             claim.surface = scope.surface;
-            (ack("started"), Some(claim))
+            (ack("started"), Some(*claim))
         }
         Submitted::Steered => {
             if let Some(id) = request_id {
@@ -1319,6 +1371,7 @@ async fn run_ws_turns(
         request_id,
         intake,
         generation,
+        turn_id,
         cancel,
         mut steering,
         surface,
@@ -1349,6 +1402,7 @@ async fn run_ws_turns(
                         original_input.as_deref(),
                         &input,
                         request_id.as_deref(),
+                        &turn_id,
                         generation,
                         cancel,
                         &mut steering,
@@ -1383,7 +1437,7 @@ async fn run_ws_turns(
             && let Submitted::Start(mut claim) = conversation.submit(late.join("\n\n"))
         {
             claim.surface = scope.surface;
-            next = Some(claim);
+            next = Some(*claim);
         }
         if next.is_none()
             && allow_resume
@@ -1606,6 +1660,7 @@ async fn process_chat_message(
     original_input: Option<&str>,
     content: &str,
     request_id: Option<&str>,
+    turn_id: &str,
     generation: u64,
     cancel_token: tokio_util::sync::CancellationToken,
     steering_rx: &mut tokio::sync::mpsc::Receiver<String>,
@@ -1664,9 +1719,8 @@ async fn process_chat_message(
     }));
 
     // Set session state to running
-    let turn_id = uuid::Uuid::new_v4().to_string();
     if let Some(ref backend) = state.session_backend {
-        let _ = backend.set_session_state(session_key, "running", Some(&turn_id));
+        let _ = backend.set_session_state(session_key, "running", Some(turn_id));
     }
 
     // ── Cancellation token lifecycle ─────────────────────────────
@@ -2092,7 +2146,7 @@ async fn process_chat_message(
 
             // Set session state to error
             if let Some(ref backend) = state.session_backend {
-                let _ = backend.set_session_state(session_key, "error", Some(&turn_id));
+                let _ = backend.set_session_state(session_key, "error", Some(turn_id));
             }
 
             ::zeroclaw_log::record!(
@@ -2774,6 +2828,10 @@ mod tests {
 
     mod review_source_tests {
         include!("ws/review_source_tests.rs");
+    }
+
+    mod cancel_tests {
+        include!("ws/cancel_tests.rs");
     }
 
     mod intake_tests {

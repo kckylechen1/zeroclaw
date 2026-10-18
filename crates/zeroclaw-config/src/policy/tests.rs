@@ -3940,7 +3940,14 @@ fn persona_files_are_protected_only_at_agent_workspace_roots() {
         ..SecurityPolicy::default()
     };
 
-    for name in ["SOUL.md", "IDENTITY.md", "USER.md", "Soul.MD"] {
+    for name in [
+        "SOUL.md",
+        "IDENTITY.md",
+        "USER.md",
+        "HEARTBEAT.md",
+        "BOOTSTRAP.md",
+        "Soul.MD",
+    ] {
         assert!(
             policy.is_protected_persona_path(&workspace.join(name)),
             "{name}"
@@ -3973,7 +3980,14 @@ fn model_write_target_bundles_runtime_config_and_persona_checks() {
         policy.check_model_write_target(&runtime),
         Err(policy.runtime_config_violation_message(&runtime))
     );
-    for name in ["SOUL.md", "IDENTITY.md", "USER.md", "user.MD"] {
+    for name in [
+        "SOUL.md",
+        "IDENTITY.md",
+        "USER.md",
+        "HEARTBEAT.md",
+        "BOOTSTRAP.md",
+        "user.MD",
+    ] {
         let target = workspace.join(name);
         assert_eq!(
             policy.check_model_write_target(&target),
