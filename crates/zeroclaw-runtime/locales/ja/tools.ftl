@@ -100,4 +100,4 @@ tool-browser-screenshot-error-sidecar-no-png-data = computer-use サイドカー
 tool-browser-screenshot-error-sidecar-non-json-success = パス付きスクリーンショットに対して computer-use サイドカーが JSON 以外の成功応答を返しました。要求されたファイルは書き込まれていません
 tool-browser-screenshot-error-sidecar-not-png = computer-use サイドカーが PNG 以外のスクリーンショットペイロードを返しました
 tool-browser-screenshot-error-symlink-target = シンボリックリンクターゲット '{ $target }' へのスクリーンショットの書き込みはできません
-tool-propose-soul-change = どのように成長したいかを、所有者の承認のために提案してください。レイヤー "growth" は、今の自分になったこと (growth_kind "self") や、ニックネームや定番の冗談など所有者と共有する何か (growth_kind "bond") を示す行の追加、あるいは合わなくなった項目の引退 (retire_index) に使います。"voice" はダイアルの変更、"principles" は原則の追加に使います。所有者が承認するまで何も変わりません。一時的な要求ではなく、持続するパターンを反映するものだけを提案してください。あなたの名前とアイデンティティは所有者が決めるものです。
+tool-propose-soul-change = どのように成長したいかを、所有者の承認のために提案してください。レイヤー "story" は、あなたと所有者の間に起きたこと (story_kind "self": 気がかり、関心、仕事の習慣。story_kind "bond": 共有する呼び名、言及、定番の冗談、進め方) を示す行の追加、あるいは合わなくなった項目の引退 (retire_index) に使います。story の行は、口調・温かさ・長さ・ユーモアに関する指示であってはなりません。"tone" はダイアルの変更に使います。一度に一段階まで、challenge は上げる提案のみ、承認された変更から 28 日間は同じダイアルを再提案できません。"principles" は原則の追加に使います。所有者が承認するまで何も変わりません。一時的な要求ではなく、持続するパターンを反映するものだけを提案してください。あなたの名前とアイデンティティは所有者が決めるものです。

@@ -1,4 +1,4 @@
-//! Owner-governed Soul profile: Identity, Principles, Growth and Voice
+//! Owner-governed Soul profile: Identity, Principles, Story and Tone
 //! (ADR-015/016).
 //!
 //! Authority rules:
@@ -14,7 +14,7 @@
 //!   proposal (`propose_soul_change`); an operator must approve before it is
 //!   applied in the same transaction. Identity remains owner-only.
 //!
-//! Stored Voice heads override configured persona defaults per key. Model
+//! Stored Tone heads override configured persona defaults per key. Model
 //! proposals move at most one level at creation and application; direct owner
 //! writes retain the existing CAS contract.
 
@@ -63,33 +63,66 @@ pub fn seed_name_for_agent(agent: &str) -> &str {
 }
 
 /// Which Soul layer a revision belongs to.
+///
+/// Each layer has two names, and this type is the one place that maps them
+/// (ADR-018 §1):
+/// - the public name (`identity`, `principles`, `tone`, `story`) is what the
+///   gateway API, the prompt, tools, and the PWA use; see [`Self::as_str`];
+/// - the storage id (`identity`, `principles`, `voice`, `growth`) is what
+///   `soul.db` rows already carry; see [`Self::storage_id`]. It never
+///   changes, so a store written by this build still reads under an older one.
+///
+/// Every SQL read or write of a `layer` column uses the storage id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SoulLayer {
     Identity,
     Principles,
-    Growth,
-    Voice,
+    Tone,
+    Story,
 }
 
 impl SoulLayer {
+    /// Public name, as used in the gateway API.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Identity => "identity",
             Self::Principles => "principles",
-            Self::Growth => "growth",
-            Self::Voice => "voice",
+            Self::Tone => "tone",
+            Self::Story => "story",
         }
     }
 
-    /// Parse a layer name as used in the gateway API.
+    /// Parse a public layer name as used in the gateway API.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "identity" => Some(Self::Identity),
             "principles" => Some(Self::Principles),
-            "growth" => Some(Self::Growth),
-            "voice" => Some(Self::Voice),
+            "tone" => Some(Self::Tone),
+            "story" => Some(Self::Story),
+            _ => None,
+        }
+    }
+
+    /// Identifier stored in the `layer` column of `soul_revisions`.
+    #[must_use]
+    pub fn storage_id(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Principles => "principles",
+            Self::Tone => "voice",
+            Self::Story => "growth",
+        }
+    }
+
+    /// Parse a `layer` column value written by this or an older build.
+    fn from_storage_id(value: &str) -> Option<Self> {
+        match value {
+            "identity" => Some(Self::Identity),
+            "principles" => Some(Self::Principles),
+            "voice" => Some(Self::Tone),
+            "growth" => Some(Self::Story),
             _ => None,
         }
     }
@@ -206,23 +239,23 @@ impl SoulPrinciples {
     }
 }
 
-/// Maximum entries in the Growth layer.
-pub const SOUL_MAX_GROWTH_ENTRIES: usize = 12;
-/// Maximum bytes of one Growth entry.
-pub const SOUL_GROWTH_ENTRY_MAX_BYTES: usize = 200;
+/// Maximum entries in the Story layer.
+pub const SOUL_MAX_STORY_ENTRIES: usize = 12;
+/// Maximum bytes of one Story entry.
+pub const SOUL_STORY_ENTRY_MAX_BYTES: usize = 200;
 
-/// What a Growth entry is about (ADR-016 §1).
+/// What a Story entry is about (ADR-016 §1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GrowthKind {
-    /// How the agent has changed, what it cares about, its habits.
+pub enum StoryKind {
+    /// Concerns, interests, and working habits.
     #[serde(rename = "self")]
     SelfView,
-    /// What the agent and the owner share: nicknames, shorthand, jokes.
+    /// Shared names, references, running jokes, and ways of working.
     Bond,
 }
 
-impl GrowthKind {
+impl StoryKind {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -241,40 +274,41 @@ impl GrowthKind {
     }
 }
 
-/// One line of who the agent has become.
+/// One line of shared history or concern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GrowthEntry {
-    pub kind: GrowthKind,
+pub struct StoryEntry {
+    pub kind: StoryKind,
     pub text: String,
 }
 
-/// The Growth layer: who the agent has become with its owner (ADR-016 §1).
+/// The Story layer: what has happened between the agent and its owner, and
+/// what the agent has come to care about (ADR-016 §1, ADR-018 §2).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SoulGrowth {
-    pub entries: Vec<GrowthEntry>,
+pub struct SoulStory {
+    pub entries: Vec<StoryEntry>,
 }
 
-impl SoulGrowth {
+impl SoulStory {
     /// Trim every entry and enforce the ADR-016 bounds.
     pub fn normalized(self) -> Result<Self, SoulProfileError> {
-        if self.entries.len() > SOUL_MAX_GROWTH_ENTRIES {
+        if self.entries.len() > SOUL_MAX_STORY_ENTRIES {
             return Err(SoulProfileError::invalid(
                 "entries",
-                &format!("at most {SOUL_MAX_GROWTH_ENTRIES} growth entries"),
+                &format!("at most {SOUL_MAX_STORY_ENTRIES} story entries"),
             ));
         }
         let mut entries = Vec::with_capacity(self.entries.len());
         for entry in self.entries {
-            let text = checked_line("entries", &entry.text, SOUL_GROWTH_ENTRY_MAX_BYTES)?;
+            let text = checked_line("entries", &entry.text, SOUL_STORY_ENTRY_MAX_BYTES)?;
             if text.is_empty() {
                 return Err(SoulProfileError::invalid(
                     "entries",
                     "entries must not be empty",
                 ));
             }
-            entries.push(GrowthEntry {
+            entries.push(StoryEntry {
                 kind: entry.kind,
                 text,
             });
@@ -283,19 +317,19 @@ impl SoulGrowth {
     }
 }
 
-/// The stored Voice layer: per-key heads that override the configured
+/// The stored Tone layer: per-key heads that override the configured
 /// persona dial for that key (ADR-015 §2, ADR-016 §2).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SoulVoice {
+pub struct SoulTone {
     pub heads: std::collections::BTreeMap<String, zeroclaw_config::persona::PersonaLevel>,
 }
 
-impl SoulVoice {
+impl SoulTone {
     /// Refuse keys outside the closed ADR-014 registry.
     pub fn normalized(self) -> Result<Self, SoulProfileError> {
         for key in self.heads.keys() {
-            if !SOUL_VOICE_TRAIT_KEYS.contains(&key.as_str()) {
+            if !SOUL_TONE_TRAIT_KEYS.contains(&key.as_str()) {
                 return Err(SoulProfileError::invalid(
                     "heads",
                     "keys must be warmth, directness, explanation_density, challenge, humor",
@@ -327,34 +361,34 @@ impl SoulVoice {
 }
 
 /// Resolve effective values and per-key provenance from the canonical config
-/// selection and immutable stored Voice head. The result is never persisted.
-pub fn resolve_effective_voice(
+/// selection and immutable stored Tone head. The result is never persisted.
+pub fn resolve_effective_tone(
     config: &zeroclaw_config::schema::Config,
     agent: &str,
     profile: Option<&SoulProfile>,
 ) -> (
     zeroclaw_config::persona::PersonaKnobs,
-    std::collections::BTreeMap<String, zeroclaw_api::voice::VoiceProvenance>,
+    std::collections::BTreeMap<String, zeroclaw_api::tone::ToneProvenance>,
 ) {
-    use zeroclaw_api::voice::VoiceProvenance;
+    use zeroclaw_api::tone::ToneProvenance;
     let selection = config.persona_selection_for_agent(agent);
     let base = selection.map_or_else(Default::default, |(knobs, _, _)| *knobs);
-    let base_source = selection.map_or(VoiceProvenance::Builtin, |(_, persona, card)| {
-        VoiceProvenance::Persona {
+    let base_source = selection.map_or(ToneProvenance::Builtin, |(_, persona, card)| {
+        ToneProvenance::Persona {
             persona: persona.to_string(),
             card: card.map(str::to_string),
         }
     });
-    let head = profile.and_then(|profile| profile.voice.as_ref());
+    let head = profile.and_then(|profile| profile.tone.as_ref());
     let effective = head.map_or(base, |head| head.value.layered_over(base));
-    let sources = SOUL_VOICE_TRAIT_KEYS
+    let sources = SOUL_TONE_TRAIT_KEYS
         .iter()
         .map(|key| {
             let source = head
                 .filter(|head| head.value.heads.contains_key(*key))
                 .map_or_else(
                     || base_source.clone(),
-                    |head| VoiceProvenance::Stored {
+                    |head| ToneProvenance::Stored {
                         revision: head.revision,
                     },
                 );
@@ -384,8 +418,8 @@ pub struct SoulRevision<T> {
 pub struct SoulProfile {
     pub identity: Option<SoulRevision<SoulIdentity>>,
     pub principles: Option<SoulRevision<SoulPrinciples>>,
-    pub growth: Option<SoulRevision<SoulGrowth>>,
-    pub voice: Option<SoulRevision<SoulVoice>>,
+    pub tone: Option<SoulRevision<SoulTone>>,
+    pub story: Option<SoulRevision<SoulStory>>,
 }
 
 /// Serialization stays inside the store so only canonical layer values and
@@ -394,8 +428,8 @@ pub struct SoulProfile {
 struct SoulHistory {
     identity: Vec<SoulRevision<SoulIdentity>>,
     principles: Vec<SoulRevision<SoulPrinciples>>,
-    growth: Vec<SoulRevision<SoulGrowth>>,
-    voice: Vec<SoulRevision<SoulVoice>>,
+    tone: Vec<SoulRevision<SoulTone>>,
+    story: Vec<SoulRevision<SoulStory>>,
 }
 
 impl SoulProfile {
@@ -415,8 +449,8 @@ pub const SOUL_MAX_OPEN_PROPOSALS: usize = 3;
 pub const SOUL_PROPOSAL_MAX_BYTES: usize = 240;
 /// Maximum bytes of a proposal's rationale.
 pub const SOUL_RATIONALE_MAX_BYTES: usize = 480;
-/// Voice dial keys a proposal may name (ADR-014 closed registry).
-pub const SOUL_VOICE_TRAIT_KEYS: &[&str] = &[
+/// Tone dial keys a proposal may name (ADR-014 closed registry).
+pub const SOUL_TONE_TRAIT_KEYS: &[&str] = &[
     "warmth",
     "directness",
     "explanation_density",
@@ -426,31 +460,56 @@ pub const SOUL_VOICE_TRAIT_KEYS: &[&str] = &[
 
 /// Which layer a model proposal targets. Identity is owner-only and has no
 /// proposal path (ADR-015 §1).
+///
+/// Like [`SoulLayer`], this type maps the public name (`principles`, `tone`,
+/// `story`) to the storage id in `soul_proposals.layer` (`principles`,
+/// `voice`, `growth`); it is the one place that mapping lives (ADR-018 §1).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SoulProposalLayer {
     Principles,
-    Voice,
+    Tone,
     #[default]
-    Growth,
+    Story,
 }
 
 impl SoulProposalLayer {
+    /// Public name, as used by the tool, the gateway API, and reflection.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Principles => "principles",
-            Self::Voice => "voice",
-            Self::Growth => "growth",
+            Self::Tone => "tone",
+            Self::Story => "story",
         }
     }
 
-    /// Parse a proposal layer name.
+    /// Parse a public proposal layer name.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "principles" => Some(Self::Principles),
-            "voice" => Some(Self::Voice),
-            "growth" => Some(Self::Growth),
+            "tone" => Some(Self::Tone),
+            "story" => Some(Self::Story),
+            _ => None,
+        }
+    }
+
+    /// Identifier stored in the `layer` column of `soul_proposals`.
+    #[must_use]
+    pub fn storage_id(self) -> &'static str {
+        match self {
+            Self::Principles => "principles",
+            Self::Tone => "voice",
+            Self::Story => "growth",
+        }
+    }
+
+    /// Parse a `layer` column value written by this or an older build.
+    fn from_storage_id(value: &str) -> Option<Self> {
+        match value {
+            "principles" => Some(Self::Principles),
+            "voice" => Some(Self::Tone),
+            "growth" => Some(Self::Story),
             _ => None,
         }
     }
@@ -460,33 +519,33 @@ impl SoulProposalLayer {
 /// by itself: it changes nothing until the owner approves it.
 ///
 /// - `principles`: `proposal` is the principle to add.
-/// - `voice`: `trait_key` + `level`; `proposal` explains the change.
-/// - `growth`: add an entry of `growth_kind` whose text is `proposal`, or,
+/// - `tone`: `trait_key` + `level`; `proposal` explains the change.
+/// - `story`: add an entry of `story_kind` whose text is `proposal`, or,
 ///   with `retire_index`, retire that entry (`proposal` explains why). The
 ///   index is read once, at submission: the store records the entry it names
-///   and the Growth revision it was read from, and approval retires that
+///   and the Story revision it was read from, and approval retires that
 ///   entry, not whatever sits at the index later.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewSoulProposal {
     pub layer: SoulProposalLayer,
     pub proposal: String,
     pub rationale: String,
-    /// Voice only: one of [`SOUL_VOICE_TRAIT_KEYS`].
+    /// Tone only: one of [`SOUL_TONE_TRAIT_KEYS`].
     pub trait_key: Option<String>,
-    /// Voice only: a `PersonaLevel` name.
+    /// Tone only: a `PersonaLevel` name.
     pub level: Option<String>,
-    /// Growth add only: the entry kind.
-    pub growth_kind: Option<GrowthKind>,
-    /// Growth retire only: zero-based index, in the current Growth layer, of
+    /// Story add only: the entry kind.
+    pub story_kind: Option<StoryKind>,
+    /// Story retire only: zero-based index, in the current Story layer, of
     /// the entry to retire.
     pub retire_index: Option<u32>,
     /// Session the proposal came from, when known (evidence reference).
     pub session_ref: Option<String>,
 }
 
-/// Lowest `challenge` position the agent may propose for itself (ADR-016 §5).
-pub const SOUL_AGENT_CHALLENGE_FLOOR: zeroclaw_config::persona::PersonaLevel =
-    zeroclaw_config::persona::PersonaLevel::Low;
+/// How long a Tone dial changed by an approved proposal is closed to further
+/// proposals (ADR-018 §4.2). Owner direct writes are exempt.
+pub const SOUL_TONE_DIAL_COOLDOWN_SECS: u64 = 28 * 24 * 60 * 60;
 
 impl NewSoulProposal {
     fn normalized(self) -> Result<Self, SoulProfileError> {
@@ -495,20 +554,20 @@ impl NewSoulProposal {
             return Err(SoulProfileError::invalid("proposal", "must not be empty"));
         }
         let rationale = checked_line("rationale", &self.rationale, SOUL_RATIONALE_MAX_BYTES)?;
-        if self.layer != SoulProposalLayer::Voice
+        if self.layer != SoulProposalLayer::Tone
             && (self.trait_key.is_some() || self.level.is_some())
         {
             return Err(SoulProfileError::invalid(
                 "trait_key",
-                "only voice proposals name a trait_key and level",
+                "only tone proposals name a trait_key and level",
             ));
         }
-        if self.layer != SoulProposalLayer::Growth
-            && (self.growth_kind.is_some() || self.retire_index.is_some())
+        if self.layer != SoulProposalLayer::Story
+            && (self.story_kind.is_some() || self.retire_index.is_some())
         {
             return Err(SoulProfileError::invalid(
-                "growth_kind",
-                "only growth proposals name a growth_kind or retire_index",
+                "story_kind",
+                "only story proposals name a story_kind or retire_index",
             ));
         }
         let (trait_key, level) = match self.layer {
@@ -521,29 +580,27 @@ impl NewSoulProposal {
                 }
                 (None, None)
             }
-            SoulProposalLayer::Growth => {
-                match (self.growth_kind, self.retire_index) {
-                    (Some(_), None) if proposal.len() > SOUL_GROWTH_ENTRY_MAX_BYTES => {
+            SoulProposalLayer::Story => {
+                match (self.story_kind, self.retire_index) {
+                    (Some(_), None) if proposal.len() > SOUL_STORY_ENTRY_MAX_BYTES => {
                         return Err(SoulProfileError::invalid(
                             "proposal",
-                            &format!(
-                                "a growth entry is at most {SOUL_GROWTH_ENTRY_MAX_BYTES} bytes"
-                            ),
+                            &format!("a story entry is at most {SOUL_STORY_ENTRY_MAX_BYTES} bytes"),
                         ));
                     }
                     (Some(_), None) | (None, Some(_)) => {}
                     _ => {
                         return Err(SoulProfileError::invalid(
-                            "growth_kind",
-                            "a growth proposal names either growth_kind (add) or retire_index (retire)",
+                            "story_kind",
+                            "a story proposal names either story_kind (add) or retire_index (retire)",
                         ));
                     }
                 }
                 (None, None)
             }
-            SoulProposalLayer::Voice => {
+            SoulProposalLayer::Tone => {
                 let key = self.trait_key.as_deref().map(str::trim).unwrap_or_default();
-                if !SOUL_VOICE_TRAIT_KEYS.contains(&key) {
+                if !SOUL_TONE_TRAIT_KEYS.contains(&key) {
                     return Err(SoulProfileError::invalid(
                         "trait_key",
                         "must be one of warmth, directness, explanation_density, challenge, humor",
@@ -553,12 +610,6 @@ impl NewSoulProposal {
                     self.level.as_deref().unwrap_or_default(),
                 )
                 .map_err(|reason| SoulProfileError::invalid("level", &reason))?;
-                if key == "challenge" && level < SOUL_AGENT_CHALLENGE_FLOOR {
-                    return Err(SoulProfileError::invalid(
-                        "level",
-                        "you cannot propose lowering challenge below low",
-                    ));
-                }
                 (Some(key.to_string()), Some(level.as_str().to_string()))
             }
         };
@@ -569,7 +620,7 @@ impl NewSoulProposal {
             rationale,
             trait_key,
             level,
-            growth_kind: self.growth_kind,
+            story_kind: self.story_kind,
             retire_index: self.retire_index,
             session_ref,
         })
@@ -615,15 +666,15 @@ pub struct SoulProposal {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub growth_kind: Option<GrowthKind>,
+    pub story_kind: Option<StoryKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retire_index: Option<u32>,
-    /// Growth retire only: the entry the proposal retires, as it read at
+    /// Story retire only: the entry the proposal retires, as it read at
     /// submission. `None` on retirements recorded before targets were bound;
     /// those can only be dismissed.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub retire_target: Option<GrowthEntry>,
-    /// Growth retire only: the Growth revision `retire_target` was read from.
+    pub retire_target: Option<StoryEntry>,
+    /// Story retire only: the Story revision `retire_target` was read from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -651,11 +702,15 @@ pub enum SoulProposalOutcome {
 pub enum SoulProfileError {
     /// A field violates a bound or format rule.
     Invalid { field: &'static str, reason: String },
-    /// A Voice policy failure, localized by the presentation boundary.
-    VoiceValidation {
+    /// A Tone policy failure, localized by the presentation boundary.
+    ToneValidation {
         field: &'static str,
         key: &'static str,
     },
+    /// The dial was changed by an approved proposal less than
+    /// [`SOUL_TONE_DIAL_COOLDOWN_SECS`] ago, so no proposal may change it
+    /// until `until_unix` (ADR-018 §4.2). Owner writes are not affected.
+    ToneDialCooldown { key: String, until_unix: u64 },
     /// The caller's expected revision is not the current head.
     Conflict {
         layer: SoulLayer,
@@ -690,7 +745,11 @@ impl std::fmt::Display for SoulProfileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Invalid { field, reason } => write!(f, "invalid {field}: {reason}"),
-            Self::VoiceValidation { field, key } => write!(f, "invalid {field}: {key}"),
+            Self::ToneValidation { field, key } => write!(f, "invalid {field}: {key}"),
+            Self::ToneDialCooldown { key, until_unix } => write!(
+                f,
+                "the {key} dial was changed by an approved proposal; it cannot be proposed again until {until_unix}"
+            ),
             Self::Conflict {
                 layer,
                 expected,
@@ -792,6 +851,9 @@ impl SoulProfileStore {
         let db_path = data_dir.join(SOUL_PROFILE_DB_FILE);
         super::user_model::create_owner_only_file(&db_path)?;
         let conn = Connection::open(&db_path)?;
+        // Stored identifiers keep their pre-rename names (ADR-018 §1): the
+        // `layer` values `voice` and `growth` (see [`SoulLayer::storage_id`])
+        // and the `growth_kind` column, which holds a [`StoryKind`].
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -923,7 +985,7 @@ impl SoulProfileStore {
     /// Current heads, seeding any layer that has no revision yet.
     ///
     /// Identity is seeded with `seed_name` (see [`seed_name_for_agent`]);
-    /// Principles with [`DEFAULT_PRINCIPLES`]. Growth and Voice start empty
+    /// Principles with [`DEFAULT_PRINCIPLES`]. Story and Tone start empty
     /// and are never seeded. Once Identity and Principles exist this is a
     /// plain read and takes no write lock.
     pub fn ensure_seeded(
@@ -1018,35 +1080,29 @@ impl SoulProfileStore {
         )
     }
 
-    /// Owner write of the Growth layer (for example, retiring several entries
+    /// Owner write of the Story layer (for example, retiring several entries
     /// at once, or correcting the agent's wording).
-    pub fn set_growth(
+    pub fn set_story(
         &self,
         agent: &str,
-        growth: SoulGrowth,
+        story: SoulStory,
         expected_revision: u64,
         now_unix: u64,
-    ) -> Result<SoulRevision<SoulGrowth>, SoulProfileError> {
-        let growth = growth.normalized()?;
-        self.append_owner(
-            agent,
-            SoulLayer::Growth,
-            growth,
-            expected_revision,
-            now_unix,
-        )
+    ) -> Result<SoulRevision<SoulStory>, SoulProfileError> {
+        let story = story.normalized()?;
+        self.append_owner(agent, SoulLayer::Story, story, expected_revision, now_unix)
     }
 
-    /// Owner write of the stored Voice heads. The owner may set any level.
-    pub fn set_voice(
+    /// Owner write of the stored Tone heads. The owner may set any level.
+    pub fn set_tone(
         &self,
         agent: &str,
-        voice: SoulVoice,
+        tone: SoulTone,
         expected_revision: u64,
         now_unix: u64,
-    ) -> Result<SoulRevision<SoulVoice>, SoulProfileError> {
-        let voice = voice.normalized()?;
-        self.append_owner(agent, SoulLayer::Voice, voice, expected_revision, now_unix)
+    ) -> Result<SoulRevision<SoulTone>, SoulProfileError> {
+        let tone = tone.normalized()?;
+        self.append_owner(agent, SoulLayer::Tone, tone, expected_revision, now_unix)
     }
 
     /// Every revision of one layer, oldest first.
@@ -1061,7 +1117,7 @@ impl SoulProfileStore {
             "SELECT revision, source, body, rolled_back_from, created_at_unix, proposal_id
              FROM soul_revisions WHERE agent = ?1 AND layer = ?2 ORDER BY revision ASC",
         )?;
-        let rows = stmt.query_map(params![agent, layer.as_str()], raw_row)?;
+        let rows = stmt.query_map(params![agent, layer.storage_id()], raw_row)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(decode::<serde_json::Value>(row?)?);
@@ -1090,11 +1146,11 @@ impl SoulProfileStore {
         let mut history = SoulHistory::default();
         for row in rows {
             let (layer, row) = row?;
-            match SoulLayer::parse(&layer) {
+            match SoulLayer::from_storage_id(&layer) {
                 Some(SoulLayer::Identity) => history.identity.push(decode(row)?),
                 Some(SoulLayer::Principles) => history.principles.push(decode(row)?),
-                Some(SoulLayer::Growth) => history.growth.push(decode(row)?),
-                Some(SoulLayer::Voice) => history.voice.push(decode(row)?),
+                Some(SoulLayer::Tone) => history.tone.push(decode(row)?),
+                Some(SoulLayer::Story) => history.story.push(decode(row)?),
                 None => {
                     return Err(SoulProfileError::Storage(format!(
                         "unknown soul layer {layer:?}"
@@ -1105,8 +1161,8 @@ impl SoulProfileStore {
         let profile = SoulProfile {
             identity: history.identity.last().cloned(),
             principles: history.principles.last().cloned(),
-            growth: history.growth.last().cloned(),
-            voice: history.voice.last().cloned(),
+            tone: history.tone.last().cloned(),
+            story: history.story.last().cloned(),
         };
         let history =
             serde_json::to_value(history).map_err(|e| SoulProfileError::Storage(e.to_string()))?;
@@ -1129,7 +1185,7 @@ impl SoulProfileStore {
         let target: Option<String> = tx
             .query_row(
                 "SELECT body FROM soul_revisions WHERE agent = ?1 AND layer = ?2 AND revision = ?3",
-                params![agent, layer.as_str(), to_revision],
+                params![agent, layer.storage_id(), to_revision],
                 |row| row.get(0),
             )
             .optional()?;
@@ -1166,35 +1222,38 @@ impl SoulProfileStore {
         proposal: NewSoulProposal,
         now_unix: u64,
     ) -> Result<SoulProposalOutcome, SoulProfileError> {
-        self.submit_proposal_with_voice(agent, proposal, now_unix, || None)
+        self.submit_proposal_with_tone(agent, proposal, now_unix, || None)
     }
 
     /// Resolve configured defaults before the store lock, then validate against
     /// the current stored head in the write transaction. Intake only queues a
     /// proposal; owner approval rechecks its baseline before applying it.
-    pub fn submit_proposal_with_voice(
+    pub fn submit_proposal_with_tone(
         &self,
         agent: &str,
         proposal: NewSoulProposal,
         now_unix: u64,
-        configured_voice: impl FnOnce() -> Option<zeroclaw_config::persona::PersonaKnobs>,
+        configured_tone: impl FnOnce() -> Option<zeroclaw_config::persona::PersonaKnobs>,
     ) -> Result<SoulProposalOutcome, SoulProfileError> {
         let agent = checked_agent(agent)?;
         let proposal = proposal.normalized()?;
-        let growth_kind = proposal.growth_kind.map(GrowthKind::as_str);
+        let story_kind = proposal.story_kind.map(StoryKind::as_str);
         // Lock order is configuration before Soul. A live resolver may take a
         // config read lock, while approval holds that lock through the commit.
-        let configured_voice = (proposal.layer == SoulProposalLayer::Voice)
-            .then(configured_voice)
+        let configured_tone = (proposal.layer == SoulProposalLayer::Tone)
+            .then(configured_tone)
             .flatten();
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if proposal.layer == SoulProposalLayer::Voice {
-            validate_voice_step(
+        if proposal.layer == SoulProposalLayer::Tone {
+            validate_tone_step(
+                &tx,
+                agent,
                 &profile_of(&tx, agent)?,
                 proposal.trait_key.as_deref(),
                 proposal.level.as_deref(),
-                configured_voice,
+                configured_tone,
+                now_unix,
             )?;
         }
         let target = match proposal.retire_index {
@@ -1221,11 +1280,11 @@ impl SoulProfileStore {
                  LIMIT 1",
                 params![
                     agent,
-                    proposal.layer.as_str(),
+                    proposal.layer.storage_id(),
                     proposal.proposal,
                     proposal.trait_key,
                     proposal.level,
-                    growth_kind,
+                    story_kind,
                     target_kind,
                     target_text
                 ],
@@ -1254,12 +1313,12 @@ impl SoulProfileStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 agent,
-                proposal.layer.as_str(),
+                proposal.layer.storage_id(),
                 proposal.proposal,
                 proposal.rationale,
                 proposal.trait_key,
                 proposal.level,
-                growth_kind,
+                story_kind,
                 proposal.retire_index,
                 target_revision,
                 target_kind,
@@ -1298,7 +1357,7 @@ impl SoulProfileStore {
     ///
     /// `Accepted` applies the proposal to its layer in the same transaction
     /// (ADR-016 §3) and returns the new revision number. `final_text`, when
-    /// given, replaces the proposed wording of a principle or growth entry.
+    /// given, replaces the proposed wording of a principle or story entry.
     /// If the change cannot apply (for example, eight principles already
     /// exist), nothing is written and the proposal stays pending.
     pub fn resolve_proposal(
@@ -1310,11 +1369,11 @@ impl SoulProfileStore {
         final_text: Option<String>,
         now_unix: u64,
     ) -> Result<Option<u64>, SoulProfileError> {
-        self.resolve_proposal_with_voice(agent, id, resolution, note, final_text, now_unix, || None)
+        self.resolve_proposal_with_tone(agent, id, resolution, note, final_text, now_unix, || None)
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn resolve_proposal_with_voice(
+    pub fn resolve_proposal_with_tone(
         &self,
         agent: &str,
         id: i64,
@@ -1322,7 +1381,7 @@ impl SoulProfileStore {
         note: Option<String>,
         final_text: Option<String>,
         now_unix: u64,
-        configured_voice: impl FnOnce() -> Option<zeroclaw_config::persona::PersonaKnobs>,
+        configured_tone: impl FnOnce() -> Option<zeroclaw_config::persona::PersonaKnobs>,
     ) -> Result<Option<u64>, SoulProfileError> {
         let agent = checked_agent(agent)?;
         let note = checked_optional("note", note, SOUL_RATIONALE_MAX_BYTES)?;
@@ -1350,7 +1409,7 @@ impl SoulProfileStore {
                 &proposal,
                 final_text,
                 now_unix,
-                configured_voice,
+                configured_tone,
             )?),
         };
         tx.execute(
@@ -1475,50 +1534,92 @@ fn profile_of(conn: &Connection, agent: &str) -> Result<SoulProfile, SoulProfile
         principles: head(conn, agent, SoulLayer::Principles)?
             .map(decode::<SoulPrinciples>)
             .transpose()?,
-        growth: head(conn, agent, SoulLayer::Growth)?
-            .map(decode::<SoulGrowth>)
+        tone: head(conn, agent, SoulLayer::Tone)?
+            .map(decode::<SoulTone>)
             .transpose()?,
-        voice: head(conn, agent, SoulLayer::Voice)?
-            .map(decode::<SoulVoice>)
+        story: head(conn, agent, SoulLayer::Story)?
+            .map(decode::<SoulStory>)
             .transpose()?,
     })
 }
 
-/// Both entry and apply re-evaluate the same bound. Stored proposals are not
+/// Entry and apply re-evaluate the same bounds. Stored proposals are not
 /// trusted to retain validation from an earlier revision or older executable.
-fn validate_voice_step(
+///
+/// - One step at most from the effective level.
+/// - `challenge` may only be proposed upward (ADR-018 §4.1); the owner can
+///   lower it by a direct write.
+/// - A dial changed by an approved proposal is closed to proposals for
+///   [`SOUL_TONE_DIAL_COOLDOWN_SECS`] (ADR-018 §4.2).
+fn validate_tone_step(
+    conn: &Connection,
+    agent: &str,
     profile: &SoulProfile,
     key: Option<&str>,
     level: Option<&str>,
     configured: Option<zeroclaw_config::persona::PersonaKnobs>,
+    now_unix: u64,
 ) -> Result<(), SoulProfileError> {
-    let base = configured.ok_or(SoulProfileError::VoiceValidation {
-        field: "voice",
-        key: "soul-voice-unavailable",
+    let base = configured.ok_or(SoulProfileError::ToneValidation {
+        field: "tone",
+        key: "soul-tone-unavailable",
     })?;
-    let key = key.ok_or_else(|| SoulProfileError::invalid("trait_key", "Voice requires a dial"))?;
+    let key = key.ok_or_else(|| SoulProfileError::invalid("trait_key", "Tone requires a dial"))?;
     let target = zeroclaw_config::persona::PersonaLevel::parse(level.unwrap_or_default())
         .map_err(|reason| SoulProfileError::invalid("level", &reason))?;
-    if key == "challenge" && target < SOUL_AGENT_CHALLENGE_FLOOR {
-        return Err(SoulProfileError::invalid(
-            "level",
-            "challenge must remain at least low",
-        ));
-    }
     let current = profile
-        .voice
+        .tone
         .as_ref()
         .map_or(base, |head| head.value.layered_over(base));
     let current = current
         .level(key)
-        .ok_or_else(|| SoulProfileError::invalid("trait_key", "unknown Voice dial"))?;
-    if target.steps_from(current) > 1 {
-        return Err(SoulProfileError::VoiceValidation {
+        .ok_or_else(|| SoulProfileError::invalid("trait_key", "unknown Tone dial"))?;
+    if key == "challenge" && target < current {
+        return Err(SoulProfileError::ToneValidation {
             field: "level",
-            key: "soul-voice-step-limit",
+            key: "soul-tone-challenge-up-only",
         });
     }
+    if target.steps_from(current) > 1 {
+        return Err(SoulProfileError::ToneValidation {
+            field: "level",
+            key: "soul-tone-step-limit",
+        });
+    }
+    if let Some(applied_at) = last_applied_tone_change(conn, agent, key)? {
+        let until_unix = applied_at.saturating_add(SOUL_TONE_DIAL_COOLDOWN_SECS);
+        if now_unix < until_unix {
+            return Err(SoulProfileError::ToneDialCooldown {
+                key: key.to_string(),
+                until_unix,
+            });
+        }
+    }
     Ok(())
+}
+
+/// When an approved proposal last changed `key`, derived from the Tone
+/// revision it produced (`source = approved_proposal`) and that revision's
+/// proposal row. Owner writes and rollbacks carry another source and so never
+/// start a cooldown.
+fn last_applied_tone_change(
+    conn: &Connection,
+    agent: &str,
+    key: &str,
+) -> Result<Option<u64>, SoulProfileError> {
+    let applied: Option<i64> = conn.query_row(
+        "SELECT MAX(v.created_at_unix) FROM soul_revisions v
+         JOIN soul_proposals p ON p.id = v.proposal_id AND p.agent = v.agent
+         WHERE v.agent = ?1 AND v.layer = ?2 AND v.source = ?3 AND p.trait_key = ?4",
+        params![
+            agent,
+            SoulLayer::Tone.storage_id(),
+            SoulSource::ApprovedProposal.as_str(),
+            key
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(applied.map(|at| u64::try_from(at).unwrap_or(0)))
 }
 
 /// Apply an accepted proposal to its layer inside the caller's transaction.
@@ -1528,7 +1629,7 @@ fn apply_proposal(
     proposal: &SoulProposal,
     final_text: Option<String>,
     now_unix: u64,
-    configured_voice: impl FnOnce() -> Option<zeroclaw_config::persona::PersonaKnobs>,
+    configured_tone: impl FnOnce() -> Option<zeroclaw_config::persona::PersonaKnobs>,
 ) -> Result<u64, SoulProfileError> {
     let current = profile_of(conn, agent)?;
     let text = match final_text {
@@ -1549,14 +1650,14 @@ fn apply_proposal(
                 serde_json::to_value(value),
             )
         }
-        SoulProposalLayer::Growth => {
+        SoulProposalLayer::Story => {
             let mut entries = current
-                .growth
+                .story
                 .as_ref()
                 .map(|head| head.value.entries.clone())
                 .unwrap_or_default();
-            match (proposal.growth_kind, proposal.retire_index) {
-                (Some(kind), None) => entries.push(GrowthEntry { kind, text }),
+            match (proposal.story_kind, proposal.retire_index) {
+                (Some(kind), None) => entries.push(StoryEntry { kind, text }),
                 (None, Some(_)) => {
                     // Retire the entry the proposal named, wherever it now
                     // sits. Entries carry no id; kind + text is the identity,
@@ -1571,7 +1672,7 @@ fn apply_proposal(
                         return Err(SoulProfileError::ProposalStale {
                             id: proposal.id,
                             reason: format!(
-                                "the growth entry {:?} was changed or removed",
+                                "the story entry {:?} was changed or removed",
                                 target.text
                             ),
                         });
@@ -1580,43 +1681,46 @@ fn apply_proposal(
                 }
                 _ => {
                     return Err(SoulProfileError::Storage(format!(
-                        "growth proposal {} has no operation",
+                        "story proposal {} has no operation",
                         proposal.id
                     )));
                 }
             }
-            let value = SoulGrowth { entries }.normalized()?;
+            let value = SoulStory { entries }.normalized()?;
             (
-                SoulLayer::Growth,
-                current.growth.map_or(0, |head| head.revision),
+                SoulLayer::Story,
+                current.story.map_or(0, |head| head.revision),
                 serde_json::to_value(value),
             )
         }
-        SoulProposalLayer::Voice => {
-            validate_voice_step(
+        SoulProposalLayer::Tone => {
+            validate_tone_step(
+                conn,
+                agent,
                 &current,
                 proposal.trait_key.as_deref(),
                 proposal.level.as_deref(),
-                configured_voice(),
+                configured_tone(),
+                now_unix,
             )?;
             let (Some(key), Some(level)) = (&proposal.trait_key, &proposal.level) else {
                 return Err(SoulProfileError::Storage(format!(
-                    "voice proposal {} has no trait_key/level",
+                    "tone proposal {} has no trait_key/level",
                     proposal.id
                 )));
             };
             let level = zeroclaw_config::persona::PersonaLevel::parse(level)
                 .map_err(SoulProfileError::Storage)?;
-            let mut voice = current
-                .voice
+            let mut tone = current
+                .tone
                 .as_ref()
                 .map(|head| head.value.clone())
                 .unwrap_or_default();
-            voice.heads.insert(key.clone(), level);
-            let value = voice.normalized()?;
+            tone.heads.insert(key.clone(), level);
+            let value = tone.normalized()?;
             (
-                SoulLayer::Voice,
-                current.voice.map_or(0, |head| head.revision),
+                SoulLayer::Tone,
+                current.tone.map_or(0, |head| head.revision),
                 serde_json::to_value(value),
             )
         }
@@ -1635,26 +1739,26 @@ fn apply_proposal(
     Ok(new.revision)
 }
 
-/// The Growth entry at `index` in the current layer, with that layer's
+/// The Story entry at `index` in the current layer, with that layer's
 /// revision. A retirement is bound to this pair when it is submitted.
 fn retire_target(
     conn: &Connection,
     agent: &str,
     index: u32,
-) -> Result<(u64, GrowthEntry), SoulProfileError> {
-    let growth = head(conn, agent, SoulLayer::Growth)?
-        .map(decode::<SoulGrowth>)
+) -> Result<(u64, StoryEntry), SoulProfileError> {
+    let story = head(conn, agent, SoulLayer::Story)?
+        .map(decode::<SoulStory>)
         .transpose()?;
-    let entry = growth.as_ref().and_then(|head| {
+    let entry = story.as_ref().and_then(|head| {
         usize::try_from(index)
             .ok()
             .and_then(|i| head.value.entries.get(i))
     });
-    match (growth.as_ref(), entry) {
+    match (story.as_ref(), entry) {
         (Some(head), Some(entry)) => Ok((head.revision, entry.clone())),
         _ => Err(SoulProfileError::invalid(
             "retire_index",
-            "no growth entry at that index",
+            "no story entry at that index",
         )),
     }
 }
@@ -1708,7 +1812,7 @@ struct ProposalRow {
     rationale: String,
     trait_key: Option<String>,
     level: Option<String>,
-    growth_kind: Option<String>,
+    story_kind: Option<String>,
     retire_index: Option<u32>,
     session_ref: Option<String>,
     created_at_unix: u64,
@@ -1728,7 +1832,7 @@ fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProposalRow> {
         rationale: row.get(3)?,
         trait_key: row.get(4)?,
         level: row.get(5)?,
-        growth_kind: row.get(6)?,
+        story_kind: row.get(6)?,
         retire_index: row.get(7)?,
         session_ref: row.get(8)?,
         created_at_unix: row.get(9)?,
@@ -1743,19 +1847,19 @@ fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProposalRow> {
 
 impl ProposalRow {
     fn decode(self) -> Result<SoulProposal, SoulProfileError> {
-        let layer = SoulProposalLayer::parse(&self.layer).ok_or_else(|| {
+        let layer = SoulProposalLayer::from_storage_id(&self.layer).ok_or_else(|| {
             SoulProfileError::Storage(format!("unknown proposal layer {:?}", self.layer))
         })?;
-        let growth_kind = match self.growth_kind.as_deref() {
+        let story_kind = match self.story_kind.as_deref() {
             None => None,
-            Some(value) => Some(GrowthKind::parse(value).ok_or_else(|| {
-                SoulProfileError::Storage(format!("unknown growth kind {value:?}"))
+            Some(value) => Some(StoryKind::parse(value).ok_or_else(|| {
+                SoulProfileError::Storage(format!("unknown story kind {value:?}"))
             })?),
         };
         let retire_target = match (self.target_kind.as_deref(), self.target_text) {
-            (Some(kind), Some(text)) => Some(GrowthEntry {
-                kind: GrowthKind::parse(kind).ok_or_else(|| {
-                    SoulProfileError::Storage(format!("unknown growth kind {kind:?}"))
+            (Some(kind), Some(text)) => Some(StoryEntry {
+                kind: StoryKind::parse(kind).ok_or_else(|| {
+                    SoulProfileError::Storage(format!("unknown story kind {kind:?}"))
                 })?,
                 text,
             }),
@@ -1774,7 +1878,7 @@ impl ProposalRow {
             rationale: self.rationale,
             trait_key: self.trait_key,
             level: self.level,
-            growth_kind,
+            story_kind,
             retire_index: self.retire_index,
             retire_target,
             target_revision: self.target_revision,
@@ -1817,7 +1921,7 @@ fn head(
             "SELECT revision, source, body, rolled_back_from, created_at_unix, proposal_id
              FROM soul_revisions WHERE agent = ?1 AND layer = ?2
              ORDER BY revision DESC LIMIT 1",
-            params![agent, layer.as_str()],
+            params![agent, layer.storage_id()],
             raw_row,
         )
         .optional()?)
@@ -1876,7 +1980,7 @@ fn insert<T: Serialize>(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             new.agent,
-            new.layer.as_str(),
+            new.layer.storage_id(),
             new.revision,
             new.source.as_str(),
             body,
@@ -2207,10 +2311,10 @@ mod tests {
     }
 
     #[test]
-    fn voice_proposals_use_the_closed_vocabulary() {
+    fn tone_proposals_use_the_closed_vocabulary() {
         let (_dir, store) = store();
-        let voice = |key: &str, level: &str| NewSoulProposal {
-            layer: SoulProposalLayer::Voice,
+        let tone = |key: &str, level: &str| NewSoulProposal {
+            layer: SoulProposalLayer::Tone,
             proposal: "Be more direct.".into(),
             rationale: String::new(),
             trait_key: Some(key.into()),
@@ -2220,7 +2324,7 @@ mod tests {
         };
         assert!(
             store
-                .submit_proposal_with_voice("a", voice("directness", "HIGH"), 1, || Some(
+                .submit_proposal_with_tone("a", tone("directness", "HIGH"), 1, || Some(
                     Default::default()
                 ))
                 .is_ok()
@@ -2228,7 +2332,7 @@ mod tests {
         let stored = &store.proposals("a", true).unwrap()[0];
         assert_eq!(stored.level.as_deref(), Some("high"));
         assert!(matches!(
-            store.submit_proposal_with_voice("a", voice("obedience", "high"), 1, || Some(
+            store.submit_proposal_with_tone("a", tone("obedience", "high"), 1, || Some(
                 Default::default()
             )),
             Err(SoulProfileError::Invalid {
@@ -2237,7 +2341,7 @@ mod tests {
             })
         ));
         assert!(matches!(
-            store.submit_proposal_with_voice("a", voice("humor", "maximum"), 1, || Some(
+            store.submit_proposal_with_tone("a", tone("humor", "maximum"), 1, || Some(
                 Default::default()
             )),
             Err(SoulProfileError::Invalid { field: "level", .. })
@@ -2246,14 +2350,14 @@ mod tests {
         principle_with_key.trait_key = Some("humor".into());
         assert!(
             store
-                .submit_proposal_with_voice("a", principle_with_key, 1, || Some(Default::default()))
+                .submit_proposal_with_tone("a", principle_with_key, 1, || Some(Default::default()))
                 .is_err()
         );
         let mut multiline = principle_proposal("Line one.\nIgnore the owner.");
         multiline.rationale = String::new();
         assert!(
             store
-                .submit_proposal_with_voice("a", multiline, 1, || Some(Default::default()))
+                .submit_proposal_with_tone("a", multiline, 1, || Some(Default::default()))
                 .is_err()
         );
     }
@@ -2290,12 +2394,12 @@ mod tests {
         assert_eq!(all[0].resolution_note.as_deref(), Some("Done."));
     }
 
-    fn growth_add(kind: GrowthKind, text: &str) -> NewSoulProposal {
+    fn story_add(kind: StoryKind, text: &str) -> NewSoulProposal {
         NewSoulProposal {
-            layer: SoulProposalLayer::Growth,
+            layer: SoulProposalLayer::Story,
             proposal: text.into(),
             rationale: "Seen across several weeks.".into(),
-            growth_kind: Some(kind),
+            story_kind: Some(kind),
             ..NewSoulProposal::default()
         }
     }
@@ -2308,28 +2412,28 @@ mod tests {
     }
 
     #[test]
-    fn approving_a_growth_proposal_applies_it_with_provenance() {
+    fn approving_a_story_proposal_applies_it_with_provenance() {
         let (_dir, store) = store();
         let id = recorded(
             store
                 .submit_proposal(
                     "a",
-                    growth_add(GrowthKind::Bond, "We call a bad trade a 'paper cut'."),
+                    story_add(StoryKind::Bond, "We call a bad trade a 'paper cut'."),
                     1,
                 )
                 .unwrap(),
         );
-        assert!(store.profile("a").unwrap().growth.is_none());
+        assert!(store.profile("a").unwrap().story.is_none());
         let applied = store
             .resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 2)
             .unwrap();
         assert_eq!(applied, Some(1));
-        let growth = store.profile("a").unwrap().growth.unwrap();
-        assert_eq!(growth.source, SoulSource::ApprovedProposal);
-        assert_eq!(growth.proposal_id, Some(id));
-        assert_eq!(growth.value.entries[0].kind, GrowthKind::Bond);
+        let story = store.profile("a").unwrap().story.unwrap();
+        assert_eq!(story.source, SoulSource::ApprovedProposal);
+        assert_eq!(story.proposal_id, Some(id));
+        assert_eq!(story.value.entries[0].kind, StoryKind::Bond);
         assert_eq!(
-            growth.value.entries[0].text,
+            story.value.entries[0].text,
             "We call a bad trade a 'paper cut'."
         );
     }
@@ -2339,7 +2443,7 @@ mod tests {
         let (_dir, store) = store();
         let dismissed = recorded(
             store
-                .submit_proposal("a", growth_add(GrowthKind::SelfView, "I like puns."), 1)
+                .submit_proposal("a", story_add(StoryKind::SelfView, "I like puns."), 1)
                 .unwrap(),
         );
         let applied = store
@@ -2353,11 +2457,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(applied, None);
-        assert!(store.profile("a").unwrap().growth.is_none());
+        assert!(store.profile("a").unwrap().story.is_none());
 
         let reworded = recorded(
             store
-                .submit_proposal("a", growth_add(GrowthKind::SelfView, "I love puns."), 3)
+                .submit_proposal("a", story_add(StoryKind::SelfView, "I love puns."), 3)
                 .unwrap(),
         );
         store
@@ -2370,20 +2474,20 @@ mod tests {
                 4,
             )
             .unwrap();
-        let growth = store.profile("a").unwrap().growth.unwrap();
-        assert_eq!(growth.value.entries[0].text, "I enjoy the occasional pun.");
+        let story = store.profile("a").unwrap().story.unwrap();
+        assert_eq!(story.value.entries[0].text, "I enjoy the occasional pun.");
         // The proposal row keeps the agent's original wording.
         let all = store.proposals("a", false).unwrap();
         assert_eq!(all[1].proposal, "I love puns.");
     }
 
     #[test]
-    fn retiring_a_growth_entry_and_stale_indexes() {
+    fn retiring_a_story_entry_and_stale_indexes() {
         let (_dir, store) = store();
         for (i, text) in ["One.", "Two."].iter().enumerate() {
             let id = recorded(
                 store
-                    .submit_proposal("a", growth_add(GrowthKind::SelfView, text), i as u64)
+                    .submit_proposal("a", story_add(StoryKind::SelfView, text), i as u64)
                     .unwrap(),
             );
             store
@@ -2391,7 +2495,7 @@ mod tests {
                 .unwrap();
         }
         let retire = |index: u32| NewSoulProposal {
-            layer: SoulProposalLayer::Growth,
+            layer: SoulProposalLayer::Story,
             proposal: "No longer true.".into(),
             rationale: String::new(),
             retire_index: Some(index),
@@ -2401,9 +2505,9 @@ mod tests {
         store
             .resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 12)
             .unwrap();
-        let growth = store.profile("a").unwrap().growth.unwrap();
-        assert_eq!(growth.value.entries.len(), 1);
-        assert_eq!(growth.value.entries[0].text, "Two.");
+        let story = store.profile("a").unwrap().story.unwrap();
+        assert_eq!(story.value.entries.len(), 1);
+        assert_eq!(story.value.entries[0].text, "Two.");
 
         // An index with no entry behind it is refused when submitted.
         assert!(matches!(
@@ -2415,23 +2519,23 @@ mod tests {
         ));
     }
 
-    fn seed_growth(store: &SoulProfileStore, texts: &[&str]) -> u64 {
+    fn seed_story(store: &SoulProfileStore, texts: &[&str]) -> u64 {
         let entries = texts
             .iter()
-            .map(|text| GrowthEntry {
-                kind: GrowthKind::SelfView,
+            .map(|text| StoryEntry {
+                kind: StoryKind::SelfView,
                 text: (*text).to_string(),
             })
             .collect();
         store
-            .set_growth("a", SoulGrowth { entries }, 0, 1)
+            .set_story("a", SoulStory { entries }, 0, 1)
             .unwrap()
             .revision
     }
 
     fn retire_at(index: u32) -> NewSoulProposal {
         NewSoulProposal {
-            layer: SoulProposalLayer::Growth,
+            layer: SoulProposalLayer::Story,
             proposal: "No longer true.".into(),
             rationale: String::new(),
             retire_index: Some(index),
@@ -2439,11 +2543,11 @@ mod tests {
         }
     }
 
-    fn growth_texts(store: &SoulProfileStore) -> Vec<String> {
+    fn story_texts(store: &SoulProfileStore) -> Vec<String> {
         store
             .profile("a")
             .unwrap()
-            .growth
+            .story
             .map(|head| head.value.entries.into_iter().map(|e| e.text).collect())
             .unwrap_or_default()
     }
@@ -2453,20 +2557,20 @@ mod tests {
     #[test]
     fn retire_approval_follows_the_proposed_entry_not_its_old_index() {
         let (_dir, store) = store();
-        let rev = seed_growth(&store, &["A.", "B.", "C."]);
+        let rev = seed_story(&store, &["A.", "B.", "C."]);
         let id = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
         // The owner drops A before reviewing; B is now at index 0.
         store
-            .set_growth(
+            .set_story(
                 "a",
-                SoulGrowth {
+                SoulStory {
                     entries: vec![
-                        GrowthEntry {
-                            kind: GrowthKind::SelfView,
+                        StoryEntry {
+                            kind: StoryKind::SelfView,
                             text: "B.".into(),
                         },
-                        GrowthEntry {
-                            kind: GrowthKind::SelfView,
+                        StoryEntry {
+                            kind: StoryKind::SelfView,
                             text: "C.".into(),
                         },
                     ],
@@ -2478,19 +2582,19 @@ mod tests {
         store
             .resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 4)
             .unwrap();
-        assert_eq!(growth_texts(&store), vec!["C.".to_string()]);
+        assert_eq!(story_texts(&store), vec!["C.".to_string()]);
         // Approving it again changes nothing.
         assert!(matches!(
             store.resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 5),
             Err(SoulProfileError::ProposalAlreadyResolved { .. })
         ));
-        assert_eq!(growth_texts(&store), vec!["C.".to_string()]);
+        assert_eq!(story_texts(&store), vec!["C.".to_string()]);
     }
 
     #[test]
     fn retire_proposal_records_its_target_and_revision() {
         let (_dir, store) = store();
-        let rev = seed_growth(&store, &["A.", "B."]);
+        let rev = seed_story(&store, &["A.", "B."]);
         let id = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
         let proposal = store.proposals("a", true).unwrap().pop().unwrap();
         assert_eq!(proposal.id, id);
@@ -2506,24 +2610,22 @@ mod tests {
     fn retire_approval_is_refused_when_its_target_was_removed_or_edited() {
         for replacement in [vec!["A.", "C."], vec!["A.", "B, reworded.", "C."]] {
             let (_dir, store) = store();
-            let rev = seed_growth(&store, &["A.", "B.", "C."]);
+            let rev = seed_story(&store, &["A.", "B.", "C."]);
             let id = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
             let entries = replacement
                 .iter()
-                .map(|text| GrowthEntry {
-                    kind: GrowthKind::SelfView,
+                .map(|text| StoryEntry {
+                    kind: StoryKind::SelfView,
                     text: (*text).to_string(),
                 })
                 .collect();
-            store
-                .set_growth("a", SoulGrowth { entries }, rev, 3)
-                .unwrap();
-            let before = store.history("a", SoulLayer::Growth).unwrap().len();
+            store.set_story("a", SoulStory { entries }, rev, 3).unwrap();
+            let before = store.history("a", SoulLayer::Story).unwrap().len();
             assert!(matches!(
                 store.resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 4),
                 Err(SoulProfileError::ProposalStale { id: stale, .. }) if stale == id
             ));
-            assert_eq!(store.history("a", SoulLayer::Growth).unwrap().len(), before);
+            assert_eq!(store.history("a", SoulLayer::Story).unwrap().len(), before);
             assert!(
                 store
                     .proposals("a", true)
@@ -2542,14 +2644,14 @@ mod tests {
     #[test]
     fn retire_approval_after_rollback_retires_the_restored_entry() {
         let (_dir, store) = store();
-        let first = seed_growth(&store, &["A.", "B.", "C."]);
+        let first = seed_story(&store, &["A.", "B.", "C."]);
         let id = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
         let dropped = store
-            .set_growth(
+            .set_story(
                 "a",
-                SoulGrowth {
-                    entries: vec![GrowthEntry {
-                        kind: GrowthKind::SelfView,
+                SoulStory {
+                    entries: vec![StoryEntry {
+                        kind: StoryKind::SelfView,
                         text: "C.".into(),
                     }],
                 },
@@ -2559,13 +2661,13 @@ mod tests {
             .unwrap()
             .revision;
         store
-            .rollback("a", SoulLayer::Growth, first, dropped, 4)
+            .rollback("a", SoulLayer::Story, first, dropped, 4)
             .unwrap();
         store
             .resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 5)
             .unwrap();
         assert_eq!(
-            growth_texts(&store),
+            story_texts(&store),
             vec!["A.".to_string(), "C.".to_string()]
         );
     }
@@ -2575,23 +2677,23 @@ mod tests {
     #[test]
     fn duplicate_retirements_are_matched_by_target_not_index() {
         let (_dir, store) = store();
-        let rev = seed_growth(&store, &["A.", "B."]);
+        let rev = seed_story(&store, &["A.", "B."]);
         let first = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
         assert_eq!(
             store.submit_proposal("a", retire_at(1), 3).unwrap(),
             SoulProposalOutcome::AlreadyPending { id: first }
         );
         store
-            .set_growth(
+            .set_story(
                 "a",
-                SoulGrowth {
+                SoulStory {
                     entries: vec![
-                        GrowthEntry {
-                            kind: GrowthKind::SelfView,
+                        StoryEntry {
+                            kind: StoryKind::SelfView,
                             text: "A.".into(),
                         },
-                        GrowthEntry {
-                            kind: GrowthKind::SelfView,
+                        StoryEntry {
+                            kind: StoryKind::SelfView,
                             text: "D.".into(),
                         },
                     ],
@@ -2611,7 +2713,7 @@ mod tests {
     #[test]
     fn retire_rows_without_a_bound_target_are_stale() {
         let (dir, store) = store();
-        seed_growth(&store, &["A.", "B."]);
+        seed_story(&store, &["A.", "B."]);
         drop(store);
         let conn = Connection::open(dir.path().join("soul.db")).unwrap();
         conn.execute(
@@ -2629,17 +2731,17 @@ mod tests {
             Err(SoulProfileError::ProposalStale { .. })
         ));
         assert_eq!(
-            growth_texts(&store),
+            story_texts(&store),
             vec!["A.".to_string(), "B.".to_string()]
         );
     }
 
     #[test]
-    fn voice_step_bound_is_rechecked_against_current_config_and_stored_revision() {
+    fn tone_step_bound_is_rechecked_against_current_config_and_stored_revision() {
         use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
         let (_dir, store) = store();
-        let voice = |key: &str, level: &str| NewSoulProposal {
-            layer: SoulProposalLayer::Voice,
+        let tone = |key: &str, level: &str| NewSoulProposal {
+            layer: SoulProposalLayer::Tone,
             proposal: "Adjust.".into(),
             trait_key: Some(key.into()),
             level: Some(level.into()),
@@ -2647,22 +2749,22 @@ mod tests {
         };
         let base = std::cell::Cell::new(PersonaKnobs::default());
         assert!(matches!(
-            store.submit_proposal("a", voice("warmth", "high"), 1),
-            Err(SoulProfileError::VoiceValidation {
-                field: "voice",
-                key: "soul-voice-unavailable"
+            store.submit_proposal("a", tone("warmth", "high"), 1),
+            Err(SoulProfileError::ToneValidation {
+                field: "tone",
+                key: "soul-tone-unavailable"
             })
         ));
         assert!(matches!(
-            store.submit_proposal_with_voice("a", voice("warmth", "xhigh"), 1, || Some(base.get())),
-            Err(SoulProfileError::VoiceValidation {
+            store.submit_proposal_with_tone("a", tone("warmth", "xhigh"), 1, || Some(base.get())),
+            Err(SoulProfileError::ToneValidation {
                 field: "level",
-                key: "soul-voice-step-limit"
+                key: "soul-tone-step-limit"
             })
         ));
         let id = recorded(
             store
-                .submit_proposal_with_voice("a", voice("warmth", "high"), 1, || {
+                .submit_proposal_with_tone("a", tone("warmth", "high"), 1, || {
                     // A queued config writer must never leave this resolver
                     // holding Soul while approval holds the config read lock.
                     assert!(
@@ -2679,7 +2781,7 @@ mod tests {
         });
         assert!(
             store
-                .resolve_proposal_with_voice(
+                .resolve_proposal_with_tone(
                     "a",
                     id,
                     SoulProposalResolution::Accepted,
@@ -2690,13 +2792,13 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(store.profile("a").unwrap().voice.is_none());
+        assert!(store.profile("a").unwrap().tone.is_none());
         assert_eq!(store.proposals("a", true).unwrap().len(), 1);
         // Owner-authored edits can jump, but a pending model proposal cannot.
         store
-            .set_voice(
+            .set_tone(
                 "a",
-                SoulVoice {
+                SoulTone {
                     heads: [("warmth".into(), PersonaLevel::Minimal)].into(),
                 },
                 0,
@@ -2706,7 +2808,7 @@ mod tests {
         base.set(PersonaKnobs::default());
         assert!(
             store
-                .resolve_proposal_with_voice(
+                .resolve_proposal_with_tone(
                     "a",
                     id,
                     SoulProposalResolution::Accepted,
@@ -2718,9 +2820,9 @@ mod tests {
                 .is_err()
         );
         store
-            .set_voice(
+            .set_tone(
                 "a",
-                SoulVoice {
+                SoulTone {
                     heads: [("warmth".into(), PersonaLevel::Medium)].into(),
                 },
                 1,
@@ -2728,7 +2830,7 @@ mod tests {
             )
             .unwrap();
         store
-            .resolve_proposal_with_voice(
+            .resolve_proposal_with_tone(
                 "a",
                 id,
                 SoulProposalResolution::Accepted,
@@ -2739,22 +2841,24 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            store.profile("a").unwrap().voice.unwrap().value.heads["warmth"],
+            store.profile("a").unwrap().tone.unwrap().value.heads["warmth"],
             PersonaLevel::High
         );
     }
 
     #[test]
-    fn legacy_voice_proposal_cannot_bypass_apply_step_or_challenge_floor() {
+    fn legacy_tone_proposal_cannot_bypass_apply_step_or_challenge_rule() {
         let (dir, store) = store();
         let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
-        for (key, invalid) in [("warmth", "xhigh"), ("challenge", "minimal")] {
+        // `challenge` low is one step from the default medium, so only the
+        // up-only rule refuses it.
+        for (key, invalid) in [("warmth", "xhigh"), ("challenge", "low")] {
             // Simulate historical rows without weakening append-only triggers.
             conn.execute("INSERT INTO soul_proposals (agent,layer,proposal,rationale,trait_key,level,created_at_unix) VALUES ('a','voice','Legacy adjustment.','',?1,?2,1)", params![key, invalid]).unwrap();
             let id = conn.last_insert_rowid();
             assert!(
                 store
-                    .resolve_proposal_with_voice(
+                    .resolve_proposal_with_tone(
                         "a",
                         id,
                         SoulProposalResolution::Accepted,
@@ -2766,42 +2870,49 @@ mod tests {
                     .is_err()
             );
         }
-        assert!(store.profile("a").unwrap().voice.is_none());
+        assert!(store.profile("a").unwrap().tone.is_none());
         assert_eq!(store.proposals("a", true).unwrap().len(), 2);
     }
 
     #[test]
-    fn approved_voice_heads_layer_per_key_and_the_agent_cannot_lower_challenge() {
+    fn approved_tone_heads_layer_per_key_and_the_agent_cannot_lower_challenge() {
         let (_dir, store) = store();
-        let voice = |key: &str, level: &str| NewSoulProposal {
-            layer: SoulProposalLayer::Voice,
+        let tone = |key: &str, level: &str| NewSoulProposal {
+            layer: SoulProposalLayer::Tone,
             proposal: "Adjust.".into(),
             trait_key: Some(key.into()),
             level: Some(level.into()),
             ..NewSoulProposal::default()
         };
-        assert!(matches!(
-            store.submit_proposal_with_voice("a", voice("challenge", "minimal"), 1, || Some(
-                Default::default()
-            )),
-            Err(SoulProfileError::Invalid { field: "level", .. })
-        ));
+        // Lowering challenge is refused, by one step or by two.
+        for level in ["low", "minimal"] {
+            assert!(matches!(
+                store.submit_proposal_with_tone("a", tone("challenge", level), 1, || Some(
+                    Default::default()
+                )),
+                Err(SoulProfileError::ToneValidation {
+                    field: "level",
+                    key: "soul-tone-challenge-up-only"
+                })
+            ));
+        }
+        // Raising it is allowed.
         assert!(
             store
-                .submit_proposal_with_voice("a", voice("challenge", "low"), 1, || Some(
+                .submit_proposal_with_tone("a", tone("challenge", "high"), 1, || Some(
                     Default::default()
                 ))
                 .is_ok()
         );
         let id = recorded(
             store
-                .submit_proposal_with_voice("a", voice("humor", "high"), 2, || {
+                .submit_proposal_with_tone("a", tone("humor", "high"), 2, || {
                     Some(Default::default())
                 })
                 .unwrap(),
         );
         store
-            .resolve_proposal_with_voice(
+            .resolve_proposal_with_tone(
                 "a",
                 id,
                 SoulProposalResolution::Accepted,
@@ -2811,7 +2922,7 @@ mod tests {
                 || Some(Default::default()),
             )
             .unwrap();
-        let heads = store.profile("a").unwrap().voice.unwrap().value;
+        let heads = store.profile("a").unwrap().tone.unwrap().value;
         let config = zeroclaw_config::persona::PersonaKnobs {
             humor: zeroclaw_config::persona::PersonaLevel::Low,
             warmth: zeroclaw_config::persona::PersonaLevel::High,
@@ -2821,12 +2932,73 @@ mod tests {
         assert_eq!(layered.humor, zeroclaw_config::persona::PersonaLevel::High);
         assert_eq!(layered.warmth, zeroclaw_config::persona::PersonaLevel::High);
         // The owner can still set any level directly.
-        let mut owner = SoulVoice::default();
+        let mut owner = SoulTone::default();
         owner.heads.insert(
             "challenge".into(),
             zeroclaw_config::persona::PersonaLevel::Minimal,
         );
-        assert!(store.set_voice("a", owner, 1, 4).is_ok());
+        assert!(store.set_tone("a", owner, 1, 4).is_ok());
+    }
+
+    #[test]
+    fn challenge_up_only_is_judged_against_the_effective_level_at_intake_and_apply() {
+        use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
+        let (_dir, store) = store();
+        let challenge = |level: &str| NewSoulProposal {
+            layer: SoulProposalLayer::Tone,
+            proposal: "Adjust.".into(),
+            trait_key: Some("challenge".into()),
+            level: Some(level.into()),
+            ..NewSoulProposal::default()
+        };
+        let configured = || Some(PersonaKnobs::default());
+        // Filed while the effective level is medium, so high is an increase.
+        let id = recorded(
+            store
+                .submit_proposal_with_tone("a", challenge("high"), 1, configured)
+                .unwrap(),
+        );
+        // The owner then sets challenge to xhigh. Applying the pending
+        // proposal would now lower the dial, so approval refuses it and it
+        // stays pending.
+        store
+            .set_tone(
+                "a",
+                SoulTone {
+                    heads: [("challenge".into(), PersonaLevel::Xhigh)].into(),
+                },
+                0,
+                2,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.resolve_proposal_with_tone(
+                "a",
+                id,
+                SoulProposalResolution::Accepted,
+                None,
+                None,
+                3,
+                configured
+            ),
+            Err(SoulProfileError::ToneValidation {
+                key: "soul-tone-challenge-up-only",
+                ..
+            })
+        ));
+        assert_eq!(store.proposals("a", true).unwrap().len(), 1);
+        assert_eq!(
+            store.profile("a").unwrap().tone.unwrap().value.heads["challenge"],
+            PersonaLevel::Xhigh
+        );
+        // Intake judges against the stored head, not the configured default.
+        assert!(matches!(
+            store.submit_proposal_with_tone("a", challenge("high"), 4, configured),
+            Err(SoulProfileError::ToneValidation {
+                key: "soul-tone-challenge-up-only",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2855,18 +3027,18 @@ mod tests {
     }
 
     #[test]
-    fn identity_and_malformed_growth_proposals_are_refused() {
+    fn identity_and_malformed_story_proposals_are_refused() {
         let (_dir, store) = store();
         let neither = NewSoulProposal {
-            layer: SoulProposalLayer::Growth,
+            layer: SoulProposalLayer::Story,
             proposal: "Something.".into(),
             ..NewSoulProposal::default()
         };
         assert!(store.submit_proposal("a", neither, 1).is_err());
         let both = NewSoulProposal {
-            growth_kind: Some(GrowthKind::Bond),
+            story_kind: Some(StoryKind::Bond),
             retire_index: Some(0),
-            ..growth_add(GrowthKind::Bond, "x")
+            ..story_add(StoryKind::Bond, "x")
         };
         assert!(store.submit_proposal("a", both, 1).is_err());
         assert!(SoulProposalLayer::parse("identity").is_none());
@@ -2935,11 +3107,11 @@ mod tests {
         let (_dir, store) = store();
         let (profile, history) = store.export("agent_a").unwrap();
         assert!(profile.identity.is_none() && profile.principles.is_none());
-        assert!(profile.growth.is_none() && profile.voice.is_none());
+        assert!(profile.story.is_none() && profile.tone.is_none());
         assert_eq!(
             history,
             serde_json::json!({
-                "identity": [], "principles": [], "growth": [], "voice": []
+                "identity": [], "principles": [], "story": [], "tone": []
             })
         );
         assert_eq!(store.revision_stamp("agent_a").unwrap(), 0);
@@ -2958,11 +3130,11 @@ mod tests {
             .set_identity("agent_a", identity("ZeroClawAgent"), 1, 2)
             .unwrap();
         store
-            .set_growth(
+            .set_story(
                 "agent_a",
-                SoulGrowth {
-                    entries: vec![GrowthEntry {
-                        kind: GrowthKind::Bond,
+                SoulStory {
+                    entries: vec![StoryEntry {
+                        kind: StoryKind::Bond,
                         text: "Use a familiar tone for recurring tasks.".into(),
                     }],
                 },
@@ -2971,9 +3143,9 @@ mod tests {
             )
             .unwrap();
         store
-            .set_voice(
+            .set_tone(
                 "agent_a",
-                SoulVoice {
+                SoulTone {
                     heads: [("warmth".into(), PersonaLevel::High)].into(),
                 },
                 0,
@@ -3021,8 +3193,8 @@ mod tests {
         );
         assert_eq!(history["identity"].as_array().unwrap().len(), 2);
         assert_eq!(history["principles"].as_array().unwrap().len(), 3);
-        assert_eq!(history["growth"].as_array().unwrap().len(), 1);
-        assert_eq!(history["voice"].as_array().unwrap().len(), 1);
+        assert_eq!(history["story"].as_array().unwrap().len(), 1);
+        assert_eq!(history["tone"].as_array().unwrap().len(), 1);
         assert_eq!(history["principles"][0]["source"], "seed");
         assert_eq!(history["principles"][1]["source"], "approved_proposal");
         assert_eq!(history["principles"][1]["proposal_id"], id);
@@ -3138,5 +3310,570 @@ mod tests {
                 .revision,
             65
         );
+    }
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    fn tone_dial(key: &str, level: &str) -> NewSoulProposal {
+        NewSoulProposal {
+            layer: SoulProposalLayer::Tone,
+            proposal: format!("Move {key} to {level}."),
+            trait_key: Some(key.into()),
+            level: Some(level.into()),
+            ..NewSoulProposal::default()
+        }
+    }
+
+    fn default_knobs() -> Option<zeroclaw_config::persona::PersonaKnobs> {
+        Some(zeroclaw_config::persona::PersonaKnobs::default())
+    }
+
+    fn approve_tone(
+        store: &SoulProfileStore,
+        id: i64,
+        now_unix: u64,
+    ) -> Result<Option<u64>, SoulProfileError> {
+        store.resolve_proposal_with_tone(
+            "a",
+            id,
+            SoulProposalResolution::Accepted,
+            None,
+            None,
+            now_unix,
+            default_knobs,
+        )
+    }
+
+    /// ADR-018 §4.2, fixed clock: approved at T, refused at T + 27 days,
+    /// accepted at T + 28 days; other dials are unaffected.
+    #[test]
+    fn an_approved_dial_change_closes_that_dial_to_proposals_for_28_days() {
+        const T: u64 = 1_800_000_000;
+        assert_eq!(SOUL_TONE_DIAL_COOLDOWN_SECS, 28 * DAY);
+        let (_dir, store) = store();
+        let submit = |key: &str, level: &str, now: u64| {
+            store.submit_proposal_with_tone("a", tone_dial(key, level), now, default_knobs)
+        };
+        let first = recorded(submit("warmth", "high", T - DAY).unwrap());
+        approve_tone(&store, first, T).unwrap();
+
+        assert_eq!(
+            submit("warmth", "xhigh", T + 27 * DAY),
+            Err(SoulProfileError::ToneDialCooldown {
+                key: "warmth".into(),
+                until_unix: T + 28 * DAY
+            })
+        );
+        assert_eq!(store.proposals("a", true).unwrap().len(), 0);
+        // A different dial is not affected.
+        assert!(matches!(
+            submit("humor", "high", T + 27 * DAY),
+            Ok(SoulProposalOutcome::Recorded { .. })
+        ));
+        // The boundary itself is open.
+        assert!(matches!(
+            submit("warmth", "xhigh", T + 28 * DAY),
+            Ok(SoulProposalOutcome::Recorded { .. })
+        ));
+    }
+
+    #[test]
+    fn a_pending_proposal_is_refused_at_approval_when_its_dial_entered_cooldown_after_filing() {
+        const T: u64 = 1_800_000_000;
+        let (_dir, store) = store();
+        let file = |text: &str| {
+            let mut proposal = tone_dial("warmth", "high");
+            proposal.proposal = text.into();
+            recorded(
+                store
+                    .submit_proposal_with_tone("a", proposal, T - DAY, default_knobs)
+                    .unwrap(),
+            )
+        };
+        let first = file("Be warmer.");
+        let second = file("Warmer, please.");
+        approve_tone(&store, first, T).unwrap();
+
+        let before = store.history("a", SoulLayer::Tone).unwrap().len();
+        assert_eq!(
+            approve_tone(&store, second, T + DAY),
+            Err(SoulProfileError::ToneDialCooldown {
+                key: "warmth".into(),
+                until_unix: T + 28 * DAY
+            })
+        );
+        // Like other refusals at approval, it applies nothing and stays pending.
+        assert_eq!(store.history("a", SoulLayer::Tone).unwrap().len(), before);
+        let pending = store.proposals("a", true).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, second);
+        assert!(approve_tone(&store, second, T + 28 * DAY).is_ok());
+    }
+
+    #[test]
+    fn owner_tone_writes_are_exempt_from_the_cooldown_and_start_none() {
+        const T: u64 = 1_800_000_000;
+        let (_dir, store) = store();
+        let knobs = |warmth| zeroclaw_config::persona::PersonaLevel::parse(warmth).unwrap();
+        // An owner write starts no cooldown: a proposal one second later is accepted.
+        let head = store
+            .set_tone(
+                "a",
+                SoulTone {
+                    heads: [("warmth".into(), knobs("high"))].into(),
+                },
+                0,
+                T,
+            )
+            .unwrap();
+        let id = recorded(
+            store
+                .submit_proposal_with_tone("a", tone_dial("warmth", "xhigh"), T + 1, default_knobs)
+                .unwrap(),
+        );
+        approve_tone(&store, id, T + 2).unwrap();
+        // The owner may write the same dial at any time, cooldown or not.
+        let rolled = store
+            .set_tone(
+                "a",
+                SoulTone {
+                    heads: [("warmth".into(), knobs("minimal"))].into(),
+                },
+                head.revision + 1,
+                T + 3,
+            )
+            .unwrap();
+        assert_eq!(rolled.source, SoulSource::Owner);
+        store
+            .rollback("a", SoulLayer::Tone, head.revision, rolled.revision, T + 4)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_cooldown_is_per_agent_and_not_started_by_other_layers() {
+        const T: u64 = 1_800_000_000;
+        let (_dir, store) = store();
+        let id = recorded(
+            store
+                .submit_proposal_with_tone("a", tone_dial("warmth", "high"), T, default_knobs)
+                .unwrap(),
+        );
+        approve_tone(&store, id, T).unwrap();
+        // Another agent has its own dials.
+        assert!(
+            store
+                .submit_proposal_with_tone("b", tone_dial("warmth", "high"), T + 1, default_knobs)
+                .is_ok()
+        );
+        // An approved Story entry sharing the proposal-id space starts nothing.
+        let story = recorded(
+            store
+                .submit_proposal(
+                    "a",
+                    story_add(StoryKind::Bond, "Fridays are ship day."),
+                    T + 1,
+                )
+                .unwrap(),
+        );
+        store
+            .resolve_proposal(
+                "a",
+                story,
+                SoulProposalResolution::Accepted,
+                None,
+                None,
+                T + 2,
+            )
+            .unwrap();
+        assert!(
+            store
+                .submit_proposal_with_tone("a", tone_dial("humor", "high"), T + 3, default_knobs)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn layer_public_names_and_storage_ids_map_in_one_place() {
+        for (layer, public, storage) in [
+            (SoulLayer::Identity, "identity", "identity"),
+            (SoulLayer::Principles, "principles", "principles"),
+            (SoulLayer::Tone, "tone", "voice"),
+            (SoulLayer::Story, "story", "growth"),
+        ] {
+            assert_eq!(layer.as_str(), public);
+            assert_eq!(layer.storage_id(), storage);
+            assert_eq!(SoulLayer::parse(public), Some(layer));
+            assert_eq!(SoulLayer::from_storage_id(storage), Some(layer));
+            assert_eq!(serde_json::to_value(layer).unwrap(), public);
+        }
+        // The API accepts public names only; storage ids are not aliases.
+        assert_eq!(SoulLayer::parse("voice"), None);
+        assert_eq!(SoulLayer::parse("growth"), None);
+        assert_eq!(SoulLayer::from_storage_id("tone"), None);
+        assert_eq!(SoulLayer::from_storage_id("story"), None);
+
+        for (layer, public, storage) in [
+            (SoulProposalLayer::Principles, "principles", "principles"),
+            (SoulProposalLayer::Tone, "tone", "voice"),
+            (SoulProposalLayer::Story, "story", "growth"),
+        ] {
+            assert_eq!(layer.as_str(), public);
+            assert_eq!(layer.storage_id(), storage);
+            assert_eq!(SoulProposalLayer::parse(public), Some(layer));
+            assert_eq!(SoulProposalLayer::from_storage_id(storage), Some(layer));
+            assert_eq!(serde_json::to_value(layer).unwrap(), public);
+        }
+        assert_eq!(SoulProposalLayer::parse("voice"), None);
+        assert_eq!(SoulProposalLayer::parse("growth"), None);
+        assert_eq!(SoulProposalLayer::from_storage_id("identity"), None);
+    }
+
+    /// The `soul.db` tables exactly as the build before the Tone/Story rename
+    /// created them (ADR-018 §1: stored identifiers do not change).
+    const PRE_RENAME_DDL: &str = "
+        CREATE TABLE soul_revisions (
+            agent TEXT NOT NULL,
+            layer TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            body TEXT NOT NULL,
+            rolled_back_from INTEGER,
+            proposal_id INTEGER,
+            created_at_unix INTEGER NOT NULL,
+            PRIMARY KEY (agent, layer, revision)
+        );
+        CREATE TABLE soul_proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent TEXT NOT NULL,
+            layer TEXT NOT NULL,
+            proposal TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            trait_key TEXT,
+            level TEXT,
+            growth_kind TEXT,
+            retire_index INTEGER,
+            target_revision INTEGER,
+            target_kind TEXT,
+            target_text TEXT,
+            session_ref TEXT,
+            created_at_unix INTEGER NOT NULL
+        );
+        CREATE TABLE soul_proposal_resolutions (
+            proposal_id INTEGER PRIMARY KEY REFERENCES soul_proposals(id),
+            resolution TEXT NOT NULL,
+            note TEXT,
+            resolved_at_unix INTEGER NOT NULL
+        );";
+
+    /// Row shapes written by the pre-rename build: layer ids `voice` and
+    /// `growth`, bodies `{"heads":...}` and `{"entries":[{"kind","text"}]}`.
+    const PRE_RENAME_ROWS: &str = r#"
+        INSERT INTO soul_revisions VALUES
+          ('a','identity',1,'seed','{"name":"Nova"}',NULL,NULL,10),
+          ('a','voice',1,'owner','{"heads":{"warmth":"high"}}',NULL,NULL,20),
+          ('a','voice',2,'approved_proposal','{"heads":{"humor":"low","warmth":"high"}}',NULL,1,30),
+          ('a','growth',1,'owner','{"entries":[{"kind":"self","text":"I double-check dates."},{"kind":"bond","text":"We call Fridays ship day."}]}',NULL,NULL,40);
+        INSERT INTO soul_proposals
+          (id,agent,layer,proposal,rationale,trait_key,level,growth_kind,retire_index,target_revision,target_kind,target_text,session_ref,created_at_unix)
+        VALUES
+          (1,'a','voice','Be drier.','The owner groaned.','humor','low',NULL,NULL,NULL,NULL,NULL,'{"session":"s","at_unix":5}',25),
+          (2,'a','growth','We call Fridays ship day.','Said twice.',NULL,NULL,'bond',NULL,NULL,NULL,NULL,'weekly_reflection',35),
+          (3,'a','growth','No longer true.','',NULL,NULL,NULL,0,1,'self','I double-check dates.',NULL,45);
+        INSERT INTO soul_proposal_resolutions VALUES
+          (1,'accepted',NULL,30),
+          (2,'dismissed','Not needed.',36);"#;
+
+    fn pre_rename_store() -> (tempfile::TempDir, SoulProfileStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        conn.execute_batch(PRE_RENAME_DDL).unwrap();
+        conn.execute_batch(PRE_RENAME_ROWS).unwrap();
+        drop(conn);
+        let store = SoulProfileStore::open(dir.path()).unwrap();
+        (dir, store)
+    }
+
+    fn raw_layers(dir: &tempfile::TempDir, table: &str) -> Vec<String> {
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT DISTINCT layer FROM {table} ORDER BY layer"
+            ))
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// ADR-018 Acceptance 3: rows with `voice` and `growth` read back as
+    /// Tone and Story unchanged.
+    #[test]
+    fn a_store_written_before_the_rename_reads_back_as_tone_and_story() {
+        use zeroclaw_config::persona::PersonaLevel;
+        let (dir, store) = pre_rename_store();
+        let profile = store.profile("a").unwrap();
+        let tone = profile.tone.unwrap();
+        assert_eq!(tone.revision, 2);
+        assert_eq!(tone.source, SoulSource::ApprovedProposal);
+        assert_eq!(tone.proposal_id, Some(1));
+        assert_eq!(
+            tone.value.heads,
+            [
+                ("humor".to_string(), PersonaLevel::Low),
+                ("warmth".to_string(), PersonaLevel::High)
+            ]
+            .into()
+        );
+        let story = profile.story.unwrap();
+        assert_eq!(story.revision, 1);
+        assert_eq!(
+            story.value.entries,
+            vec![
+                StoryEntry {
+                    kind: StoryKind::SelfView,
+                    text: "I double-check dates.".into()
+                },
+                StoryEntry {
+                    kind: StoryKind::Bond,
+                    text: "We call Fridays ship day.".into()
+                },
+            ]
+        );
+        assert_eq!(store.history("a", SoulLayer::Tone).unwrap().len(), 2);
+        assert_eq!(store.history("a", SoulLayer::Story).unwrap().len(), 1);
+
+        let proposals = store.proposals("a", false).unwrap();
+        assert_eq!(
+            proposals.iter().map(|p| p.layer).collect::<Vec<_>>(),
+            [
+                SoulProposalLayer::Tone,
+                SoulProposalLayer::Story,
+                SoulProposalLayer::Story
+            ]
+        );
+        assert_eq!(proposals[0].level.as_deref(), Some("low"));
+        assert_eq!(proposals[1].story_kind, Some(StoryKind::Bond));
+        assert_eq!(
+            proposals[1].resolution,
+            Some(SoulProposalResolution::Dismissed)
+        );
+        assert_eq!(proposals[2].target_revision, Some(1));
+        assert_eq!(
+            proposals[2].retire_target,
+            Some(StoryEntry {
+                kind: StoryKind::SelfView,
+                text: "I double-check dates.".into()
+            })
+        );
+
+        let (exported, history) = store.export("a").unwrap();
+        assert_eq!(exported.tone.unwrap().revision, 2);
+        assert_eq!(history["tone"].as_array().unwrap().len(), 2);
+        assert_eq!(history["story"].as_array().unwrap().len(), 1);
+        assert!(history.get("voice").is_none() && history.get("growth").is_none());
+
+        // Nothing was rewritten on open.
+        assert_eq!(
+            raw_layers(&dir, "soul_revisions"),
+            ["growth", "identity", "voice"]
+        );
+        assert_eq!(raw_layers(&dir, "soul_proposals"), ["growth", "voice"]);
+    }
+
+    /// Governance still works on the old rows: a retirement bound before the
+    /// rename applies, rollback appends under the old layer id, and the
+    /// cooldown is derived from the old approved row.
+    #[test]
+    fn pre_rename_rows_keep_working_for_apply_rollback_and_cooldown() {
+        let (dir, store) = pre_rename_store();
+        // Proposal 1 (humor) was approved at 30: humor is closed for 28 days.
+        assert_eq!(
+            store.submit_proposal_with_tone("a", tone_dial("humor", "medium"), 31, default_knobs),
+            Err(SoulProfileError::ToneDialCooldown {
+                key: "humor".into(),
+                until_unix: 30 + SOUL_TONE_DIAL_COOLDOWN_SECS
+            })
+        );
+        assert!(
+            store
+                .submit_proposal_with_tone("a", tone_dial("directness", "high"), 31, default_knobs)
+                .is_ok()
+        );
+        assert!(
+            store
+                .submit_proposal_with_tone(
+                    "a",
+                    tone_dial("humor", "medium"),
+                    30 + SOUL_TONE_DIAL_COOLDOWN_SECS,
+                    default_knobs
+                )
+                .is_ok()
+        );
+
+        // Pending retirement 3 targets the first entry.
+        assert_eq!(
+            store
+                .resolve_proposal("a", 3, SoulProposalResolution::Accepted, None, None, 50)
+                .unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            store
+                .profile("a")
+                .unwrap()
+                .story
+                .unwrap()
+                .value
+                .entries
+                .len(),
+            1
+        );
+        store.rollback("a", SoulLayer::Story, 1, 2, 51).unwrap();
+        store.rollback("a", SoulLayer::Tone, 1, 2, 52).unwrap();
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        let rows: Vec<(String, i64, String)> = conn
+            .prepare(
+                "SELECT layer, revision, source FROM soul_revisions
+                 WHERE revision >= 2 AND layer != 'identity' ORDER BY layer, revision",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("growth".to_string(), 2, "approved_proposal".to_string()),
+                ("growth".to_string(), 3, "owner".to_string()),
+                ("voice".to_string(), 2, "approved_proposal".to_string()),
+                ("voice".to_string(), 3, "owner".to_string()),
+            ]
+        );
+    }
+
+    /// ADR-018 Acceptance 3, the other direction: what the new build writes
+    /// is the old row format, so an older binary reads it unchanged.
+    #[test]
+    fn rows_written_by_this_build_use_the_stored_layer_ids_and_the_old_json_shape() {
+        use zeroclaw_config::persona::PersonaLevel;
+        let (dir, store) = store();
+        store
+            .set_tone(
+                "a",
+                SoulTone {
+                    heads: [("warmth".into(), PersonaLevel::High)].into(),
+                },
+                0,
+                1,
+            )
+            .unwrap();
+        store
+            .set_story(
+                "a",
+                SoulStory {
+                    entries: vec![StoryEntry {
+                        kind: StoryKind::SelfView,
+                        text: "I double-check dates.".into(),
+                    }],
+                },
+                0,
+                2,
+            )
+            .unwrap();
+        let tone_id = recorded(
+            store
+                .submit_proposal_with_tone("a", tone_dial("humor", "high"), 3, default_knobs)
+                .unwrap(),
+        );
+        approve_tone(&store, tone_id, 4).unwrap();
+        let story_id = recorded(
+            store
+                .submit_proposal("a", story_add(StoryKind::Bond, "Fridays are ship day."), 5)
+                .unwrap(),
+        );
+        store
+            .resolve_proposal(
+                "a",
+                story_id,
+                SoulProposalResolution::Accepted,
+                None,
+                None,
+                6,
+            )
+            .unwrap();
+        let retire = recorded(store.submit_proposal("a", retire_at(0), 7).unwrap());
+        store.rollback("a", SoulLayer::Tone, 1, 2, 8).unwrap();
+
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        let bodies: Vec<(String, i64, String)> = conn
+            .prepare("SELECT layer, revision, body FROM soul_revisions ORDER BY layer, revision")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            bodies,
+            [
+                (
+                    "growth".to_string(),
+                    1,
+                    r#"{"entries":[{"kind":"self","text":"I double-check dates."}]}"#.to_string()
+                ),
+                (
+                    "growth".to_string(),
+                    2,
+                    r#"{"entries":[{"kind":"self","text":"I double-check dates."},{"kind":"bond","text":"Fridays are ship day."}]}"#.to_string()
+                ),
+                (
+                    "voice".to_string(),
+                    1,
+                    r#"{"heads":{"warmth":"high"}}"#.to_string()
+                ),
+                (
+                    "voice".to_string(),
+                    2,
+                    r#"{"heads":{"humor":"high","warmth":"high"}}"#.to_string()
+                ),
+                (
+                    "voice".to_string(),
+                    3,
+                    r#"{"heads":{"warmth":"high"}}"#.to_string()
+                ),
+            ]
+        );
+        assert_eq!(raw_layers(&dir, "soul_revisions"), ["growth", "voice"]);
+        assert_eq!(raw_layers(&dir, "soul_proposals"), ["growth", "voice"]);
+        let kinds: Vec<Option<String>> = conn
+            .prepare("SELECT growth_kind FROM soul_proposals WHERE layer = 'growth' ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(kinds, [Some("bond".to_string()), None]);
+        let (target_kind, target_text): (String, String) = conn
+            .query_row(
+                "SELECT target_kind, target_text FROM soul_proposals WHERE id = ?1",
+                params![retire],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (target_kind.as_str(), target_text.as_str()),
+            ("self", "I double-check dates.")
+        );
+        // The schema itself keeps its column names.
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(soul_proposals)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(columns.contains(&"growth_kind".to_string()));
+        assert!(!columns.contains(&"story_kind".to_string()));
     }
 }

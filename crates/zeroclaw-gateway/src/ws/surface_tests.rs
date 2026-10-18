@@ -22,15 +22,15 @@ fn without_surface(prompt: &str) -> String {
 
 /// Actual TCP route, connect frames and provider-bound prompts on one retained Agent.
 #[tokio::test]
-async fn surfaces_share_identity_soul_voice_and_history_without_pinning_the_first_socket() {
+async fn surfaces_share_identity_soul_tone_and_history_without_pinning_the_first_socket() {
     use zeroclaw_gateway_client::{Client, ConnectOptions, Frame};
-    use zeroclaw_memory::companion::{SoulPrinciples, SoulProfileStore, SoulVoice};
+    use zeroclaw_memory::companion::{SoulPrinciples, SoulProfileStore, SoulTone};
     let mut chat = SharedChat::new();
     let data_dir = chat._tmp.path().join("owner-data");
     std::fs::create_dir_all(&data_dir).unwrap();
     let soul = SoulProfileStore::shared(&data_dir).unwrap();
     soul.set_principles("web", SoulPrinciples { items: vec!["Keep owner authority explicit.".into()] }, 0, 1).unwrap();
-    soul.set_voice("web", SoulVoice { heads: [("warmth".into(), zeroclaw_config::persona::PersonaLevel::High)].into() }, 0, 1).unwrap();
+    soul.set_tone("web", SoulTone { heads: [("warmth".into(), zeroclaw_config::persona::PersonaLevel::High)].into() }, 0, 1).unwrap();
     chat.owner_config = Some(Arc::new(zeroclaw_config::schema::Config { data_dir, ..Default::default() }));
     {
         let mut config = chat.state.config.write();

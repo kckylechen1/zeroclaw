@@ -1312,8 +1312,8 @@ fn carded_agent_persona_reaches_this_pipelines_built_prompt() {
     let prompt = agent.build_system_prompt().unwrap();
 
     assert!(
-        prompt.contains("## Voice"),
-        "carded persona must render a Voice section"
+        prompt.contains("## Tone"),
+        "carded persona must render a Tone section"
     );
     assert!(
         prompt.contains(
@@ -1352,8 +1352,8 @@ fn direct_persona_agent_reaches_this_pipelines_built_prompt() {
     let prompt = agent.build_system_prompt().unwrap();
 
     assert!(
-        prompt.contains("## Voice"),
-        "a direct persona field must render a Voice section"
+        prompt.contains("## Tone"),
+        "a direct persona field must render a Tone section"
     );
     assert!(
         prompt.contains(
@@ -1364,10 +1364,10 @@ fn direct_persona_agent_reaches_this_pipelines_built_prompt() {
 }
 
 /// An agent with neither a card nor a direct persona must produce no
-/// `## Voice` section at all — the regression guard for every existing
+/// `## Tone` section at all — the regression guard for every existing
 /// agent that predates persona dials.
 #[test]
-fn agent_with_no_persona_configured_has_no_voice_section() {
+fn agent_with_no_persona_configured_has_no_tone_section() {
     let toml = r#"
             [providers.models.custom.default]
             api_key = "k"
@@ -1389,8 +1389,8 @@ fn agent_with_no_persona_configured_has_no_voice_section() {
     let prompt = agent.build_system_prompt().unwrap();
 
     assert!(
-        !prompt.contains("## Voice"),
-        "no persona configured must mean no Voice section"
+        !prompt.contains("## Tone"),
+        "no persona configured must mean no Tone section"
     );
 }
 

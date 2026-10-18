@@ -14,8 +14,8 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use zeroclaw_memory::companion::{
-    SoulGrowth, SoulIdentity, SoulLayer, SoulPrinciples, SoulProfileError, SoulProfileStore,
-    SoulProposalResolution, SoulVoice,
+    SOUL_TONE_DIAL_COOLDOWN_SECS, SoulIdentity, SoulLayer, SoulPrinciples, SoulProfileError,
+    SoulProfileStore, SoulProposalResolution, SoulStory, SoulTone,
 };
 
 use crate::AppState;
@@ -36,12 +36,29 @@ fn error_json(status: StatusCode, code: &str, message: &str) -> Response {
 
 fn soul_error(err: &SoulProfileError) -> Response {
     match err {
-        SoulProfileError::VoiceValidation { field, key } => (
+        SoulProfileError::ToneValidation { field, key } => (
             StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({
                 "code": "invalid",
                 "field": field,
+                "reason": key,
                 "error": crate::i18n::get_required_cli_string(key),
+            })),
+        )
+            .into_response(),
+        SoulProfileError::ToneDialCooldown { key, until_unix } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(serde_json::json!({
+                "code": "tone_dial_cooldown",
+                "dial": key,
+                "until_unix": until_unix,
+                "error": crate::i18n::get_required_cli_string_with_args(
+                    "soul-tone-dial-cooldown",
+                    &[
+                        ("dial", key.as_str()),
+                        ("days", &(SOUL_TONE_DIAL_COOLDOWN_SECS / (24 * 60 * 60)).to_string()),
+                    ],
+                ),
             })),
         )
             .into_response(),
@@ -168,13 +185,13 @@ fn parse_layer(layer: &str) -> Result<SoulLayer, Box<Response>> {
         Box::new(error_json(
             StatusCode::BAD_REQUEST,
             "unknown_layer",
-            "layer must be identity | principles",
+            "layer must be identity | principles | tone | story",
         ))
     })
 }
 
 /// GET /api/soul?agent=<alias> — current Identity and Principles heads (with
-/// revision and source), effective Voice with per-key provenance, and whether the legacy
+/// revision and source), effective Tone with per-key provenance, and whether the legacy
 /// persona files are still injected. Seeds missing layers on first read,
 /// exactly as the prompt builder does.
 pub async fn get_soul(
@@ -208,9 +225,9 @@ pub async fn get_soul(
     .await
     {
         Ok((profile, last_reflection)) => {
-            let (voice, effective, sources) = {
+            let (tone, effective, sources) = {
                 let config = state.config.read();
-                let (effective, sources) = zeroclaw_memory::companion::resolve_effective_voice(
+                let (effective, sources) = zeroclaw_memory::companion::resolve_effective_tone(
                     &config,
                     &agent,
                     Some(&profile),
@@ -232,10 +249,10 @@ pub async fn get_soul(
                     "agent": agent,
                     "identity": profile.identity,
                     "principles": profile.principles,
-                    "growth": profile.growth,
-                    "voice": {
-                        "configured": voice,
-                        "stored": profile.voice,
+                    "story": profile.story,
+                    "tone": {
+                        "configured": tone,
+                        "stored": profile.tone,
                         "effective": effective,
                         "sources": sources,
                     },
@@ -273,7 +290,7 @@ pub async fn get_export(
         Ok((profile, history)) => {
             let (configured, effective, sources) = {
                 let config = state.config.read();
-                let (effective, sources) = zeroclaw_memory::companion::resolve_effective_voice(
+                let (effective, sources) = zeroclaw_memory::companion::resolve_effective_tone(
                     &config,
                     &agent,
                     Some(&profile),
@@ -294,11 +311,11 @@ pub async fn get_export(
                     ),
                 ],
                 axum::Json(serde_json::json!({
-                    "format_version": 1,
+                    "format_version": 2,
                     "agent": agent,
                     "profile": profile,
                     "history": history,
-                    "voice": {
+                    "tone": {
                         "configured": configured,
                         "effective": effective,
                         "sources": sources,
@@ -311,7 +328,7 @@ pub async fn get_export(
     }
 }
 
-/// GET /api/soul/history?agent=<alias>&layer=identity|principles — every
+/// GET /api/soul/history?agent=<alias>&layer=identity|principles|tone|story — every
 /// revision of one layer, oldest first.
 pub async fn get_history(
     State(state): State<AppState>,
@@ -472,15 +489,15 @@ pub async fn post_rollback(
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GrowthBody {
+struct StoryBody {
     agent: String,
     expected_revision: u64,
-    growth: SoulGrowth,
+    story: SoulStory,
 }
 
-/// PUT /api/soul/growth — owner rewrite of the Growth layer (for example to
+/// PUT /api/soul/story — owner rewrite of the Story layer (for example to
 /// retire several entries at once or correct the agent's wording).
-pub async fn put_growth(
+pub async fn put_story(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -489,7 +506,7 @@ pub async fn put_growth(
     if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
         return err;
     }
-    let body = match serde_json::from_slice::<GrowthBody>(&body) {
+    let body = match serde_json::from_slice::<StoryBody>(&body) {
         Ok(body) => body,
         Err(err) => return error_json(StatusCode::BAD_REQUEST, "bad_body", &err.to_string()),
     };
@@ -498,7 +515,7 @@ pub async fn put_growth(
         Err(err) => return *err,
     };
     match run_store(data_dir, move |store| {
-        store.set_growth(&agent, body.growth, body.expected_revision, now_unix())
+        store.set_story(&agent, body.story, body.expected_revision, now_unix())
     })
     .await
     {
@@ -509,15 +526,15 @@ pub async fn put_growth(
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct VoiceBody {
+struct ToneBody {
     agent: String,
     expected_revision: u64,
-    voice: SoulVoice,
+    tone: SoulTone,
 }
 
-/// PUT /api/soul/voice — owner write of the stored Voice heads, which layer
+/// PUT /api/soul/tone — owner write of the stored Tone heads, which layer
 /// over the configured persona dials key by key. The owner may set any level.
-pub async fn put_voice(
+pub async fn put_tone(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -526,7 +543,7 @@ pub async fn put_voice(
     if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
         return err;
     }
-    let body = match serde_json::from_slice::<VoiceBody>(&body) {
+    let body = match serde_json::from_slice::<ToneBody>(&body) {
         Ok(body) => body,
         Err(err) => return error_json(StatusCode::BAD_REQUEST, "bad_body", &err.to_string()),
     };
@@ -535,7 +552,7 @@ pub async fn put_voice(
         Err(err) => return *err,
     };
     match run_store(data_dir, move |store| {
-        store.set_voice(&agent, body.voice, body.expected_revision, now_unix())
+        store.set_tone(&agent, body.tone, body.expected_revision, now_unix())
     })
     .await
     {
@@ -553,7 +570,7 @@ struct ProposalsQuery {
 }
 
 /// GET /api/soul/proposals?agent=<alias>[&pending=true] — the agent's own
-/// proposals to change its principles or voice, oldest first.
+/// proposals to change its principles or tone, oldest first.
 pub async fn get_proposals(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -590,7 +607,7 @@ struct ResolveBody {
     resolution: String,
     #[serde(default)]
     note: Option<String>,
-    /// Owner rewording of a principle or growth entry before it applies.
+    /// Owner rewording of a principle or story entry before it applies.
     #[serde(default)]
     final_text: Option<String>,
 }
@@ -600,7 +617,7 @@ struct ResolveBody {
 /// layer in the same transaction (optionally reworded with `final_text`) and
 /// returns the applied revision; `dismissed` applies nothing. Each proposal
 /// resolves once. If the change can no longer apply (an invalid field, or a
-/// Growth retirement whose entry the owner has since removed or reworded),
+/// Story retirement whose entry the owner has since removed or reworded),
 /// the proposal stays pending and nothing is applied.
 pub async fn post_resolve_proposal(
     State(state): State<AppState>,
@@ -631,7 +648,7 @@ pub async fn post_resolve_proposal(
     match run_store(data_dir, move |store| {
         // Keep configuration stable through the SQLite validation and commit.
         let config = live_config.read();
-        store.resolve_proposal_with_voice(
+        store.resolve_proposal_with_tone(
             &agent,
             id,
             resolution,
@@ -734,30 +751,243 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_policy_errors_are_localized_with_a_stable_field() {
+    async fn tone_policy_errors_are_localized_with_a_stable_field() {
         for (field, key) in [
-            ("voice", "soul-voice-unavailable"),
-            ("level", "soul-voice-step-limit"),
+            ("tone", "soul-tone-unavailable"),
+            ("level", "soul-tone-step-limit"),
+            ("level", "soul-tone-challenge-up-only"),
         ] {
-            let (status, body) = json_of(soul_error(&SoulProfileError::VoiceValidation {
-                field,
-                key,
-            }))
-            .await;
+            let (status, body) =
+                json_of(soul_error(&SoulProfileError::ToneValidation { field, key })).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(body["code"], "invalid");
             assert_eq!(body["field"], field);
+            assert_eq!(body["reason"], key);
             assert_eq!(body["error"], crate::i18n::get_required_cli_string(key));
             assert_ne!(body["error"], key);
         }
     }
 
     #[tokio::test]
-    async fn effective_voice_provenance_matches_the_prompt_and_refreshes_per_key() {
+    async fn dial_cooldown_is_a_localized_too_many_requests_error_with_the_end_time() {
+        let (status, body) = json_of(soul_error(&SoulProfileError::ToneDialCooldown {
+            key: "warmth".into(),
+            until_unix: 1_234,
+        }))
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "tone_dial_cooldown");
+        assert_eq!(body["dial"], "warmth");
+        assert_eq!(body["until_unix"], 1_234);
+        let message = body["error"].as_str().unwrap();
+        assert!(
+            message.contains("warmth") && message.contains("28 days"),
+            "{message}"
+        );
+        assert_ne!(message, "soul-tone-dial-cooldown");
+    }
+
+    /// ADR-018 §4.2 through the owner surface: an approved dial change closes
+    /// the dial to a second approval, which stays pending; the owner's own
+    /// write to the same dial still goes through.
+    #[tokio::test]
+    async fn approving_a_second_proposal_on_a_cooled_down_dial_is_refused_and_stays_pending() {
+        let (dir, state) = state_with_agent();
+        let store = SoulProfileStore::shared(dir.path()).unwrap();
+        let file = |text: &str| {
+            let outcome = store
+                .submit_proposal_with_tone(
+                    "nova",
+                    zeroclaw_memory::companion::NewSoulProposal {
+                        layer: zeroclaw_memory::companion::SoulProposalLayer::Tone,
+                        proposal: text.into(),
+                        trait_key: Some("warmth".into()),
+                        level: Some("high".into()),
+                        ..Default::default()
+                    },
+                    1,
+                    || Some(Default::default()),
+                )
+                .unwrap();
+            let zeroclaw_memory::companion::SoulProposalOutcome::Recorded { id } = outcome else {
+                panic!("{outcome:?}")
+            };
+            id
+        };
+        let first = file("Be warmer.");
+        let second = file("Warmer, please.");
+        let resolve = |id: i64| {
+            post_resolve_proposal(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                Path(id),
+                body(&serde_json::json!({"agent": "nova", "resolution": "accepted"})),
+            )
+        };
+        let (status, json) = json_of(resolve(first).await).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let (status, json) = json_of(resolve(second).await).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{json}");
+        assert_eq!(json["code"], "tone_dial_cooldown");
+        assert_eq!(json["dial"], "warmth");
+        assert_eq!(store.proposals("nova", true).unwrap().len(), 1);
+
+        let (status, json) = json_of(
+            put_tone(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                body(&serde_json::json!({
+                    "agent": "nova", "expected_revision": 1,
+                    "tone": {"heads": {"warmth": "minimal", "challenge": "minimal"}}
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+
+    /// ADR-018 §1: the API speaks Tone and Story only; `soul.db` keeps the
+    /// stored identifiers.
+    #[tokio::test]
+    async fn tone_and_story_routes_use_public_names_and_store_the_old_layer_ids() {
+        let (dir, state) = state_with_agent();
+        let (status, json) = json_of(
+            put_tone(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                body(&serde_json::json!({
+                    "agent": "nova", "expected_revision": 0,
+                    "tone": {"heads": {"warmth": "high"}}
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let (status, json) = json_of(
+            put_story(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                body(&serde_json::json!({
+                    "agent": "nova", "expected_revision": 0,
+                    "story": {"entries": [{"kind": "bond", "text": "Fridays are ship day."}]}
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+
+        // The pre-rename request keys are refused, not aliased.
+        for (handler_body, is_story) in [
+            (
+                serde_json::json!({"agent": "nova", "expected_revision": 1,
+                    "voice": {"heads": {"warmth": "low"}}}),
+                false,
+            ),
+            (
+                serde_json::json!({"agent": "nova", "expected_revision": 1,
+                    "growth": {"entries": []}}),
+                true,
+            ),
+        ] {
+            let response = if is_story {
+                put_story(
+                    State(state.clone()),
+                    ConnectInfo(peer()),
+                    operator(),
+                    body(&handler_body),
+                )
+                .await
+            } else {
+                put_tone(
+                    State(state.clone()),
+                    ConnectInfo(peer()),
+                    operator(),
+                    body(&handler_body),
+                )
+                .await
+            };
+            let (status, json) = json_of(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json["code"], "bad_body");
+        }
+
+        let (_, soul) = get(&state, "/api/soul?agent=nova", operator()).await;
+        assert_eq!(soul["tone"]["stored"]["value"]["heads"]["warmth"], "high");
+        assert_eq!(soul["story"]["value"]["entries"][0]["kind"], "bond");
+        assert!(soul.get("voice").is_none() && soul.get("growth").is_none());
+
+        for (layer, expected) in [("tone", StatusCode::OK), ("story", StatusCode::OK)] {
+            let (status, json) = json_of(
+                get_history(
+                    State(state.clone()),
+                    ConnectInfo(peer()),
+                    operator(),
+                    format!("/api/soul/history?agent=nova&layer={layer}")
+                        .parse()
+                        .unwrap(),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, expected, "{json}");
+            assert_eq!(json["layer"], layer);
+            assert_eq!(json["revisions"].as_array().unwrap().len(), 1);
+        }
+        for old in ["voice", "growth"] {
+            let (status, json) = json_of(
+                get_history(
+                    State(state.clone()),
+                    ConnectInfo(peer()),
+                    operator(),
+                    format!("/api/soul/history?agent=nova&layer={old}")
+                        .parse()
+                        .unwrap(),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{old}");
+            assert_eq!(json["code"], "unknown_layer");
+        }
+        let (status, json) = json_of(
+            post_rollback(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                body(&serde_json::json!({
+                    "agent": "nova", "layer": "story", "to_revision": 1, "expected_revision": 1
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+
+        let conn = rusqlite::Connection::open(dir.path().join("soul.db")).unwrap();
+        let mut layers: Vec<String> = conn
+            .prepare("SELECT DISTINCT layer FROM soul_revisions")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        layers.sort();
+        assert_eq!(layers, ["growth", "identity", "principles", "voice"]);
+    }
+
+    #[tokio::test]
+    async fn effective_tone_provenance_matches_the_prompt_and_refreshes_per_key() {
         use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
         let (_dir, state) = state_with_agent();
         let (_, initial) = get(&state, "/api/soul?agent=nova", operator()).await;
-        assert_eq!(initial["voice"]["sources"]["humor"]["kind"], "builtin");
+        assert_eq!(initial["tone"]["sources"]["humor"]["kind"], "builtin");
         {
             let mut config = state.config.write();
             config.personas.insert(
@@ -772,9 +1002,9 @@ mod tests {
         let data_dir = state.config.read().data_dir.clone();
         let store = SoulProfileStore::shared(&data_dir).unwrap();
         store
-            .set_voice(
+            .set_tone(
                 "nova",
-                SoulVoice {
+                SoulTone {
                     heads: [("warmth".into(), PersonaLevel::High)].into(),
                 },
                 0,
@@ -783,18 +1013,18 @@ mod tests {
             .unwrap();
         let (status, data) = get(&state, "/api/soul?agent=nova", operator()).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(data["voice"]["effective"]["warmth"], "high");
-        assert_eq!(data["voice"]["effective"]["explanation_density"], "low");
+        assert_eq!(data["tone"]["effective"]["warmth"], "high");
+        assert_eq!(data["tone"]["effective"]["explanation_density"], "low");
         assert_eq!(
-            data["voice"]["sources"]["warmth"],
+            data["tone"]["sources"]["warmth"],
             serde_json::json!({"kind":"stored","revision":1})
         );
         assert_eq!(
-            data["voice"]["sources"]["explanation_density"],
+            data["tone"]["sources"]["explanation_density"],
             serde_json::json!({"kind":"persona","persona":"brief","card":null})
         );
         let effective: PersonaKnobs =
-            serde_json::from_value(data["voice"]["effective"].clone()).unwrap();
+            serde_json::from_value(data["tone"]["effective"].clone()).unwrap();
         let projection = zeroclaw_runtime::agent::persona_projection::persona_projection(
             &state.config.read(),
             "nova",
@@ -806,10 +1036,10 @@ mod tests {
                 .ends_with(&effective.to_prompt_section().unwrap())
         );
         // Removing a stored key restores the configured source, not a cached override.
-        store.set_voice("nova", SoulVoice::default(), 1, 2).unwrap();
+        store.set_tone("nova", SoulTone::default(), 1, 2).unwrap();
         let (_, data) = get(&state, "/api/soul?agent=nova", operator()).await;
-        assert_eq!(data["voice"]["effective"]["warmth"], "medium");
-        assert_eq!(data["voice"]["sources"]["warmth"]["kind"], "persona");
+        assert_eq!(data["tone"]["effective"]["warmth"], "medium");
+        assert_eq!(data["tone"]["sources"]["warmth"]["kind"], "persona");
     }
 
     #[tokio::test]
@@ -952,24 +1182,24 @@ mod tests {
         assert_eq!(revisions[1]["value"]["items"][0], "Be brief.");
     }
 
-    /// #380 S12: an owner edit between proposal and approval makes a Growth
+    /// #380 S12: an owner edit between proposal and approval makes a Story
     /// retirement stale instead of retiring whatever now sits at its index.
     #[tokio::test]
-    async fn stale_growth_retirement_is_refused_and_stays_pending() {
+    async fn stale_story_retirement_is_refused_and_stays_pending() {
         use zeroclaw_memory::companion::{
-            GrowthEntry, GrowthKind, NewSoulProposal, SoulGrowth, SoulProposalLayer,
-            SoulProposalOutcome,
+            NewSoulProposal, SoulProposalLayer, SoulProposalOutcome, SoulStory, StoryEntry,
+            StoryKind,
         };
         let (dir, state) = state_with_agent();
         let store = SoulProfileStore::shared(dir.path()).unwrap();
-        let entry = |text: &str| GrowthEntry {
-            kind: GrowthKind::SelfView,
+        let entry = |text: &str| StoryEntry {
+            kind: StoryKind::SelfView,
             text: text.into(),
         };
         let rev = store
-            .set_growth(
+            .set_story(
                 "nova",
-                SoulGrowth {
+                SoulStory {
                     entries: vec![entry("A."), entry("B."), entry("C.")],
                 },
                 0,
@@ -981,7 +1211,7 @@ mod tests {
             .submit_proposal(
                 "nova",
                 NewSoulProposal {
-                    layer: SoulProposalLayer::Growth,
+                    layer: SoulProposalLayer::Story,
                     proposal: "No longer true.".into(),
                     retire_index: Some(1),
                     ..Default::default()
@@ -1009,9 +1239,9 @@ mod tests {
 
         // The owner removes B before reviewing.
         store
-            .set_growth(
+            .set_story(
                 "nova",
-                SoulGrowth {
+                SoulStory {
                     entries: vec![entry("A."), entry("C.")],
                 },
                 rev,
@@ -1031,8 +1261,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{json}");
         assert_eq!(json["code"], "proposal_stale");
-        let growth = store.profile("nova").unwrap().growth.unwrap().value;
-        assert_eq!(growth.entries, vec![entry("A."), entry("C.")]);
+        let story = store.profile("nova").unwrap().story.unwrap().value;
+        assert_eq!(story.entries, vec![entry("A."), entry("C.")]);
         assert_eq!(store.proposals("nova", true).unwrap().len(), 1);
     }
 
@@ -1162,7 +1392,7 @@ mod tests {
         );
         let (status, data) = json_of(response).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(data["format_version"], 1);
+        assert_eq!(data["format_version"], 2);
         assert_eq!(data["agent"], "nova");
         assert_eq!(
             data.as_object()
@@ -1170,13 +1400,13 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["agent", "format_version", "history", "profile", "voice"]
+            ["agent", "format_version", "history", "profile", "tone"]
         );
-        for layer in ["identity", "principles", "growth", "voice"] {
+        for layer in ["identity", "principles", "story", "tone"] {
             assert!(data["profile"][layer].is_null());
             assert_eq!(data["history"][layer], serde_json::json!([]));
         }
-        assert_eq!(data["voice"]["effective"]["warmth"], "medium");
+        assert_eq!(data["tone"]["effective"]["warmth"], "medium");
         let data_dir = state.config.read().data_dir.clone();
         assert_eq!(
             SoulProfileStore::shared(&data_dir)
@@ -1188,11 +1418,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_keeps_personality_history_and_voice_sources_but_omits_private_evidence() {
+    async fn export_keeps_personality_history_and_tone_sources_but_omits_private_evidence() {
         use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
         use zeroclaw_memory::companion::{
-            GrowthEntry, GrowthKind, NewSoulProposal, SoulProposalLayer, SoulProposalOutcome,
-            SoulReflectionReceipt,
+            NewSoulProposal, SoulProposalLayer, SoulProposalOutcome, SoulReflectionReceipt,
+            StoryEntry, StoryKind,
         };
         let (_dir, state) = state_with_agent();
         {
@@ -1210,11 +1440,11 @@ mod tests {
         let store = SoulProfileStore::shared(&data_dir).unwrap();
         store.ensure_seeded("nova", "ZeroClawAgent", 1).unwrap();
         store
-            .set_growth(
+            .set_story(
                 "nova",
-                SoulGrowth {
-                    entries: vec![GrowthEntry {
-                        kind: GrowthKind::Bond,
+                SoulStory {
+                    entries: vec![StoryEntry {
+                        kind: StoryKind::Bond,
                         text: "Use a familiar tone for recurring tasks.".into(),
                     }],
                 },
@@ -1223,9 +1453,9 @@ mod tests {
             )
             .unwrap();
         store
-            .set_voice(
+            .set_tone(
                 "nova",
-                SoulVoice {
+                SoulTone {
                     heads: [("warmth".into(), PersonaLevel::High)].into(),
                 },
                 0,
@@ -1288,17 +1518,17 @@ mod tests {
             "approved_proposal"
         );
         assert_eq!(data["history"]["principles"][1]["proposal_id"], id);
-        assert_eq!(data["voice"]["effective"]["warmth"], "high");
-        assert_eq!(data["voice"]["effective"]["explanation_density"], "low");
+        assert_eq!(data["tone"]["effective"]["warmth"], "high");
+        assert_eq!(data["tone"]["effective"]["explanation_density"], "low");
         assert_eq!(
-            data["voice"]["sources"]["warmth"],
+            data["tone"]["sources"]["warmth"],
             serde_json::json!({"kind": "stored", "revision": 1})
         );
         assert_eq!(
-            data["voice"]["sources"]["explanation_density"]["kind"],
+            data["tone"]["sources"]["explanation_density"]["kind"],
             "persona"
         );
-        for layer in ["identity", "principles", "growth", "voice"] {
+        for layer in ["identity", "principles", "story", "tone"] {
             assert_eq!(
                 &data["profile"][layer],
                 data["history"][layer].as_array().unwrap().last().unwrap()

@@ -107,7 +107,7 @@ tool-knowledge = Manage a knowledge graph of architecture decisions, solution pa
 
 tool-discord-search = Search Discord message history stored in discord.db. Use to find past messages, summarize channel activity, or look up what users said. Supports keyword search and optional filters: channel_id, since, until.
 
-tool-propose-soul-change = Propose how you would like to grow, for your owner to approve. Use layer "growth" to add a line about who you have become (growth_kind "self") or about something you and your owner share, such as a nickname or a running joke (growth_kind "bond"), or to retire an entry that no longer fits (retire_index). Use "voice" to change a dial and "principles" to add a principle. Nothing changes until your owner approves. Propose only what reflects a lasting pattern, not a one-off request. Your name and identity are your owner's to decide.
+tool-propose-soul-change = Propose how you would like to grow, for your owner to approve. Use layer "story" to add a line about what has happened between you and your owner (story_kind "self": your concerns, interests, and working habits; story_kind "bond": shared names, references, running jokes, and ways of working), or to retire an entry that no longer fits (retire_index). A story line is never an instruction about tone, warmth, length, or humor. Use "tone" to change a dial: one level at a time, challenge only upward, and not again within 28 days of an approved change to that dial. Use "principles" to add a principle. Nothing changes until your owner approves. Propose only what reflects a lasting pattern, not a one-off request. Your name and identity are your owner's to decide.
 tool-memory-forget = Remove a memory by key. Use to delete outdated facts or sensitive data. Returns whether the memory was found and removed.
 
 tool-memory-recall = Search long-term memory for relevant facts, preferences, or context. Returns scored results ranked by relevance. Omit the query or pass bare * to return recent memories.
@@ -189,6 +189,8 @@ tool-owner-correction-recorded = Correction recorded in the review inbox for thi
 tool-owner-correction-pending = No new candidate was recorded: this correction is already pending or the review queue is full.
 tool-owner-correction-store-error = Could not record the correction. Check the statement and semantic key, then try again.
 
-soul-voice-unavailable = Current configured Voice is unavailable.
-soul-voice-step-limit = Voice proposals may move a dial by at most one level.
+soul-tone-unavailable = Current configured Tone is unavailable.
+soul-tone-step-limit = Tone proposals may move a dial by at most one level.
+soul-tone-challenge-up-only = The challenge dial may only be proposed upward; only your owner can lower it.
+soul-tone-dial-cooldown = The { $dial } dial was changed by an approved proposal less than { $days } days ago, so it cannot be proposed again yet.
 memory-store-conversation-scope-required = Conversation memory requires a current session and a backend that preserves its scope.

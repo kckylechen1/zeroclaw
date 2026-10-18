@@ -7,13 +7,13 @@ assert.deepEqual(decisionRequest(user, 'dismiss', '', '', []), { path: '/api/use
 assert.deepEqual(decisionRequest(user, 'reword', '  Brief when practical  ', '', []), { path: '/api/user-model/candidates/x%2Fy/review', body: { action: 'accept', final_text: 'Brief when practical', expected_head: { id: null } } });
 assert.deepEqual(decisionRequest(user, 'narrow', '', 'session:A', []).body, { action: 'narrow', narrowed_scope: 'session:A', expected_head: { id: null } });
 assert.throws(() => decisionRequest(user, 'narrow', '', 'global', []));
-const soul = { id: 'soul:nova:7', kind: 'soul_proposal' as const, agent: 'nova', item: { id: 7, layer: 'growth' as const, proposal: 'Shared shorthand', rationale: 'Owner reaction', created_at_unix: 1 } };
+const soul = { id: 'soul:nova:7', kind: 'soul_proposal' as const, agent: 'nova', item: { id: 7, layer: 'story' as const, proposal: 'Shared shorthand', rationale: 'Owner reaction', created_at_unix: 1 } };
 assert.equal(canReword(soul), true);
 assert.deepEqual(decisionRequest(soul, 'accept', '', '', []).body, { agent: 'nova', resolution: 'accepted' });
 assert.deepEqual(decisionRequest(soul, 'dismiss', '', '', []).body, { agent: 'nova', resolution: 'dismissed' });
 assert.throws(() => decisionRequest(soul, 'narrow', '', 'session:A', []));
 assert.equal(canReword({ ...soul, item: { ...soul.item, retire_index: 0 } }), false);
-assert.throws(() => decisionRequest({ ...soul, item: { ...soul.item, layer: 'voice' } }, 'reword', 'high', '', []));
+assert.throws(() => decisionRequest({ ...soul, item: { ...soul.item, layer: 'tone' } }, 'reword', 'high', '', []));
 let calls = 0;
 globalThis.fetch = async (input, options) => {
     calls++;
@@ -56,7 +56,13 @@ for (const outcome of ['clock_started', 'nothing_to_reflect_on', 'proposal_queue
 }
 assert.deepEqual(reflectionOutcome('model_call_failed: timeout: synthetic'), { key: 'review.outcome_model_call_failed', detail: 'timeout: synthetic' });
 assert.deepEqual(reflectionOutcome('future_status'), { key: 'review.outcome_unknown', detail: 'future_status' });
-for (const field of ['voice', 'level', 'unexpected_field']) {
+for (const field of ['tone', 'level', 'unexpected_field']) {
     globalThis.fetch = async () => new Response(JSON.stringify({ code: 'invalid', field, error: 'untrusted prose' }), { status: 400 });
     await assert.rejects(reviewFetch('/api/soul/proposals/19/resolve'), (error: unknown) => error instanceof ReviewError && error.field === field && validationMessage(error) === (field === 'unexpected_field' ? 'review.invalid' : `review.invalid_${field}`));
 }
+globalThis.fetch = async () => new Response(JSON.stringify({ code: 'invalid', field: 'level', reason: 'soul-tone-challenge-up-only', error: 'untrusted prose' }), { status: 400 });
+await assert.rejects(reviewFetch('/api/soul/proposals/19/resolve'), (error: unknown) => error instanceof ReviewError && error.reason === 'soul-tone-challenge-up-only' && validationMessage(error) === 'review.invalid_challenge_up_only');
+globalThis.fetch = async () => new Response(JSON.stringify({ code: 'tone_dial_cooldown', dial: 'warmth', until_unix: 1, error: 'untrusted prose' }), { status: 429 });
+await assert.rejects(reviewFetch('/api/soul/proposals/19/resolve'), (error: unknown) => error instanceof ReviewError && error.status === 429 && error.code === 'tone_dial_cooldown');
+assert.equal(canReword({ ...soul, item: { ...soul.item, layer: 'tone' } }), false);
+console.log('tone and story layer names, challenge rule and dial cooldown boundaries passed');

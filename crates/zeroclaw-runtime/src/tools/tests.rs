@@ -1429,7 +1429,7 @@ mod wrapper_spec_forwarding_tests {
 }
 
 #[tokio::test]
-async fn voice_proposals_resolve_defaults_in_fixed_and_live_registries() {
+async fn tone_proposals_resolve_defaults_in_fixed_and_live_registries() {
     use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
     for use_live in [false, true] {
         let tmp = TempDir::new().unwrap();
@@ -1491,7 +1491,7 @@ async fn voice_proposals_resolve_defaults_in_fixed_and_live_registries() {
             .unwrap();
         let result = tool
             .execute(serde_json::json!({
-                "layer":"voice", "trait_key":"humor", "level":"medium",
+                "layer":"tone", "trait_key":"humor", "level":"medium",
                 "proposal":"Use occasional humour", "rationale":"Owner requested it"
             }))
             .await

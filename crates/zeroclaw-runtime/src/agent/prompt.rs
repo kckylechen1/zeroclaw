@@ -43,7 +43,7 @@ pub struct SystemPromptBuilder {
 }
 
 impl SystemPromptBuilder {
-    /// `persona_section` is the pre-rendered `## Voice` section
+    /// `persona_section` is the pre-rendered `## Tone` section
     /// ([`zeroclaw_config::persona::PersonaKnobs::to_prompt_section`]), resolved
     /// once by the caller (there is no persona field on [`PromptContext`] —
     /// threading it through the builder avoids changing that struct's shape,
@@ -58,7 +58,7 @@ impl SystemPromptBuilder {
     /// ([`ToolsSection`]), mirroring the ordering rule in
     /// `agent::system_prompt::build_system_prompt_with_persona`: a persona
     /// dial must never be able to soften a hard behavioural constraint, and
-    /// voice should render before tools are listed.
+    /// tone should render before tools are listed.
     pub fn with_defaults(persona_section: Option<String>) -> Self {
         Self::with_persona(crate::agent::persona_projection::PersonaProjection {
             section: persona_section,
@@ -67,18 +67,18 @@ impl SystemPromptBuilder {
     }
 
     /// Same pipeline as [`Self::with_defaults`], driven by a governed Soul
-    /// projection: its section renders where the Voice section sits, and the
+    /// projection: its section renders where the Tone section sits, and the
     /// legacy `SOUL.md` / `IDENTITY.md` files are left out of the workspace
     /// file listing once the owner has written a governed Identity
     /// (ADR-015 §2).
     pub fn with_persona(persona: crate::agent::persona_projection::PersonaProjection) -> Self {
-        let (identity, voice) = persona_sections(persona);
+        let (identity, tone) = persona_sections(persona);
         Self {
             sections: vec![
                 Box::new(DateTimeSection),
                 identity,
                 Box::new(ToolHonestySection),
-                voice,
+                tone,
                 Box::new(NotesSection),
                 Box::new(ToolsSection),
                 Box::new(SafetySection),
@@ -93,13 +93,13 @@ impl SystemPromptBuilder {
     /// Swap in a new Soul projection, keeping every other section and the
     /// section order. Used when the Soul revision moves mid-session.
     pub fn set_persona(&mut self, persona: crate::agent::persona_projection::PersonaProjection) {
-        let (identity, voice) = persona_sections(persona);
+        let (identity, tone) = persona_sections(persona);
         let mut identity = Some(identity);
-        let mut voice = Some(voice);
+        let mut tone = Some(tone);
         for section in &mut self.sections {
             let replacement = match section.name() {
                 "identity" => identity.take(),
-                "voice" => voice.take(),
+                "tone" => tone.take(),
                 _ => None,
             };
             if let Some(replacement) = replacement {
@@ -135,7 +135,7 @@ fn persona_sections(
         crate::agent::persona_projection::LegacyPersonaFiles::Inject => Box::new(IdentitySection),
         retired => Box::new(GovernedIdentitySection(retired)),
     };
-    (identity, Box::new(VoiceSection(persona.section)))
+    (identity, Box::new(ToneSection(persona.section)))
 }
 
 pub struct IdentitySection;
@@ -147,12 +147,12 @@ pub struct GovernedIdentitySection(pub crate::agent::persona_projection::LegacyP
 /// part of the Soul; renders nothing when none of the files has content.
 pub struct NotesSection;
 pub struct ToolHonestySection;
-/// Pre-rendered `## Voice` persona section, captured at builder-construction
+/// Pre-rendered `## Tone` persona section, captured at builder-construction
 /// time. Carries the already-rendered text rather than reading it off
 /// [`PromptContext`] so that adding persona support did not require adding a
 /// field to `PromptContext` — which has a construction site outside this
 /// module (`tools::delegate`) that this change must not force edits onto.
-pub struct VoiceSection(pub Option<String>);
+pub struct ToneSection(pub Option<String>);
 pub struct ToolsSection;
 pub struct SafetySection;
 pub struct SkillsSection;
@@ -252,9 +252,9 @@ impl PromptSection for ToolHonestySection {
     }
 }
 
-impl PromptSection for VoiceSection {
+impl PromptSection for ToneSection {
     fn name(&self) -> &str {
-        "voice"
+        "tone"
     }
 
     fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
@@ -1089,50 +1089,47 @@ mod tests {
         }
     }
 
-    /// `## Voice` must land after `ToolHonestySection` (the only
+    /// `## Tone` must land after `ToolHonestySection` (the only
     /// behavioural-constraint section this pipeline has — there is no
     /// anti-narration equivalent here) and before `ToolsSection`, mirroring
     /// the ordering rule `agent::system_prompt::build_system_prompt_with_persona`
     /// applies to its own pipeline.
     #[test]
-    fn voice_section_lands_after_tool_honesty_and_before_tools() {
+    fn tone_section_lands_after_tool_honesty_and_before_tools() {
         let tools: Vec<Box<dyn Tool>> = vec![Box::new(TestTool)];
         let ctx = persona_test_ctx(&tools);
-        let prompt = SystemPromptBuilder::with_defaults(Some("## Voice\n\n- Be terse.\n".into()))
+        let prompt = SystemPromptBuilder::with_defaults(Some("## Tone\n\n- Be terse.\n".into()))
             .build(&ctx)
             .unwrap();
 
         let honesty_pos = prompt
             .find("## CRITICAL: Tool Honesty")
             .expect("tool honesty block present");
-        let voice_pos = prompt.find("## Voice").expect("Voice section present");
+        let tone_pos = prompt.find("## Tone").expect("Tone section present");
         let tools_pos = prompt.find("## Tools").expect("Tools section present");
 
         assert!(
-            honesty_pos < voice_pos,
-            "Voice must come after the tool-honesty block"
+            honesty_pos < tone_pos,
+            "Tone must come after the tool-honesty block"
         );
-        assert!(
-            voice_pos < tools_pos,
-            "Voice must come before the tools list"
-        );
+        assert!(tone_pos < tools_pos, "Tone must come before the tools list");
     }
 
     /// Regression guard: a persona-less builder must produce byte-identical
     /// output to the pre-persona section list (`DateTime, Identity,
     /// ToolHonesty, Tools, Safety, Skills, Workspace, Runtime, ChannelMedia`
-    /// — the exact order `with_defaults` used before `VoiceSection` existed).
-    /// `VoiceSection(None)` must contribute exactly zero bytes.
+    /// — the exact order `with_defaults` used before `ToneSection` existed).
+    /// `ToneSection(None)` must contribute exactly zero bytes.
     #[test]
-    fn no_persona_is_byte_identical_to_the_pre_voice_section_list() {
+    fn no_persona_is_byte_identical_to_the_pre_tone_section_list() {
         let tools: Vec<Box<dyn Tool>> = vec![Box::new(TestTool)];
         let ctx = persona_test_ctx(&tools);
 
-        let with_voice_section_but_no_persona = SystemPromptBuilder::with_defaults(None)
+        let with_tone_section_but_no_persona = SystemPromptBuilder::with_defaults(None)
             .build(&ctx)
             .unwrap();
 
-        let without_voice_section_at_all = SystemPromptBuilder::default()
+        let without_tone_section_at_all = SystemPromptBuilder::default()
             .add_section(Box::new(DateTimeSection))
             .add_section(Box::new(IdentitySection))
             .add_section(Box::new(ToolHonestySection))
@@ -1147,11 +1144,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            with_voice_section_but_no_persona, without_voice_section_at_all,
-            "VoiceSection(None) must render nothing — output must match the \
+            with_tone_section_but_no_persona, without_tone_section_at_all,
+            "ToneSection(None) must render nothing — output must match the \
              pre-persona section list exactly"
         );
-        assert!(!with_voice_section_but_no_persona.contains("## Voice"));
+        assert!(!with_tone_section_but_no_persona.contains("## Tone"));
     }
 
     #[test]

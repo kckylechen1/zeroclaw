@@ -9153,13 +9153,13 @@ fn build_system_prompt_for_turn_forwards_persona_section() {
         usize::MAX,
         true,
         false,
-        Some("## Voice\n\n- Be terse.\n"),
+        Some("## Tone\n\n- Be terse.\n"),
         crate::agent::persona_projection::LegacyPersonaFiles::Inject,
         None,
     )
     .expect("prompt with persona section should build");
     assert!(
-        with_persona.contains("## Voice"),
+        with_persona.contains("## Tone"),
         "persona_section: Some(..) must reach the built prompt"
     );
 
@@ -9188,8 +9188,8 @@ fn build_system_prompt_for_turn_forwards_persona_section() {
     )
     .expect("prompt without persona section should build");
     assert!(
-        !without_persona.contains("## Voice"),
-        "persona_section: None must add no Voice section"
+        !without_persona.contains("## Tone"),
+        "persona_section: None must add no Tone section"
     );
 }
 

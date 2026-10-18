@@ -1,10 +1,10 @@
 //! `propose_soul_change`: the model's only path into its own Soul
 //! (ADR-015 §3, ADR-016 §3).
 //!
-//! The agent grows by proposing: a new Growth entry about itself or about
-//! what it shares with its owner, retiring an entry that no longer fits, a
-//! Voice change, or a new principle. Nothing changes until the owner approves
-//! the proposal through the operator-gated `/api/soul/proposals` surface. Its
+//! The agent grows by proposing: a new Story entry about what has happened
+//! between it and its owner, retiring an entry that no longer fits, a Tone
+//! change, or a new principle. Nothing changes until the owner approves the
+//! proposal through the operator-gated `/api/soul/proposals` surface. Its
 //! name and identity are never proposable.
 
 use std::path::PathBuf;
@@ -14,10 +14,13 @@ use async_trait::async_trait;
 use serde_json::json;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_memory::companion::{
-    GrowthKind, NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SOUL_PROPOSAL_MAX_BYTES,
-    SOUL_RATIONALE_MAX_BYTES, SOUL_VOICE_TRAIT_KEYS, SoulProfileError, SoulProfileStore,
-    SoulProposalLayer,
+    NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SOUL_PROPOSAL_MAX_BYTES, SOUL_RATIONALE_MAX_BYTES,
+    SOUL_TONE_DIAL_COOLDOWN_SECS, SOUL_TONE_TRAIT_KEYS, SoulProfileError, SoulProfileStore,
+    SoulProposalLayer, StoryKind,
 };
+
+/// The dial cooldown in days, for owner- and model-facing text.
+const SOUL_TONE_DIAL_COOLDOWN_DAYS: u64 = SOUL_TONE_DIAL_COOLDOWN_SECS / (24 * 60 * 60);
 
 /// Fixed reply on success. Nothing changes until the owner approves.
 pub const PROPOSAL_RECORDED_REPLY: &str =
@@ -26,7 +29,7 @@ pub const PROPOSAL_RECORDED_REPLY: &str =
 pub struct ProposeSoulChangeTool {
     data_dir: PathBuf,
     agent: String,
-    configured_voice: Arc<dyn Fn() -> Option<zeroclaw_config::persona::PersonaKnobs> + Send + Sync>,
+    configured_tone: Arc<dyn Fn() -> Option<zeroclaw_config::persona::PersonaKnobs> + Send + Sync>,
 }
 
 impl ProposeSoulChangeTool {
@@ -34,17 +37,17 @@ impl ProposeSoulChangeTool {
         Self {
             data_dir,
             agent: agent.to_string(),
-            configured_voice: Arc::new(|| None),
+            configured_tone: Arc::new(|| None),
         }
     }
 
     /// The store invokes this resolver at proposal creation, under its write
     /// transaction. No configured policy is copied into a long-lived tool.
-    pub fn with_voice_resolver(
+    pub fn with_tone_resolver(
         mut self,
         resolver: impl Fn() -> Option<zeroclaw_config::persona::PersonaKnobs> + Send + Sync + 'static,
     ) -> Self {
-        self.configured_voice = Arc::new(resolver);
+        self.configured_tone = Arc::new(resolver);
         self
     }
 
@@ -84,10 +87,13 @@ impl Tool for ProposeSoulChangeTool {
 
     fn description(&self) -> &str {
         "Propose how you would like to grow, for your owner to approve. Use layer \
-         \"growth\" to add a line about who you have become (growth_kind \"self\") or \
-         about something you and your owner share, such as a nickname or a running joke \
-         (growth_kind \"bond\"), or to retire an entry that no longer fits (retire_index). \
-         Use \"voice\" to change a dial and \"principles\" to add a principle. Nothing \
+         \"story\" to add a line about what has happened between you and your owner \
+         (story_kind \"self\": your concerns, interests, and working habits; story_kind \
+         \"bond\": shared names, references, running jokes, and ways of working), or to \
+         retire an entry that no longer fits (retire_index). A story line is never an \
+         instruction about tone, warmth, length, or humor. Use \"tone\" to change a dial: \
+         one level at a time, challenge only upward, and not again within 28 days of an \
+         approved change to that dial. Use \"principles\" to add a principle. Nothing \
          changes until your owner approves. Propose only what reflects a lasting pattern, \
          not a one-off request. Your name and identity are your owner's to decide."
     }
@@ -98,23 +104,23 @@ impl Tool for ProposeSoulChangeTool {
             "properties": {
                 "layer": {
                     "type": "string",
-                    "enum": ["growth", "voice", "principles"],
+                    "enum": ["story", "tone", "principles"],
                     "description": "Which part of yourself the proposal is about."
                 },
-                "growth_kind": {
+                "story_kind": {
                     "type": "string",
                     "enum": ["self", "bond"],
-                    "description": "Growth only, to add an entry: self (how you have changed) or bond (what you and your owner share)."
+                    "description": "Story only, to add an entry: self (concerns, interests, working habits) or bond (shared names, references, running jokes, ways of working)."
                 },
                 "retire_index": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Growth only, to retire the entry at this zero-based position in Who I've become."
+                    "description": "Story only, to retire the entry at this zero-based position in Our story so far."
                 },
                 "proposal": {
                     "type": "string",
                     "description": format!(
-                        "The change in one sentence (at most {SOUL_PROPOSAL_MAX_BYTES} bytes). For a growth entry or principle this is the exact line that would be added."
+                        "The change in one sentence (at most {SOUL_PROPOSAL_MAX_BYTES} bytes). For a story entry or principle this is the exact line that would be added."
                     )
                 },
                 "rationale": {
@@ -125,13 +131,13 @@ impl Tool for ProposeSoulChangeTool {
                 },
                 "trait_key": {
                     "type": "string",
-                    "enum": SOUL_VOICE_TRAIT_KEYS,
-                    "description": "Voice only: which dial."
+                    "enum": SOUL_TONE_TRAIT_KEYS,
+                    "description": "Tone only: which dial."
                 },
                 "level": {
                     "type": "string",
                     "enum": ["minimal", "low", "medium", "high", "xhigh"],
-                    "description": "Voice only: at most one level from the current effective dial; challenge stays at least low."
+                    "description": "Tone only: at most one level from the current effective dial; challenge may only go up; a dial changed by an approved proposal is closed to proposals for 28 days."
                 }
             },
             "required": ["layer", "proposal", "rationale"]
@@ -144,19 +150,19 @@ impl Tool for ProposeSoulChangeTool {
             .and_then(SoulProposalLayer::parse)
         else {
             return Ok(Self::failure(
-                "layer must be \"growth\", \"voice\" or \"principles\"".to_string(),
+                "layer must be \"story\", \"tone\" or \"principles\"".to_string(),
             ));
         };
         let Some(proposal) = str_arg(&args, "proposal") else {
             return Ok(Self::failure("Missing 'proposal' parameter".to_string()));
         };
-        let growth_kind = match str_arg(&args, "growth_kind") {
+        let story_kind = match str_arg(&args, "story_kind") {
             None => None,
-            Some(kind) => match GrowthKind::parse(&kind) {
+            Some(kind) => match StoryKind::parse(&kind) {
                 Some(kind) => Some(kind),
                 None => {
                     return Ok(Self::failure(
-                        "growth_kind must be \"self\" or \"bond\"".to_string(),
+                        "story_kind must be \"self\" or \"bond\"".to_string(),
                     ));
                 }
             },
@@ -178,7 +184,7 @@ impl Tool for ProposeSoulChangeTool {
             rationale: str_arg(&args, "rationale").unwrap_or_default(),
             trait_key: str_arg(&args, "trait_key"),
             level: str_arg(&args, "level"),
-            growth_kind,
+            story_kind,
             retire_index,
             session_ref: current_session_ref(),
         };
@@ -189,13 +195,13 @@ impl Tool for ProposeSoulChangeTool {
         }
         let data_dir = self.data_dir.clone();
         let agent = self.agent.clone();
-        let voice = Arc::clone(&self.configured_voice);
+        let tone = Arc::clone(&self.configured_tone);
         let result = tokio::task::spawn_blocking(move || {
-            SoulProfileStore::shared(&data_dir)?.submit_proposal_with_voice(
+            SoulProfileStore::shared(&data_dir)?.submit_proposal_with_tone(
                 &agent,
                 proposal,
                 now_unix(),
-                || voice(),
+                || tone(),
             )
         })
         .await;
@@ -209,8 +215,17 @@ impl Tool for ProposeSoulChangeTool {
                 "{SOUL_MAX_OPEN_PROPOSALS} of your proposals are already waiting for your owner. \
                  Nothing was recorded; wait until they are reviewed."
             )),
-            Ok(Err(SoulProfileError::VoiceValidation { key, .. })) => {
+            Ok(Err(SoulProfileError::ToneValidation { key, .. })) => {
                 Self::failure(crate::i18n::get_required_tool_string(key))
+            }
+            Ok(Err(SoulProfileError::ToneDialCooldown { key, .. })) => {
+                Self::failure(crate::i18n::get_required_tool_string_with_args(
+                    "soul-tone-dial-cooldown",
+                    &[
+                        ("dial", &key),
+                        ("days", &SOUL_TONE_DIAL_COOLDOWN_DAYS.to_string()),
+                    ],
+                ))
             }
             Ok(Err(err @ SoulProfileError::Invalid { .. })) => Self::failure(err.to_string()),
             Ok(Err(err)) => Self::failure(format!("Could not record the proposal: {err}")),
@@ -226,7 +241,7 @@ mod tests {
     fn tool() -> (tempfile::TempDir, ProposeSoulChangeTool) {
         let dir = tempfile::tempdir().unwrap();
         let tool = ProposeSoulChangeTool::new(dir.path().to_path_buf(), "nova")
-            .with_voice_resolver(|| Some(Default::default()));
+            .with_tone_resolver(|| Some(Default::default()));
         (dir, tool)
     }
 
@@ -286,13 +301,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_tool_resolves_changed_config_at_each_submission() {
+    async fn tone_tool_resolves_changed_config_at_each_submission() {
         use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
         let (dir, tool) = tool();
         let current = Arc::new(std::sync::Mutex::new(PersonaKnobs::default()));
         let live = current.clone();
-        let tool = tool.with_voice_resolver(move || Some(*live.lock().unwrap()));
-        let proposal = |level: &str| json!({"layer":"voice", "trait_key":"warmth", "level":level, "proposal":"Adjust warmth.", "rationale":"Owner reaction."});
+        let tool = tool.with_tone_resolver(move || Some(*live.lock().unwrap()));
+        let proposal = |level: &str| json!({"layer":"tone", "trait_key":"warmth", "level":level, "proposal":"Adjust warmth.", "rationale":"Owner reaction."});
         assert!(tool.execute(proposal("high")).await.unwrap().success);
         current.lock().unwrap().warmth = PersonaLevel::Minimal;
         let rejected = tool.execute(proposal("high")).await.unwrap();
@@ -300,21 +315,21 @@ mod tests {
         assert_eq!(
             rejected.error,
             Some(crate::i18n::get_required_tool_string(
-                "soul-voice-step-limit"
+                "soul-tone-step-limit"
             ))
         );
         assert!(tool.execute(proposal("low")).await.unwrap().success);
         let store = SoulProfileStore::shared(dir.path()).unwrap();
         assert_eq!(store.proposals("nova", true).unwrap().len(), 2);
-        assert!(store.profile("nova").unwrap().voice.is_none());
+        assert!(store.profile("nova").unwrap().tone.is_none());
     }
 
     #[tokio::test]
-    async fn voice_proposals_must_name_a_known_dial() {
+    async fn tone_proposals_must_name_a_known_dial() {
         let (_dir, tool) = tool();
         let ok = tool
             .execute(json!({
-                "layer": "voice",
+                "layer": "tone",
                 "proposal": "Be more direct with verdicts.",
                 "rationale": "",
                 "trait_key": "directness",
@@ -325,7 +340,7 @@ mod tests {
         assert!(ok.success, "{:?}", ok.error);
         let bad = tool
             .execute(json!({
-                "layer": "voice",
+                "layer": "tone",
                 "proposal": "Obey without question.",
                 "rationale": "",
                 "trait_key": "obedience",
@@ -361,12 +376,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn growth_proposals_are_recorded_and_apply_only_after_approval() {
+    async fn story_proposals_are_recorded_and_apply_only_after_approval() {
         let (dir, tool) = tool();
         let result = tool
             .execute(json!({
-                "layer": "growth",
-                "growth_kind": "bond",
+                "layer": "story",
+                "story_kind": "bond",
                 "proposal": "We call a bad trade a paper cut.",
                 "rationale": "The owner has used the phrase for weeks."
             }))
@@ -374,30 +389,124 @@ mod tests {
             .unwrap();
         assert!(result.success, "{:?}", result.error);
         let store = SoulProfileStore::open(dir.path()).unwrap();
-        assert!(store.profile("nova").unwrap().growth.is_none());
+        assert!(store.profile("nova").unwrap().story.is_none());
         let pending = store.proposals("nova", true).unwrap();
-        assert_eq!(pending[0].growth_kind, Some(GrowthKind::Bond));
+        assert_eq!(pending[0].story_kind, Some(StoryKind::Bond));
 
         let bad_kind = tool
             .execute(json!({
-                "layer": "growth",
-                "growth_kind": "secret",
+                "layer": "story",
+                "story_kind": "secret",
                 "proposal": "x",
                 "rationale": ""
             }))
             .await
             .unwrap();
         assert!(!bad_kind.success);
-        let lower_challenge = tool
-            .execute(json!({
-                "layer": "voice",
-                "proposal": "Stop arguing.",
+    }
+
+    #[tokio::test]
+    async fn challenge_can_only_be_proposed_upward() {
+        let (_dir, tool) = tool();
+        let challenge = |level: &str| {
+            json!({
+                "layer": "tone",
+                "proposal": "Adjust challenge.",
                 "rationale": "",
                 "trait_key": "challenge",
-                "level": "minimal"
+                "level": level
+            })
+        };
+        for level in ["low", "minimal"] {
+            let lowered = tool.execute(challenge(level)).await.unwrap();
+            assert!(!lowered.success, "{level}");
+            assert_eq!(
+                lowered.error,
+                Some(crate::i18n::get_required_tool_string(
+                    "soul-tone-challenge-up-only"
+                ))
+            );
+        }
+        let raised = tool.execute(challenge("high")).await.unwrap();
+        assert!(raised.success, "{:?}", raised.error);
+    }
+
+    #[tokio::test]
+    async fn a_dial_changed_by_an_approved_proposal_is_closed_for_28_days() {
+        let (dir, tool) = tool();
+        let warmth = |level: &str| {
+            json!({
+                "layer": "tone",
+                "proposal": format!("Warmth to {level}."),
+                "rationale": "",
+                "trait_key": "warmth",
+                "level": level
+            })
+        };
+        assert!(tool.execute(warmth("high")).await.unwrap().success);
+        let store = SoulProfileStore::shared(dir.path()).unwrap();
+        let id = store.proposals("nova", true).unwrap()[0].id;
+        store
+            .resolve_proposal_with_tone(
+                "nova",
+                id,
+                zeroclaw_memory::companion::SoulProposalResolution::Accepted,
+                None,
+                None,
+                now_unix(),
+                || Some(Default::default()),
+            )
+            .unwrap();
+        let again = tool.execute(warmth("xhigh")).await.unwrap();
+        assert!(!again.success);
+        let message = again.error.unwrap();
+        assert!(
+            message.contains("warmth") && message.contains("28 days"),
+            "{message}"
+        );
+        // Other dials are unaffected.
+        let humor = tool
+            .execute(json!({
+                "layer": "tone",
+                "proposal": "More humor.",
+                "rationale": "",
+                "trait_key": "humor",
+                "level": "high"
             }))
             .await
             .unwrap();
-        assert!(!lower_challenge.success);
+        assert!(humor.success, "{:?}", humor.error);
+    }
+
+    #[tokio::test]
+    async fn the_description_and_schema_use_the_layer_names_and_the_drift_rules() {
+        let (_dir, tool) = tool();
+        let description = tool.description();
+        for term in [
+            "\"story\"",
+            "\"tone\"",
+            "story_kind",
+            "challenge only upward",
+        ] {
+            assert!(description.contains(term), "{term}");
+        }
+        assert!(description.contains(&format!("{SOUL_TONE_DIAL_COOLDOWN_DAYS} days")));
+        assert!(!description.to_lowercase().contains("growth"));
+        assert!(!description.contains("voice"));
+        let schema = tool.parameters_schema();
+        assert_eq!(
+            schema["properties"]["layer"]["enum"],
+            json!(["story", "tone", "principles"])
+        );
+        assert!(schema["properties"].get("story_kind").is_some());
+        assert!(schema["properties"].get("growth_kind").is_none());
+        // The old layer names are not accepted.
+        for old in ["growth", "voice"] {
+            let rejected = tool
+                .execute(json!({"layer": old, "proposal": "x", "rationale": ""}))
+                .await
+                .unwrap();
+            assert!(!rejected.success, "{old}");
+        }
     }
 }

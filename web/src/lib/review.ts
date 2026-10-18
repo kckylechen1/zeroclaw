@@ -1,6 +1,6 @@
 import { getToken } from './auth';
 import { apiOrigin, basePath } from './basePath';
-export type Layer = 'identity' | 'principles' | 'growth' | 'voice';
+export type Layer = 'identity' | 'principles' | 'tone' | 'story';
 export interface Revision {
     revision: number;
     source: string;
@@ -16,7 +16,7 @@ export interface Proposal {
     rationale: string;
     trait_key?: string;
     level?: string;
-    growth_kind?: string;
+    story_kind?: string;
     retire_index?: number;
     retire_target?: { kind: string; text: string };
     target_revision?: number;
@@ -63,8 +63,8 @@ export interface Soul {
     agent: string;
     identity?: Revision;
     principles?: Revision;
-    growth?: Revision;
-    voice: {
+    story?: Revision;
+    tone: {
         configured: unknown;
         stored?: Revision;
         effective?: Record<string, string>;
@@ -96,7 +96,7 @@ export interface CandidateHistory {
     }[];
 }
 export class ReviewError extends Error {
-    constructor(public status: number, public code?: string, public field?: string) { super(`Review HTTP ${status}`); }
+    constructor(public status: number, public code?: string, public field?: string, public reason?: string) { super(`Review HTTP ${status}`); }
 }
 // Owner-only responses have several legacy envelopes. Preserve the status,
 // and keep re-pair local to this surface instead of changing anonymous routes.
@@ -112,13 +112,14 @@ export async function reviewFetch<T>(path: string, signal?: AbortSignal, body?: 
         const envelope: unknown = await response.json().catch(() => null);
         const code = envelope && typeof envelope === 'object' && 'code' in envelope && typeof envelope.code === 'string' ? envelope.code : undefined;
         const field = envelope && typeof envelope === 'object' && 'field' in envelope && typeof envelope.field === 'string' ? envelope.field : undefined;
-        throw new ReviewError(response.status, code, field);
+        const reason = envelope && typeof envelope === 'object' && 'reason' in envelope && typeof envelope.reason === 'string' ? envelope.reason : undefined;
+        throw new ReviewError(response.status, code, field, reason);
     }
     return response.json() as Promise<T>;
 }
 export type Decision = 'accept' | 'reword' | 'narrow' | 'dismiss';
 export function canReword(item: InboxItem): boolean {
-    return item.kind === 'user_model_candidate' || (item.kind === 'soul_proposal' && (item.item.layer === 'principles' || (item.item.layer === 'growth' && item.item.retire_index === undefined)));
+    return item.kind === 'user_model_candidate' || (item.kind === 'soul_proposal' && (item.item.layer === 'principles' || (item.item.layer === 'story' && item.item.retire_index === undefined)));
 }
 export function canNarrow(candidate: Candidate): boolean {
     return candidate.scope === 'global' || /^session:\S.*$/.test(candidate.scope) && candidate.scope.trim() === candidate.scope;
@@ -154,5 +155,5 @@ export function reflectionOutcome(outcome: string): { key: string; detail: strin
         : { key: 'review.outcome_unknown', detail: outcome };
 }
 export function validationMessage(error: ReviewError): string {
-    return error.field === 'voice' ? 'review.invalid_voice' : error.field === 'level' ? 'review.invalid_level' : 'review.invalid';
+    return error.reason === 'soul-tone-challenge-up-only' ? 'review.invalid_challenge_up_only' : error.field === 'tone' ? 'review.invalid_tone' : error.field === 'level' ? 'review.invalid_level' : 'review.invalid';
 }

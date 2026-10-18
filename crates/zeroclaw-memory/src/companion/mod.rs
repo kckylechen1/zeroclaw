@@ -35,14 +35,14 @@ pub use outbox::{
     probe_companion_outbox_health,
 };
 pub use soul_profile::{
-    DEFAULT_PRINCIPLES, GrowthEntry, GrowthKind, NewSoulProposal, SOUL_AGENT_CHALLENGE_FLOOR,
-    SOUL_GROWTH_ENTRY_MAX_BYTES, SOUL_MAX_GROWTH_ENTRIES, SOUL_MAX_OPEN_PROPOSALS,
-    SOUL_MAX_PRINCIPLES, SOUL_NAME_MAX_BYTES, SOUL_PRINCIPLE_MAX_BYTES, SOUL_PROFILE_DB_FILE,
+    DEFAULT_PRINCIPLES, NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SOUL_MAX_PRINCIPLES,
+    SOUL_MAX_STORY_ENTRIES, SOUL_NAME_MAX_BYTES, SOUL_PRINCIPLE_MAX_BYTES, SOUL_PROFILE_DB_FILE,
     SOUL_PROPOSAL_MAX_BYTES, SOUL_RATIONALE_MAX_BYTES, SOUL_SELF_DESCRIPTION_MAX_BYTES,
-    SOUL_SHORT_FIELD_MAX_BYTES, SOUL_VOICE_TRAIT_KEYS, SoulGrowth, SoulIdentity, SoulLayer,
-    SoulPrinciples, SoulProfile, SoulProfileError, SoulProfileStore, SoulProposal,
-    SoulProposalLayer, SoulProposalOutcome, SoulProposalResolution, SoulReflectionReceipt,
-    SoulRevision, SoulSource, SoulVoice, resolve_effective_voice, seed_name_for_agent,
+    SOUL_SHORT_FIELD_MAX_BYTES, SOUL_STORY_ENTRY_MAX_BYTES, SOUL_TONE_DIAL_COOLDOWN_SECS,
+    SOUL_TONE_TRAIT_KEYS, SoulIdentity, SoulLayer, SoulPrinciples, SoulProfile, SoulProfileError,
+    SoulProfileStore, SoulProposal, SoulProposalLayer, SoulProposalOutcome, SoulProposalResolution,
+    SoulReflectionReceipt, SoulRevision, SoulSource, SoulStory, SoulTone, StoryEntry, StoryKind,
+    resolve_effective_tone, seed_name_for_agent,
 };
 pub use user_model::validate_review_text as validate_user_model_review_text;
 pub use user_model::{

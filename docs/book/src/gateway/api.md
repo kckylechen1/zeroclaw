@@ -77,7 +77,7 @@ frame. Null denotes omission. Legacy clients may omit the field.
 
 The register belongs to the initiating connection and is resolved for each turn,
 not captured by the first socket's shared Agent. It adds one repository-owned
-`## Surface` line about length and Markdown. Identity, Soul and Voice stay
+`## Surface` line about length and Markdown. Identity, Soul and Tone stay
 identical; surface grants no authority and does not change authentication,
 allowlists, session identity or the `wss` runtime channel. All subscribers receive
 the same output. Steering and a late steering continuation retain the original
@@ -453,7 +453,7 @@ remain visible for every agent filter.
 Each candidate has `review_url` pointing to its existing operator endpoint:
 
 - Soul: submit `agent` and `resolution: "accepted"` or `"dismissed"`.
-  `final_text` rewords an accepted Growth entry or principle.
+  `final_text` rewords an accepted Story entry or principle.
 - User Model: submit `action: "accept"`, `"narrow"` or `"reject"`.
   `narrow` requires `narrowed_scope`; `final_text` optionally supplies the
   owner's wording for an accepted/narrowed statement. Wording is a non-empty
@@ -557,25 +557,33 @@ Every route below requires the operator identity. The `agent` must be a
 configured agent alias; an unknown alias returns 404 with
 `code: "unknown_agent"`.
 
+The four layers are Identity, Principles, Tone (how the agent sounds: the five
+persona dials) and Story (what has happened between the agent and its owner;
+[ADR-018](../architecture/decisions/ADR-018-soul-character-model.md)). They are
+named `identity`, `principles`, `tone` and `story` in every route, JSON field
+and tool argument. `soul.db` keeps its older stored identifiers (`voice` for
+Tone and `growth` for Story) so a store stays readable by an earlier build;
+those never appear in the API, and "voice" in this API means audio only.
+
 | Route | Purpose |
 | --- | --- |
-| `GET /api/soul?agent=<alias>` | Current `identity`, `principles`, and `growth` heads (each with `revision`, `source`, and `value`), `voice` (`configured` dials, `stored` heads, `effective` dials and per-key `sources`), `legacy_persona_files` (`injected` or `suppressed`), and `last_reflection`. Seeds missing layers on first read. |
-| `GET /api/soul/history?agent=<alias>&layer=identity\|principles\|growth\|voice` | Every revision of one layer, oldest first. |
-| `GET /api/soul/export?agent=<alias>` | Download JSON (`format_version: 1`) containing `agent`, four current layers in `profile`, all four per-layer revision arrays in `history` (oldest first), and `voice` (`configured`, `effective`, `sources`). Current heads and history come from one read snapshot. |
+| `GET /api/soul?agent=<alias>` | Current `identity`, `principles`, and `story` heads (each with `revision`, `source`, and `value`), `tone` (`configured` dials, `stored` heads, `effective` dials and per-key `sources`), `legacy_persona_files` (`injected` or `suppressed`), and `last_reflection`. Seeds missing layers on first read. |
+| `GET /api/soul/history?agent=<alias>&layer=identity\|principles\|tone\|story` | Every revision of one layer, oldest first. |
+| `GET /api/soul/export?agent=<alias>` | Download JSON (`format_version: 2`) containing `agent`, four current layers in `profile`, all four per-layer revision arrays in `history` (oldest first), and `tone` (`configured`, `effective`, `sources`). Current heads and history come from one read snapshot. |
 | `PUT /api/soul/identity` | Body `{ "agent", "expected_revision", "identity": { "name", "self_description"?, "primary_language"?, "pronouns"? } }`. |
 | `PUT /api/soul/principles` | Body `{ "agent", "expected_revision", "items": [ ... ] }`, at most 8 single-line items of up to 240 bytes. |
-| `PUT /api/soul/growth` | Body `{ "agent", "expected_revision", "growth": { "entries": [ { "kind": "self" \| "bond", "text" } ] } }`, at most 12 single-line entries of up to 200 bytes. |
-| `PUT /api/soul/voice` | Body `{ "agent", "expected_revision", "voice": { "heads": { "<key>": "<level>" } } }`. Keys are the five persona dials; a stored head wins over the configured dial for its key. |
+| `PUT /api/soul/tone` | Body `{ "agent", "expected_revision", "tone": { "heads": { "<key>": "<level>" } } }`. Keys are the five persona dials; a stored head wins over the configured dial for its key. The owner may set any level, and an owner write starts no dial cooldown. |
+| `PUT /api/soul/story` | Body `{ "agent", "expected_revision", "story": { "entries": [ { "kind": "self" \| "bond", "text" } ] } }`, at most 12 single-line entries of up to 200 bytes. `self` is concerns, interests and working habits; `bond` is shared names, references, running jokes and ways of working. |
 | `POST /api/soul/rollback` | Body `{ "agent", "layer", "to_revision", "expected_revision" }`. Appends a copy of an earlier revision. |
-| `GET /api/soul/proposals?agent=<alias>[&pending=true]` | The agent's own proposals to change its growth, voice, or principles, oldest first. |
-| `POST /api/soul/proposals/{id}/resolve` | Body `{ "agent", "resolution": "accepted" \| "dismissed", "note"?, "final_text"? }`. Accepting applies the proposal and returns `applied_revision`. Each proposal resolves once; a repeat returns 409 with `code: "proposal_already_resolved"`. A Growth retirement is bound to the entry it named when submitted (`retire_target`, read from `target_revision`); if the owner has since removed or reworded that entry, accepting returns 409 with `code: "proposal_stale"` and the proposal stays pending for dismissal. |
+| `GET /api/soul/proposals?agent=<alias>[&pending=true]` | The agent's own proposals to change its tone, story, or principles, oldest first. A story proposal carries `story_kind`. |
+| `POST /api/soul/proposals/{id}/resolve` | Body `{ "agent", "resolution": "accepted" \| "dismissed", "note"?, "final_text"? }`. Accepting applies the proposal and returns `applied_revision`. Each proposal resolves once; a repeat returns 409 with `code: "proposal_already_resolved"`. A Story retirement is bound to the entry it named when submitted (`retire_target`, read from `target_revision`); if the owner has since removed or reworded that entry, accepting returns 409 with `code: "proposal_stale"` and the proposal stays pending for dismissal. A Tone proposal that would lower `challenge` or change a dial inside its cooldown is refused when accepted, the same way (see below); the cooldown refusal returns 429 with `code: "tone_dial_cooldown"`, the `dial`, and `until_unix`. |
 
 Exports do not seed missing layers: absent heads are `null` and their histories
 are empty arrays. They contain only the requested agent's canonical layer
 values and revision metadata, including rollback and approved-proposal IDs.
 Proposal prose, rationale, session references, resolution notes, reflection
 receipts, the User Model, chat history, and legacy workspace files are excluded.
-The effective Voice uses the exported stored head plus the current configured
+The effective Tone uses the exported stored head plus the current configured
 defaults; configuration is not a historical Soul revision. Downloads use
 `Cache-Control: no-store` and a fixed `soul-export.json` attachment filename.
 This is an owner archive, not an import format or a model tool.
@@ -607,47 +615,60 @@ until then each start logs one WARN naming the migration path. The files the
 model may still write (`AGENTS.md`, `TOOLS.md`, `MEMORY.md`) render after the
 persona under a fixed `## Notes you wrote` heading and never carry authority.
 
-Voice uses the same resolver in the prompt and `GET /api/soul`. The configured
+Tone uses the same resolver in the prompt and `GET /api/soul`. The configured
 selection is the agent's persona, otherwise its card's persona, otherwise the
-built-in `medium` dials. Stored Voice keys override that selection individually;
-removing a stored key restores its configured value. `voice.effective` returns
-all five levels; `voice.sources` maps each key to `{ "kind": "builtin" }`,
+built-in `medium` dials. Stored Tone keys override that selection individually;
+removing a stored key restores its configured value. `tone.effective` returns
+all five levels; `tone.sources` maps each key to `{ "kind": "builtin" }`,
 `{ "kind": "persona", "persona": "<alias>", "card": "<alias or null>" }`, or
 `{ "kind": "stored", "revision": 3 }`. The stored revision identifies the current
-Voice layer snapshot, not the author of each individual dial; layer authorship
-and proposal receipts remain in `voice.stored` and history.
+Tone layer snapshot, not the author of each individual dial; layer authorship
+and proposal receipts remain in `tone.stored` and history.
 
 Each of the five levels renders repository-owned behavioral guidance and a
-one-line example for every dial, including `medium`. The complete `## Voice`
+one-line example for every dial, including `medium`. The complete `## Tone`
 section stays within 1,024 bytes. Tone never changes honesty, permissions or
 safety rules. The guidance has no surface input; surface formatting cannot
-change its Voice bytes. Config-only persona edits still require an Agent
+change its Tone bytes. Config-only persona edits still require an Agent
 rebuild; stored Soul changes use the next-turn refresh described above.
 
 The model's only path into its own Soul is a proposal, either from the
 `propose_soul_change` tool mid-conversation or from the weekly reflection. At
 most three proposals wait per agent, and identical pending proposals are not
-stored twice. Identity is never proposable, and the agent cannot propose
-`challenge` below `low`. Voice proposals can move a dial by at most one level
-from its current effective value. The store checks this at creation and again
-inside the approval transaction, so changed config, changed stored heads and
-historical proposals cannot bypass the bound. A tool without a current config
-resolver refuses Voice proposals. The owner may still set any level directly
-through `PUT /api/soul/voice`, including large changes and `challenge = minimal`;
-the honesty floor still renders. Under a prompt budget, optional Voice text
-yields before the existing tail truncation; Identity, Principles and Growth
-retain their existing handling. Accepting a proposal holds the live configured
-Voice stable through validation and commit in the same transaction; `final_text` lets the owner reword a growth entry or principle
-before it applies. If the apply fails validation or the layer changed
-underneath it, the proposal stays pending. Dismissing applies nothing.
+stored twice. Identity is never proposable. Tone proposals can move a dial by
+at most one level from its current effective value, and `challenge` may only be
+proposed upward: any proposal that would set it below its current effective
+level is refused with a localized `soul-tone-challenge-up-only` error. A dial
+changed by an accepted proposal is closed to further proposals for 28 days
+(`SOUL_TONE_DIAL_COOLDOWN_SECS`); the end time is derived from the Tone
+revision with `source: "approved_proposal"` and its proposal's dial, so no
+extra record exists, and owner writes and rollbacks neither respect nor start a
+cooldown. The store checks the one-step bound, the `challenge` rule and the
+cooldown at creation and again inside the approval transaction, so changed
+config, changed stored heads, a dial that entered cooldown after a proposal was
+filed and historical proposals cannot bypass them; a refused approval leaves
+the proposal pending. A tool without a current config resolver refuses Tone
+proposals. The owner may still set any level directly through
+`PUT /api/soul/tone`, including large changes and `challenge = minimal`; the
+honesty floor still renders. Under a prompt budget, the optional tail of the
+persona section yields lowest precedence first, before the existing tail
+truncation: Story, then Tone if the prompt is still over budget; Identity and
+Principles retain their existing handling. Accepting a proposal holds the live configured Tone stable
+through validation and commit in the same transaction; `final_text` lets the
+owner reword a story entry or principle before it applies. If the apply fails
+validation or the layer changed underneath it, the proposal stays pending.
+Dismissing applies nothing.
 
 Once every 7 days per agent, the daemon reflects: it reads only the owner's
 own `user` messages since the previous reflection (at most the latest 32 KiB),
 makes one model call with no tools, and stores at most three validated Soul
 proposals plus three User Model candidates. Each domain has its own pending
 cap of three, so a full Soul queue does not block User Model suggestions.
-Voice reflection compares Growth bond entries with actual owner reactions.
-Each Voice proposal must select exactly one supplied owner-message index; its
+The reflection prompt states what each layer is for; an observation about tone
+becomes a Tone proposal or nothing, never a Story entry. Its output names
+layers `tone`, `story` and `principles`, and Story additions use `story_kind`.
+Tone reflection compares Story bond entries with actual owner reactions.
+Each Tone proposal must select exactly one supplied owner-message index; its
 existing `session_ref` records the canonical session and timestamp (or a
 `sha256:` digest of that canonical JSON when it exceeds the 128-byte field).
 Its 480-byte rationale reserves space for a JSON-escaped owner quote before

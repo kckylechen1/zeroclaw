@@ -695,7 +695,7 @@ pub fn all_tools_with_runtime(
         // owner review and changes nothing (ADR-015 §3).
         Arc::new(
             ProposeSoulChangeTool::new(root_config.data_dir.clone(), agent_alias)
-                .with_voice_resolver({
+                .with_tone_resolver({
                     let live = live_config.clone();
                     let fixed = Arc::clone(&config);
                     let agent = agent_alias.to_string();
