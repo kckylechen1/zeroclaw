@@ -15,7 +15,7 @@ case "${1:-}" in
       cargo outdated --version
       printf '\nCommand: cargo outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10\n'
       printf '%s\n' 'Coverage limit: cargo-outdated preserves direct rusqlite and matrix-sdk constraints in its hypothetical latest-version graph.'
-      printf '%s\n' 'This defers latest-version updates outside the declared rusqlite and matrix-sdk constraints: Matrix 0.18 uses rusqlite ^0.37, while Matrix 0.19 selects an incompatible SQLite links graph. The vendored libsqlite3-sys remains on the checked-in security floor (see vendor/libsqlite3-sys/VENDOR.md). Other dependencies remain eligible for hypothetical updates; transitive choices still obey this constrained graph.'
+      printf '%s\n' 'This defers latest-version updates outside the declared rusqlite and matrix-sdk constraints: matrix-sdk-sqlite shares the workspace rusqlite SQLite links graph, so bumping either crate alone can force an incompatible libsqlite3-sys selection, and the two move as one coordinated review. Other dependencies remain eligible for hypothetical updates; transitive choices still obey this constrained graph.'
       printf '\n## Scanner output\n\n'
     } > "$OUTPUT_FILE" 2>&1
 
