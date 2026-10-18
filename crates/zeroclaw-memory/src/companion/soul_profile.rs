@@ -388,6 +388,16 @@ pub struct SoulProfile {
     pub voice: Option<SoulRevision<SoulVoice>>,
 }
 
+/// Serialization stays inside the store so only canonical layer values and
+/// revision metadata can enter an export, never proposal or reflection evidence.
+#[derive(Default, Serialize)]
+struct SoulHistory {
+    identity: Vec<SoulRevision<SoulIdentity>>,
+    principles: Vec<SoulRevision<SoulPrinciples>>,
+    growth: Vec<SoulRevision<SoulGrowth>>,
+    voice: Vec<SoulRevision<SoulVoice>>,
+}
+
 impl SoulProfile {
     /// Whether the owner has taken over the Identity layer. Once true the
     /// legacy `SOUL.md` / `IDENTITY.md` files stop being injected (ADR-015 §2).
@@ -1057,6 +1067,50 @@ impl SoulProfileStore {
             out.push(decode::<serde_json::Value>(row?)?);
         }
         Ok(out)
+    }
+
+    /// Current layers and their complete histories from one read snapshot.
+    ///
+    /// A single SELECT holds the SQLite read snapshot even across independent
+    /// connections. Heads are taken from those same rows, not re-read after a
+    /// concurrent approval. This never seeds missing layers or reads evidence.
+    pub fn export(
+        &self,
+        agent: &str,
+    ) -> Result<(SoulProfile, serde_json::Value), SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT revision, source, body, rolled_back_from, created_at_unix, proposal_id, layer
+             FROM soul_revisions WHERE agent = ?1 ORDER BY layer ASC, revision ASC",
+        )?;
+        let rows = stmt.query_map(params![agent], |row| {
+            Ok((row.get::<_, String>(6)?, raw_row(row)?))
+        })?;
+        let mut history = SoulHistory::default();
+        for row in rows {
+            let (layer, row) = row?;
+            match SoulLayer::parse(&layer) {
+                Some(SoulLayer::Identity) => history.identity.push(decode(row)?),
+                Some(SoulLayer::Principles) => history.principles.push(decode(row)?),
+                Some(SoulLayer::Growth) => history.growth.push(decode(row)?),
+                Some(SoulLayer::Voice) => history.voice.push(decode(row)?),
+                None => {
+                    return Err(SoulProfileError::Storage(format!(
+                        "unknown soul layer {layer:?}"
+                    )));
+                }
+            }
+        }
+        let profile = SoulProfile {
+            identity: history.identity.last().cloned(),
+            principles: history.principles.last().cloned(),
+            growth: history.growth.last().cloned(),
+            voice: history.voice.last().cloned(),
+        };
+        let history =
+            serde_json::to_value(history).map_err(|e| SoulProfileError::Storage(e.to_string()))?;
+        Ok((profile, history))
     }
 
     /// Append a new owner revision whose content equals `to_revision`.
@@ -2874,5 +2928,215 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[1].1, old);
         assert_eq!(history[0].1.user_model_candidates_created, 1);
+    }
+
+    #[test]
+    fn export_empty_profile_is_read_only_and_rejects_missing_alias() {
+        let (_dir, store) = store();
+        let (profile, history) = store.export("agent_a").unwrap();
+        assert!(profile.identity.is_none() && profile.principles.is_none());
+        assert!(profile.growth.is_none() && profile.voice.is_none());
+        assert_eq!(
+            history,
+            serde_json::json!({
+                "identity": [], "principles": [], "growth": [], "voice": []
+            })
+        );
+        assert_eq!(store.revision_stamp("agent_a").unwrap(), 0);
+        assert!(matches!(
+            store.export(""),
+            Err(SoulProfileError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn export_preserves_all_layers_provenance_and_rollback_without_evidence() {
+        use zeroclaw_config::persona::PersonaLevel;
+        let (_dir, store) = store();
+        store.ensure_seeded("agent_a", "ZeroClawAgent", 1).unwrap();
+        store
+            .set_identity("agent_a", identity("ZeroClawAgent"), 1, 2)
+            .unwrap();
+        store
+            .set_growth(
+                "agent_a",
+                SoulGrowth {
+                    entries: vec![GrowthEntry {
+                        kind: GrowthKind::Bond,
+                        text: "Use a familiar tone for recurring tasks.".into(),
+                    }],
+                },
+                0,
+                3,
+            )
+            .unwrap();
+        store
+            .set_voice(
+                "agent_a",
+                SoulVoice {
+                    heads: [("warmth".into(), PersonaLevel::High)].into(),
+                },
+                0,
+                4,
+            )
+            .unwrap();
+        let SoulProposalOutcome::Recorded { id } = store
+            .submit_proposal(
+                "agent_a",
+                NewSoulProposal {
+                    layer: SoulProposalLayer::Principles,
+                    proposal: "Use compact answers.".into(),
+                    rationale: "private-rationale-canary".into(),
+                    session_ref: Some("private-session-canary".into()),
+                    ..Default::default()
+                },
+                5,
+            )
+            .unwrap()
+        else {
+            panic!("new proposal should be recorded")
+        };
+        store
+            .resolve_proposal(
+                "agent_a",
+                id,
+                SoulProposalResolution::Accepted,
+                Some("private-resolution-canary".into()),
+                Some("Keep answers concise.".into()),
+                6,
+            )
+            .unwrap();
+        store
+            .rollback("agent_a", SoulLayer::Principles, 1, 2, 7)
+            .unwrap();
+        store
+            .set_identity("agent_b", identity("ZeroClawOtherAgent"), 0, 8)
+            .unwrap();
+        let stamp = store.revision_stamp("agent_a").unwrap();
+        let (profile, history) = store.export("agent_a").unwrap();
+        assert_eq!(profile, store.profile("agent_a").unwrap());
+        assert_eq!(
+            profile.principles.as_ref().unwrap().rolled_back_from,
+            Some(1)
+        );
+        assert_eq!(history["identity"].as_array().unwrap().len(), 2);
+        assert_eq!(history["principles"].as_array().unwrap().len(), 3);
+        assert_eq!(history["growth"].as_array().unwrap().len(), 1);
+        assert_eq!(history["voice"].as_array().unwrap().len(), 1);
+        assert_eq!(history["principles"][0]["source"], "seed");
+        assert_eq!(history["principles"][1]["source"], "approved_proposal");
+        assert_eq!(history["principles"][1]["proposal_id"], id);
+        assert_eq!(history["principles"][1]["created_at_unix"], 6);
+        assert_eq!(history["principles"][2]["rolled_back_from"], 1);
+        let json = serde_json::to_string(&(profile, history)).unwrap();
+        for private in [
+            "private-rationale-canary",
+            "private-session-canary",
+            "private-resolution-canary",
+            "ZeroClawOtherAgent",
+        ] {
+            assert!(!json.contains(private), "excluded content: {private}");
+        }
+        assert_eq!(store.revision_stamp("agent_a").unwrap(), stamp);
+    }
+
+    #[test]
+    fn export_refuses_corrupt_history_even_when_the_current_head_is_valid() {
+        let (_dir, store) = store();
+        store
+            .conn
+            .lock()
+            .execute(
+                "INSERT INTO soul_revisions (agent, layer, revision, source, body, created_at_unix)
+             VALUES ('agent_a', 'identity', 1, 'owner', 'not-json', 1)",
+                [],
+            )
+            .unwrap();
+        store
+            .set_identity("agent_a", identity("ZeroClawAgent"), 1, 2)
+            .unwrap();
+        assert!(store.profile("agent_a").unwrap().identity.is_some());
+        assert!(matches!(
+            store.export("agent_a"),
+            Err(SoulProfileError::Storage(_))
+        ));
+    }
+
+    #[test]
+    fn export_snapshot_stays_coherent_with_an_independent_connection_writer() {
+        let (dir, store) = store();
+        store
+            .set_identity("agent_a", identity("generation-0"), 0, 0)
+            .unwrap();
+        store
+            .set_principles(
+                "agent_a",
+                SoulPrinciples {
+                    items: vec!["generation-0".into()],
+                },
+                0,
+                0,
+            )
+            .unwrap();
+        let writer = SoulProfileStore::open(dir.path()).unwrap();
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let writer_start = start.clone();
+        let writer = std::thread::spawn(move || {
+            writer_start.wait();
+            for generation in 1..=64 {
+                let mut conn = writer.conn.lock();
+                let tx = conn.transaction().unwrap();
+                for layer in [SoulLayer::Identity, SoulLayer::Principles] {
+                    let text = format!("generation-{generation}");
+                    let value = match layer {
+                        SoulLayer::Identity => serde_json::to_value(identity(&text)).unwrap(),
+                        _ => serde_json::json!({ "items": [text] }),
+                    };
+                    insert(
+                        &tx,
+                        &NewRevision {
+                            agent: "agent_a",
+                            layer,
+                            revision: generation + 1,
+                            source: SoulSource::Owner,
+                            rolled_back_from: None,
+                            proposal_id: None,
+                            now_unix: generation,
+                        },
+                        &value,
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+                std::thread::yield_now();
+            }
+        });
+        start.wait();
+        for _ in 0..128 {
+            let (profile, history) = store.export("agent_a").unwrap();
+            let identity = profile.identity.unwrap();
+            let principles = profile.principles.unwrap();
+            assert_eq!(identity.value.name, principles.value.items[0]);
+            assert_eq!(identity.revision, principles.revision);
+            assert_eq!(
+                history["identity"].as_array().unwrap().last().unwrap()["revision"],
+                identity.revision
+            );
+            assert_eq!(
+                history["principles"].as_array().unwrap().last().unwrap()["revision"],
+                principles.revision
+            );
+        }
+        writer.join().unwrap();
+        assert_eq!(
+            store
+                .export("agent_a")
+                .unwrap()
+                .0
+                .identity
+                .unwrap()
+                .revision,
+            65
+        );
     }
 }
