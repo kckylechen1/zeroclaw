@@ -1058,3 +1058,13 @@ gateway-invalid-surface = Invalid chat surface. Use web, telegram or cli; query 
 soul-weekly-review-notice = Weekly reflection created { $soul_count } Soul proposals and { $user_count } User Model candidates. Review: { $review_path }
 soul-voice-unavailable = Current configured Voice is unavailable.
 soul-voice-step-limit = Voice proposals may move a dial by at most one level.
+
+# Scoped chat turn cancellation. Requested is not a completed cancellation.
+gateway-cancel-requested = Stop requested for that turn; it has not yet confirmed cancellation.
+gateway-cancel-stale = That turn has ended. The newer turn was not stopped.
+gateway-cancel-no-active = That turn is no longer running.
+gateway-cancel-unauthorized = Current device or scoped bridge authority is required to stop this turn.
+gateway-cancel-invalid = This stop request has no supported version or valid turn target.
+gateway-cancel-idle = No running turn was observed; no stop was sent.
+gateway-cancel-unknown = The stop outcome is unknown. It will not be sent again automatically.
+gateway-cancel-not-sent = The stop was not sent. Reconnect or wait for pending stop outcomes before trying again.
