@@ -275,7 +275,7 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
     // WebSocket history uses `gw_<id>` while its memory uses `<id>`.
     // Always scope this invocation, including nested turns with no memory,
     // so a child cannot inherit its parent's recall authority.
-    let memory_sessions = p
+    let memory_sessions: Vec<String> = p
         .memory
         .as_ref()
         .into_iter()
@@ -283,10 +283,17 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
         .filter(|session| !session.trim().is_empty())
         .cloned()
         .collect();
+    let read_policy = zeroclaw_memory::admissibility::policy_for_turn(
+        p.ingress.origin,
+        !memory_sessions.is_empty(),
+    );
     zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
         .scope(
             memory_sessions,
-            crate::subagent_v1::scope_advisor_turn(run_tool_call_loop_turn(p)),
+            zeroclaw_api::TOOL_LOOP_MEMORY_READ_POLICY.scope(
+                read_policy,
+                crate::subagent_v1::scope_advisor_turn(run_tool_call_loop_turn(p)),
+            ),
         )
         .await
 }
@@ -380,7 +387,11 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
     }
 
     if let Some(turn_memory) = &memory {
-        let has_session = turn_memory.sessions.iter().any(Option::is_some);
+        let has_session = turn_memory
+            .sessions
+            .iter()
+            .flatten()
+            .any(|session| !session.trim().is_empty());
         if let crate::agent::memory_inject::InjectPolicy::Inject {
             exclude_conversation,
         } = crate::agent::memory_inject::resolve_inject_policy(

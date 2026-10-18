@@ -30,6 +30,9 @@ git -C "$main" worktree add -q --detach "$linked"
 main="$(cd "$main" && pwd -P)"
 linked="$(cd "$linked" && pwd -P)"
 export PATH="$fixture/bin:$PATH" TEST_CARGO_LOG="$fixture/cargo.log"
+# Isolate host admission from the developer's installed gate.
+export HOME="$fixture/home"
+mkdir -p "$HOME"
 unset CARGO_TARGET_DIR CARGO_INCREMENTAL
 for checkout in "$main" "$linked"; do
   bash "$checkout/scripts/dev/cargo-local.sh" test -p example -- 'name with spaces'
@@ -59,6 +62,26 @@ if TEST_GATE_EXIT=9 bash "$linked/scripts/dev/cargo-local.sh" check; then
   echo 'launcher ignored toolchain failure' >&2; exit 1
 fi
 test ! -e "$TEST_CARGO_LOG"
+mkdir -p "$HOME/.local/state/host-build" "$HOME/bin"
+printf '{"schema":1}\n' > "$HOME/.local/state/host-build/managed.json"
+if bash "$linked/scripts/dev/cargo-local.sh" check; then
+  echo 'managed host silently bypassed missing admission' >&2; exit 1
+fi
+test ! -e "$TEST_CARGO_LOG"
+cat > "$HOME/bin/host-build" <<'HOST'
+#!/bin/bash
+[[ "$1" == -- && "$2" == cargo ]] || exit 64
+printf 'admitted\n' > "$TEST_HOST_LOG"
+shift
+exec "$@"
+HOST
+chmod +x "$HOME/bin/host-build"
+export TEST_HOST_LOG="$fixture/host.log"
+bash "$linked/scripts/dev/cargo-local.sh" test -p example -- 'name with spaces'
+test "$(cat "$TEST_HOST_LOG")" = admitted
+printf '%s\n' "$main/target" 0 "$linked" test -p example -- 'name with spaces' > "$fixture/expected"
+diff -u "$fixture/expected" "$TEST_CARGO_LOG"
+rm "$TEST_CARGO_LOG"
 separate="$fixture/separate"
 git init -q --separate-git-dir="$fixture/git-storage" "$separate"
 mkdir -p "$separate/scripts/dev"

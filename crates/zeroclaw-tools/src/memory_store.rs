@@ -236,7 +236,11 @@ mod tests {
             let result = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
                 .scope(
                     vec![scope.into(), "shared-sender".into()],
-                    recall.execute(json!({"query":"*"})),
+                    // Direct-tool callers supply the host policy explicitly.
+                    zeroclaw_api::TOOL_LOOP_MEMORY_READ_POLICY.scope(
+                        zeroclaw_api::memory_traits::MemoryReadPolicy::SessionScoped,
+                        recall.execute(json!({"query":"*"})),
+                    ),
                 )
                 .await
                 .unwrap();
