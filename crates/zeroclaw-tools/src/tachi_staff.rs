@@ -5,8 +5,8 @@
 //! start(harness, task, reason, refs) → tachi_staff(action=start, profile=harnesses[harness], …)
 //!                                      → StaffReceipt { dispatch_id, state, run_dir }
 //! status(dispatch_id)                → tachi_staff(action=status)       → RunStatus
-//! result(dispatch_id)                → tachi_task(action=status, include_result=true)
-//!                                      → RunResult (result.md, Tachi caps it at 8000 chars)
+//! result(dispatch_id)                → tachi_staff(action=result)
+//!                                      → RunResult (full result.md, at most 64 KiB)
 //! cancel(dispatch_id, revision)      → tachi_staff(action=cancel, expected_status_revision)
 //!                                      → CancelReceipt, or CancelUnsupported for CLI runs
 //! ```
@@ -46,8 +46,8 @@ use zeroclaw_config::tachi::TachiConfig;
 
 /// The one Tachi tool that starts, reads, and cancels delegated runs.
 pub const TACHI_STAFF_TOOL: &str = "tachi_staff";
-/// Tachi's task read model; the only place `result.md` is served today
-/// (kckylechen1/Tachi#2003 tracks moving it onto the staff facade).
+/// Tachi's task read-model name, retained for compatibility. Staff result reads
+/// never call it or fall back to its report preview.
 pub const TACHI_TASK_TOOL: &str = "tachi_task";
 
 /// Tool profile header. ZeroClaw always asks for the ordinary `standard`
@@ -65,6 +65,8 @@ const CLIENT_NAME: &str = "zeroclaw";
 /// Budget for one Tachi call. A start provisions an environment before it
 /// returns its receipt, so it gets more room than a read.
 const CALL_TIMEOUT_SECS: u64 = 120;
+/// Tachi #2039's named full-report file bound, also enforced on received text.
+const RESULT_MAX_BYTES: usize = 64 * 1024;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Wire vocabulary
@@ -280,58 +282,60 @@ impl TachiStaffClient {
         Ok(status)
     }
 
-    /// Read a run's report through `tachi_task(status, include_result)`.
+    /// Read the canonical receipt and full bounded report through Staff result.
+    /// Requires Tachi #2039; an older peer's refusal never falls back to Task.
     ///
     /// # Errors
     /// `Unavailable`, `Refused`, or `Protocol`.
     pub async fn result(&self, dispatch_id: &str) -> Result<RunResult, TachiStaffError> {
         #[derive(Deserialize)]
-        struct TaskStatus {
-            run_status: RunStatus,
-            state: RunState,
-            #[serde(default)]
-            task: Option<TaskProjection>,
-            #[serde(default)]
-            managed_run: Option<Value>,
-            #[serde(default)]
-            result: Option<ResultBody>,
-        }
-        #[derive(Deserialize)]
-        struct TaskProjection {
-            #[serde(default)]
-            state_basis: Option<String>,
+        struct StaffResult {
+            #[serde(flatten)]
+            status: RunStatus,
+            result: ResultBody,
         }
         #[derive(Deserialize)]
         struct ResultBody {
-            #[serde(default)]
-            body: Option<String>,
+            // Missing reports are explicit `body: null`, not a missing object
+            // or field that could hide a malformed or incompatible response.
+            body: Value,
             #[serde(default)]
             truncated: bool,
         }
         let args = json!({
-            "action": "status",
+            "action": "result",
             "format": "json",
             "dispatch_id": dispatch_id,
-            "include_result": true,
         });
-        let payload = self.call("result", TACHI_TASK_TOOL, args).await?;
-        let status: TaskStatus = decode("result", payload)?;
-        if status.run_status.dispatch_id != dispatch_id {
+        let payload = self.call("result", TACHI_STAFF_TOOL, args).await?;
+        let response: StaffResult = decode("result", payload)?;
+        if response.status.dispatch_id != dispatch_id {
             return Err(TachiStaffError::Protocol(
                 "result dispatch mismatch".to_string(),
             ));
         }
-        let (body, truncated) = status
-            .result
-            .map_or((None, false), |result| (result.body, result.truncated));
+        let body = match response.result.body {
+            Value::Null => None,
+            Value::String(body) if body.len() <= RESULT_MAX_BYTES => Some(body),
+            Value::String(_) => {
+                return Err(TachiStaffError::Protocol(
+                    "result report exceeds the 64 KiB byte limit".to_string(),
+                ));
+            }
+            _ => {
+                return Err(TachiStaffError::Protocol(
+                    "result report body is neither text nor null".to_string(),
+                ));
+            }
+        };
         Ok(RunResult {
-            state: status.run_status.state.clone(),
-            status: status.run_status,
-            task_state: status.state,
-            state_basis: status.task.and_then(|task| task.state_basis),
-            managed_run: status.managed_run,
+            state: response.status.state.clone(),
+            status: response.status,
+            task_state: None,
+            state_basis: None,
+            managed_run: None,
             body,
-            truncated,
+            truncated: response.result.truncated,
         })
     }
 
