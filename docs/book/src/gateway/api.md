@@ -609,6 +609,7 @@ configured agent alias; an unknown alias returns 404 with
 | --- | --- |
 | `GET /api/soul?agent=<alias>` | Current `identity`, `principles`, and `growth` heads (each with `revision`, `source`, and `value`), `voice` (`configured` dials, `stored` heads, `effective` dials and per-key `sources`), `legacy_persona_files` (`injected` or `suppressed`), and `last_reflection`. Seeds missing layers on first read. |
 | `GET /api/soul/history?agent=<alias>&layer=identity\|principles\|growth\|voice` | Every revision of one layer, oldest first. |
+| `GET /api/soul/export?agent=<alias>` | Download JSON (`format_version: 1`) containing `agent`, four current layers in `profile`, all four per-layer revision arrays in `history` (oldest first), and `voice` (`configured`, `effective`, `sources`). Current heads and history come from one read snapshot. |
 | `PUT /api/soul/identity` | Body `{ "agent", "expected_revision", "identity": { "name", "self_description"?, "primary_language"?, "pronouns"? } }`. |
 | `PUT /api/soul/principles` | Body `{ "agent", "expected_revision", "items": [ ... ] }`, at most 8 single-line items of up to 240 bytes. |
 | `PUT /api/soul/growth` | Body `{ "agent", "expected_revision", "growth": { "entries": [ { "kind": "self" \| "bond", "text" } ] } }`, at most 12 single-line entries of up to 200 bytes. |
@@ -616,6 +617,16 @@ configured agent alias; an unknown alias returns 404 with
 | `POST /api/soul/rollback` | Body `{ "agent", "layer", "to_revision", "expected_revision" }`. Appends a copy of an earlier revision. |
 | `GET /api/soul/proposals?agent=<alias>[&pending=true]` | The agent's own proposals to change its growth, voice, or principles, oldest first. |
 | `POST /api/soul/proposals/{id}/resolve` | Body `{ "agent", "resolution": "accepted" \| "dismissed", "note"?, "final_text"? }`. Accepting applies the proposal and returns `applied_revision`. Each proposal resolves once; a repeat returns 409 with `code: "proposal_already_resolved"`. A Growth retirement is bound to the entry it named when submitted (`retire_target`, read from `target_revision`); if the owner has since removed or reworded that entry, accepting returns 409 with `code: "proposal_stale"` and the proposal stays pending for dismissal. |
+
+Exports do not seed missing layers: absent heads are `null` and their histories
+are empty arrays. They contain only the requested agent's canonical layer
+values and revision metadata, including rollback and approved-proposal IDs.
+Proposal prose, rationale, session references, resolution notes, reflection
+receipts, the User Model, chat history, and legacy workspace files are excluded.
+The effective Voice uses the exported stored head plus the current configured
+defaults; configuration is not a historical Soul revision. Downloads use
+`Cache-Control: no-store` and a fixed `soul-export.json` attachment filename.
+This is an owner archive, not an import format or a model tool.
 
 Revisions are append-only. Seeded values have `source: "seed"`; owner writes
 and rollbacks have `source: "owner"`; approved proposals have
