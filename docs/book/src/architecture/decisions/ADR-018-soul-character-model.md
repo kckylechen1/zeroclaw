@@ -116,7 +116,7 @@ A repository-owned **Soul check** turns "the same Soul on every model" from a by
 - **Run.** For each configured provider/model the owner selects, the check builds the real Soul projection for the agent, sends each scenario with **no tools**, and records the reply.
 - **Judge.** One judge model (default: the agent's own model, configurable) scores each reply against the repository-owned rubric for the dial it targets, on the same five-level scale, and checks the floors as pass/fail.
 - **Result.** A report per provider: expected level, judged level, and floor results. It flags any dial off by two or more levels from its setting, any dial two or more levels apart between providers, and any failed floor.
-- **Scope.** This is an owner-run diagnostic, not a CI gate: it spends real model calls and an LLM judge is a signal, not proof. It runs on demand, and `doctor` suggests it when an agent's provider or model changes. The report is printed and not persisted in v1, so this adds no store. Scripted replay cases in `evals/` keep covering the deterministic parts (projection bytes, refusal paths).
+- **Scope.** This is an owner-run diagnostic, not a CI gate: it spends real model calls and an LLM judge is a signal, not proof. It runs on demand, and `doctor` reminds the owner to run it (unconditionally; detecting a provider or model change would itself need persisted state, which v1 does not add). The report is printed and not persisted in v1, so this adds no store beyond the seeded Soul a first chat turn would create. Scripted replay cases in `evals/` keep covering the deterministic parts (projection bytes, refusal paths).
 
 ### 6. Prompt files are governed by what they do
 

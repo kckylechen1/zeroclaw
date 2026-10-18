@@ -443,6 +443,49 @@ fn check_bootstrap_truncation_matches_runtime_trim_and_injection_honesty() {
 }
 
 #[test]
+fn soul_check_hint_lists_enabled_agents_with_a_soul_store_as_informational() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().to_path_buf(),
+        ..Config::default()
+    };
+    for (alias, enabled) in [("alpha", true), ("beta", false), ("gamma", true)] {
+        config.agents.insert(
+            alias.to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                enabled,
+                ..Default::default()
+            },
+        );
+    }
+
+    // No Soul store yet: nothing to suggest.
+    let mut items = Vec::new();
+    check_soul_check_hint(&config, &mut items);
+    assert!(items.is_empty());
+
+    std::fs::write(
+        tmp.path()
+            .join(zeroclaw_memory::companion::SOUL_PROFILE_DB_FILE),
+        b"",
+    )
+    .unwrap();
+    check_soul_check_hint(&config, &mut items);
+    assert_eq!(items.len(), 2, "disabled agents are skipped");
+    for (item, alias) in items.iter().zip(["alpha", "gamma"]) {
+        assert_eq!(item.severity, Severity::Ok, "informational, not a warning");
+        assert_eq!(item.category, "agent.soul");
+        assert!(
+            item.message
+                .contains(&format!("zeroclaw soul check --agent {alias}")),
+            "{}",
+            item.message
+        );
+    }
+}
+
+#[test]
 fn check_personality_truncation_reports_over_cap_with_compact_off() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mut config = Config {

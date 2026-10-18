@@ -162,6 +162,20 @@ impl PersonaKnobs {
     }
 }
 
+/// The repository-owned guidance string for one dial at one level, exactly as
+/// the Tone section renders it. `None` for an unknown dial key.
+#[must_use]
+pub fn dial_guidance(key: &str, level: PersonaLevel) -> Option<&'static str> {
+    match key {
+        "warmth" => Some(warmth_line(level)),
+        "directness" => Some(directness_line(level)),
+        "explanation_density" => Some(explanation_density_line(level)),
+        "challenge" => Some(challenge_line(level)),
+        "humor" => Some(humor_line(level)),
+        _ => None,
+    }
+}
+
 fn warmth_line(level: PersonaLevel) -> &'static str {
     match level {
         PersonaLevel::Minimal => {
@@ -347,6 +361,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dial_guidance_matches_the_rendered_tone_section() {
+        for level in [
+            PersonaLevel::Minimal,
+            PersonaLevel::Low,
+            PersonaLevel::Medium,
+            PersonaLevel::High,
+            PersonaLevel::Xhigh,
+        ] {
+            let rendered = PersonaKnobs {
+                warmth: level,
+                directness: level,
+                explanation_density: level,
+                challenge: level,
+                humor: level,
+            }
+            .to_prompt_section()
+            .unwrap();
+            for key in [
+                "warmth",
+                "directness",
+                "explanation_density",
+                "challenge",
+                "humor",
+            ] {
+                let guidance = dial_guidance(key, level).expect("known dial");
+                assert!(
+                    rendered.contains(&format!("- {key} ({}): {guidance}\n", level.as_str())),
+                    "{key} {level:?}"
+                );
+            }
+        }
+        assert_eq!(dial_guidance("bogus", PersonaLevel::Low), None);
     }
 
     /// Dials are ordered, so a caller can compare positions without mapping

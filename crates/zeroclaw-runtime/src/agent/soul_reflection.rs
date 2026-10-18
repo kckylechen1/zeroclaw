@@ -27,6 +27,19 @@ fn reflection_provider(config: &Config, agent_alias: &str) -> anyhow::Result<Ref
     else {
         anyhow::bail!("agents.{agent_alias}.model_provider has no model");
     };
+    build_model_provider(config, provider_name, provider_alias, entry, model)
+}
+
+/// Build a configured model provider entry (`providers.models.<type>.<alias>`)
+/// for a tool-less call with `model`, wired like a normal turn: same runtime
+/// options, reliability and routing. Shared by Soul reflection and the Soul check.
+pub(crate) fn build_model_provider(
+    config: &Config,
+    provider_name: &str,
+    provider_alias: &str,
+    entry: &zeroclaw_config::schema::ModelProviderConfig,
+    model: &str,
+) -> anyhow::Result<ReflectionModel> {
     let options = zeroclaw_providers::provider_runtime_options_for_alias(
         config,
         provider_name,

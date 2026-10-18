@@ -1066,6 +1066,24 @@ soul-tone-exemplars-too-many = A Tone can hold at most four exemplars.
 soul-tone-exemplar-empty = Each exemplar needs a situation, your line, and the agent's line.
 soul-tone-exemplar-single-line = An exemplar field must be a single line of text without line breaks or control characters.
 soul-tone-exemplar-too-long = An exemplar field is over its limit: situation 80 bytes, your line 160 bytes, the agent's line 320 bytes.
+
+# Soul check (ADR-018 section 5). Labels and counts only; never interpolate Soul or owner content.
+cli-soul-about = Inspect and check the agent Soul
+cli-soul-check-about = Check that the Soul behaves the same on the selected models (spends real model calls)
+soul-check-notice = Soul check for agent { $agent }: this makes real model calls, up to { $calls } ({ $replies } scenario replies plus { $judgements } judge calls). Each selected target receives the agent's real Soul projection as its system prompt — only choose targets you want to send it to. Results are printed and not stored (a data directory without a seeded Soul gets one, same as the first chat turn).
+soul-check-title = Soul check for agent { $agent } (judge: { $judge })
+soul-check-target = Target { $target }
+soul-check-col-scenario = SCENARIO
+soul-check-col-check = CHECK
+soul-check-col-expected = EXPECTED
+soul-check-col-result = RESULT
+soul-check-col-delta = DELTA
+soul-check-col-flags = FLAGS
+soul-check-disagree-title = Targets two or more levels apart
+soul-check-summary = Summary: { $targets } targets, { $scenarios } scenarios, { $calls } model calls; { $off_by_two } off by two, { $floor_failed } floors failed, { $disagree } providers disagree, { $errors } errors.
+soul-check-caveat = The judge is a model: treat these results as a signal, not proof. Nothing is stored.
+cli-doctor-soul-check-hint = Agent { $alias } has a Soul. After changing its provider or model, run `zeroclaw soul check --agent { $alias }` to confirm it still behaves like itself.
+
 # Scoped chat turn cancellation. Requested is not a completed cancellation.
 gateway-cancel-requested = Stop requested for that turn; it has not yet confirmed cancellation.
 gateway-cancel-stale = That turn has ended. The newer turn was not stopped.
