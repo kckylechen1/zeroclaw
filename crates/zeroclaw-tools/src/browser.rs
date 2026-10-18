@@ -701,7 +701,8 @@ impl BrowserTool {
     /// 1. String-level `is_path_allowed` — rejects null bytes, `..` traversal, URL-encoded traversal
     /// 2. `resolve_tool_path` + `canonicalize` parent — resolves relative/tilde paths
     /// 3. `is_resolved_path_allowed` — confirms canonical parent is inside workspace allowlist
-    /// 4. `is_runtime_config_path` — rejects `config.toml`, `config.toml.bak`, `.config.toml.tmp-*`
+    /// 4. `check_model_write_target` — rejects `config.toml`, `config.toml.bak`, `.config.toml.tmp-*`
+    ///    and the owner-governed persona files
     /// 5. `symlink_metadata` — rejects existing symlink targets
     ///
     /// Replaces the raw path with the canonical target so backends write the checked string.
@@ -728,8 +729,8 @@ impl BrowserTool {
     ///    paths.
     /// 3. `is_resolved_path_allowed` — canonical parent inside the workspace
     ///    allowlist.
-    /// 4. `is_runtime_config_path` — rejects `config.toml`, `config.toml.bak`,
-    ///    `.config.toml.tmp-*`.
+    /// 4. `check_model_write_target` — rejects `config.toml`, `config.toml.bak`,
+    ///    `.config.toml.tmp-*` and the owner-governed persona files.
     /// 5. `symlink_metadata` — rejects existing symlink targets.
     /// 6. Rejects canonical destinations that are not valid UTF-8.
     ///
@@ -790,8 +791,10 @@ impl BrowserTool {
         };
         let resolved_target = canonical.join(file_name);
 
-        if self.security.is_runtime_config_path(&resolved_target)
-            || self.security.is_protected_persona_path(&resolved_target)
+        if self
+            .security
+            .check_model_write_target(&resolved_target)
+            .is_err()
         {
             let msg = crate::i18n::get_required_tool_string_with_args(
                 "tool-browser-screenshot-error-runtime-config-target",

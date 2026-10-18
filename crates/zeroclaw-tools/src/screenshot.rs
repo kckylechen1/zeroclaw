@@ -80,6 +80,13 @@ impl ScreenshotTool {
         }
 
         let output_path = self.security.workspace_dir.join(&safe_name);
+        if let Err(message) = self.security.check_model_write_target(&output_path) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(message),
+            });
+        }
         let output_str = output_path.to_string_lossy().to_string();
 
         let Some(mut cmd_args) = Self::screenshot_command(&output_str) else {
@@ -256,6 +263,7 @@ impl Tool for ScreenshotTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
     use zeroclaw_config::autonomy::AutonomyLevel;
     use zeroclaw_config::policy::SecurityPolicy;
 
@@ -324,5 +332,32 @@ mod tests {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn screenshot_command_is_unsupported_on_other_platforms() {
         assert!(ScreenshotTool::screenshot_command("screenshot.png").is_none());
+    }
+
+    #[tokio::test]
+    async fn screenshot_refuses_persona_file_names_in_workspace_root() {
+        let workspace = TempDir::new().unwrap();
+        let tool = ScreenshotTool::new(Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Full,
+            workspace_dir: workspace.path().to_path_buf(),
+            ..SecurityPolicy::default()
+        }));
+        for name in ["SOUL.md", "IDENTITY.md", "USER.md", "user.md"] {
+            let result = tool.execute(json!({ "filename": name })).await.unwrap();
+            assert!(!result.success, "{name} must be refused");
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("persona file"),
+                "{name}: {:?}",
+                result.error
+            );
+            assert!(
+                !workspace.path().join(name).exists(),
+                "{name} must not be created"
+            );
+        }
     }
 }

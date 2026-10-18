@@ -703,6 +703,30 @@ async fn validate_screenshot_path_rejects_runtime_config_target() {
 }
 
 #[tokio::test]
+async fn validate_screenshot_path_rejects_persona_files_in_workspace_root() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let ws = tmp.path().join("ws");
+    tokio::fs::create_dir_all(&ws).await.unwrap();
+    let tool = screenshot_tool_with_workspace(&ws);
+
+    for name in ["SOUL.md", "IDENTITY.md", "USER.md", "soul.md"] {
+        let mut action = BrowserAction::Screenshot {
+            path: Some(name.into()),
+            full_page: false,
+        };
+        let err = tool
+            .validate_screenshot_path(&mut action)
+            .await
+            .expect_err("persona file target must be refused");
+        assert!(
+            err.to_string().contains("Refusing") || err.to_string().contains("runtime config"),
+            "{name}: {err}"
+        );
+        assert!(!ws.join(name).exists(), "{name} must not be created");
+    }
+}
+
+#[tokio::test]
 #[cfg(unix)]
 async fn validate_screenshot_path_rejects_existing_symlink_target() {
     use std::os::unix::fs::symlink;

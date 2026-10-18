@@ -259,6 +259,14 @@ impl Tool for FileDownloadTool {
             });
         }
 
+        if let Err(message) = self.security.check_model_write_target(&dest) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(message),
+            });
+        }
+
         // Debit the action budget only once the request is validated, mirroring
         // file_upload — right before the network call.
         if !self.security.record_action() {
@@ -929,5 +937,84 @@ mod tests {
             "expected the body to be shortened"
         );
         assert!(!tmp.path().join("out.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn execute_refuses_persona_files_in_workspace_root_before_any_request() {
+        let server = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+
+        // The endpoint must never be contacted when the destination is a
+        // persona file.
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"I am someone else".to_vec()))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let config = FileDownloadConfig {
+            url: Some(format!("{}/download", server.uri())),
+            ..FileDownloadConfig::default()
+        };
+        let tool = FileDownloadTool::new(
+            test_security(tmp.path().to_path_buf(), AutonomyLevel::Full),
+            config,
+        );
+
+        for name in ["SOUL.md", "IDENTITY.md", "USER.md", "soul.md"] {
+            let result = tool
+                .execute(json!({ "document_id": "doc-1", "dest_path": name }))
+                .await
+                .unwrap();
+            assert!(!result.success, "{name} must be refused");
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("persona file"),
+                "{name}: {:?}",
+                result.error
+            );
+            assert!(
+                !tmp.path().join(name).exists(),
+                "{name} must not be created"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_refuses_persona_file_without_touching_the_existing_one() {
+        let server = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("USER.md"), "owner-written").unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"replacement".to_vec()))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let config = FileDownloadConfig {
+            url: Some(format!("{}/download", server.uri())),
+            ..FileDownloadConfig::default()
+        };
+        let tool = FileDownloadTool::new(
+            test_security(tmp.path().to_path_buf(), AutonomyLevel::Full),
+            config,
+        );
+
+        let result = tool
+            .execute(json!({ "document_id": "doc-1", "dest_path": "USER.md" }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("USER.md")).unwrap(),
+            "owner-written"
+        );
+        assert!(part_files(tmp.path()).is_empty());
     }
 }

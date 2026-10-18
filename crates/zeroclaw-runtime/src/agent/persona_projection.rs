@@ -19,7 +19,9 @@
 //!
 //! Legacy `SOUL.md` / `IDENTITY.md` workspace files keep being injected until
 //! the owner writes an Identity revision; after that they are suppressed so
-//! there is one persona source.
+//! there is one persona source. `USER.md` retires the same way, decided
+//! separately: once the User Model holds an owner-authorized active revision
+//! for the agent, `USER.md` is no longer injected (ADR-018 §6).
 //!
 //! If the store cannot be opened or read, the outcome depends on whether it
 //! was ever initialized. With no `soul.db` yet (first run), the legacy files
@@ -27,6 +29,8 @@
 //! is unknown, so the projection degrades: legacy files stay suppressed, a
 //! fixed line says the identity is unavailable, and the configured Voice
 //! applies. Nothing replaces the damaged store; the next turn retries.
+//! A User Model that cannot be read never fails the turn: `USER.md` keeps
+//! being injected and one WARN is logged.
 //!
 //! [`PersonaKnobs`]: zeroclaw_config::persona::PersonaKnobs
 
@@ -35,7 +39,9 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 
 use zeroclaw_config::schema::Config;
-use zeroclaw_memory::companion::{GrowthKind, SoulProfile, SoulProfileStore};
+use zeroclaw_memory::companion::{
+    GrowthKind, Scope, SoulProfile, SoulProfileStore, UserModelStore,
+};
 
 /// Byte ceiling of the rendered `## Identity` section.
 pub const IDENTITY_SECTION_MAX_BYTES: usize = 512;
@@ -61,21 +67,57 @@ pub const IDENTITY_UNAVAILABLE_LINE: &str = "Your identity record could not be l
 /// Legacy persona files that the governed Identity layer replaces.
 pub const LEGACY_PERSONA_FILES: &[&str] = &["SOUL.md", "IDENTITY.md"];
 
-/// Whether the prompt builders still inject the legacy persona files.
+/// The legacy file the User Model replaces (ADR-018 §6).
+pub const LEGACY_USER_FILE: &str = "USER.md";
+
+/// Which legacy persona files the prompt builders still inject.
+///
+/// Two independent decisions: the Soul Identity retires `SOUL.md` /
+/// `IDENTITY.md`, and the User Model retires `USER.md`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LegacyPersonaFiles {
-    /// Inject `SOUL.md` / `IDENTITY.md` as before (owner has not migrated).
+    /// Inject `SOUL.md`, `IDENTITY.md` and `USER.md` as before (owner has
+    /// not migrated).
     #[default]
     Inject,
-    /// Skip them: the owner-authored Identity layer is the persona source.
+    /// Skip `SOUL.md` / `IDENTITY.md`: the owner-authored Identity layer is
+    /// the persona source. `USER.md` is still injected.
     Suppress,
+    /// Skip `USER.md` only: the User Model holds the owner's facts.
+    SuppressUser,
+    /// Skip all three.
+    SuppressAll,
 }
 
 impl LegacyPersonaFiles {
+    /// Combine the two independent retirement decisions.
+    #[must_use]
+    pub fn from_retired(identity_retired: bool, user_retired: bool) -> Self {
+        match (identity_retired, user_retired) {
+            (false, false) => Self::Inject,
+            (true, false) => Self::Suppress,
+            (false, true) => Self::SuppressUser,
+            (true, true) => Self::SuppressAll,
+        }
+    }
+
+    /// Whether `SOUL.md` / `IDENTITY.md` are left out of the prompt.
+    #[must_use]
+    pub fn identity_files_retired(self) -> bool {
+        matches!(self, Self::Suppress | Self::SuppressAll)
+    }
+
+    /// Whether `USER.md` is left out of the prompt.
+    #[must_use]
+    pub fn user_file_retired(self) -> bool {
+        matches!(self, Self::SuppressUser | Self::SuppressAll)
+    }
+
     /// Whether `filename` should be left out of the prompt.
     #[must_use]
     pub fn skips(self, filename: &str) -> bool {
-        self == Self::Suppress && LEGACY_PERSONA_FILES.contains(&filename)
+        (self.identity_files_retired() && LEGACY_PERSONA_FILES.contains(&filename))
+            || (self.user_file_retired() && filename == LEGACY_USER_FILE)
     }
 }
 
@@ -132,7 +174,10 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
                      running without an identity, legacy persona files stay suppressed"
                 ),
             );
-            return degraded_projection(configured_voice);
+            return degraded_projection(
+                configured_voice,
+                user_model_retires_user_md(config, agent_alias),
+            );
         }
         Err(err) => {
             warn_once(
@@ -147,15 +192,17 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
         }
     };
 
-    let legacy_files = if profile
+    let identity_retired = profile
         .as_ref()
-        .is_some_and(SoulProfile::identity_is_owner_authored)
-    {
-        LegacyPersonaFiles::Suppress
-    } else {
+        .is_some_and(SoulProfile::identity_is_owner_authored);
+    if !identity_retired {
         warn_if_legacy_files_present(config, agent_alias);
-        LegacyPersonaFiles::Inject
-    };
+    }
+    let user_retired = user_model_retires_user_md(config, agent_alias);
+    if !user_retired {
+        warn_if_user_file_present(config, agent_alias);
+    }
+    let legacy_files = LegacyPersonaFiles::from_retired(identity_retired, user_retired);
 
     let voice =
         zeroclaw_memory::companion::resolve_effective_voice(config, agent_alias, profile.as_ref())
@@ -187,6 +234,7 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
 /// fixed identity notice, the honesty floor, and the configured Voice.
 fn degraded_projection(
     configured_voice: zeroclaw_config::persona::PersonaKnobs,
+    user_file_retired: bool,
 ) -> PersonaProjection {
     let mut parts = vec![format!(
         "## Identity\n\n{IDENTITY_UNAVAILABLE_LINE}\n{IDENTITY_HONESTY_LINE}\n"
@@ -201,7 +249,7 @@ fn degraded_projection(
                 .join("\n\n")
                 + "\n",
         ),
-        legacy_files: LegacyPersonaFiles::Suppress,
+        legacy_files: LegacyPersonaFiles::from_retired(true, user_file_retired),
     }
 }
 
@@ -301,6 +349,59 @@ fn warn_if_legacy_files_present(config: &Config, agent_alias: &str) {
                  Move what you want to keep into the governed Soul \
                  (PUT /api/soul/identity and /api/soul/principles); \
                  the legacy files stop being injected after that.",
+                display(&workspace)
+            ),
+        );
+    }
+}
+
+/// Whether the User Model retires `USER.md` for `agent_alias`: it holds at
+/// least one active, owner-authorized revision that applies to the whole
+/// agent (global or agent scope; channel and session scopes cover only part
+/// of the agent's turns). Every revision is owner-authored or
+/// owner-ratified; unreviewed candidates are stored apart and never count.
+///
+/// Until then `USER.md` keeps being injected. A store that cannot be read never fails the turn:
+/// `USER.md` keeps being injected and one WARN says so. The prompt path
+/// never creates the data directory.
+#[must_use]
+pub fn user_model_retires_user_md(config: &Config, agent_alias: &str) -> bool {
+    if !config.data_dir.is_dir() {
+        return false;
+    }
+    UserModelStore::shared(&config.data_dir)
+        .and_then(|store| store.active_heads_for_agent(agent_alias, None))
+        .map(|heads| {
+            heads.iter().any(|head| match Scope::parse(&head.scope) {
+                Some(Scope::Global) => true,
+                Some(Scope::Agent(agent)) => agent == agent_alias,
+                _ => false,
+            })
+        })
+        .map_err(|err| {
+            warn_once(
+                &format!("user_model:{agent_alias}"),
+                "agent.user_model_unavailable",
+                &format!(
+                    "User Model for agent {agent_alias} could not be read ({err}); \
+                         USER.md keeps being injected"
+                ),
+            );
+        })
+        .unwrap_or(false)
+}
+
+fn warn_if_user_file_present(config: &Config, agent_alias: &str) {
+    let workspace = config.agent_workspace_dir(agent_alias);
+    if workspace.join(LEGACY_USER_FILE).is_file() {
+        warn_once(
+            &format!("legacy_user:{agent_alias}"),
+            "agent.legacy_user_file_injected",
+            &format!(
+                "Agent {agent_alias} still injects legacy USER.md from {}. \
+                 Record what you want to keep as owner statements \
+                 (POST /api/user-model/statements); \
+                 USER.md stops being injected after that.",
                 display(&workspace)
             ),
         );
@@ -630,5 +731,158 @@ mod tests {
             assert!(!suppress.skips(kept), "{kept}");
         }
         assert!(!LegacyPersonaFiles::Inject.skips("SOUL.md"));
+    }
+
+    fn record_owner_statement(config: &Config, scope: &str, key: &str) {
+        UserModelStore::shared(&config.data_dir)
+            .unwrap()
+            .record_owner_statement(
+                zeroclaw_memory::companion::UserModelKind::Preference,
+                "Prefers short answers.",
+                key,
+                scope,
+                1,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn legacy_files_combine_two_independent_decisions() {
+        let user_only = LegacyPersonaFiles::from_retired(false, true);
+        assert_eq!(user_only, LegacyPersonaFiles::SuppressUser);
+        assert!(user_only.skips("USER.md"));
+        for kept in [
+            "SOUL.md",
+            "IDENTITY.md",
+            "AGENTS.md",
+            "TOOLS.md",
+            "MEMORY.md",
+        ] {
+            assert!(!user_only.skips(kept), "{kept}");
+        }
+        let all = LegacyPersonaFiles::from_retired(true, true);
+        assert_eq!(all, LegacyPersonaFiles::SuppressAll);
+        for skipped in ["SOUL.md", "IDENTITY.md", "USER.md"] {
+            assert!(all.skips(skipped), "{skipped}");
+        }
+        assert!(!all.skips("AGENTS.md"));
+        assert_eq!(
+            LegacyPersonaFiles::from_retired(true, false),
+            LegacyPersonaFiles::Suppress
+        );
+        assert_eq!(
+            LegacyPersonaFiles::from_retired(false, false),
+            LegacyPersonaFiles::Inject
+        );
+    }
+
+    #[test]
+    fn user_md_injects_until_an_owner_user_model_revision_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        assert_eq!(
+            persona_projection(&config, "nova").legacy_files,
+            LegacyPersonaFiles::Inject
+        );
+
+        // An unreviewed candidate is not owner authority.
+        UserModelStore::shared(&config.data_dir)
+            .unwrap()
+            .record_observation(
+                zeroclaw_memory::companion::UserModelKind::Preference,
+                "Seems to like short answers.",
+                "style.length",
+                "[]",
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            persona_projection(&config, "nova").legacy_files,
+            LegacyPersonaFiles::Inject
+        );
+
+        record_owner_statement(&config, "global", "style.length");
+        let projection = persona_projection(&config, "nova");
+        assert_eq!(projection.legacy_files, LegacyPersonaFiles::SuppressUser);
+        assert!(projection.legacy_files.skips("USER.md"));
+        assert!(!projection.legacy_files.skips("SOUL.md"));
+    }
+
+    #[test]
+    fn user_md_decision_is_independent_of_the_soul_identity_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        init_owner_identity(&config);
+        assert_eq!(
+            persona_projection(&config, "nova").legacy_files,
+            LegacyPersonaFiles::Suppress,
+            "owner identity alone retires SOUL.md / IDENTITY.md only"
+        );
+        record_owner_statement(&config, "agent:nova", "style.length");
+        assert_eq!(
+            persona_projection(&config, "nova").legacy_files,
+            LegacyPersonaFiles::SuppressAll
+        );
+        // Another agent has no Soul identity of its own, and the statement
+        // is scoped to `nova`.
+        assert_eq!(
+            persona_projection(&config, "other").legacy_files,
+            LegacyPersonaFiles::Inject
+        );
+    }
+
+    #[test]
+    fn partial_scope_user_model_revisions_do_not_retire_user_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        record_owner_statement(&config, "session:s1", "style.a");
+        record_owner_statement(&config, "channel:telegram", "style.b");
+        record_owner_statement(&config, "agent:other", "style.c");
+        assert_eq!(
+            persona_projection(&config, "nova").legacy_files,
+            LegacyPersonaFiles::Inject
+        );
+    }
+
+    #[test]
+    fn unreadable_user_model_keeps_injecting_user_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        // user_model.db is a directory, so the store cannot be opened.
+        std::fs::create_dir_all(config.data_dir.join("user_model.db")).unwrap();
+        let projection = persona_projection(&config, "nova");
+        assert_eq!(projection.legacy_files, LegacyPersonaFiles::Inject);
+        assert!(projection.section.is_some());
+    }
+
+    #[test]
+    fn user_md_migration_warning_is_logged_once_per_start() {
+        let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+        let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+        zeroclaw_log::try_install_capture_subscriber();
+        let mut rx = zeroclaw_log::subscribe_or_install();
+        while rx.try_recv().is_ok() {}
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_in(dir.path());
+        config.config_path = dir.path().join("config.toml");
+        let workspace = config.agent_workspace_dir("userwarn");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("USER.md"), "- likes tea").unwrap();
+
+        for _ in 0..3 {
+            let _ = persona_projection(&config, "userwarn");
+        }
+        let warns = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| event["attributes"]["error_key"] == "agent.legacy_user_file_injected")
+            .collect::<Vec<_>>();
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        let message = warns[0]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("/api/user-model/statements"), "{message}");
+
+        record_owner_statement(&config, "global", "style.length");
+        let projection = persona_projection(&config, "userwarn");
+        assert_eq!(projection.legacy_files, LegacyPersonaFiles::SuppressUser);
+        zeroclaw_log::clear_broadcast_hook();
     }
 }

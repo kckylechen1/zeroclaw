@@ -198,25 +198,11 @@ impl Tool for FileWriteTool {
 
         let resolved_target = resolved_parent.join(file_name);
 
-        if self.security.is_runtime_config_path(&resolved_target) {
+        if let Err(message) = self.security.check_model_write_target(&resolved_target) {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
-                error: Some(
-                    self.security
-                        .runtime_config_violation_message(&resolved_target),
-                ),
-            });
-        }
-
-        if self.security.is_protected_persona_path(&resolved_target) {
-            return Ok(ToolResult {
-                success: false,
-                output: ToolOutput::default(),
-                error: Some(
-                    self.security
-                        .persona_file_violation_message(&resolved_target),
-                ),
+                error: Some(message),
             });
         }
 

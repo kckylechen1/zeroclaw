@@ -26,10 +26,14 @@ use zeroclaw_memory::companion::{
     UserModelStore, project_applicable_heads,
 };
 
-use crate::agent::persona_projection::{PersonaProjection, persona_projection};
+use crate::agent::persona_projection::{
+    PersonaProjection, persona_projection, user_model_retires_user_md,
+};
 
-/// The Soul store's change marker for `agent_alias`, or `None` when there is
-/// no readable store. Never creates the data directory.
+/// The change marker of everything the persona projection reads for
+/// `agent_alias`: the Soul store's revision count, plus whether the User
+/// Model retires `USER.md` (which moves the stamp when it flips). `None` when
+/// there is no readable Soul store. Never creates the data directory.
 ///
 /// Read it *before* projecting: a change that lands between the read and the
 /// projection then shows up as a moved stamp on the next turn instead of
@@ -39,9 +43,11 @@ pub fn soul_revision_stamp(config: &Config, agent_alias: &str) -> Option<u64> {
     if !config.data_dir.is_dir() {
         return None;
     }
-    SoulProfileStore::shared(&config.data_dir)
+    let revisions = SoulProfileStore::shared(&config.data_dir)
         .and_then(|store| store.revision_stamp(agent_alias))
-        .ok()
+        .ok()?;
+    let user_md_retired = user_model_retires_user_md(config, agent_alias);
+    Some(revisions.saturating_mul(2) + u64::from(user_md_retired))
 }
 
 /// Render the owner-profile section that applies in `applicability`.
@@ -270,6 +276,36 @@ mod tests {
             assemble_turn_context(config.clone(), "nova".into(), second.soul_stamp, ctx()).await;
         let section = third.persona.unwrap().section.unwrap();
         assert!(section.contains("You are Nova Prime."), "{section}");
+    }
+
+    #[tokio::test]
+    async fn user_md_retirement_reprojects_a_live_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        let stamp = soul_revision_stamp(&config, "nova");
+        let _ = persona_projection(&config, "nova");
+        // Seeding on first projection moves the stamp once.
+        let first = assemble_turn_context(config.clone(), "nova".into(), stamp, ctx()).await;
+        let settled =
+            assemble_turn_context(config.clone(), "nova".into(), first.soul_stamp, ctx()).await;
+        assert!(settled.persona.is_none());
+
+        UserModelStore::shared(&config.data_dir)
+            .unwrap()
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "Answer in short paragraphs.",
+                "style.length",
+                "global",
+                1,
+            )
+            .unwrap();
+        let after =
+            assemble_turn_context(config.clone(), "nova".into(), settled.soul_stamp, ctx()).await;
+        assert_ne!(after.soul_stamp, settled.soul_stamp);
+        let persona = after.persona.expect("USER.md retirement must re-project");
+        assert!(persona.legacy_files.skips("USER.md"));
+        assert!(!persona.legacy_files.skips("SOUL.md"));
     }
 
     #[tokio::test]

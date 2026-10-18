@@ -2240,6 +2240,25 @@ impl SecurityPolicy {
                 == Some("agents")
     }
 
+    /// The one write guard for model tools that write a resolved filesystem
+    /// target (ADR-018 §6): refuses runtime config/state files and the
+    /// owner-governed persona files. Every such tool calls this after it
+    /// resolves the final target, so a new write-capable tool needs no
+    /// per-file knowledge. Reads are unaffected, which is why this is not
+    /// part of [`Self::is_resolved_path_allowed`]. `shell` cannot be guarded
+    /// by path and stays behind the approval chain.
+    ///
+    /// `Err` carries the tool-facing violation message.
+    pub fn check_model_write_target(&self, resolved: &Path) -> Result<(), String> {
+        if self.is_runtime_config_path(resolved) {
+            return Err(self.runtime_config_violation_message(resolved));
+        }
+        if self.is_protected_persona_path(resolved) {
+            return Err(self.persona_file_violation_message(resolved));
+        }
+        Ok(())
+    }
+
     pub fn persona_file_violation_message(&self, resolved: &Path) -> String {
         format!(
             "Refusing to modify persona file: {}. Your identity and principles are owner-governed; \

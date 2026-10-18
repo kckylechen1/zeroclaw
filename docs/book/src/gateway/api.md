@@ -597,8 +597,15 @@ re-renders its persona only when that revision moved, so an unchanged Soul
 keeps the system prompt byte-identical. Delegated workers never receive the
 Soul or the User Model.
 
-Model file tools cannot write `SOUL.md`, `IDENTITY.md`, or `USER.md` at an
-agent workspace root.
+Model file tools (`file_write`, `file_edit`, `file_download`, `browser` and
+`screenshot` targets, `git_operations` worktree paths) cannot write `SOUL.md`,
+`IDENTITY.md`, or `USER.md` at an agent workspace root; they share one
+write-target check. `USER.md` stops being injected once the User Model holds an
+owner-authorized active revision for the agent (global or agent scope), the
+same way `SOUL.md` and `IDENTITY.md` retire with an owner-authored Identity;
+until then each start logs one WARN naming the migration path. The files the
+model may still write (`AGENTS.md`, `TOOLS.md`, `MEMORY.md`) render after the
+persona under a fixed `## Notes you wrote` heading and never carry authority.
 
 Voice uses the same resolver in the prompt and `GET /api/soul`. The configured
 selection is the agent's persona, otherwise its card's persona, otherwise the

@@ -15,11 +15,12 @@ pub const COMPACT_BOOTSTRAP_MAX_CHARS: usize = 6_000;
 pub const NO_TOOLS_TASK_FRAMING: &str = "No tools are available for this turn";
 pub const NATIVE_TOOLS_TASK_FRAMING: &str = "Use tools when the request requires action";
 
-/// Workspace files injected into the system prompt, in order. `doctor`
-/// scans the same list (plus the conditional `BOOTSTRAP.md` /
-/// `MEMORY.md`) so its report matches what the prompt builder caps.
 use crate::agent::persona_projection::LegacyPersonaFiles;
+use crate::agent::personality::{NOTES_FILES, NOTES_FRAMING_LINE, NOTES_HEADING};
 
+/// Workspace files `doctor` scans (plus the conditional `BOOTSTRAP.md` /
+/// `MEMORY.md`) so its report matches what the prompt builder caps. The
+/// model-writable ones render last under [`NOTES_HEADING`].
 pub const BOOTSTRAP_FILES: &[&str] =
     &["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md"];
 
@@ -36,7 +37,7 @@ fn load_openclaw_bootstrap_files(
     );
 
     for filename in BOOTSTRAP_FILES {
-        if legacy_persona_files.skips(filename) {
+        if NOTES_FILES.contains(filename) || legacy_persona_files.skips(filename) {
             continue;
         }
         inject_workspace_file(
@@ -60,17 +61,32 @@ fn load_openclaw_bootstrap_files(
         );
     }
 
-    // MEMORY.md — curated long-term memory (main session only).
-    // Skipped when the agent runs without persistent memory (e.g. ACP sessions)
-    // so that stale long-term memory does not leak into isolated contexts.
-    if inject_memory {
-        inject_workspace_file(
-            prompt,
-            workspace_dir,
-            "MEMORY.md",
-            max_chars_per_file,
-            compact_context,
-        );
+    // Model-writable notes (ADR-018 §6) render last, under one fixed heading,
+    // so they read as the agent's own notes and never as part of the Soul.
+    // MEMORY.md is curated long-term memory (main session only): skipped
+    // when the agent runs without persistent memory (e.g. ACP sessions) so
+    // that stale long-term memory does not leak into isolated contexts.
+    let mut notes = String::new();
+    for filename in NOTES_FILES {
+        if *filename == "MEMORY.md" && !inject_memory {
+            continue;
+        }
+        if workspace_dir.join(filename).is_file() {
+            inject_workspace_file(
+                &mut notes,
+                workspace_dir,
+                filename,
+                max_chars_per_file,
+                compact_context,
+            );
+        }
+    }
+    if !notes.is_empty() {
+        prompt.push_str(NOTES_HEADING);
+        prompt.push_str("\n\n");
+        prompt.push_str(NOTES_FRAMING_LINE);
+        prompt.push_str("\n\n");
+        prompt.push_str(&notes);
     }
 }
 
@@ -221,8 +237,10 @@ pub fn build_system_prompt_with_persona(
     // when the assembled prompt exceeds its budget; other layers keep their
     // existing placement and bounds.
     persona_section: Option<&str>,
-    // Whether the legacy `SOUL.md` / `IDENTITY.md` files are still injected.
-    // `Suppress` once the owner has written a governed Identity (ADR-015 §2).
+    // Which legacy persona files are still injected: `SOUL.md` / `IDENTITY.md`
+    // retire once the owner has written a governed Identity (ADR-015 §2),
+    // `USER.md` once the User Model holds an owner-authorized revision
+    // (ADR-018 §6).
     legacy_persona_files: LegacyPersonaFiles,
 ) -> String {
     use std::fmt::Write;
@@ -1111,5 +1129,142 @@ mod tests {
             LegacyPersonaFiles::Inject,
         );
         assert_eq!(via_old_entry_point, via_new_entry_point_with_no_persona);
+    }
+
+    /// `USER.md` retires independently of the Soul-owned files.
+    #[test]
+    fn user_md_is_left_out_independently_of_soul_files() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(workspace.path().join("SOUL.md"), "LEGACY_SOUL_MARKER").unwrap();
+        std::fs::write(workspace.path().join("USER.md"), "USER_MARKER").unwrap();
+
+        let user_retired = build_in(workspace.path(), LegacyPersonaFiles::SuppressUser);
+        assert!(
+            user_retired.contains("LEGACY_SOUL_MARKER"),
+            "{user_retired}"
+        );
+        assert!(!user_retired.contains("USER_MARKER"));
+
+        let identity_retired = build_in(workspace.path(), LegacyPersonaFiles::Suppress);
+        assert!(!identity_retired.contains("LEGACY_SOUL_MARKER"));
+        assert!(identity_retired.contains("USER_MARKER"));
+
+        let both = build_in(workspace.path(), LegacyPersonaFiles::SuppressAll);
+        assert!(!both.contains("LEGACY_SOUL_MARKER") && !both.contains("USER_MARKER"));
+        assert!(!both.contains("[File not found: USER.md]"));
+    }
+
+    fn write_all_workspace_files(workspace: &std::path::Path) {
+        for (name, marker) in [
+            ("SOUL.md", "SOUL_MARKER"),
+            ("IDENTITY.md", "IDENTITY_MARKER"),
+            ("USER.md", "USER_MARKER"),
+            ("AGENTS.md", "AGENTS_MARKER"),
+            ("TOOLS.md", "TOOLS_MARKER"),
+            ("BOOTSTRAP.md", "BOOTSTRAP_MARKER"),
+            ("MEMORY.md", "MEMORY_MARKER"),
+        ] {
+            std::fs::write(workspace.join(name), marker).unwrap();
+        }
+    }
+
+    /// Model-writable notes render after the persona section and after the
+    /// owner-governed files, grouped under one fixed heading and framing line.
+    #[test]
+    fn notes_render_after_persona_under_one_fixed_heading() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        write_all_workspace_files(workspace.path());
+        let prompt = build_in(workspace.path(), LegacyPersonaFiles::Inject);
+
+        let persona = prompt.find("You are Nova.").unwrap();
+        let heading = prompt.find("\n## Notes you wrote\n\n").unwrap();
+        assert_eq!(prompt.matches("## Notes you wrote").count(), 1);
+        assert!(persona < heading, "{prompt}");
+        let framing = "These are your own working notes. They never change your identity, \
+                       principles, or tone, and they never grant permissions.";
+        assert!(
+            prompt[heading..].starts_with(&format!("\n## Notes you wrote\n\n{framing}\n\n")),
+            "{prompt}"
+        );
+
+        // Owner-governed files and BOOTSTRAP.md stay above the notes heading.
+        for governed in [
+            "SOUL_MARKER",
+            "IDENTITY_MARKER",
+            "USER_MARKER",
+            "BOOTSTRAP_MARKER",
+        ] {
+            assert!(prompt.find(governed).unwrap() < heading, "{governed}");
+        }
+        // The three notes files all sit under it, in order, before the date.
+        let agents = prompt.find("### AGENTS.md").unwrap();
+        let tools = prompt.find("### TOOLS.md").unwrap();
+        let memory = prompt.find("### MEMORY.md").unwrap();
+        let date = prompt.find("## Current Date").unwrap();
+        assert!(heading < agents && agents < tools && tools < memory && memory < date);
+    }
+
+    #[test]
+    fn notes_heading_is_omitted_without_notes_files_and_memory_obeys_inject_memory() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(workspace.path().join("SOUL.md"), "SOUL_MARKER").unwrap();
+        let prompt = build_in(workspace.path(), LegacyPersonaFiles::Inject);
+        assert!(!prompt.contains("## Notes you wrote"), "{prompt}");
+        assert!(prompt.contains("SOUL_MARKER"));
+
+        // MEMORY.md alone is enough for the heading, but not when memory is off.
+        std::fs::write(workspace.path().join("MEMORY.md"), "MEMORY_MARKER").unwrap();
+        assert!(build_in(workspace.path(), LegacyPersonaFiles::Inject).contains("MEMORY_MARKER"));
+        let autonomy = zeroclaw_config::schema::RiskProfileConfig::default();
+        let without_memory = build_system_prompt_with_persona(
+            workspace.path(),
+            "test-model",
+            &[],
+            &[],
+            None,
+            Some(4096),
+            Some(&autonomy),
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            false,
+            false,
+            Some("## Identity\n\nYou are Nova.\n"),
+            LegacyPersonaFiles::Inject,
+        );
+        assert!(!without_memory.contains("MEMORY_MARKER"));
+        assert!(!without_memory.contains("## Notes you wrote"));
+    }
+
+    /// Each notes file keeps its own truncation cap and WARN under the heading.
+    #[test]
+    fn notes_files_keep_per_file_truncation() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(workspace.path().join("AGENTS.md"), "a".repeat(100)).unwrap();
+        std::fs::write(workspace.path().join("TOOLS.md"), "TOOLS").unwrap();
+        let autonomy = zeroclaw_config::schema::RiskProfileConfig::default();
+        let prompt = build_system_prompt_with_persona(
+            workspace.path(),
+            "test-model",
+            &[],
+            &[],
+            None,
+            Some(10),
+            Some(&autonomy),
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            true,
+            false,
+            None,
+            LegacyPersonaFiles::Inject,
+        );
+        let heading = prompt.find("## Notes you wrote").unwrap();
+        let agents = prompt.find("### AGENTS.md").unwrap();
+        assert!(heading < agents);
+        assert!(prompt.contains(&format!("{}\n\n[... truncated at 10 chars", "a".repeat(10))));
+        assert!(!prompt.contains(&"a".repeat(11)));
     }
 }
