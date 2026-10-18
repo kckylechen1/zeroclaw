@@ -249,6 +249,68 @@ pub async fn get_soul(
     }
 }
 
+/// GET /api/soul/export?agent=<alias> — canonical layers and history only.
+/// No seeding, proposals, reflection receipts, or private evidence notes.
+pub async fn get_export(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let query: AgentQuery = match parse_query(&uri) {
+        Ok(query) => query,
+        Err(err) => return *err,
+    };
+    let (agent, data_dir) = match configured_agent(&state, &query.agent) {
+        Ok(found) => found,
+        Err(err) => return *err,
+    };
+    let export_agent = agent.clone();
+    match run_store(data_dir, move |store| store.export(&export_agent)).await {
+        Ok((profile, history)) => {
+            let (configured, effective, sources) = {
+                let config = state.config.read();
+                let (effective, sources) = zeroclaw_memory::companion::resolve_effective_voice(
+                    &config,
+                    &agent,
+                    Some(&profile),
+                );
+                (
+                    config.persona_for_agent(&agent).copied(),
+                    effective,
+                    sources,
+                )
+            };
+            (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CACHE_CONTROL, "no-store"),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"soul-export.json\"",
+                    ),
+                ],
+                axum::Json(serde_json::json!({
+                    "format_version": 1,
+                    "agent": agent,
+                    "profile": profile,
+                    "history": history,
+                    "voice": {
+                        "configured": configured,
+                        "effective": effective,
+                        "sources": sources,
+                    },
+                })),
+            )
+                .into_response()
+        }
+        Err(err) => err,
+    }
+}
+
 /// GET /api/soul/history?agent=<alias>&layer=identity|principles — every
 /// revision of one layer, oldest first.
 pub async fn get_history(
@@ -1044,5 +1106,227 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn export(state: &AppState, uri: &str, headers: HeaderMap) -> Response {
+        get_export(
+            State(state.clone()),
+            ConnectInfo(peer()),
+            headers,
+            uri.parse().unwrap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn export_requires_operator_even_without_pairing_and_validates_before_store_access() {
+        let (dir, mut state) = state_with_agent();
+        state.pairing = Arc::new(zeroclaw_runtime::security::pairing::PairingGuard::new(
+            false,
+            &["op-token".into()],
+        ));
+        let mut other = HeaderMap::new();
+        other.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer non-operator-token"),
+        );
+        for headers in [HeaderMap::new(), other] {
+            assert_eq!(
+                export(&state, "/api/soul/export?agent=ghost", headers)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        for (uri, expected) in [
+            ("/api/soul/export?agent=ghost", StatusCode::NOT_FOUND),
+            ("/api/soul/export", StatusCode::BAD_REQUEST),
+        ] {
+            assert_eq!(export(&state, uri, operator()).await.status(), expected);
+        }
+        assert!(
+            !dir.path()
+                .join(zeroclaw_memory::companion::SOUL_PROFILE_DB_FILE)
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn export_download_is_versioned_and_does_not_seed_missing_layers() {
+        let (_dir, state) = state_with_agent();
+        let response = export(&state, "/api/soul/export?agent=nova", operator()).await;
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"soul-export.json\""
+        );
+        let (status, data) = json_of(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["format_version"], 1);
+        assert_eq!(data["agent"], "nova");
+        assert_eq!(
+            data.as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["agent", "format_version", "history", "profile", "voice"]
+        );
+        for layer in ["identity", "principles", "growth", "voice"] {
+            assert!(data["profile"][layer].is_null());
+            assert_eq!(data["history"][layer], serde_json::json!([]));
+        }
+        assert_eq!(data["voice"]["effective"]["warmth"], "medium");
+        let data_dir = state.config.read().data_dir.clone();
+        assert_eq!(
+            SoulProfileStore::shared(&data_dir)
+                .unwrap()
+                .revision_stamp("nova")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn export_keeps_personality_history_and_voice_sources_but_omits_private_evidence() {
+        use zeroclaw_config::persona::{PersonaKnobs, PersonaLevel};
+        use zeroclaw_memory::companion::{
+            GrowthEntry, GrowthKind, NewSoulProposal, SoulProposalLayer, SoulProposalOutcome,
+            SoulReflectionReceipt,
+        };
+        let (_dir, state) = state_with_agent();
+        {
+            let mut config = state.config.write();
+            config.personas.insert(
+                "brief".into(),
+                PersonaKnobs {
+                    explanation_density: PersonaLevel::Low,
+                    ..Default::default()
+                },
+            );
+            config.agents.get_mut("nova").unwrap().persona = "brief".into();
+        }
+        let data_dir = state.config.read().data_dir.clone();
+        let store = SoulProfileStore::shared(&data_dir).unwrap();
+        store.ensure_seeded("nova", "ZeroClawAgent", 1).unwrap();
+        store
+            .set_growth(
+                "nova",
+                SoulGrowth {
+                    entries: vec![GrowthEntry {
+                        kind: GrowthKind::Bond,
+                        text: "Use a familiar tone for recurring tasks.".into(),
+                    }],
+                },
+                0,
+                2,
+            )
+            .unwrap();
+        store
+            .set_voice(
+                "nova",
+                SoulVoice {
+                    heads: [("warmth".into(), PersonaLevel::High)].into(),
+                },
+                0,
+                3,
+            )
+            .unwrap();
+        let SoulProposalOutcome::Recorded { id } = store
+            .submit_proposal(
+                "nova",
+                NewSoulProposal {
+                    layer: SoulProposalLayer::Principles,
+                    proposal: "Use compact answers.".into(),
+                    rationale: "private-rationale-canary".into(),
+                    session_ref: Some("private-session-canary".into()),
+                    ..Default::default()
+                },
+                4,
+            )
+            .unwrap()
+        else {
+            panic!("new proposal should be recorded")
+        };
+        store
+            .resolve_proposal(
+                "nova",
+                id,
+                SoulProposalResolution::Accepted,
+                Some("private-resolution-canary".into()),
+                Some("Keep answers concise.".into()),
+                5,
+            )
+            .unwrap();
+        store
+            .rollback("nova", SoulLayer::Principles, 1, 2, 6)
+            .unwrap();
+        store
+            .record_reflection(
+                "nova",
+                &SoulReflectionReceipt {
+                    period_from_unix: 1,
+                    messages_read: 2,
+                    proposals_created: 1,
+                    outcome: "private-reflection-canary".into(),
+                    ran_at_unix: 7,
+                    user_model_candidates_created: 0,
+                },
+            )
+            .unwrap();
+        store
+            .ensure_seeded("other", "ZeroClawOtherAgent", 8)
+            .unwrap();
+        let stamp = store.revision_stamp("nova").unwrap();
+        let (status, data) =
+            json_of(export(&state, "/api/soul/export?agent=nova", operator()).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["profile"]["principles"]["revision"], 3);
+        assert_eq!(data["profile"]["principles"]["rolled_back_from"], 1);
+        assert_eq!(
+            data["history"]["principles"][1]["source"],
+            "approved_proposal"
+        );
+        assert_eq!(data["history"]["principles"][1]["proposal_id"], id);
+        assert_eq!(data["voice"]["effective"]["warmth"], "high");
+        assert_eq!(data["voice"]["effective"]["explanation_density"], "low");
+        assert_eq!(
+            data["voice"]["sources"]["warmth"],
+            serde_json::json!({"kind": "stored", "revision": 1})
+        );
+        assert_eq!(
+            data["voice"]["sources"]["explanation_density"]["kind"],
+            "persona"
+        );
+        for layer in ["identity", "principles", "growth", "voice"] {
+            assert_eq!(
+                &data["profile"][layer],
+                data["history"][layer].as_array().unwrap().last().unwrap()
+            );
+        }
+        let serialized = data.to_string();
+        for private in [
+            "private-rationale-canary",
+            "private-session-canary",
+            "private-resolution-canary",
+            "private-reflection-canary",
+            "ZeroClawOtherAgent",
+        ] {
+            assert!(!serialized.contains(private), "excluded content: {private}");
+        }
+        assert_eq!(store.revision_stamp("nova").unwrap(), stamp);
+    }
+
+    #[tokio::test]
+    async fn export_store_failure_is_unavailable_without_a_partial_archive() {
+        let (dir, state) = state_with_agent();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        state.config.write().data_dir = blocked;
+        let (status, data) =
+            json_of(export(&state, "/api/soul/export?agent=nova", operator()).await).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(data["code"], "store_unavailable");
+        assert!(data.get("profile").is_none() && data.get("history").is_none());
     }
 }
