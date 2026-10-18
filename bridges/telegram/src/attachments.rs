@@ -227,7 +227,7 @@ mod tests {
     }
     async fn resume(ws: &mut WebSocket, cursor: i64, receipts: Value) {
         assert_eq!(value(ws).await["type"], "source_resume");
-        ws.send(Message::Text(json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":cursor,"unknown":[],"receipts":receipts}).to_string().into())).await.unwrap();
+        ws.send(Message::Text(json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":cursor,"unknown":[],"receipts":receipts,"control":{"control_version":1,"revision":1,"turn_id":"a0000000-0000-4000-8000-000000000001","idle_message":"No observed turn","unknown_message":"Stop outcome unknown","not_sent_message":"Stop not sent"}}).to_string().into())).await.unwrap();
     }
     fn push(tg: &Telegram, from: i64, file: bool) {
         let mut message =

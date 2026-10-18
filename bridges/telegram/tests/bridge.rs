@@ -248,16 +248,27 @@ async fn attach_ready(gateway: &mut FakeGateway, ready: Value) -> Ws {
     .await;
     assert_eq!(
         recv_raw(&mut ws).await,
-        json!({"type":"source_resume","source":"telegram:9000:42"})
+        json!({"type":"source_resume","source":"telegram:9000:42","control_version":1})
     );
-    let ready = if ready.is_null() {
+    let mut ready = if ready.is_null() {
         let ledger = ws.ledger.lock().unwrap();
         json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":ledger.cursor,"unknown":[],"receipts":ledger.receipts.values().collect::<Vec<_>>()})
     } else {
         ready
     };
+    if ready.get("control").is_none() {
+        ready["control"] = control_state(1, Some(TURN_A));
+    }
     send(&mut ws, ready).await;
     ws
+}
+
+const TURN_A: &str = "a0000000-0000-4000-8000-000000000001";
+const TURN_B: &str = "b0000000-0000-4000-8000-000000000001";
+
+fn control_state(revision: u64, turn_id: Option<&str>) -> Value {
+    json!({"type":"turn_state","control_version":1,"revision":revision,"turn_id":turn_id,
+        "idle_message":"No observed turn; no stop sent", "unknown_message":"Stop outcome unknown; not replayed","not_sent_message":"Stop not sent"})
 }
 
 /// Take the bridge's next control socket and start it.
@@ -982,6 +993,218 @@ async fn an_unknown_lower_update_holds_the_old_cursor_after_the_startup_probe() 
             .all(|(_, body)| body["offset"].as_i64().unwrap() <= 1)
     );
     assert_eq!(tg.lock().unwrap().updates.len(), 1);
+    running.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn stop_freezes_the_observed_turn_before_the_durable_control_receipt() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config));
+    let mut ws = attach(&mut gateway).await;
+    FakeTelegram::text(&tg, OWNER, "/stop");
+    let disposition = recv_raw(&mut ws).await;
+    assert_eq!(disposition["disposition"], "control");
+    raw_send(&mut ws, control_state(3, Some(TURN_B))).await;
+    let mut ack = intake_ack(&disposition, 2);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack.clone()).await;
+    let cancel = recv_raw(&mut ws).await;
+    assert_eq!(
+        cancel,
+        json!({"type":"cancel","control_version":1,"id":disposition["id"],"turn_id":TURN_A})
+    );
+    raw_send(&mut ws, json!({"type":"cancel_ack","control_version":1,"id":cancel["id"],"turn_id":TURN_A,"status":"stale","message":"Old turn ended; newer turn unchanged"})).await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"] == "Old turn ended; newer turn unchanged"
+    })
+    .await;
+    // A duplicate receipt cannot execute again or retarget the newer turn.
+    raw_send(&mut ws, ack).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err()
+    );
+    running.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn reconnect_snapshot_wins_over_buffered_old_state_and_stop_is_not_replayed() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config));
+    let ready = json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":0,"unknown":[],"receipts":[],"control":control_state(4,Some(TURN_B))});
+    let mut ws = attach_ready(&mut gateway, ready).await;
+    raw_send(&mut ws, control_state(1, Some(TURN_A))).await;
+    FakeTelegram::text(&tg, OWNER, "/cancel");
+    let disposition = recv_raw(&mut ws).await;
+    let mut ack = intake_ack(&disposition, 2);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack).await;
+    let cancel = recv_raw(&mut ws).await;
+    assert_eq!(cancel["turn_id"], TURN_B);
+    drop(ws); // Cancel might have executed; never resend it on reconnect.
+    let mut ws = attach(&mut gateway).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err()
+    );
+    FakeTelegram::text(&tg, OWNER, "/stop");
+    let disposition = recv_raw(&mut ws).await;
+    let mut ack = intake_ack(&disposition, 3);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack).await;
+    assert_eq!(
+        recv_raw(&mut ws).await["turn_id"],
+        TURN_A,
+        "new attachment replaces the revision baseline"
+    );
+    running.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn stop_requested_receipt_does_not_end_streaming_and_idle_stop_does_not_retarget() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config));
+    let mut ws = attach(&mut gateway).await;
+    raw_send(&mut ws, json!({"type":"chunk","content":"still "})).await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "still ").await;
+    FakeTelegram::text(&tg, OWNER, "/stop");
+    let disposition = recv_raw(&mut ws).await;
+    let mut ack = intake_ack(&disposition, 2);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack).await;
+    let cancel = recv_raw(&mut ws).await;
+    let receipt = json!({"type":"cancel_ack","control_version":1,"id":cancel["id"],"turn_id":TURN_A,"status":"requested","message":"Stop requested; awaiting cancellation"});
+    raw_send(&mut ws, receipt.clone()).await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"] == "Stop requested; awaiting cancellation"
+    })
+    .await;
+    raw_send(&mut ws, receipt).await; // Duplicate receipt cannot report twice.
+    raw_send(
+        &mut ws,
+        json!({"type":"done","full_response":"still running until done"}),
+    )
+    .await;
+    FakeTelegram::wait_for(&tg, "editMessageText", |b| {
+        b["text"] == "still running until done"
+    })
+    .await;
+    assert!(
+        !tg.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(m, b)| m == "sendMessage" && b["text"] == "(cancelled)")
+    );
+    raw_send(&mut ws, control_state(2, None)).await;
+    FakeTelegram::text(&tg, OWNER, "/stop");
+    let disposition = recv_raw(&mut ws).await;
+    raw_send(&mut ws, control_state(3, Some(TURN_B))).await;
+    let mut ack = intake_ack(&disposition, 3);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack).await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"] == "No observed turn; no stop sent"
+    })
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err()
+    );
+    running.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn missing_turn_control_contract_never_starts_telegram_polling() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config));
+    let mut ws=attach_ready(&mut gateway,json!({"type":"source_ready","intake_version":1,"source":"telegram:9000:42","cursor":0,"unknown":[],"receipts":[],"control":null})).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !tg.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(m, _)| m == "getUpdates")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_ok()
+    );
+    running.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn stop_waiter_capacity_refuses_the_33rd_wire_request_and_recovers_after_timeout() {
+    let (tg, mut gateway, config, server) = intake_fixture().await;
+    let running = tokio::spawn(run(config));
+    let mut ws = attach(&mut gateway).await;
+    for _ in 0..32 {
+        FakeTelegram::text(&tg, OWNER, "/stop");
+        let disposition = recv_raw(&mut ws).await;
+        assert_eq!(disposition["disposition"], "control");
+        let mut ack = intake_ack(&disposition, 0);
+        ack["state"] = json!("control");
+        raw_send(&mut ws, ack).await;
+        let cancel = recv_raw(&mut ws).await;
+        assert_eq!(cancel["type"], "cancel");
+        assert_eq!(cancel["id"], disposition["id"]);
+        assert_eq!(cancel["turn_id"], TURN_A);
+    }
+    FakeTelegram::text(&tg, OWNER, "/stop");
+    let disposition = recv_raw(&mut ws).await;
+    let mut ack = intake_ack(&disposition, 0);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack).await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "Stop not sent").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), ws.next())
+            .await
+            .is_err(),
+        "full capacity must not send another cancel"
+    );
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(16)).await;
+    tokio::time::resume();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let count = tg
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|(m, b)| {
+                m == "sendMessage" && b["text"] == "Stop outcome unknown; not replayed"
+            })
+            .count();
+        if count == 32 {
+            break;
+        }
+        assert!(
+            count < 32 && tokio::time::Instant::now() < deadline,
+            "all 32 sent commands need individual timeout outcomes; got {count}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    FakeTelegram::text(&tg, OWNER, "/stop");
+    let disposition = recv_raw(&mut ws).await;
+    let mut ack = intake_ack(&disposition, 0);
+    ack["state"] = json!("control");
+    raw_send(&mut ws, ack).await;
+    assert_eq!(
+        recv_raw(&mut ws).await["type"],
+        "cancel",
+        "expired waiters release capacity for a fresh explicit command"
+    );
     running.abort();
     server.abort();
 }
