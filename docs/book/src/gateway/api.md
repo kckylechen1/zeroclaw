@@ -647,8 +647,11 @@ Soul or the User Model.
 
 Model file tools (`file_write`, `file_edit`, `file_download`, `browser` and
 `screenshot` targets, `git_operations` worktree paths) cannot write `SOUL.md`,
-`IDENTITY.md`, or `USER.md` at an agent workspace root; they share one
-write-target check. `USER.md` stops being injected once the User Model holds an
+`IDENTITY.md`, `USER.md`, `HEARTBEAT.md`, or `BOOTSTRAP.md` at an agent
+workspace root; they share one
+write-target check (`HEARTBEAT.md` is the heartbeat engine's task list and
+`BOOTSTRAP.md` belongs to first-run scaffolding; neither is model-writable by
+design). `USER.md` stops being injected once the User Model holds an
 owner-authorized active revision for the agent (global or agent scope), the
 same way `SOUL.md` and `IDENTITY.md` retire with an owner-authored Identity;
 until then each start logs one WARN naming the migration path. The files the
