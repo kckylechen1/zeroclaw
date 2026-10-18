@@ -2,7 +2,7 @@
 id: ADR-018
 title: Soul character model - layer duties, names, exemplars, drift, and behavioral continuity
 date: 2026-10-18
-status: proposed
+status: accepted
 relates-to:
   - ADR-014
   - ADR-015
@@ -22,7 +22,7 @@ relates-to:
 
 ## Status
 
-Proposed on 2026-10-18 for owner review. Nothing here is implemented. If accepted, implementation is tracked in issue #380.
+Proposed and accepted by the owner on 2026-10-18, with the bounds as written (28-day dial cooldown, at most four exemplars, exemplars created by the owner only). Implementation is tracked in issue #380.
 
 This record keeps the authority model of ADR-014, ADR-015, and ADR-016 unchanged: the owner alone writes Identity and Principles, the agent only proposes, approval is bound to one immutable proposal row, reflection reads only the owner's own messages, and Soul text never grants permissions. It changes **what the layers describe, what they are called, and how they are checked**, not who may change them.
 
@@ -57,7 +57,7 @@ The governance half of the Soul design is sound and implemented (#383, #391, #39
 
 **What changes and what does not.** Every name a person or the model sees changes: prompt headings, gateway API layer names and JSON fields, the `layer` parameter of `propose_soul_change`, the reflection output shape, the PWA, export output, and documentation. Identifiers already stored in `soul.db` (`voice` and `growth` in `soul_revisions` and `soul_proposals`) do **not** change. Rewriting them would need a data migration and would break rollback to an older binary, in exchange for nicer internal names only. `SoulLayer` (and `SoulProposalLayer`) is the one place that maps the public name to the stored identifier, and it says so in its documentation. The PWA ships with the gateway, so the API rename needs no transition alias.
 
-Earlier records keep their own wording. When this record is accepted, the ADR index notes against ADR-014, ADR-015, and ADR-016 that their Voice and Growth layers are named Tone and Story by ADR-018.
+Earlier records keep their own wording. The ADR index notes against ADR-014, ADR-015, and ADR-016 that their Voice and Growth layers are named Tone and Story by ADR-018.
 
 ### 2. One question per layer
 
