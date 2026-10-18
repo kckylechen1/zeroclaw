@@ -374,7 +374,7 @@ impl Agent {
                 ),
             )
             // Identity and Principles come from the governed Soul profile,
-            // Voice from the configured persona dials (ADR-015). The body
+            // Tone from the configured persona dials (ADR-015). The body
             // re-projects it at the start of any turn whose Soul revision
             // moved, and adds the User Model owner profile per turn.
             .prompt_builder(SystemPromptBuilder::with_persona(persona))

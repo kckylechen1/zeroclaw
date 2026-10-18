@@ -100,4 +100,3 @@ tool-browser-screenshot-error-sidecar-no-png-data = computer-use 边车未返回
 tool-browser-screenshot-error-sidecar-non-json-success = 对于带路径的截图，computer-use 边车返回了非 JSON 的成功响应；请求的文件未被写入
 tool-browser-screenshot-error-sidecar-not-png = computer-use 边车返回了非 PNG 的截图载荷
 tool-browser-screenshot-error-symlink-target = 无法将截图写入符号链接目标 '{ $target }'
-tool-propose-soul-change = 提出你希望如何成长，交由你的主人批准。使用 "growth" 层添加一行关于你已成为什么样的人（growth_kind "self"）、或关于你与主人共享的某样东西（如昵称或常开的玩笑，growth_kind "bond"）、或退役一条不再合适的条目（retire_index）。使用 "voice" 更改某个旋钮，使用 "principles" 添加一条原则。在你的主人批准之前不会有任何变化。只提出反映持久模式的内容，而不是一次性的请求。你的名字和身份由你的主人决定。

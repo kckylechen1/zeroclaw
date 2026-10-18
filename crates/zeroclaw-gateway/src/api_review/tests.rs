@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeroclaw_api::model_provider::ModelProvider;
 use zeroclaw_memory::companion::reflection::{OwnerMessages, reflect};
-use zeroclaw_memory::companion::{GrowthKind, SoulGrowth, UserModelKind};
+use zeroclaw_memory::companion::{SoulStory, StoryKind, UserModelKind};
 
 struct FakeReflection;
 #[async_trait::async_trait]
@@ -16,7 +16,7 @@ impl ModelProvider for FakeReflection {
         _model: &str,
         _temperature: Option<f64>,
     ) -> anyhow::Result<String> {
-        Ok(r#"{"proposals":[{"layer":"growth","growth_kind":"bond","proposal":"Shared shorthand"}],"user_model_candidates":[{"kind":"preference","statement":"Concise replies","semantic_key":"communication.short","evidence_indices":[0]}]}"#.into())
+        Ok(r#"{"proposals":[{"layer":"story","story_kind":"bond","proposal":"Shared shorthand"}],"user_model_candidates":[{"kind":"preference","statement":"Concise replies","semantic_key":"communication.short","evidence_indices":[0]}]}"#.into())
     }
 }
 impl zeroclaw_api::attribution::Attributable for FakeReflection {
@@ -198,12 +198,12 @@ async fn actual_http_reflection_inbox_review_reword_narrow_dismiss_and_reopen() 
             .unwrap()
             .profile("nova")
             .unwrap()
-            .growth
+            .story
             .unwrap()
             .value,
-        SoulGrowth {
-            entries: vec![zeroclaw_memory::companion::GrowthEntry {
-                kind: GrowthKind::Bond,
+        SoulStory {
+            entries: vec![zeroclaw_memory::companion::StoryEntry {
+                kind: StoryKind::Bond,
                 text: "Owner chosen shorthand".into()
             }]
         }

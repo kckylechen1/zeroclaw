@@ -1,6 +1,6 @@
 //! Persona knobs: how an agent talks, as a small set of dials.
 //!
-//! Config persona defaults are authored. Reviewed Soul Voice heads may
+//! Config persona defaults are authored. Reviewed Soul Tone heads may
 //! override them per key after owner approval. This module owns the closed
 //! vocabulary and presentation guidance; nothing here widens authority.
 //!
@@ -25,7 +25,7 @@
 //!   technique, not a personality flourish.
 //! - [`PersonaKnobs::explanation_density`], [`PersonaKnobs::warmth`] and
 //!   [`PersonaKnobs::humor`] cover the rest of the observable temperament:
-//!   how much reasoning is shown, how much heat is in the voice, and whether
+//!   how much reasoning is shown, how much heat is in the tone, and whether
 //!   levity is allowed.
 //!
 //! What is deliberately *not* here: reminder intensity and delivery mode.
@@ -117,8 +117,8 @@ pub struct PersonaKnobs {
     pub humor: PersonaLevel,
 }
 
-/// Hard byte ceiling for repository-owned Voice guidance (ADR-014/015).
-pub const VOICE_SECTION_MAX_BYTES: usize = 1024;
+/// Hard byte ceiling for repository-owned Tone guidance (ADR-014/015).
+pub const TONE_SECTION_MAX_BYTES: usize = 1024;
 
 impl PersonaKnobs {
     pub fn level(&self, key: &str) -> Option<PersonaLevel> {
@@ -136,7 +136,7 @@ impl PersonaKnobs {
     /// never permissions, evidence standards or the honesty floor.
     #[must_use]
     pub fn to_prompt_section(&self) -> Option<String> {
-        let mut out = String::from("## Voice\n\n");
+        let mut out = String::from("## Tone\n\n");
         for (key, level, guidance) in [
             ("warmth", self.warmth, warmth_line(self.warmth)),
             (
@@ -154,7 +154,7 @@ impl PersonaKnobs {
         ] {
             let line = format!("- {key} ({}): {guidance}\n", level.as_str());
             // Fixed strings fit together; preserve whole lines if edited later.
-            if out.len() + line.len() <= VOICE_SECTION_MAX_BYTES {
+            if out.len() + line.len() <= TONE_SECTION_MAX_BYTES {
                 out.push_str(&line);
             }
         }
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_guidance_bytes_are_pinned_for_every_level() {
+    fn tone_guidance_bytes_are_pinned_for_every_level() {
         let levels = [
             PersonaLevel::Minimal,
             PersonaLevel::Low,
@@ -292,7 +292,7 @@ mod tests {
             PersonaLevel::High,
             PersonaLevel::Xhigh,
         ];
-        let expected = include_str!("persona_voice_golden.txt");
+        let expected = include_str!("persona_tone_golden.txt");
         let rendered = levels
             .into_iter()
             .map(|level| {
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_guidance_cap_keeps_all_five_dials_in_every_combination() {
+    fn tone_guidance_cap_keeps_all_five_dials_in_every_combination() {
         let levels = [
             PersonaLevel::Minimal,
             PersonaLevel::Low,
@@ -334,7 +334,7 @@ mod tests {
                             }
                             .to_prompt_section()
                             .unwrap();
-                            assert!(rendered.len() <= VOICE_SECTION_MAX_BYTES);
+                            assert!(rendered.len() <= TONE_SECTION_MAX_BYTES);
                             assert_eq!(
                                 rendered
                                     .lines()

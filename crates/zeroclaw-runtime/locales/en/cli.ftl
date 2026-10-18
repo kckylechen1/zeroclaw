@@ -1056,8 +1056,10 @@ gateway-invalid-surface = Invalid chat surface. Use web, telegram or cli; query 
 
 # Generic review notice. Never interpolate Soul or owner evidence content.
 soul-weekly-review-notice = Weekly reflection created { $soul_count } Soul proposals and { $user_count } User Model candidates. Review: { $review_path }
-soul-voice-unavailable = Current configured Voice is unavailable.
-soul-voice-step-limit = Voice proposals may move a dial by at most one level.
+soul-tone-unavailable = Current configured Tone is unavailable.
+soul-tone-step-limit = Tone proposals may move a dial by at most one level.
+soul-tone-challenge-up-only = The challenge dial may only be proposed upward; only your owner can lower it.
+soul-tone-dial-cooldown = The { $dial } dial was changed by an approved proposal less than { $days } days ago, so it cannot be proposed again yet.
 
 # Scoped chat turn cancellation. Requested is not a completed cancellation.
 gateway-cancel-requested = Stop requested for that turn; it has not yet confirmed cancellation.

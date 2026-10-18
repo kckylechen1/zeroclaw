@@ -409,8 +409,8 @@ mod tests {
     #[tokio::test]
     async fn approved_soul_proposal_changes_the_next_turns_prompt_bytes() {
         use zeroclaw_memory::companion::{
-            GrowthKind, NewSoulProposal, SoulProfileStore, SoulProposalLayer, SoulProposalOutcome,
-            SoulProposalResolution, UserModelKind, UserModelStore,
+            NewSoulProposal, SoulProfileStore, SoulProposalLayer, SoulProposalOutcome,
+            SoulProposalResolution, StoryKind, UserModelKind, UserModelStore,
         };
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -486,9 +486,9 @@ mod tests {
             .submit_proposal(
                 "nova",
                 NewSoulProposal {
-                    layer: SoulProposalLayer::Growth,
+                    layer: SoulProposalLayer::Story,
                     proposal: "We call a bad trade a paper cut.".into(),
-                    growth_kind: Some(GrowthKind::Bond),
+                    story_kind: Some(StoryKind::Bond),
                     ..NewSoulProposal::default()
                 },
                 2,
@@ -509,8 +509,8 @@ mod tests {
             "{third}"
         );
         // Only the Soul section moved: the prefix before it is unchanged.
-        let growth_at = third.find("## Who I've become").unwrap();
-        assert_eq!(&third[..growth_at], &second[..growth_at]);
+        let story_at = third.find("## Our story so far").unwrap();
+        assert_eq!(&third[..story_at], &second[..story_at]);
     }
 
     /// Builder-made agents without a governed turn context keep a fixed prompt

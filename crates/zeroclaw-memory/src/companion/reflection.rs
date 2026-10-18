@@ -21,8 +21,8 @@
 use std::time::Duration;
 
 use crate::companion::{
-    GrowthKind, NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SoulProfile, SoulProfileError,
-    SoulProfileStore, SoulProposalLayer, SoulProposalOutcome, SoulReflectionReceipt,
+    NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SoulProfile, SoulProfileError, SoulProfileStore,
+    SoulProposalLayer, SoulProposalOutcome, SoulReflectionReceipt, StoryKind,
 };
 use crate::companion::{USER_MODEL_MAX_OPEN_REFLECTION_CANDIDATES, UserModelKind, UserModelStore};
 use serde::Deserialize;
@@ -257,13 +257,19 @@ Rules:
 - Propose at most 3 Soul changes and at most 3 User Model candidates, and only ones worth your owner's time. Proposing nothing is fine.
 - Do not repeat a pending proposal.
 
+Soul layers, one question each:
+- Identity: who I am. Only your owner writes it; you cannot propose it.
+- Principles: what I stand for.
+- Tone: how I sound, as five dials.
+- Story: what has happened between us and what I have come to care about. `self` is concerns, interests, and working habits; `bond` is shared names, references, running jokes, and ways of working. A Story entry is never an instruction about tone, warmth, length, or humor.
+An observation about tone becomes a Tone proposal or nothing; it is never a Story entry.
+
 Proposal shapes:
-- growth, add: {\"layer\":\"growth\",\"growth_kind\":\"self\"|\"bond\",\"proposal\":\"<one line, at most 200 bytes>\",\"rationale\":\"...\"}
-  `self` is how you have changed or what you have come to care about; `bond` is something you and the owner share (a nickname, shorthand, a running joke, a way of working).
-- growth, retire: {\"layer\":\"growth\",\"retire_index\":<index shown below>,\"proposal\":\"<why>\",\"rationale\":\"...\"}
-- voice: {\"layer\":\"voice\",\"trait_key\":\"warmth\"|\"directness\"|\"explanation_density\"|\"challenge\"|\"humor\",\"level\":\"minimal\"|\"low\"|\"medium\"|\"high\"|\"xhigh\",\"proposal\":\"<why>\",\"rationale\":\"...\",\"evidence_indices\":[<one owner message index>]}
-  Move one dial by at most one adjacent level from the current effective Voice. challenge may not go below low; warmth never trades away honesty.
-  Compare Growth bond entries with actual owner reactions (thanks, corrections, tone complaints). Familiarity alone is not consent: quote a supporting owner reaction in the rationale and include exactly one evidence_indices entry. For example, a supported request for shorter answers can lower explanation_density one level. If reactions are mixed or absent, propose nothing.
+- story, add: {\"layer\":\"story\",\"story_kind\":\"self\"|\"bond\",\"proposal\":\"<one line, at most 200 bytes>\",\"rationale\":\"...\"}
+- story, retire: {\"layer\":\"story\",\"retire_index\":<index shown below>,\"proposal\":\"<why>\",\"rationale\":\"...\"}
+- tone: {\"layer\":\"tone\",\"trait_key\":\"warmth\"|\"directness\"|\"explanation_density\"|\"challenge\"|\"humor\",\"level\":\"minimal\"|\"low\"|\"medium\"|\"high\"|\"xhigh\",\"proposal\":\"<why>\",\"rationale\":\"...\",\"evidence_indices\":[<one owner message index>]}
+  Move one dial by at most one adjacent level from the current effective Tone. challenge may only be proposed upward; warmth never trades away honesty. A dial your owner approved a change to within the last 28 days cannot be proposed again.
+  Compare Story bond entries with actual owner reactions (thanks, corrections, tone complaints). Familiarity alone is not consent: quote a supporting owner reaction in the rationale and include exactly one evidence_indices entry. For example, a supported request for shorter answers can lower explanation_density one level. If reactions are mixed or absent, propose nothing.
 - principles, add: {\"layer\":\"principles\",\"proposal\":\"<one line, at most 240 bytes>\",\"rationale\":\"...\"}
 
 User Model candidate shape:
@@ -277,7 +283,7 @@ Reply with JSON only, exactly: {\"proposals\":[...],\"user_model_candidates\":[.
 #[must_use]
 pub fn reflection_input(
     profile: &SoulProfile,
-    voice: zeroclaw_config::persona::PersonaKnobs,
+    tone: zeroclaw_config::persona::PersonaKnobs,
     pending: &[crate::companion::SoulProposal],
     messages: &OwnerMessages,
 ) -> String {
@@ -294,8 +300,8 @@ pub fn reflection_input(
         }
         _ => out.push_str("(none)\n"),
     }
-    out.push_str("\n## Growth (index: kind: text)\n");
-    match profile.growth.as_ref().map(|head| &head.value.entries) {
+    out.push_str("\n## Story (index: kind: text)\n");
+    match profile.story.as_ref().map(|head| &head.value.entries) {
         Some(entries) if !entries.is_empty() => {
             for (index, entry) in entries.iter().enumerate() {
                 out.push_str(&format!(
@@ -308,12 +314,12 @@ pub fn reflection_input(
         _ => out.push_str("(none yet)\n"),
     }
     out.push_str(&format!(
-        "\n## Voice\nwarmth: {}\ndirectness: {}\nexplanation_density: {}\nchallenge: {}\nhumor: {}\n",
-        voice.warmth.as_str(),
-        voice.directness.as_str(),
-        voice.explanation_density.as_str(),
-        voice.challenge.as_str(),
-        voice.humor.as_str(),
+        "\n## Tone\nwarmth: {}\ndirectness: {}\nexplanation_density: {}\nchallenge: {}\nhumor: {}\n",
+        tone.warmth.as_str(),
+        tone.directness.as_str(),
+        tone.explanation_density.as_str(),
+        tone.challenge.as_str(),
+        tone.humor.as_str(),
     ));
     out.push_str("\n# Pending proposals\n");
     if pending.is_empty() {
@@ -353,7 +359,7 @@ struct RawProposal {
     #[serde(default)]
     level: Option<String>,
     #[serde(default)]
-    growth_kind: Option<String>,
+    story_kind: Option<String>,
     #[serde(default)]
     retire_index: Option<u32>,
     #[serde(default)]
@@ -381,11 +387,11 @@ pub fn parse_reflection(reply: &str, messages: &OwnerMessages) -> Vec<NewSoulPro
         .take(REFLECTION_MAX_PROPOSALS)
         .filter_map(|raw| {
             let layer = SoulProposalLayer::parse(raw.layer.trim())?;
-            let growth_kind = match raw.growth_kind.as_deref().map(str::trim) {
+            let story_kind = match raw.story_kind.as_deref().map(str::trim) {
                 None | Some("") => None,
-                Some(kind) => Some(GrowthKind::parse(kind)?),
+                Some(kind) => Some(StoryKind::parse(kind)?),
             };
-            let (session_ref, rationale) = if layer == SoulProposalLayer::Voice {
+            let (session_ref, rationale) = if layer == SoulProposalLayer::Tone {
                 let [index] = raw.evidence_indices.as_slice() else {
                     return None;
                 };
@@ -430,7 +436,7 @@ pub fn parse_reflection(reply: &str, messages: &OwnerMessages) -> Vec<NewSoulPro
                 rationale,
                 trait_key: raw.trait_key.filter(|s| !s.trim().is_empty()),
                 level: raw.level.filter(|s| !s.trim().is_empty()),
-                growth_kind,
+                story_kind,
                 retire_index: raw.retire_index,
                 session_ref: Some(session_ref),
             })
@@ -509,7 +515,7 @@ pub async fn reflect(
     store: &SoulProfileStore,
     agent_alias: &str,
     user_model: &UserModelStore,
-    configured_voice: impl Fn() -> Option<zeroclaw_config::persona::PersonaKnobs>,
+    configured_tone: impl Fn() -> Option<zeroclaw_config::persona::PersonaKnobs>,
     messages: &OwnerMessages,
     model: impl FnOnce() -> anyhow::Result<ReflectionModel>,
     since_unix: u64,
@@ -552,20 +558,20 @@ pub async fn reflect(
         receipt(OUTCOME_QUEUE_FULL.to_string(), 0, 0)
     } else {
         let profile = store.profile(agent_alias)?;
-        let voice = configured_voice().ok_or_else(|| {
+        let tone = configured_tone().ok_or_else(|| {
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
                     .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                "current configured Voice is unavailable"
+                "current configured Tone is unavailable"
             );
-            anyhow::Error::msg("current configured Voice is unavailable")
+            anyhow::Error::msg("current configured Tone is unavailable")
         })?;
-        let voice = profile
-            .voice
+        let tone = profile
+            .tone
             .as_ref()
-            .map_or(voice, |head| head.value.layered_over(voice));
-        let mut input = reflection_input(&profile, voice, &pending, messages);
+            .map_or(tone, |head| head.value.layered_over(tone));
+        let mut input = reflection_input(&profile, tone, &pending, messages);
         input.push_str("\n# Current owner model\n");
         input.push_str(
             &crate::companion::project_active_heads(
@@ -595,11 +601,11 @@ pub async fn reflect(
             Ok(reply) => {
                 let mut created = 0;
                 for proposal in parse_reflection(&reply, messages) {
-                    match store.submit_proposal_with_voice(
+                    match store.submit_proposal_with_tone(
                         agent_alias,
                         proposal,
                         now_unix,
-                        &configured_voice,
+                        &configured_tone,
                     ) {
                         Ok(SoulProposalOutcome::Recorded { .. }) => created += 1,
                         Ok(SoulProposalOutcome::AlreadyPending { .. }) => {}
@@ -966,12 +972,12 @@ mod tests {
     }
 
     #[test]
-    fn voice_evidence_survives_long_sessions_and_multilingual_rationale() {
+    fn tone_evidence_survives_long_sessions_and_multilingual_rationale() {
         let (_dir, store) = store();
         let mut owner = messages(&[&"請保持簡潔🙂\"\\".repeat(40)]);
         owner.messages[0].session_id = "thread-房間".repeat(80);
         let reply = serde_json::json!({"proposals":[{
-            "layer":"voice", "trait_key":"warmth", "level":"high",
+            "layer":"tone", "trait_key":"warmth", "level":"high",
             "proposal":"Adjust warmth.", "rationale":"理由".repeat(80),
             "evidence_indices":[0]
         }]})
@@ -997,23 +1003,26 @@ mod tests {
             proposal.session_ref
         );
         store
-            .submit_proposal_with_voice(AGENT, proposals[0].clone(), NOW, || {
-                Some(Default::default())
-            })
+            .submit_proposal_with_tone(
+                AGENT,
+                proposals[0].clone(),
+                NOW,
+                || Some(Default::default()),
+            )
             .unwrap();
         assert_eq!(store.proposals(AGENT, true).unwrap().len(), 1);
-        assert!(store.profile(AGENT).unwrap().voice.is_none());
+        assert!(store.profile(AGENT).unwrap().tone.is_none());
     }
 
     #[tokio::test]
-    async fn voice_reflection_binds_owner_reaction_and_rejects_unbound_or_large_changes() {
+    async fn tone_reflection_binds_owner_reaction_and_rejects_unbound_or_large_changes() {
         let (dir, store) = store();
         store
-            .set_growth(
+            .set_story(
                 AGENT,
-                crate::companion::SoulGrowth {
-                    entries: vec![crate::companion::GrowthEntry {
-                        kind: crate::companion::GrowthKind::Bond,
+                crate::companion::SoulStory {
+                    entries: vec![crate::companion::StoryEntry {
+                        kind: crate::companion::StoryKind::Bond,
                         text: "We share a shorthand for reviews.".into(),
                     }],
                 },
@@ -1022,9 +1031,9 @@ mod tests {
             )
             .unwrap();
         let reply = r#"{"proposals":[
-            {"layer":"voice","trait_key":"explanation_density","level":"low","proposal":"Be briefer.","rationale":"The owner asked for shorter replies.","evidence_indices":[0]},
-            {"layer":"voice","trait_key":"humor","level":"high","proposal":"More humor.","rationale":"Invented praise.","evidence_indices":[99]},
-            {"layer":"voice","trait_key":"warmth","level":"xhigh","proposal":"Much warmer.","rationale":"Thanks.","evidence_indices":[0]}
+            {"layer":"tone","trait_key":"explanation_density","level":"low","proposal":"Be briefer.","rationale":"The owner asked for shorter replies.","evidence_indices":[0]},
+            {"layer":"tone","trait_key":"humor","level":"high","proposal":"More humor.","rationale":"Invented praise.","evidence_indices":[99]},
+            {"layer":"tone","trait_key":"warmth","level":"xhigh","proposal":"Much warmer.","rationale":"Thanks.","evidence_indices":[0]}
         ]}"#;
         let (model, seen) = fake(Ok(reply));
         let receipt = reflect(
@@ -1040,7 +1049,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(receipt.proposals_created, 1);
-        assert!(store.profile(AGENT).unwrap().voice.is_none());
+        assert!(store.profile(AGENT).unwrap().tone.is_none());
         let proposals = store.proposals(AGENT, true).unwrap();
         assert!(
             proposals[0]
@@ -1056,6 +1065,94 @@ mod tests {
         assert!(seen[0].1.contains("We share a shorthand for reviews."));
     }
 
+    /// ADR-018 §2: the prompt carries the layer table, routes tone to Tone,
+    /// and states the drift floor in its new form.
+    #[test]
+    fn system_prompt_states_the_layer_duties_and_the_drift_rules() {
+        let prompt = REFLECTION_SYSTEM_PROMPT;
+        for line in [
+            "- Identity: who I am.",
+            "- Principles: what I stand for.",
+            "- Tone: how I sound, as five dials.",
+            "- Story: what has happened between us and what I have come to care about.",
+            "`self` is concerns, interests, and working habits",
+            "`bond` is shared names, references, running jokes, and ways of working",
+            "never an instruction about tone, warmth, length, or humor",
+            "An observation about tone becomes a Tone proposal or nothing; it is never a Story entry.",
+            "challenge may only be proposed upward",
+            "Familiarity alone is not consent",
+            "You cannot change your name or identity",
+            "Do not repeat a pending proposal.",
+        ] {
+            assert!(prompt.contains(line), "missing {line:?}");
+        }
+        assert!(!prompt.contains("below low"));
+        assert!(!prompt.to_lowercase().contains("growth\""));
+        assert!(!prompt.contains("voice"));
+        assert!(prompt.contains(&format!(
+            "within the last {} days",
+            crate::companion::SOUL_TONE_DIAL_COOLDOWN_SECS / (24 * 60 * 60)
+        )));
+    }
+
+    /// Reflection output goes through the same intake: a dial in cooldown or
+    /// a lowered challenge is dropped and the rest of the reply still lands.
+    #[tokio::test]
+    async fn reflection_proposals_obey_the_cooldown_and_the_challenge_floor() {
+        let (dir, store) = store();
+        let earlier = store
+            .submit_proposal_with_tone(
+                AGENT,
+                NewSoulProposal {
+                    layer: SoulProposalLayer::Tone,
+                    proposal: "Warmer.".into(),
+                    trait_key: Some("warmth".into()),
+                    level: Some("high".into()),
+                    ..NewSoulProposal::default()
+                },
+                NOW - 10,
+                || Some(PersonaKnobs::default()),
+            )
+            .unwrap();
+        let SoulProposalOutcome::Recorded { id } = earlier else {
+            panic!("{earlier:?}")
+        };
+        store
+            .resolve_proposal_with_tone(
+                AGENT,
+                id,
+                crate::companion::SoulProposalResolution::Accepted,
+                None,
+                None,
+                NOW - 5,
+                || Some(PersonaKnobs::default()),
+            )
+            .unwrap();
+        let reply = r#"{"proposals":[
+            {"layer":"tone","trait_key":"warmth","level":"xhigh","proposal":"Warmer still.","rationale":"Thanks.","evidence_indices":[0]},
+            {"layer":"tone","trait_key":"challenge","level":"low","proposal":"Agree more.","rationale":"Thanks.","evidence_indices":[0]},
+            {"layer":"tone","trait_key":"humor","level":"high","proposal":"More humor.","rationale":"Laughed.","evidence_indices":[0]}
+        ]}"#;
+        let (model, _seen) = fake(Ok(reply));
+        let receipt = reflect(
+            &store,
+            AGENT,
+            &UserModelStore::open(dir.path()).unwrap(),
+            || Some(PersonaKnobs::default()),
+            &messages(&["haha, thanks"]),
+            model,
+            NOW - REFLECTION_PERIOD_SECS,
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt.outcome, OUTCOME_OK);
+        assert_eq!(receipt.proposals_created, 1);
+        let pending = store.proposals(AGENT, true).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].trait_key.as_deref(), Some("humor"));
+    }
+
     #[tokio::test]
     async fn reflection_proposes_at_most_three_validated_changes_and_applies_nothing() {
         let (_dir, store) = store();
@@ -1063,10 +1160,10 @@ mod tests {
         let reply = r#"Here you go:
 {"proposals":[
  {"layer":"identity","proposal":"rename me to Bob","rationale":"x"},
- {"layer":"growth","growth_kind":"bond","proposal":"We call Fridays ship day.","rationale":"owner said so"},
- {"layer":"voice","trait_key":"challenge","level":"minimal","proposal":"agree more","rationale":"x"},
- {"layer":"voice","trait_key":"directness","level":"high","proposal":"be blunter","rationale":"owner asked for short answers"},
- {"layer":"growth","growth_kind":"self","proposal":"I keep answers short.","rationale":"x"}
+ {"layer":"story","story_kind":"bond","proposal":"We call Fridays ship day.","rationale":"owner said so"},
+ {"layer":"tone","trait_key":"challenge","level":"minimal","proposal":"agree more","rationale":"x"},
+ {"layer":"tone","trait_key":"directness","level":"high","proposal":"be blunter","rationale":"owner asked for short answers"},
+ {"layer":"story","story_kind":"self","proposal":"I keep answers short.","rationale":"x"}
 ]}"#;
         let (model, seen) = fake(Ok(reply));
         let receipt = reflect(
@@ -1083,7 +1180,7 @@ mod tests {
         .unwrap();
 
         // Only the first three entries are considered; identity is not a
-        // proposable layer and challenge below low fails store validation.
+        // proposable layer and lowering challenge fails store validation.
         assert_eq!(receipt.outcome, OUTCOME_OK);
         assert_eq!(receipt.messages_read, 2);
         assert_eq!(receipt.proposals_created, 1);
@@ -1128,9 +1225,9 @@ mod tests {
                 .submit_proposal(
                     AGENT,
                     NewSoulProposal {
-                        layer: SoulProposalLayer::Growth,
+                        layer: SoulProposalLayer::Story,
                         proposal: text.into(),
-                        growth_kind: Some(GrowthKind::SelfView),
+                        story_kind: Some(StoryKind::SelfView),
                         ..NewSoulProposal::default()
                     },
                     NOW - 5,
@@ -1274,10 +1371,10 @@ mod tests {
         let before = soul.profile(AGENT).unwrap();
         let reply = serde_json::json!({
             "proposals": [
-                {"layer":"growth","growth_kind":"self","proposal":"Careful communication"},
-                {"layer":"growth","growth_kind":"bond","proposal":"Shared rhythm"},
+                {"layer":"story","story_kind":"self","proposal":"Careful communication"},
+                {"layer":"story","story_kind":"bond","proposal":"Shared rhythm"},
                 {"layer":"principles","proposal":"Check assumptions"},
-                {"layer":"growth","growth_kind":"self","proposal":"Fourth must be ignored"}
+                {"layer":"story","story_kind":"self","proposal":"Fourth must be ignored"}
             ],
             "user_model_candidates": [
                 {"kind":"preference","statement":"Prefers short replies","semantic_key":"communication.short","evidence_indices":[0]},
@@ -1335,9 +1432,9 @@ mod tests {
             soul.submit_proposal(
                 AGENT,
                 NewSoulProposal {
-                    layer: SoulProposalLayer::Growth,
+                    layer: SoulProposalLayer::Story,
                     proposal: text.into(),
-                    growth_kind: Some(GrowthKind::SelfView),
+                    story_kind: Some(StoryKind::SelfView),
                     ..Default::default()
                 },
                 NOW - 5,
@@ -1379,7 +1476,7 @@ mod tests {
         let connection = rusqlite::Connection::open(dir.path().join("soul.db")).unwrap();
         connection.execute_batch("CREATE TRIGGER deny_candidate BEFORE INSERT ON soul_proposals BEGIN SELECT RAISE(ABORT, 'fixture write refusal'); END;").unwrap();
         let (model, _) = fake(Ok(
-            r#"{"proposals":[{"layer":"growth","growth_kind":"bond","proposal":"Shared shorthand"}]}"#,
+            r#"{"proposals":[{"layer":"story","story_kind":"bond","proposal":"Shared shorthand"}]}"#,
         ));
         let err = reflect(
             &soul,
@@ -1413,7 +1510,7 @@ mod tests {
         let connection = rusqlite::Connection::open(dir.path().join("user_model.db")).unwrap();
         connection.execute_batch("CREATE TRIGGER deny_second BEFORE INSERT ON user_model_candidates WHEN NEW.semantic_key = 'communication.second' BEGIN SELECT RAISE(ABORT, 'fixture second write refusal'); END;").unwrap();
         let (model, _) = fake(Ok(
-            r#"{"proposals":[{"layer":"growth","growth_kind":"bond","proposal":"Shared shorthand"}],"user_model_candidates":[{"kind":"preference","statement":"Brief replies","semantic_key":"communication.first","evidence_indices":[0]},{"kind":"preference","statement":"Detailed replies","semantic_key":"communication.second","evidence_indices":[0]}]}"#,
+            r#"{"proposals":[{"layer":"story","story_kind":"bond","proposal":"Shared shorthand"}],"user_model_candidates":[{"kind":"preference","statement":"Brief replies","semantic_key":"communication.first","evidence_indices":[0]},{"kind":"preference","statement":"Detailed replies","semantic_key":"communication.second","evidence_indices":[0]}]}"#,
         ));
         let err = reflect(
             &soul,

@@ -63,7 +63,7 @@ pub(crate) fn build_system_prompt_for_turn(
     max_system_prompt_chars: usize,
     inject_memory: bool,
     show_tool_calls: bool,
-    // Rendered `## Voice` section for this agent's persona, or `None`. See
+    // Rendered `## Tone` section for this agent's persona, or `None`. See
     // `system_prompt::build_system_prompt_with_persona` for placement rules.
     persona_section: Option<&str>,
     // Which legacy persona files still inject (ADR-015 §2, ADR-018 §6).

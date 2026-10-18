@@ -91,19 +91,22 @@ A rejected User Model candidate can be narrowed once from its review history.
 Soul proposals have no generic scope-narrowing action. Stale Soul proposals
 show the backend reason and offer dismissal instead of another acceptance. Agent selection filters
 Soul and reflection records, while the shared User Model retains its recorded
-scopes. Approval cards display the canonical Growth retirement target and
+scopes. Approval cards display the canonical Story retirement target and
 revision, or the User Model kind, semantic key and current head replaced by
 acceptance. Current heads must load before candidate approval is available.
 Evidence is displayed as text, never executed as HTML.
 
-My Agent shows the four Soul layers, provenance and history. Restoring an older
-Soul revision appends a new revision and includes the current revision for
-conflict detection. About me shows active owner-authorized entries and the
-candidate review history; there is no User Model rollback button. Effective
-Voice and per-key sources are read from the gateway when available, without
-recalculating precedence in the browser. Older gateways show configured and
-stored Voice separately. History shows proposal IDs and restored revision IDs
-when present, and candidate state/action labels follow the UI locale.
+My Agent shows the four Soul layers (Identity, Principles, Tone and Our story),
+provenance and history. Restoring an older Soul revision appends a new revision
+and includes the current revision for conflict detection. About me shows active
+owner-authorized entries and the candidate review history; there is no User
+Model rollback button. Effective Tone and per-key sources are read from the
+gateway when available, without recalculating precedence in the browser. Older
+gateways show configured and stored Tone separately. A Tone approval that would
+lower `challenge`, or change a dial inside its 28-day cooldown, is refused by
+the gateway and the card says why; the proposal stays pending for dismissal.
+History shows proposal IDs and restored revision IDs when present, and
+candidate state/action labels follow the UI locale.
 
 These pages add no background notification channel or offline record cache.
 They do not establish PWA installability or closed-app delivery. Deploy the web

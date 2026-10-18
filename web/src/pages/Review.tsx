@@ -6,7 +6,7 @@ import { t } from '@/lib/i18n';
 import { reflectionOutcome, validationMessage, displayedHead, canNarrow, validNarrowScope, canReword, decisionRequest, reviewFetch, loadCandidatePage, appendCandidatePage, ReviewError, type CandidatePage, type CandidateHistory, type Decision, type Head, type Inbox, type InboxItem, type Layer, type Revision, type Soul } from '@/lib/review';
 const field = 'w-full min-h-11 rounded-md border border-pc-border bg-pc-base p-3 text-pc-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]';
 const date = (value: number) => new Date(value * 1000).toLocaleString();
-const layers: Layer[] = ['identity', 'principles', 'growth', 'voice'];
+const layers: Layer[] = ['identity', 'principles', 'tone', 'story'];
 function Value({ value }: {
     value: unknown;
 }) {
@@ -25,7 +25,7 @@ function Value({ value }: {
             </div>)}</dl>;
     return <span className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{String(value)}</span>;
 }
-function VoiceSource({ source }: { source?: NonNullable<Soul['voice']['sources']>[string] }) {
+function ToneSource({ source }: { source?: NonNullable<Soul['tone']['sources']>[string] }) {
     if (!source) return <span>{t('review.unavailable')}</span>;
     return <span>{t(`review.${source.kind}`)}
         {source.kind === 'stored' && ` · ${t('review.revision')} ${source.revision}`}
@@ -78,7 +78,7 @@ function ProposalCard({ item, act, busy, heads, headsAvailable, canApproveUserMo
     {!user && <>
         <p className="text-sm text-pc-text-secondary break-words">{item.item.rationale}</p>
         <p className="text-sm">{t(`review.${item.item.layer}`)} {item.item.trait_key && `${t(`review.${item.item.trait_key}`)} → ${t(`review.${item.item.level}`)}`}{item.item.retire_index !== undefined && ` · ${t('review.retire')}`}</p>
-        {item.item.growth_kind && <p>{t('review.kind')}: {t(`review.${item.item.growth_kind}`)}</p>}
+        {item.item.story_kind && <p>{t('review.kind')}: {t(`review.${item.item.story_kind}`)}</p>}
         {item.item.retire_index !== undefined && <div className="space-y-2">
             <p className="font-medium">{t('review.retire_target')} · {t('review.revision')} {item.item.target_revision ?? t('review.unavailable')}</p>
             {item.item.retire_target ? <><p>{t(`review.${item.item.retire_target.kind}`)}</p><p className="whitespace-pre-wrap break-words">{item.item.retire_target.text}</p></> : <p>{t('review.unavailable')}</p>}
@@ -167,7 +167,7 @@ export default function Review() {
             setCandidate(null);
             resetCandidateHistory();
         }
-        setError(t(err instanceof ReviewError && err.code === 'pagination_unavailable' ? 'review.upgrade_history' : err instanceof ReviewError && err.status === 400 && err.code === 'invalid' ? validationMessage(err) : err instanceof ReviewError ? `review.error_${[401, 403, 409, 429, 503].includes(err.status) ? err.status : 'other'}` : 'review.error_other'));
+        setError(t(err instanceof ReviewError && err.code === 'pagination_unavailable' ? 'review.upgrade_history' : err instanceof ReviewError && err.status === 400 && err.code === 'invalid' ? validationMessage(err) : err instanceof ReviewError && err.status === 429 && err.code === 'tone_dial_cooldown' ? 'review.dial_cooldown' : err instanceof ReviewError ? `review.error_${[401, 403, 409, 429, 503].includes(err.status) ? err.status : 'other'}` : 'review.error_other'));
     };
     useEffect(() => {
         if (!needsPair) return;
@@ -346,15 +346,15 @@ export default function Review() {
       {tab === 'inbox' && inbox && <section>
             <p className="text-sm text-pc-text-muted">{t('review.shared_hint')}</p>{inbox.items.length === 0 && <p className="py-10 text-pc-text-secondary">{t('review.empty')}</p>}{inbox.items.map(item => <ProposalCard key={item.id} item={item} heads={heads} headsAvailable={headRead !== null} canApproveUserModel={canApproveUserModel} busy={busy} act={act} stale={staleProposals.has(item.id)}/>)}{inbox.next_offset !== null && <Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/review/inbox?limit=100&offset=${inbox.next_offset}${agent ? `&agent=${encodeURIComponent(agent)}` : ''}`, value => setInbox(value as Inbox))}>{t('review.next')}</Button>}</section>}
       {tab === 'profile' && soul && <section className="space-y-8">{layers.map(layer => {
-                    const head = layer === 'voice' ? soul.voice.stored : soul[layer];
+                    const head = layer === 'tone' ? soul.tone.stored : soul[layer];
                     return <article key={layer} className="border-t border-pc-border pt-5 space-y-4">
-                    <h2 className="text-xl font-medium">{t(`review.${layer}`)}</h2>{layer === 'voice' ? soul.voice.effective ? <dl className="space-y-4">{Object.entries(soul.voice.effective).map(([dial, level]) => <div key={dial}>
+                    <h2 className="text-xl font-medium">{t(`review.${layer}`)}</h2>{layer === 'tone' ? soul.tone.effective ? <dl className="space-y-4">{Object.entries(soul.tone.effective).map(([dial, level]) => <div key={dial}>
                             <dt className="text-sm text-pc-text-secondary">{t(`review.${dial}`)}</dt>
                             <dd className="font-medium">{t(`review.${level}`)}</dd>
                             <dd className="text-xs text-pc-text-muted">
-                            <VoiceSource source={soul.voice.sources?.[dial]}/>
+                            <ToneSource source={soul.tone.sources?.[dial]}/>
                             </dd>
-                            </div>)}</dl> : <div className="space-y-4"><p>{t('review.voice_unavailable')}</p><h3 className="font-medium">{t('review.configured')}</h3><Value value={soul.voice.configured}/><h3 className="font-medium">{t('review.stored')}</h3><Value value={soul.voice.stored?.value}/></div> : <Value value={head?.value}/>}{head && <p className="text-xs text-pc-text-muted">{t('review.revision')} {head.revision} · {t(`review.${head.source}`)} · {date(head.created_at_unix)}</p>}<Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/soul/history?agent=${encodeURIComponent(agent)}&layer=${layer}`, value => setHistory(value as {
+                            </div>)}</dl> : <div className="space-y-4"><p>{t('review.tone_unavailable')}</p><h3 className="font-medium">{t('review.configured')}</h3><Value value={soul.tone.configured}/><h3 className="font-medium">{t('review.stored')}</h3><Value value={soul.tone.stored?.value}/></div> : <Value value={head?.value}/>}{head && <p className="text-xs text-pc-text-muted">{t('review.revision')} {head.revision} · {t(`review.${head.source}`)} · {date(head.created_at_unix)}</p>}<Button variant="ghost" disabled={busy} onClick={() => void inspect(`/api/soul/history?agent=${encodeURIComponent(agent)}&layer=${layer}`, value => setHistory(value as {
                         layer: Layer;
                         revisions: Revision[];
                     }))}>{t('review.history')}</Button>{history?.layer === layer && <div className="space-y-5 pl-3 border-l border-pc-border">{history.revisions.slice().reverse().map(revision => <div key={revision.revision} className="space-y-3">

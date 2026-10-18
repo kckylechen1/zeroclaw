@@ -15,7 +15,7 @@ pub const COMPACT_BOOTSTRAP_MAX_CHARS: usize = 6_000;
 pub const NO_TOOLS_TASK_FRAMING: &str = "No tools are available for this turn";
 pub const NATIVE_TOOLS_TASK_FRAMING: &str = "Use tools when the request requires action";
 
-use crate::agent::persona_projection::LegacyPersonaFiles;
+use crate::agent::persona_projection::{LegacyPersonaFiles, STORY_HEADING};
 use crate::agent::personality::{NOTES_FILES, NOTES_FRAMING_LINE, NOTES_HEADING};
 
 /// Workspace files `doctor` scans (plus the conditional `BOOTSTRAP.md` /
@@ -212,7 +212,7 @@ pub fn build_system_prompt_with_mode_and_autonomy(
 }
 
 /// Like [`build_system_prompt_with_mode_and_autonomy`] but additionally
-/// accepts a pre-rendered persona `## Voice` section
+/// accepts a pre-rendered persona `## Tone` section
 /// ([`zeroclaw_config::persona::PersonaKnobs::to_prompt_section`]).
 /// `persona_section: None` (the case `build_system_prompt_with_mode_and_autonomy`
 /// always passes) produces byte-identical output to before this section
@@ -232,10 +232,10 @@ pub fn build_system_prompt_with_persona(
     max_system_prompt_chars: usize,
     inject_memory: bool,
     show_tool_calls: bool,
-    // Governed Soul projection with trailing Voice, or a standalone Voice
-    // section. Hard honesty blocks precede it. Optional Voice yields first
-    // when the assembled prompt exceeds its budget; other layers keep their
-    // existing placement and bounds.
+    // Governed Soul projection ending in Tone and Story, or a standalone Tone
+    // section. Hard honesty blocks precede it. The optional Tone-and-Story
+    // tail yields first when the assembled prompt exceeds its budget; other
+    // layers keep their existing placement and bounds.
     persona_section: Option<&str>,
     // Which legacy persona files are still injected: `SOUL.md` / `IDENTITY.md`
     // retire once the owner has written a governed Identity (ADR-015 §2),
@@ -272,27 +272,33 @@ pub fn build_system_prompt_with_persona(
         );
     }
 
-    // ── 0c. Voice (persona dials) ───────────────────────────────
+    // ── 0c. Tone (persona dials) ────────────────────────────────
     // Must sit after the two hard behavioural blocks above (a persona dial
     // must never be able to displace anti-narration or tool honesty) and
     // before the tools list below. If the prompt exceeds its budget, discard
-    // the optional trailing Voice first so style cannot displace safety,
-    // approval guidance or the governed Identity/Principles/Growth layers.
-    let mut voice_range = None;
+    // the optional tail first, lowest precedence first (ADR-018 §2): Story,
+    // then Tone if still over budget, so style and shared history cannot
+    // displace safety, approval guidance or the governed Identity/Principles
+    // layers.
+    let mut tone_range = None;
+    let mut story_range = None;
     if let Some(section) = persona_section
         && !section.is_empty()
     {
-        let voice_start = if section.starts_with("## Voice\n") {
+        let tone_start = if section.starts_with("## Tone\n") {
             Some(0)
         } else {
-            section.rfind("\n## Voice\n")
+            section.rfind("\n## Tone\n")
         };
+        let story_start = section.find(&format!("\n{STORY_HEADING}\n"));
         let start = prompt.len();
         prompt.push_str(section);
         prompt.push('\n');
-        voice_range = voice_start.map(|offset| {
-            let end = prompt.len() - usize::from(offset > 0);
-            start + offset..end
+        let end = prompt.len();
+        story_range = story_start.map(|offset| start + offset..end - 1);
+        tone_range = tone_start.map(|offset| {
+            let tone_end = story_start.map_or(end - usize::from(offset > 0), |story| start + story);
+            start + offset..tone_end
         });
     }
 
@@ -536,11 +542,12 @@ pub fn build_system_prompt_with_persona(
     } // end if !compact_context (Channel Capabilities)
 
     // ── 9. Truncation (max_system_prompt_chars budget) ──────────
-    if max_system_prompt_chars > 0
-        && prompt.len() > max_system_prompt_chars
-        && let Some(range) = voice_range
-    {
-        prompt.replace_range(range, "");
+    // Story renders after Tone, so removing it first leaves the Tone range
+    // valid.
+    for range in [story_range, tone_range].into_iter().flatten() {
+        if max_system_prompt_chars > 0 && prompt.len() > max_system_prompt_chars {
+            prompt.replace_range(range, "");
+        }
     }
     if max_system_prompt_chars > 0 && prompt.len() > max_system_prompt_chars {
         // Truncate on a char boundary, keeping the top portion (identity + safety).
@@ -998,14 +1005,14 @@ mod tests {
         assert!(suppressed.contains("You are Nova."));
     }
 
-    /// `## Voice` must land after both hard behavioural blocks (anti-narration,
+    /// `## Tone` must land after both hard behavioural blocks (anti-narration,
     /// tool honesty) and before the tools list — a persona dial must never be
     /// able to displace either, and truncation keeps only the top of the
-    /// prompt, so voice has to sit high enough to survive it.
+    /// prompt, so tone has to sit high enough to survive it.
     #[test]
-    fn voice_section_lands_after_honesty_blocks_and_before_tools() {
+    fn tone_section_lands_after_honesty_blocks_and_before_tools() {
         let tools = [("shell", "Run a shell command")];
-        let prompt = build_with_persona(&tools, Some("## Voice\n\n- Be terse.\n"));
+        let prompt = build_with_persona(&tools, Some("## Tone\n\n- Be terse.\n"));
 
         let narration_pos = prompt
             .find("## CRITICAL: No Tool Narration")
@@ -1013,34 +1020,47 @@ mod tests {
         let honesty_pos = prompt
             .find("## CRITICAL: Tool Honesty")
             .expect("tool honesty block present");
-        let voice_pos = prompt.find("## Voice").expect("Voice section present");
+        let tone_pos = prompt.find("## Tone").expect("Tone section present");
         let tools_pos = prompt.find("## Tools").expect("Tools section present");
 
         assert!(
-            narration_pos < voice_pos && honesty_pos < voice_pos,
-            "Voice must come after both anti-narration and tool-honesty blocks"
+            narration_pos < tone_pos && honesty_pos < tone_pos,
+            "Tone must come after both anti-narration and tool-honesty blocks"
         );
-        assert!(
-            voice_pos < tools_pos,
-            "Voice must come before the tools list"
-        );
+        assert!(tone_pos < tools_pos, "Tone must come before the tools list");
     }
 
     #[test]
-    fn voice_yields_to_capped_prompt_without_displacing_governed_identity_or_safety() {
+    fn tone_yields_to_capped_prompt_without_displacing_governed_identity_or_safety() {
         let workspace = tempfile::TempDir::new().unwrap();
         let policy = zeroclaw_config::schema::RiskProfileConfig::default();
         let config = zeroclaw_config::schema::Config {
             data_dir: workspace.path().to_path_buf(),
             ..Default::default()
         };
-        let with_voice = crate::agent::persona_projection::persona_projection(&config, "nova")
+        // Story renders after Tone and is dropped first when the budget bites.
+        zeroclaw_memory::companion::SoulProfileStore::shared(&config.data_dir)
+            .unwrap()
+            .set_story(
+                "nova",
+                zeroclaw_memory::companion::SoulStory {
+                    entries: vec![zeroclaw_memory::companion::StoryEntry {
+                        kind: zeroclaw_memory::companion::StoryKind::Bond,
+                        text: "Fridays are ship day.".into(),
+                    }],
+                },
+                0,
+                1,
+            )
+            .unwrap();
+        let with_tone = crate::agent::persona_projection::persona_projection(&config, "nova")
             .section
             .unwrap();
-        let (governed, _) = with_voice.rsplit_once("\n\n## Voice\n").unwrap();
+        assert!(with_tone.contains("\n\n## Our story so far\n"));
+        let (governed, _) = with_tone.split_once("\n\n## Tone\n").unwrap();
         // The canonical projection joins trimmed layers and appends one newline.
         let identity = format!("{governed}\n");
-        let voice = zeroclaw_config::persona::PersonaKnobs::default()
+        let tone = zeroclaw_config::persona::PersonaKnobs::default()
             .to_prompt_section()
             .unwrap();
         let render = |persona: &str, cap| {
@@ -1065,25 +1085,34 @@ mod tests {
         let baseline = render(&identity, 0);
         assert!(baseline.contains("## Safety"));
         for cap in [4000, baseline.len()] {
-            assert_eq!(render(&with_voice, cap), render(&identity, cap));
+            assert_eq!(render(&with_tone, cap), render(&identity, cap));
             assert!(
-                render(&with_voice, cap)
+                render(&with_tone, cap)
                     .contains(crate::agent::persona_projection::IDENTITY_HONESTY_LINE)
             );
         }
-        assert!(render(&with_voice, 0).contains(&voice));
+        assert!(render(&with_tone, 0).contains(&tone));
+        assert!(render(&with_tone, 0).contains("- Between us: Fridays are ship day.\n"));
+        // A budget that fits Tone but not Story drops Story only.
+        let (before_story, _) = with_tone.split_once("\n\n## Our story so far\n").unwrap();
+        let tone_only = format!("{before_story}\n");
+        let cap = render(&tone_only, 0).len();
+        assert_eq!(render(&with_tone, cap), render(&tone_only, cap));
+        assert!(render(&with_tone, cap).contains(&tone));
+        assert!(!render(&with_tone, cap).contains("Fridays are ship day."));
+        assert!(!render(&with_tone, 4000).contains("Fridays are ship day."));
     }
 
     /// Regression guard: `build_system_prompt_with_mode_and_autonomy` (every
-    /// caller that predates persona wiring) must never emit `## Voice` —
+    /// caller that predates persona wiring) must never emit `## Tone` —
     /// its `persona_section` is hard-wired to `None`.
     #[test]
-    fn no_persona_produces_no_voice_section() {
+    fn no_persona_produces_no_tone_section() {
         let tools = [("shell", "Run a shell command")];
         let prompt = build_with_persona(&tools, None);
         assert!(
-            !prompt.contains("## Voice"),
-            "no persona section should mean no Voice heading"
+            !prompt.contains("## Tone"),
+            "no persona section should mean no Tone heading"
         );
     }
 

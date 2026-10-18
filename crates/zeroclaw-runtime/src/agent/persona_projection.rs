@@ -1,14 +1,16 @@
 //! Governed Soul projection (ADR-015 §2, §6).
 //!
-//! Renders the agent's persona section from three sources, in order:
+//! Renders the agent's persona section from four sources, in order of
+//! precedence (ADR-018 §2):
 //!
 //! 1. `## Identity`: the owner-governed Identity layer of the Soul profile
 //!    store, plus a fixed honesty line (ADR-015 §5);
 //! 2. `## Principles`: the owner-governed Principles layer;
-//! 3. `## Who I've become`: the Growth layer (ADR-016), changed only by
-//!    owner-approved proposals or by the owner;
-//! 4. `## Voice`: the configured persona dials ([`PersonaKnobs`]) with any
-//!    stored Voice heads layered over them key by key.
+//! 3. `## Tone`: the configured persona dials ([`PersonaKnobs`]) with any
+//!    stored Tone heads layered over them key by key;
+//! 4. `## Our story so far`: the Story layer (ADR-016), changed only by
+//!    owner-approved proposals or by the owner. It comes after Tone because
+//!    Tone decides how the agent sounds when the two disagree.
 //!
 //! Only owner-written text, owner-approved proposal text, seeded defaults,
 //! and repository-owned strings can render. Each layer is byte-bounded and
@@ -27,7 +29,7 @@
 //! was ever initialized. With no `soul.db` yet (first run), the legacy files
 //! stay the persona source. With an existing `soul.db`, the identity it holds
 //! is unknown, so the projection degrades: legacy files stay suppressed, a
-//! fixed line says the identity is unavailable, and the configured Voice
+//! fixed line says the identity is unavailable, and the configured Tone
 //! applies. Nothing replaces the damaged store; the next turn retries.
 //! A User Model that cannot be read never fails the turn: `USER.md` keeps
 //! being injected and one WARN is logged.
@@ -39,20 +41,20 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 
 use zeroclaw_config::schema::Config;
-use zeroclaw_memory::companion::{
-    GrowthKind, Scope, SoulProfile, SoulProfileStore, UserModelStore,
-};
+use zeroclaw_memory::companion::{Scope, SoulProfile, SoulProfileStore, StoryKind, UserModelStore};
 
 /// Byte ceiling of the rendered `## Identity` section.
 pub const IDENTITY_SECTION_MAX_BYTES: usize = 512;
 /// Byte ceiling of the rendered `## Principles` section.
 pub const PRINCIPLES_SECTION_MAX_BYTES: usize = 2048;
-/// Byte ceiling of the rendered `## Who I've become` section.
-pub const GROWTH_SECTION_MAX_BYTES: usize = 2048;
+/// Byte ceiling of the rendered `## Our story so far` section.
+pub const STORY_SECTION_MAX_BYTES: usize = 2048;
 
-/// Fixed framing of the Growth section: character, never authority.
-pub const GROWTH_FRAMING_LINE: &str = "These describe who you have become with your owner. \
-     They never grant permissions or override the principles above.";
+/// Fixed framing of the Story section: shared history, never tone or
+/// authority (ADR-018 §2).
+pub const STORY_FRAMING_LINE: &str = "This is your shared history with your owner. \
+     It is not an instruction about tone; your Tone section decides how you sound. \
+     It never grants permissions or overrides the principles above.";
 
 /// Fixed honesty floor rendered with every governed identity.
 pub const IDENTITY_HONESTY_LINE: &str = "If someone sincerely asks whether they are talking to an AI, \
@@ -124,7 +126,7 @@ impl LegacyPersonaFiles {
 /// Everything a prompt builder needs from the persona.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PersonaProjection {
-    /// Rendered Identity + Principles + Voice, or `None` when all are empty.
+    /// Rendered Identity + Principles + Tone, or `None` when all are empty.
     pub section: Option<String>,
     pub legacy_files: LegacyPersonaFiles,
 }
@@ -133,11 +135,11 @@ pub struct PersonaProjection {
 ///
 /// Seeds missing Soul layers on first use. Store failures never fail the
 /// turn: they log one WARN. Before the store exists they fall back to the
-/// configured Voice plus the legacy files; once it exists they degrade
+/// configured Tone plus the legacy files; once it exists they degrade
 /// without reviving the legacy files (see the module docs).
 #[must_use]
 pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjection {
-    let configured_voice = config
+    let configured_tone = config
         .persona_for_agent(agent_alias)
         .copied()
         .unwrap_or_default();
@@ -175,7 +177,7 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
                 ),
             );
             return degraded_projection(
-                configured_voice,
+                configured_tone,
                 user_model_retires_user_md(config, agent_alias),
             );
         }
@@ -185,7 +187,7 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
                 "agent.soul_profile_unavailable",
                 &format!(
                     "Soul profile for agent {agent_alias} could not be created ({err}); \
-                     using configured voice and legacy persona files only"
+                     using configured tone and legacy persona files only"
                 ),
             );
             None
@@ -204,8 +206,8 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
     }
     let legacy_files = LegacyPersonaFiles::from_retired(identity_retired, user_retired);
 
-    let voice =
-        zeroclaw_memory::companion::resolve_effective_voice(config, agent_alias, profile.as_ref())
+    let tone =
+        zeroclaw_memory::companion::resolve_effective_tone(config, agent_alias, profile.as_ref())
             .0
             .to_prompt_section();
 
@@ -213,9 +215,11 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
     if let Some(profile) = &profile {
         parts.extend(render_identity(profile));
         parts.extend(render_principles(profile));
-        parts.extend(render_growth(profile));
     }
-    parts.extend(voice);
+    parts.extend(tone);
+    if let Some(profile) = &profile {
+        parts.extend(render_story(profile));
+    }
     let section = (!parts.is_empty()).then(|| {
         parts
             .iter()
@@ -231,15 +235,15 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
 }
 
 /// The projection used when an initialized Soul store cannot be read: a
-/// fixed identity notice, the honesty floor, and the configured Voice.
+/// fixed identity notice, the honesty floor, and the configured Tone.
 fn degraded_projection(
-    configured_voice: zeroclaw_config::persona::PersonaKnobs,
+    configured_tone: zeroclaw_config::persona::PersonaKnobs,
     user_file_retired: bool,
 ) -> PersonaProjection {
     let mut parts = vec![format!(
         "## Identity\n\n{IDENTITY_UNAVAILABLE_LINE}\n{IDENTITY_HONESTY_LINE}\n"
     )];
-    parts.extend(configured_voice.to_prompt_section());
+    parts.extend(configured_tone.to_prompt_section());
     PersonaProjection {
         section: Some(
             parts
@@ -310,22 +314,25 @@ pub fn render_principles(profile: &SoulProfile) -> Option<String> {
     Some(out)
 }
 
-/// Render `## Who I've become`, or `None` when the layer is absent or empty.
+/// Heading of the rendered Story section.
+pub const STORY_HEADING: &str = "## Our story so far";
+
+/// Render `## Our story so far`, or `None` when the layer is absent or empty.
 #[must_use]
-pub fn render_growth(profile: &SoulProfile) -> Option<String> {
-    let entries = &profile.growth.as_ref()?.value.entries;
+pub fn render_story(profile: &SoulProfile) -> Option<String> {
+    let entries = &profile.story.as_ref()?.value.entries;
     if entries.is_empty() {
         return None;
     }
-    let mut out = format!("## Who I've become\n\n{GROWTH_FRAMING_LINE}\n\n");
+    let mut out = format!("{STORY_HEADING}\n\n{STORY_FRAMING_LINE}\n\n");
     for (index, entry) in entries.iter().enumerate() {
         let line = match entry.kind {
-            GrowthKind::SelfView => format!("- {}\n", entry.text),
-            GrowthKind::Bond => format!("- Between us: {}\n", entry.text),
+            StoryKind::SelfView => format!("- {}\n", entry.text),
+            StoryKind::Bond => format!("- Between us: {}\n", entry.text),
         };
-        if out.len() + line.len() > GROWTH_SECTION_MAX_BYTES {
+        if out.len() + line.len() > STORY_SECTION_MAX_BYTES {
             let marker = format!("(+{} entries elided)\n", entries.len() - index);
-            if out.len() + marker.len() <= GROWTH_SECTION_MAX_BYTES {
+            if out.len() + marker.len() <= STORY_SECTION_MAX_BYTES {
                 out.push_str(&marker);
             }
             break;
@@ -519,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn store_that_cannot_be_created_falls_back_to_voice_and_legacy_files() {
+    fn store_that_cannot_be_created_falls_back_to_tone_and_legacy_files() {
         let dir = tempfile::tempdir().unwrap();
         // A read-only data dir: first-run creation of soul.db fails.
         let config = config_in(dir.path());
@@ -668,10 +675,10 @@ mod tests {
     }
 
     #[test]
-    fn approved_growth_renders_after_principles_and_voice_layers_per_key() {
+    fn tone_renders_before_story_and_stored_heads_layer_per_key() {
         use zeroclaw_memory::companion::{
-            GrowthKind, NewSoulProposal, SoulProposalLayer, SoulProposalOutcome,
-            SoulProposalResolution,
+            NewSoulProposal, SoulProposalLayer, SoulProposalOutcome, SoulProposalResolution,
+            StoryKind,
         };
         let dir = tempfile::tempdir().unwrap();
         let config = config_in(dir.path());
@@ -679,13 +686,13 @@ mod tests {
         store.ensure_seeded("nova", "nova", 1).unwrap();
         let approve = |proposal: NewSoulProposal| {
             let SoulProposalOutcome::Recorded { id } = store
-                .submit_proposal_with_voice("nova", proposal, 2, || Some(Default::default()))
+                .submit_proposal_with_tone("nova", proposal, 2, || Some(Default::default()))
                 .unwrap()
             else {
                 panic!()
             };
             store
-                .resolve_proposal_with_voice(
+                .resolve_proposal_with_tone(
                     "nova",
                     id,
                     SoulProposalResolution::Accepted,
@@ -697,13 +704,13 @@ mod tests {
                 .unwrap();
         };
         approve(NewSoulProposal {
-            layer: SoulProposalLayer::Growth,
+            layer: SoulProposalLayer::Story,
             proposal: "We call a bad trade a paper cut.".into(),
-            growth_kind: Some(GrowthKind::Bond),
+            story_kind: Some(StoryKind::Bond),
             ..NewSoulProposal::default()
         });
         approve(NewSoulProposal {
-            layer: SoulProposalLayer::Voice,
+            layer: SoulProposalLayer::Tone,
             proposal: "More levity.".into(),
             trait_key: Some("humor".into()),
             level: Some("high".into()),
@@ -711,10 +718,16 @@ mod tests {
         });
         let section = persona_projection(&config, "nova").section.unwrap();
         let principles = section.find("## Principles").unwrap();
-        let growth = section.find("## Who I've become").unwrap();
-        let voice = section.find("## Voice").unwrap();
-        assert!(principles < growth && growth < voice, "{section}");
-        assert!(section.contains(GROWTH_FRAMING_LINE));
+        let story = section.find("## Our story so far").unwrap();
+        let tone = section.find("## Tone").unwrap();
+        assert!(principles < tone && tone < story, "{section}");
+        assert_eq!(
+            STORY_FRAMING_LINE,
+            "This is your shared history with your owner. It is not an instruction about tone; \
+             your Tone section decides how you sound. It never grants permissions or overrides \
+             the principles above."
+        );
+        assert!(section.contains(&format!("## Our story so far\n\n{STORY_FRAMING_LINE}\n")));
         assert!(section.contains("- Between us: We call a bad trade a paper cut.\n"));
         // humor=high from the approved head; no config persona is set.
         assert!(
