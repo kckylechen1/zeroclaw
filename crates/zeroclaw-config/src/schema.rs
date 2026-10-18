@@ -3776,7 +3776,7 @@ impl Config {
     }
 
     /// The canonical persona selection, including its registry alias and
-    /// optional card path for derived Voice provenance.
+    /// optional card path for derived Tone provenance.
     #[must_use]
     pub fn persona_selection_for_agent(
         &self,
