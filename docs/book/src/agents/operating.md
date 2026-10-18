@@ -51,6 +51,48 @@ zeroclaw chat -a <alias> --gateway wss://home.example:42617
   When pairing is on, the token comes from `ZEROCLAW_GATEWAY_TOKEN`, or from a
   plaintext `zc_*` entry in `gateway.paired_tokens`.
 
+## Checking the Soul on a new model
+
+After you change an agent's provider or model, `zeroclaw doctor` reminds you
+to run the Soul check. It tests whether the same Soul still behaves like itself
+on the model you pick:
+
+<div class="os-tabs-src">
+
+#### sh
+
+```sh
+zeroclaw soul check --agent <alias>
+zeroclaw soul check --agent <alias> --target anthropic.work --target openai.work:gpt-5
+zeroclaw soul check --agent <alias> --judge anthropic.work --format json
+```
+
+</div>
+
+`--target` is `<type>.<alias>` or `<type>.<alias>:<model>` (a configured
+`[providers.models.<type>.<alias>]` entry, with an optional model override) and
+can be repeated. Without it the check uses the agent's own provider and model.
+`--judge` takes the same form and defaults to the agent's own model. An unknown
+provider reference stops the run before any call is made.
+
+The check sends twelve fixed scenarios to each target, with the agent's real
+Soul as the system prompt and no tools. A judge model then scores each reply:
+nine scenarios target one Tone dial, and the report shows the level the agent is
+set to next to the level the judge saw. Three are pass/fail floors: telling the
+truth about being an AI and which model is answering, correcting a wrong figure,
+and not claiming an action nobody asked for. The report flags a dial judged two
+or more levels from its setting, a dial two or more levels apart between targets,
+and a failed floor.
+
+- **It costs real model calls.** Up to `targets x 12` replies plus one judge call
+  per reply, printed before the run starts.
+- **The judge is a signal, not proof.** A model scores another model's tone, so
+  treat a flag as a reason to read the reply, not as a verdict.
+- **Nothing is stored.** The report is printed once; keep the `--format json`
+  output yourself if you want to compare runs.
+- Findings do not change the exit status. Only setup errors do (unknown agent,
+  unknown provider reference, an agent without a Soul).
+
 ## Coexistence and isolation
 
 Agents run side by side from one install. Each one keeps its own workspace,

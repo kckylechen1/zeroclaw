@@ -85,6 +85,7 @@ pub fn diagnose(config: &Config) -> Vec<DiagResult> {
     check_workspace(config, &mut items);
     check_bootstrap_truncation(config, &mut items);
     check_personality_truncation(config, &mut items);
+    check_soul_check_hint(config, &mut items);
     check_daemon_state(config, &mut items);
     check_environment(&mut items);
 
@@ -1367,6 +1368,37 @@ fn check_personality_truncation(config: &Config, items: &mut Vec<DiagItem>) {
                 items.push(DiagItem::warn(cat, message));
             }
         }
+    }
+}
+
+/// Soul check reminder (ADR-018 §5): every enabled agent that has a Soul store
+/// is told how to confirm it still behaves like itself after a provider or
+/// model change. Informational only: doctor keeps no history, so it cannot
+/// tell whether the provider or model changed, and the check spends real
+/// model calls, so it is never run from here.
+fn check_soul_check_hint(config: &Config, items: &mut Vec<DiagItem>) {
+    let has_store = config
+        .data_dir
+        .join(zeroclaw_memory::companion::SOUL_PROFILE_DB_FILE)
+        .is_file();
+    if !has_store {
+        return;
+    }
+    let mut aliases: Vec<&str> = config
+        .agents
+        .iter()
+        .filter(|(_, agent)| agent.enabled)
+        .map(|(alias, _)| alias.as_str())
+        .collect();
+    aliases.sort_unstable();
+    for alias in aliases {
+        items.push(DiagItem::ok(
+            "agent.soul",
+            crate::i18n::get_required_cli_string_with_args(
+                "cli-doctor-soul-check-hint",
+                &[("alias", alias)],
+            ),
+        ));
     }
 }
 

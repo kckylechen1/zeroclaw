@@ -462,6 +462,67 @@ fn security_status_cli_requires_agent_and_parses_json_form() {
 
 #[test]
 #[cfg(feature = "agent-runtime")]
+fn soul_check_cli_requires_agent_and_parses_repeatable_targets() {
+    let err = Cli::try_parse_from(["zeroclaw", "soul", "check"])
+        .expect_err("soul check requires --agent");
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+
+    let cli = Cli::try_parse_from(["zeroclaw", "soul", "check", "--agent", "ops"])
+        .expect("soul check --agent should parse");
+    match cli.command {
+        Commands::Soul {
+            soul_command:
+                SoulCommands::Check {
+                    agent,
+                    targets,
+                    judge,
+                    format,
+                },
+        } => {
+            assert_eq!(agent, "ops");
+            assert!(targets.is_empty(), "defaults to the agent's own model");
+            assert_eq!(judge, None);
+            assert_eq!(format, commands::soul::OutputFormat::Table);
+        }
+        other => panic!("expected soul check command, got {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "zeroclaw",
+        "soul",
+        "check",
+        "--agent",
+        "ops",
+        "--target",
+        "anthropic.work",
+        "--target",
+        "ollama.local:llama3:8b",
+        "--judge",
+        "openai.work:gpt-5",
+        "--format",
+        "json",
+    ])
+    .expect("repeated --target should parse");
+    match cli.command {
+        Commands::Soul {
+            soul_command:
+                SoulCommands::Check {
+                    targets,
+                    judge,
+                    format,
+                    ..
+                },
+        } => {
+            assert_eq!(targets, ["anthropic.work", "ollama.local:llama3:8b"]);
+            assert_eq!(judge.as_deref(), Some("openai.work:gpt-5"));
+            assert_eq!(format, commands::soul::OutputFormat::Json);
+        }
+        other => panic!("expected soul check command, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "agent-runtime")]
 fn gateway_get_paircode_rotate_flags_parse_and_conflict() {
     let cli = Cli::try_parse_from(["zeroclaw", "gateway", "get-paircode", "--rotate"])
         .expect("gateway get-paircode --rotate should parse");

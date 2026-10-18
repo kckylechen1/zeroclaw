@@ -411,6 +411,32 @@ enum EvalCommands {
     },
 }
 
+/// Subcommands for `zeroclaw soul`.
+#[cfg(feature = "agent-runtime")]
+#[derive(Subcommand, Debug)]
+enum SoulCommands {
+    /// Check that the Soul behaves the same on the selected models.
+    Check {
+        /// Agent alias whose Soul to check.
+        #[arg(long)]
+        agent: String,
+
+        /// Model to test, as `<type>.<alias>` or `<type>.<alias>:<model>`.
+        /// Repeat for several. Defaults to the agent's own provider and model.
+        #[arg(long = "target", value_name = "PROVIDER[:MODEL]")]
+        targets: Vec<String>,
+
+        /// Judge model, as `<type>.<alias>` or `<type>.<alias>:<model>`.
+        /// Defaults to the agent's own provider and model.
+        #[arg(long, value_name = "PROVIDER[:MODEL]")]
+        judge: Option<String>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "table")]
+        format: commands::soul::OutputFormat,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Quickstart — create one working agent end-to-end. Replaces the
@@ -925,6 +951,32 @@ Examples:
     Eval {
         #[command(subcommand)]
         eval_command: EvalCommands,
+    },
+
+    #[cfg(feature = "agent-runtime")]
+    /// Inspect and check the agent Soul
+    // i18n-exempt: clap derive help — framework requires a compile-time literal
+    #[command(long_about = "\
+Soul diagnostics.
+
+`soul check` sends a fixed set of twelve scenarios to each selected model with \
+the agent's real Soul as the system prompt and no tools, then asks a judge \
+model to score each reply against the Tone guidance (dials) or a pass/fail \
+criterion (honesty, factual correction, ask before acting). It flags dials \
+judged two or more levels from their setting, dials two or more levels apart \
+between targets, and failed floors.
+
+This makes real model calls (targets x 12 replies, plus one judge call per \
+reply). The judge is a model: its scores are a signal, not proof. Nothing is \
+stored. Findings do not change the exit status; only setup errors do.
+
+Examples:
+  zeroclaw soul check --agent default
+  zeroclaw soul check --agent default --target anthropic.work --target openai.work:gpt-5
+  zeroclaw soul check --agent default --judge anthropic.work --format json")]
+    Soul {
+        #[command(subcommand)]
+        soul_command: SoulCommands,
     },
 
     #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
@@ -2883,6 +2935,21 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 if !report.all_passed() {
                     std::process::exit(1);
                 }
+                Ok(())
+            }
+        },
+
+        #[cfg(feature = "agent-runtime")]
+        Commands::Soul { soul_command } => match soul_command {
+            SoulCommands::Check {
+                agent,
+                targets,
+                judge,
+                format,
+            } => {
+                let report =
+                    commands::soul::check(&config, &agent, &targets, judge.as_deref()).await?;
+                commands::soul::print_report(&report, format);
                 Ok(())
             }
         },

@@ -12,6 +12,8 @@ pub mod quickstart;
 #[cfg(feature = "agent-runtime")]
 pub mod self_test;
 #[cfg(feature = "agent-runtime")]
+pub mod soul;
+#[cfg(feature = "agent-runtime")]
 pub mod status;
 #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
 pub mod telegram;
