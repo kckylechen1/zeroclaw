@@ -714,6 +714,7 @@ mod tests {
                     user_model_candidates_created: 1,
                     outcome: "ok".into(),
                     ran_at_unix: now,
+                    drift: None,
                 },
             )
             .unwrap();

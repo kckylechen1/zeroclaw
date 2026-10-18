@@ -311,7 +311,7 @@ pub async fn get_export(
                     ),
                 ],
                 axum::Json(serde_json::json!({
-                    "format_version": 2,
+                    "format_version": 3,
                     "agent": agent,
                     "profile": profile,
                     "history": history,
@@ -557,6 +557,145 @@ pub async fn put_tone(
     .await
     {
         Ok(revision) => (StatusCode::OK, axum::Json(revision)).into_response(),
+        Err(err) => err,
+    }
+}
+
+/// GET /api/soul/drift?agent=<alias> — the agent's current anchor and its
+/// deterministic drift (ADR-018 §4.3). Read-only: a default anchor is derived,
+/// never stored, by this call.
+pub async fn get_drift(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let query: AgentQuery = match parse_query(&uri) {
+        Ok(query) => query,
+        Err(err) => return *err,
+    };
+    let (agent, data_dir) = match configured_agent(&state, &query.agent) {
+        Ok(found) => found,
+        Err(err) => return *err,
+    };
+    let configured = state
+        .config
+        .read()
+        .persona_for_agent(&agent)
+        .copied()
+        .unwrap_or_default();
+    let lookup = agent.clone();
+    match run_store(data_dir, move |store| {
+        store.drift(&lookup, configured, now_unix())
+    })
+    .await
+    {
+        Ok(drift) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "agent": agent,
+                "anchor": drift.anchor,
+                "drift": drift,
+            })),
+        )
+            .into_response(),
+        Err(err) => err,
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnchorBody {
+    agent: String,
+    expected_tone_revision: u64,
+    expected_story_revision: u64,
+}
+
+/// POST /api/soul/anchor — "keep": move the anchor to the current Tone and
+/// Story heads. Both expected revisions must be the current heads, else `409`
+/// `revision_conflict`.
+pub async fn post_anchor(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let body = match serde_json::from_slice::<AnchorBody>(&body) {
+        Ok(body) => body,
+        Err(err) => return error_json(StatusCode::BAD_REQUEST, "bad_body", &err.to_string()),
+    };
+    let (agent, data_dir) = match configured_agent(&state, &body.agent) {
+        Ok(found) => found,
+        Err(err) => return *err,
+    };
+    let target = agent.clone();
+    match run_store(data_dir, move |store| {
+        store.set_anchor_to_current(
+            &target,
+            body.expected_tone_revision,
+            body.expected_story_revision,
+            now_unix(),
+        )
+    })
+    .await
+    {
+        Ok(anchor) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "agent": agent, "anchor": anchor })),
+        )
+            .into_response(),
+        Err(err) => err,
+    }
+}
+
+/// POST /api/soul/anchor/rollback — "roll back": append Tone and Story
+/// revisions equal to the anchor's, in one transaction, through the same path
+/// as `/api/soul/rollback`. A layer already equal to the anchor is left alone
+/// (`null`). The anchor does not move. Stale expected revisions get `409`
+/// `revision_conflict` and write nothing.
+pub async fn post_anchor_rollback(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let body = match serde_json::from_slice::<AnchorBody>(&body) {
+        Ok(body) => body,
+        Err(err) => return error_json(StatusCode::BAD_REQUEST, "bad_body", &err.to_string()),
+    };
+    let (agent, data_dir) = match configured_agent(&state, &body.agent) {
+        Ok(found) => found,
+        Err(err) => return *err,
+    };
+    let target = agent.clone();
+    match run_store(data_dir, move |store| {
+        store.rollback_to_anchor(
+            &target,
+            body.expected_tone_revision,
+            body.expected_story_revision,
+            now_unix(),
+        )
+    })
+    .await
+    {
+        Ok(restored) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "agent": agent,
+                "tone_revision": restored.tone_revision,
+                "story_revision": restored.story_revision,
+            })),
+        )
+            .into_response(),
         Err(err) => err,
     }
 }
@@ -1047,6 +1186,42 @@ mod tests {
         let (_dir, state) = state_with_agent();
         let (status, _) = get(&state, "/api/soul?agent=nova", HeaderMap::new()).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let anchor_body = body(&serde_json::json!({
+            "agent": "nova", "expected_tone_revision": 0, "expected_story_revision": 0
+        }));
+        assert_eq!(
+            get_drift(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                HeaderMap::new(),
+                "/api/soul/drift?agent=nova".parse().unwrap(),
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            post_anchor(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                HeaderMap::new(),
+                anchor_body.clone(),
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            post_anchor_rollback(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                HeaderMap::new(),
+                anchor_body,
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
         let response = put_identity(
             State(state.clone()),
             ConnectInfo(peer()),
@@ -1105,6 +1280,136 @@ mod tests {
         let (_, json) = get(&state, "/api/soul?agent=nova", operator()).await;
         assert_eq!(json["identity"]["value"]["name"], "Nova");
         assert_eq!(json["legacy_persona_files"], "suppressed");
+    }
+
+    async fn drift_of(state: &AppState) -> (StatusCode, serde_json::Value) {
+        json_of(
+            get_drift(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                "/api/soul/drift?agent=nova".parse().unwrap(),
+            )
+            .await,
+        )
+        .await
+    }
+
+    async fn put_tone_warmth(state: &AppState, expected: u64, level: &str) {
+        let (status, json) = json_of(
+            put_tone(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                body(&serde_json::json!({
+                    "agent": "nova", "expected_revision": expected,
+                    "tone": {"heads": {"warmth": level}}
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+    }
+
+    /// ADR-018 §4.3 through the owner surface: read the drift, keep or roll
+    /// back with both revisions checked, and a stale one is the existing 409.
+    #[tokio::test]
+    async fn drift_keep_and_rollback_use_compare_and_set_on_both_layers() {
+        let (dir, state) = state_with_agent();
+        let (status, json) = drift_of(&state).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["agent"], "nova");
+        assert_eq!(json["anchor"]["source"], "default");
+        assert!(json["anchor"]["id"].is_null());
+        assert_eq!(json["drift"]["dials"].as_array().unwrap().len(), 5);
+        assert_eq!(json["drift"]["story_added"], 0);
+        let store = SoulProfileStore::shared(dir.path()).unwrap();
+        assert_eq!(
+            store.revision_stamp("nova").unwrap(),
+            0,
+            "a read never seeds"
+        );
+
+        put_tone_warmth(&state, 0, "minimal").await;
+        put_tone_warmth(&state, 1, "xhigh").await;
+        let (_, json) = drift_of(&state).await;
+        assert_eq!(json["anchor"]["tone_revision_id"], 1);
+        let warmth = &json["drift"]["dials"][0];
+        assert_eq!(warmth["key"], "warmth");
+        assert_eq!(warmth["anchor_level"], "minimal");
+        assert_eq!(warmth["current_level"], "xhigh");
+        assert_eq!(warmth["steps"], 4);
+
+        let call = |path: &'static str, tone: u64, story: u64| {
+            let state = state.clone();
+            async move {
+                let request = body(&serde_json::json!({
+                    "agent": "nova",
+                    "expected_tone_revision": tone,
+                    "expected_story_revision": story,
+                }));
+                let response = if path == "keep" {
+                    post_anchor(State(state), ConnectInfo(peer()), operator(), request).await
+                } else {
+                    post_anchor_rollback(State(state), ConnectInfo(peer()), operator(), request)
+                        .await
+                };
+                json_of(response).await
+            }
+        };
+        // Stale Tone or Story: the existing revision_conflict shape, nothing written.
+        let (status, json) = call("keep", 1, 0).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["code"], "revision_conflict");
+        assert_eq!(json["current_revision"], 2);
+        let (status, json) = call("rollback", 2, 5).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["code"], "revision_conflict");
+        assert_eq!(store.revision_stamp("nova").unwrap(), 2);
+
+        // Roll back: Tone gets a new revision equal to the anchor's; Story had none.
+        let (status, json) = call("rollback", 2, 0).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["tone_revision"], 3);
+        assert!(json["story_revision"].is_null());
+        let (_, json) = drift_of(&state).await;
+        assert_eq!(json["drift"]["dials"][0]["steps"], 0);
+        assert_eq!(json["anchor"]["source"], "default", "the anchor stays put");
+
+        // Keep: an owner anchor at the current heads.
+        let (status, json) = call("keep", 3, 0).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["anchor"]["source"], "owner");
+        assert_eq!(json["anchor"]["tone_revision_id"], 3);
+        assert!(json["anchor"]["story_revision_id"].is_null());
+        let (_, json) = drift_of(&state).await;
+        assert_eq!(json["anchor"]["id"], 1);
+
+        let (status, json) = json_of(
+            post_anchor(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                body(&serde_json::json!({"agent": "nova", "expected_tone_revision": 3})),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(json["code"], "bad_body");
+        let (status, json) = json_of(
+            get_drift(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                "/api/soul/drift?agent=ghost".parse().unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+        assert_eq!(json["code"], "unknown_agent");
     }
 
     #[tokio::test]
@@ -1392,7 +1697,7 @@ mod tests {
         );
         let (status, data) = json_of(response).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(data["format_version"], 2);
+        assert_eq!(data["format_version"], 3);
         assert_eq!(data["agent"], "nova");
         assert_eq!(
             data.as_object()
@@ -1406,6 +1711,7 @@ mod tests {
             assert!(data["profile"][layer].is_null());
             assert_eq!(data["history"][layer], serde_json::json!([]));
         }
+        assert_eq!(data["history"]["anchors"], serde_json::json!([]));
         assert_eq!(data["tone"]["effective"]["warmth"], "medium");
         let data_dir = state.config.read().data_dir.clone();
         assert_eq!(
@@ -1500,6 +1806,7 @@ mod tests {
                     proposals_created: 1,
                     outcome: "private-reflection-canary".into(),
                     ran_at_unix: 7,
+                    drift: None,
                     user_model_candidates_created: 0,
                 },
             )

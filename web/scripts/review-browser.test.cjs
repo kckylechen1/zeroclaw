@@ -28,6 +28,15 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     let unknownReads = 0;
     let reviewState = 'rejected';
     const actions = [];
+    // ADR-018 §4.3 drift fixture; an older gateway answers the route with {}.
+    let driftEnabled = false;
+    let anchorConflictOnce = true;
+    const dial = (key, anchor_level, current_level, steps) => ({ key, anchor_level, current_level, steps });
+    const driftOf = (anchor, dials, extra) => ({ anchor, dials, story_added: 0, story_retired: 0, approved_proposals_since_anchor: 0, ...extra });
+    const defaultAnchor = { id: null, tone_revision_id: 1, story_revision_id: null, set_at_unix: now, source: 'default' };
+    const drifted = () => driftOf(defaultAnchor, [dial('warmth', 'medium', 'xhigh', 2), dial('directness', 'medium', 'medium', 0), dial('explanation_density', 'medium', 'medium', 0), dial('challenge', 'medium', 'medium', 0), dial('humor', 'medium', 'low', -1)], { story_added: 1, story_retired: 2, approved_proposals_since_anchor: 3 });
+    const unmoved = (anchor) => driftOf(anchor, ['warmth', 'directness', 'explanation_density', 'challenge', 'humor'].map(key => dial(key, 'medium', 'medium', 0)));
+    let driftState = drifted();
     const proposal = { id: 'soul:nova:7', kind: 'soul_proposal', agent: 'nova', item: { id: 7, layer: 'story', proposal: 'Retire the old shared shorthand', rationale: 'Synthetic stale-target fixture', retire_index: 0, retire_target: { kind: 'bond', text: 'Actual canonical shared shorthand' }, target_revision: 17, created_at_unix: now } };
     const user = { id: 'user_model:8', kind: 'user_model_candidate', item: { id: '8', kind: 'preference', statement: 'Shorter planning replies', scope: 'global', evidence: 'Synthetic owner evidence', semantic_key: 'style', created_at_unix: now } };
     const rejected = { ...user.item, id: '42', statement: 'Previously dismissed preference' };
@@ -77,6 +86,15 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
         if (req.method() === 'POST') {
             const body = req.postDataJSON();
             actions.push({ path: url.pathname, body });
+            if (url.pathname === '/api/soul/anchor') {
+                if (anchorConflictOnce) { anchorConflictOnce = false; return send({ code: 'revision_conflict', current_revision: 3, error: 'untrusted conflict detail' }, 409); }
+                driftState = unmoved({ ...defaultAnchor, id: 1, source: 'owner' });
+                return send({ agent: body.agent, anchor: driftState.anchor });
+            }
+            if (url.pathname === '/api/soul/anchor/rollback') {
+                driftState = unmoved(defaultAnchor);
+                return send({ agent: body.agent, tone_revision: 3, story_revision: null });
+            }
             if (url.pathname.endsWith('/19/resolve')) return send({ code: 'invalid', field: 'level', error: 'untrusted validation detail' }, 400);
             if (url.pathname.endsWith('/8/review') && body.action === 'accept') {
                 assert.deepEqual(body.expected_head, { id: 'revision-current' });
@@ -95,6 +113,8 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
             }
             return send({ ok: true });
         }
+        if (url.pathname === '/api/soul/drift')
+            return driftEnabled ? send({ agent: url.searchParams.get('agent'), anchor: driftState.anchor, drift: driftState }) : send({});
         if (url.pathname === '/api/soul')
             return soulUnavailable ? send({ code: 'store_unavailable' }, 503) : send(soul);
         if (url.pathname === '/api/soul/history') {
@@ -199,6 +219,51 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.match(await toneCard.innerText(), /high/);
     assert.match(await toneCard.innerText(), /low/);
     await toneCard.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-tone-fallback-375.png') });
+    // Drift card: provenance, signed per-dial distance, keep and roll back by CAS.
+    driftEnabled = true;
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    const driftCard = page.getByRole('region', { name: 'Drift', exact: true });
+    await driftCard.waitFor();
+    const driftText = await driftCard.innerText();
+    assert.match(driftText, /Anchor · Default \(the first seed or owner revisions\) · /);
+    assert.match(driftText, /Warmth\s+Medium → Very high\s+\+2/);
+    assert.match(driftText, /Humor\s+Medium → Low\s+\u22121/);
+    assert.match(driftText, /Since the anchor/);
+    assert.match(driftText, /Story entries added: 1/);
+    assert.match(driftText, /Story entries retired: 2/);
+    assert.match(driftText, /Approved proposals: 3/);
+    assert.equal(await driftCard.getByRole('button', { name: 'Roll back to anchor', exact: true }).isDisabled(), false);
+    await driftCard.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-drift-375.png') });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    // Keep: both revisions are named; a stale one is the existing 409 and writes nothing.
+    const beforeKeep = actions.length;
+    await driftCard.getByRole('button', { name: 'Keep as anchor', exact: true }).click();
+    await page.getByText('The current revision changed.', { exact: false }).waitFor();
+    assert.deepEqual(actions.slice(beforeKeep), [{ path: '/api/soul/anchor', body: { agent: 'nova', expected_tone_revision: 2, expected_story_revision: 2 } }]);
+    assert.match(await driftCard.innerText(), /Warmth\s+Medium → Very high\s+\+2/);
+    await driftCard.getByRole('button', { name: 'Keep as anchor', exact: true }).click();
+    await page.getByText('Decision recorded.', { exact: false }).waitFor();
+    assert.deepEqual(actions.at(-1), { path: '/api/soul/anchor', body: { agent: 'nova', expected_tone_revision: 2, expected_story_revision: 2 } });
+    await driftCard.getByText('No drift from the anchor.', { exact: true }).waitFor();
+    assert.match(await driftCard.innerText(), /Anchor · Set by the owner · /);
+    assert.equal(await driftCard.getByRole('button', { name: 'Roll back to anchor', exact: true }).isDisabled(), true);
+    // Roll back: confirm first, then the same CAS body; cancelling sends nothing.
+    driftState = drifted();
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    await driftCard.getByText('Story entries retired: 2', { exact: true }).waitFor();
+    const beforeRollback = actions.length;
+    await driftCard.getByRole('button', { name: 'Roll back to anchor', exact: true }).click();
+    const confirm = page.getByRole('dialog');
+    await confirm.getByText('Append new Tone and Story revisions equal to the anchor.', { exact: false }).waitFor();
+    await confirm.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await confirm.waitFor({ state: 'detached' });
+    assert.equal(actions.length, beforeRollback);
+    await driftCard.getByRole('button', { name: 'Roll back to anchor', exact: true }).click();
+    await confirm.getByRole('button', { name: 'Roll back to anchor', exact: true }).click();
+    await driftCard.getByText('No drift from the anchor.', { exact: true }).waitFor();
+    assert.deepEqual(actions.slice(beforeRollback), [{ path: '/api/soul/anchor/rollback', body: { agent: 'nova', expected_tone_revision: 2, expected_story_revision: 2 } }]);
+    assert.match(await driftCard.innerText(), /Anchor · Default/);
+    driftState = drifted();
     delayHistory = true;
     await page.getByRole('button', { name: 'History and sources', exact: true }).nth(0).click();
     await page.getByRole('button', { name: 'History and sources', exact: true }).nth(1).click();
@@ -247,9 +312,20 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     await page.getByText('Upgrade the gateway', { exact: false }).waitFor();
     assert.equal(actions.length, beforeDismiss + 1);
     reviewState = 'narrowed';
+    // The same card in Chinese, on the inbox tab the notification links to.
+    driftState = drifted();
     locale = 'zh';
     await page.evaluate(() => localStorage.setItem('zeroclaw-locale', 'zh'));
     await page.reload();
+    const zhDrift = page.getByRole('region', { name: '偏离', exact: true });
+    await zhDrift.waitFor();
+    assert.match(await zhDrift.innerText(), /锚点 · 默认/);
+    await zhDrift.getByText('自锚点以来', { exact: true }).waitFor();
+    await zhDrift.getByRole('button', { name: '保持为锚点', exact: true }).waitFor();
+    await zhDrift.getByRole('button', { name: '回滚到锚点', exact: true }).waitFor();
+    assert.match(await zhDrift.innerText(), /亲切度\s+中 → 极高\s+\+2/);
+    await page.screenshot({ path: path.join(artifacts, 'zeroclaw-phone-drift-zh-375.png') });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.getByRole('button', { name: '关于我', exact: true }).click();
     await page.getByRole('button', { name: '所有候选的审核历史' }).click();
     await page.getByRole('button', { name: '历史与来源', exact: true }).click();
@@ -297,7 +373,7 @@ const server = http.createServer((req, res) => { const file = path.join(dist, re
     assert.equal(await page.getByRole('heading', { name: addition.item.proposal, exact: true }).count(), 0);
     assert.equal(await userCard.count(), 0);
     assert.deepEqual(failures, []);
-    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_story_target: true, story_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_tone_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, tone_validation_refresh: true, heads_failure_preserves_inbox: true, heads_auth_failure_clears_data: true, actions }));
+    console.log(JSON.stringify({ result: 'PASS', pairing_disabled_no_form_or_mint: true, bridge_rejected: true, pairing_enabled_recovery: true, stale_agent_recovered: true, stale_proposal_dismiss_only: true, stale_secondary_401_ignored: true, rejected_history_narrow_once: true, summary_44px: true, keyboard_editor_focus: true, bound_story_target: true, story_add_kind: true, replacement_head_visible: true, narrow_scope_valid: true, revision_provenance: true, localized_history: true, old_tone_separate: true, displayed_head_cas: true, head_conflict_refresh_only: true, old_gateway_approval_blocked: true, independent_profile_reads: true, localized_reflection_outcomes: true, tone_validation_refresh: true, heads_failure_preserves_inbox: true, heads_auth_failure_clears_data: true, drift_card_cas_keep_and_confirmed_rollback: true, drift_card_localized: true, actions }));
     await browser.close();
     server.close();
 })().catch(async e => { console.error(e); server.close(); if (browser) await browser.close(); process.exitCode = 1; });

@@ -1056,6 +1056,8 @@ gateway-invalid-surface = Invalid chat surface. Use web, telegram or cli; query 
 
 # Generic review notice. Never interpolate Soul or owner evidence content.
 soul-weekly-review-notice = Weekly reflection created { $soul_count } Soul proposals and { $user_count } User Model candidates. Review: { $review_path }
+# Soul drift report. Counts only; never interpolate Soul or owner content.
+soul-drift-notice = Soul drift report: { $dials_moved } Tone dials moved from your anchor (largest move: { $max_steps } steps); { $story_added } Story entries added, { $story_retired } retired. Keep it or roll back: { $review_path }
 soul-tone-unavailable = Current configured Tone is unavailable.
 soul-tone-step-limit = Tone proposals may move a dial by at most one level.
 soul-tone-challenge-up-only = The challenge dial may only be proposed upward; only your owner can lower it.

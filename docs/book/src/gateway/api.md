@@ -569,14 +569,45 @@ those never appear in the API, and "voice" in this API means audio only.
 | --- | --- |
 | `GET /api/soul?agent=<alias>` | Current `identity`, `principles`, and `story` heads (each with `revision`, `source`, and `value`), `tone` (`configured` dials, `stored` heads, `effective` dials and per-key `sources`), `legacy_persona_files` (`injected` or `suppressed`), and `last_reflection`. Seeds missing layers on first read. |
 | `GET /api/soul/history?agent=<alias>&layer=identity\|principles\|tone\|story` | Every revision of one layer, oldest first. |
-| `GET /api/soul/export?agent=<alias>` | Download JSON (`format_version: 2`) containing `agent`, four current layers in `profile`, all four per-layer revision arrays in `history` (oldest first), and `tone` (`configured`, `effective`, `sources`). Current heads and history come from one read snapshot. |
+| `GET /api/soul/export?agent=<alias>` | Download JSON (`format_version: 3`) containing `agent`, four current layers in `profile`, all four per-layer revision arrays and the stored `anchors` rows in `history` (oldest first), and `tone` (`configured`, `effective`, `sources`). Current heads and history come from one read snapshot. |
 | `PUT /api/soul/identity` | Body `{ "agent", "expected_revision", "identity": { "name", "self_description"?, "primary_language"?, "pronouns"? } }`. |
 | `PUT /api/soul/principles` | Body `{ "agent", "expected_revision", "items": [ ... ] }`, at most 8 single-line items of up to 240 bytes. |
 | `PUT /api/soul/tone` | Body `{ "agent", "expected_revision", "tone": { "heads": { "<key>": "<level>" } } }`. Keys are the five persona dials; a stored head wins over the configured dial for its key. The owner may set any level, and an owner write starts no dial cooldown. |
 | `PUT /api/soul/story` | Body `{ "agent", "expected_revision", "story": { "entries": [ { "kind": "self" \| "bond", "text" } ] } }`, at most 12 single-line entries of up to 200 bytes. `self` is concerns, interests and working habits; `bond` is shared names, references, running jokes and ways of working. |
 | `POST /api/soul/rollback` | Body `{ "agent", "layer", "to_revision", "expected_revision" }`. Appends a copy of an earlier revision. |
+| `GET /api/soul/drift?agent=<alias>` | `{ "agent", "anchor", "drift" }`: the current anchor and how far the Soul sits from it (see below). Read-only; it never stores a default anchor. |
+| `POST /api/soul/anchor` | Body `{ "agent", "expected_tone_revision", "expected_story_revision" }`. "Keep": appends an anchor at the current Tone and Story heads and returns `{ "agent", "anchor" }`. Each expected revision is the layer's current head (`0` when it has none); a stale one returns 409 `revision_conflict` and stores nothing. |
+| `POST /api/soul/anchor/rollback` | Same body. "Roll back": appends Tone and Story revisions equal to the anchor's, in one transaction, through the same path as `POST /api/soul/rollback` (`source: "owner"`, `rolled_back_from` set). Returns `{ "agent", "tone_revision", "story_revision" }`, each the new revision or `null` when that layer already equalled the anchor. An anchor with no Tone revision restores empty heads, and one with no Story revision restores no entries. The anchor stays where it was. A stale expected revision returns 409 `revision_conflict` and writes nothing. |
 | `GET /api/soul/proposals?agent=<alias>[&pending=true]` | The agent's own proposals to change its tone, story, or principles, oldest first. A story proposal carries `story_kind`. |
 | `POST /api/soul/proposals/{id}/resolve` | Body `{ "agent", "resolution": "accepted" \| "dismissed", "note"?, "final_text"? }`. Accepting applies the proposal and returns `applied_revision`. Each proposal resolves once; a repeat returns 409 with `code: "proposal_already_resolved"`. A Story retirement is bound to the entry it named when submitted (`retire_target`, read from `target_revision`); if the owner has since removed or reworded that entry, accepting returns 409 with `code: "proposal_stale"` and the proposal stays pending for dismissal. A Tone proposal that would lower `challenge` or change a dial inside its cooldown is refused when accepted, the same way (see below); the cooldown refusal returns 429 with `code: "tone_dial_cooldown"`, the `dial`, and `until_unix`. |
+
+### Anchor and drift
+
+An anchor is a pointer to one Tone revision and one Story revision that the owner
+marks as "this is the agent I want"
+([ADR-018](../architecture/decisions/ADR-018-soul-character-model.md) §4.3). The
+`soul_anchors` table in `soul.db` stores pointers only (`tone_revision_id`,
+`story_revision_id`, `set_at_unix`, `source`), append-only, and the latest row for
+the agent is current. An agent with no row has a `default` anchor (`id: null`),
+derived on read and never written: the earliest Tone revision and the earliest
+Story revision whose source is `seed` or `owner`. A layer with none has a `null`
+pointer, meaning no stored heads or no entries. Its `set_at_unix` is the later of
+the two revisions' creation times (the agent's earliest revision when neither
+exists). Owner-set anchors have `source: "owner"`.
+
+`drift` is computed without a model:
+
+| Field | Meaning |
+| --- | --- |
+| `anchor` | The anchor compared against. |
+| `dials` | All five Tone dials as `{ "key", "anchor_level", "current_level", "steps" }`. Levels are effective: the stored heads of the anchor revision and of the current revision, each over the current configured persona, so changing configuration alone shows no drift. `steps` is signed; positive means the dial moved up. |
+| `story_added`, `story_retired` | Multiset difference of `(kind, text)` Story entries between the anchor revision and the current one. |
+| `approved_proposals_since_anchor` | Accepted proposals of this agent resolved at or after the anchor's `set_at_unix`. |
+
+Every reflection receipt carries the `drift` that was true when it was written
+(an object, or `null` on receipts that predate it or ran without a configured
+Tone). It appears as `drift` on `last_reflection` and on the reflection receipts
+of `GET /api/review/inbox`.
 
 Exports do not seed missing layers: absent heads are `null` and their histories
 are empty arrays. They contain only the requested agent's canonical layer
@@ -727,8 +758,29 @@ notification ledger is created. Existing quiet hours, exact-source mute,
 snooze/dismiss and bridge acknowledgement semantics apply. Dismissing a notice
 does not dismiss or approve any review item.
 
+The same task also queues a Soul drift report per enabled agent, under the same
+opt-in destination and the same eligibility and live-target rules (there is no
+separate key). It computes the agent's drift against its anchor at check time,
+with no model call, and queues a counts-only notice with the `/review` path as
+`source_kind = soul_drift`, `source_id = <agent alias>` when either holds:
+
+- threshold: any dial is two or more steps from the anchor; `event_id =
+  threshold:<anchor>:<fingerprint>`, where `<anchor>` is the anchor row id or
+  `default` and the fingerprint lists every dial's current level, so one drift
+  state is reported once and a new state is reported again;
+- periodic: the drift is non-empty (a dial moved, or Story entries were added or
+  retired) and at least one 28-day bucket has elapsed since the anchor was set;
+  `event_id = periodic:<anchor>:<bucket>`, with `bucket = (now - set_at) /
+  (28 days)`, at most once per bucket.
+
+Both may be queued for the same pass. Deduplication is the outbox's and keeps
+its 30-day window, so a drift state that stays unchanged can be reported again
+after that window. The notice offers the Review page, where the owner chooses
+**Keep as anchor** or **Roll back to anchor**; neither is taken automatically.
+Delivery gating treats `soul_drift` rows exactly like `weekly_review` rows.
+
 The producer resolves the live destination for every enqueue. Before claiming an
-unclaimed weekly notice, delivery also checks the current destination and agent.
+unclaimed weekly or drift notice, delivery also checks the current destination and agent.
 Disabling the target or changing bridge, recipient or thread holds old unclaimed
 notices until they become eligible again or expire. Already in-flight messages
 cannot be retracted and retain their normal receipt handling. A live data-root

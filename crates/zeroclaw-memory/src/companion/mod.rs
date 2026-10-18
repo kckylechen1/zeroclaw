@@ -35,11 +35,12 @@ pub use outbox::{
     probe_companion_outbox_health,
 };
 pub use soul_profile::{
-    DEFAULT_PRINCIPLES, NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SOUL_MAX_PRINCIPLES,
-    SOUL_MAX_STORY_ENTRIES, SOUL_NAME_MAX_BYTES, SOUL_PRINCIPLE_MAX_BYTES, SOUL_PROFILE_DB_FILE,
-    SOUL_PROPOSAL_MAX_BYTES, SOUL_RATIONALE_MAX_BYTES, SOUL_SELF_DESCRIPTION_MAX_BYTES,
-    SOUL_SHORT_FIELD_MAX_BYTES, SOUL_STORY_ENTRY_MAX_BYTES, SOUL_TONE_DIAL_COOLDOWN_SECS,
-    SOUL_TONE_TRAIT_KEYS, SoulIdentity, SoulLayer, SoulPrinciples, SoulProfile, SoulProfileError,
+    AnchorRollback, AnchorSource, DEFAULT_PRINCIPLES, DialDrift, NewSoulProposal,
+    SOUL_MAX_OPEN_PROPOSALS, SOUL_MAX_PRINCIPLES, SOUL_MAX_STORY_ENTRIES, SOUL_NAME_MAX_BYTES,
+    SOUL_PRINCIPLE_MAX_BYTES, SOUL_PROFILE_DB_FILE, SOUL_PROPOSAL_MAX_BYTES,
+    SOUL_RATIONALE_MAX_BYTES, SOUL_SELF_DESCRIPTION_MAX_BYTES, SOUL_SHORT_FIELD_MAX_BYTES,
+    SOUL_STORY_ENTRY_MAX_BYTES, SOUL_TONE_DIAL_COOLDOWN_SECS, SOUL_TONE_TRAIT_KEYS, SoulAnchor,
+    SoulDrift, SoulIdentity, SoulLayer, SoulPrinciples, SoulProfile, SoulProfileError,
     SoulProfileStore, SoulProposal, SoulProposalLayer, SoulProposalOutcome, SoulProposalResolution,
     SoulReflectionReceipt, SoulRevision, SoulSource, SoulStory, SoulTone, StoryEntry, StoryKind,
     resolve_effective_tone, seed_name_for_agent,

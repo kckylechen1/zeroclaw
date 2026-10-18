@@ -66,3 +66,27 @@ globalThis.fetch = async () => new Response(JSON.stringify({ code: 'tone_dial_co
 await assert.rejects(reviewFetch('/api/soul/proposals/19/resolve'), (error: unknown) => error instanceof ReviewError && error.status === 429 && error.code === 'tone_dial_cooldown');
 assert.equal(canReword({ ...soul, item: { ...soul.item, layer: 'tone' } }), false);
 console.log('tone and story layer names, challenge rule and dial cooldown boundaries passed');
+
+// ADR-018 §4.3 anchor and drift: shape guard, signed steps, and CAS binding.
+const { anchorRequest, driftIsEmpty, readDrift, signedSteps } = await import('./review');
+const dial = (key: string, anchor_level: string, current_level: string, steps: number) => ({ key, anchor_level, current_level, steps });
+const drift = { anchor: { id: null, tone_revision_id: 1, story_revision_id: null, set_at_unix: 10, source: 'default' as const }, dials: [dial('warmth', 'medium', 'xhigh', 2), dial('humor', 'medium', 'low', -1)], story_added: 1, story_retired: 0, approved_proposals_since_anchor: 3 };
+assert.deepEqual(readDrift({ agent: 'nova', anchor: drift.anchor, drift }), drift);
+for (const unreadable of [null, {}, { drift: null }, { drift: { anchor: drift.anchor } }, { drift: { ...drift, anchor: { ...drift.anchor, source: 'model' } } }, { drift: { ...drift, story_added: '1' } }]) assert.equal(readDrift(unreadable), null);
+assert.equal(driftIsEmpty(drift), false);
+assert.equal(driftIsEmpty({ ...drift, dials: [dial('warmth', 'high', 'high', 0)], story_added: 0 }), true);
+assert.equal(driftIsEmpty({ ...drift, dials: [dial('warmth', 'high', 'high', 0)], story_added: 0, story_retired: 2 }), false);
+assert.deepEqual([2, -1, 0].map(signedSteps), ['+2', '\u22121', '0']);
+const head = (revision: number) => ({ revision, source: 'owner', created_at_unix: 1, value: {} });
+const withRevisions = { agent: 'nova', tone: { configured: {}, stored: head(4) }, story: head(9) };
+assert.deepEqual(anchorRequest(withRevisions, 'keep'), { path: '/api/soul/anchor', body: { agent: 'nova', expected_tone_revision: 4, expected_story_revision: 9 } });
+assert.deepEqual(anchorRequest(withRevisions, 'rollback'), { path: '/api/soul/anchor/rollback', body: { agent: 'nova', expected_tone_revision: 4, expected_story_revision: 9 } });
+// A layer with no revision yet is expected as 0, including a null stored head.
+assert.deepEqual(anchorRequest({ agent: 'nova', tone: { configured: {}, stored: null as never } }, 'keep').body, { agent: 'nova', expected_tone_revision: 0, expected_story_revision: 0 });
+globalThis.fetch = async (input, options) => {
+    assert.equal(input, '/controller/api/soul/anchor');
+    assert.equal(options?.method, 'POST');
+    return new Response(JSON.stringify({ code: 'revision_conflict', current_revision: 5, error: 'untrusted prose' }), { status: 409 });
+};
+await assert.rejects(reviewFetch('/api/soul/anchor', undefined, anchorRequest(withRevisions, 'keep').body), (error: unknown) => error instanceof ReviewError && error.status === 409 && error.code === 'revision_conflict');
+console.log('anchor and drift boundaries passed');

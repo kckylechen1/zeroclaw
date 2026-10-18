@@ -17,8 +17,15 @@
 //! Stored Tone heads override configured persona defaults per key. Model
 //! proposals move at most one level at creation and application; direct owner
 //! writes retain the existing CAS contract.
+//!
+//! Anchor and drift (ADR-018 §4.3). The only durable state added for it is the
+//! append-only `soul_anchors` table and the nullable `soul_reflections.drift_json`
+//! column, both owned by [`SoulProfileStore`]. `soul_anchors` holds pointers to
+//! Tone and Story revisions, never content. Drift is computed on read from the
+//! revisions and the proposal resolutions; it is stored only inside a reflection
+//! receipt, as the summary that was true when the reflection ran.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -430,6 +437,16 @@ struct SoulHistory {
     principles: Vec<SoulRevision<SoulPrinciples>>,
     tone: Vec<SoulRevision<SoulTone>>,
     story: Vec<SoulRevision<SoulStory>>,
+    /// Stored anchor rows, oldest first. A default anchor is derived, not stored.
+    anchors: Vec<SoulAnchor>,
+}
+
+/// New revisions appended by [`SoulProfileStore::rollback_to_anchor`]; `None`
+/// for a layer that already equalled the anchor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct AnchorRollback {
+    pub tone_revision: Option<u64>,
+    pub story_revision: Option<u64>,
 }
 
 impl SoulProfile {
@@ -917,14 +934,29 @@ impl SoulProfileStore {
                 proposals_created INTEGER NOT NULL,
                 user_model_candidates_created INTEGER NOT NULL DEFAULT 0,
                 outcome TEXT NOT NULL,
-                ran_at_unix INTEGER NOT NULL
+                ran_at_unix INTEGER NOT NULL,
+                drift_json TEXT
              );
              CREATE TRIGGER IF NOT EXISTS soul_reflections_no_update
                 BEFORE UPDATE ON soul_reflections
                 BEGIN SELECT RAISE(ABORT, 'soul reflections are append-only'); END;
              CREATE TRIGGER IF NOT EXISTS soul_reflections_no_delete
                 BEFORE DELETE ON soul_reflections
-                BEGIN SELECT RAISE(ABORT, 'soul reflections are append-only'); END;",
+                BEGIN SELECT RAISE(ABORT, 'soul reflections are append-only'); END;
+             CREATE TABLE IF NOT EXISTS soul_anchors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent TEXT NOT NULL,
+                tone_revision_id INTEGER,
+                story_revision_id INTEGER,
+                set_at_unix INTEGER NOT NULL,
+                source TEXT NOT NULL
+             );
+             CREATE TRIGGER IF NOT EXISTS soul_anchors_no_update
+                BEFORE UPDATE ON soul_anchors
+                BEGIN SELECT RAISE(ABORT, 'soul anchors are append-only'); END;
+             CREATE TRIGGER IF NOT EXISTS soul_anchors_no_delete
+                BEFORE DELETE ON soul_anchors
+                BEGIN SELECT RAISE(ABORT, 'soul anchors are append-only'); END;",
         )?;
         // Stores created by an earlier build of this branch lack the newer
         // columns; add them in place (ALTER TABLE ADD COLUMN keeps every row).
@@ -940,6 +972,7 @@ impl SoulProfileStore {
             "user_model_candidates_created",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        ensure_column(&conn, "soul_reflections", "drift_json", "TEXT")?;
         harden_sqlite_owner_only(&db_path);
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1135,8 +1168,11 @@ impl SoulProfileStore {
         agent: &str,
     ) -> Result<(SoulProfile, serde_json::Value), SoulProfileError> {
         let agent = checked_agent(agent)?;
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn.lock();
+        // A deferred transaction keeps one read snapshot across the revision
+        // rows and the anchor rows below.
+        let tx = conn.transaction()?;
+        let mut stmt = tx.prepare(
             "SELECT revision, source, body, rolled_back_from, created_at_unix, proposal_id, layer
              FROM soul_revisions WHERE agent = ?1 ORDER BY layer ASC, revision ASC",
         )?;
@@ -1158,6 +1194,8 @@ impl SoulProfileStore {
                 }
             }
         }
+        drop(stmt);
+        history.anchors = anchor_rows(&tx, agent)?;
         let profile = SoulProfile {
             identity: history.identity.last().cloned(),
             principles: history.principles.last().cloned(),
@@ -1181,34 +1219,125 @@ impl SoulProfileStore {
         let agent = checked_agent(agent)?;
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let current = current_revision(&tx, agent, layer, expected_revision)?;
-        let target: Option<String> = tx
-            .query_row(
-                "SELECT body FROM soul_revisions WHERE agent = ?1 AND layer = ?2 AND revision = ?3",
-                params![agent, layer.storage_id(), to_revision],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(body) = target else {
-            return Err(SoulProfileError::NotFound {
-                layer,
-                revision: to_revision,
-            });
-        };
-        let value: serde_json::Value =
-            serde_json::from_str(&body).map_err(|e| SoulProfileError::Storage(e.to_string()))?;
-        let new = NewRevision {
-            agent,
-            layer,
-            revision: current + 1,
-            source: SoulSource::Owner,
-            rolled_back_from: Some(to_revision),
-            proposal_id: None,
-            now_unix,
-        };
-        insert(&tx, &new, &value)?;
+        let revision = rollback_in(&tx, agent, layer, to_revision, expected_revision, now_unix)?;
         tx.commit()?;
-        Ok(new.revision_of(value))
+        Ok(revision)
+    }
+
+    /// The agent's current anchor: its latest stored row, or, when the owner
+    /// never set one, the default derived on read (see [`default_anchor`]).
+    /// Never writes.
+    pub fn anchor(&self, agent: &str) -> Result<SoulAnchor, SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let conn = self.conn.lock();
+        anchor_of(&conn, agent)
+    }
+
+    /// Owner "keep": append an anchor row that points at the current Tone and
+    /// Story heads. Both expected revisions are checked against the heads in
+    /// the same transaction (`0` means the layer has no revision yet).
+    pub fn set_anchor_to_current(
+        &self,
+        agent: &str,
+        expected_tone_revision: u64,
+        expected_story_revision: u64,
+        now_unix: u64,
+    ) -> Result<SoulAnchor, SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tone = current_revision(&tx, agent, SoulLayer::Tone, expected_tone_revision)?;
+        let story = current_revision(&tx, agent, SoulLayer::Story, expected_story_revision)?;
+        let anchor = SoulAnchor {
+            id: None,
+            tone_revision_id: (tone > 0).then_some(tone),
+            story_revision_id: (story > 0).then_some(story),
+            set_at_unix: now_unix,
+            source: AnchorSource::Owner,
+        };
+        tx.execute(
+            "INSERT INTO soul_anchors
+             (agent, tone_revision_id, story_revision_id, set_at_unix, source)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                agent,
+                anchor.tone_revision_id,
+                anchor.story_revision_id,
+                anchor.set_at_unix,
+                ANCHOR_SOURCE_OWNER
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(SoulAnchor {
+            id: Some(id),
+            ..anchor
+        })
+    }
+
+    /// Owner "roll back": append Tone and Story revisions equal to the
+    /// anchor's, in one transaction, through the same path as
+    /// [`Self::rollback`] (source `owner`, `rolled_back_from` set). A layer
+    /// that already equals the anchor is skipped. An anchor with no Tone
+    /// revision restores empty heads; one with no Story revision restores no
+    /// entries. The anchor itself does not move.
+    pub fn rollback_to_anchor(
+        &self,
+        agent: &str,
+        expected_tone_revision: u64,
+        expected_story_revision: u64,
+        now_unix: u64,
+    ) -> Result<AnchorRollback, SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tone = current_revision(&tx, agent, SoulLayer::Tone, expected_tone_revision)?;
+        let story = current_revision(&tx, agent, SoulLayer::Story, expected_story_revision)?;
+        let anchor = anchor_of(&tx, agent)?;
+        let tone_revision = restore_layer::<SoulTone>(
+            &tx,
+            agent,
+            SoulLayer::Tone,
+            anchor.tone_revision_id,
+            tone,
+            now_unix,
+        )?;
+        let story_revision = restore_layer::<SoulStory>(
+            &tx,
+            agent,
+            SoulLayer::Story,
+            anchor.story_revision_id,
+            story,
+            now_unix,
+        )?;
+        tx.commit()?;
+        Ok(AnchorRollback {
+            tone_revision,
+            story_revision,
+        })
+    }
+
+    /// How far the current Tone and Story sit from the anchor.
+    ///
+    /// - Dial levels are effective levels: the stored heads of the anchor
+    ///   revision and of the current revision, each layered over
+    ///   `configured_tone`, so a configuration change alone shows no drift.
+    /// - Story added and retired are the multiset difference of
+    ///   `(kind, text)` entries between the anchor revision and the current one.
+    /// - Approved proposals are the accepted resolutions of this agent resolved
+    ///   in `[anchor.set_at_unix, now_unix]`.
+    ///
+    /// Read-only, from one read snapshot.
+    pub fn drift(
+        &self,
+        agent: &str,
+        configured_tone: zeroclaw_config::persona::PersonaKnobs,
+        now_unix: u64,
+    ) -> Result<SoulDrift, SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        drift_of(&tx, agent, configured_tone, now_unix)
     }
 
     /// Record a model proposal for owner review.
@@ -1430,7 +1559,7 @@ impl SoulProfileStore {
         let conn = self.conn.lock();
         Ok(conn
             .query_row(
-                "SELECT period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created
+                "SELECT period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created, drift_json
                  FROM soul_reflections WHERE agent = ?1 ORDER BY id DESC LIMIT 1",
                 params![agent],
                 |row| {
@@ -1441,6 +1570,7 @@ impl SoulProfileStore {
                         outcome: row.get(3)?,
                         ran_at_unix: row.get(4)?,
                         user_model_candidates_created: row.get(5)?,
+                        drift: drift_from_column(row.get(6)?),
                     })
                 },
             )
@@ -1455,7 +1585,7 @@ impl SoulProfileStore {
     ) -> Result<Vec<(i64, SoulReflectionReceipt)>, SoulProfileError> {
         let agent = checked_agent(agent)?;
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT id, period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created FROM soul_reflections WHERE agent = ?1 ORDER BY id DESC LIMIT ?2")?;
+        let mut stmt = conn.prepare("SELECT id, period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created, drift_json FROM soul_reflections WHERE agent = ?1 ORDER BY id DESC LIMIT ?2")?;
         let rows = stmt.query_map(params![agent, limit.min(200) as i64], |row| {
             Ok((
                 row.get(0)?,
@@ -1466,6 +1596,7 @@ impl SoulProfileStore {
                     outcome: row.get(4)?,
                     ran_at_unix: row.get(5)?,
                     user_model_candidates_created: row.get(6)?,
+                    drift: drift_from_column(row.get(7)?),
                 },
             ))
         })?;
@@ -1480,10 +1611,16 @@ impl SoulProfileStore {
     ) -> Result<(), SoulProfileError> {
         let agent = checked_agent(agent)?;
         let outcome = checked_line("outcome", &receipt.outcome, SOUL_RATIONALE_MAX_BYTES)?;
+        let drift_json = receipt
+            .drift
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| SoulProfileError::Storage(e.to_string()))?;
         self.conn.lock().execute(
             "INSERT INTO soul_reflections
-             (agent, period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (agent, period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created, drift_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 agent,
                 receipt.period_from_unix,
@@ -1491,7 +1628,8 @@ impl SoulProfileStore {
                 receipt.proposals_created,
                 outcome,
                 receipt.ran_at_unix,
-                receipt.user_model_candidates_created
+                receipt.user_model_candidates_created,
+                drift_json
             ],
         )?;
         Ok(())
@@ -1524,7 +1662,9 @@ impl SoulProfileStore {
     }
 }
 
-pub use zeroclaw_api::review::SoulReflectionReceipt;
+pub use zeroclaw_api::review::{
+    AnchorSource, DialDrift, SoulAnchor, SoulDrift, SoulReflectionReceipt,
+};
 
 fn profile_of(conn: &Connection, agent: &str) -> Result<SoulProfile, SoulProfileError> {
     Ok(SoulProfile {
@@ -1760,6 +1900,319 @@ fn retire_target(
             "retire_index",
             "no story entry at that index",
         )),
+    }
+}
+
+/// Stored `source` of an owner-set anchor. [`AnchorSource::Default`] anchors
+/// are derived on read and never stored.
+const ANCHOR_SOURCE_OWNER: &str = "owner";
+
+fn anchor_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(SoulAnchor, String)> {
+    Ok((
+        SoulAnchor {
+            id: Some(row.get(0)?),
+            tone_revision_id: row.get(1)?,
+            story_revision_id: row.get(2)?,
+            set_at_unix: row.get(3)?,
+            source: AnchorSource::Owner,
+        },
+        row.get(4)?,
+    ))
+}
+
+/// Every stored anchor row of one agent, oldest first.
+fn anchor_rows(conn: &Connection, agent: &str) -> Result<Vec<SoulAnchor>, SoulProfileError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, tone_revision_id, story_revision_id, set_at_unix, source
+         FROM soul_anchors WHERE agent = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![agent], anchor_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (anchor, source) = row?;
+        if source != ANCHOR_SOURCE_OWNER {
+            return Err(SoulProfileError::Storage(format!(
+                "unknown soul anchor source {source:?}"
+            )));
+        }
+        out.push(anchor);
+    }
+    Ok(out)
+}
+
+fn anchor_of(conn: &Connection, agent: &str) -> Result<SoulAnchor, SoulProfileError> {
+    let latest = conn
+        .query_row(
+            "SELECT id, tone_revision_id, story_revision_id, set_at_unix, source
+             FROM soul_anchors WHERE agent = ?1 ORDER BY id DESC LIMIT 1",
+            params![agent],
+            anchor_row,
+        )
+        .optional()?;
+    match latest {
+        Some((_, source)) if source != ANCHOR_SOURCE_OWNER => Err(SoulProfileError::Storage(
+            format!("unknown soul anchor source {source:?}"),
+        )),
+        Some((anchor, _)) => Ok(anchor),
+        None => default_anchor(conn, agent),
+    }
+}
+
+/// The anchor of an agent whose owner never set one, derived on read and never
+/// written (ADR-018 §4.3: "the first owner-authored or seed revision").
+///
+/// - Tone and Story each point at the earliest revision whose source is `seed`
+///   or `owner`; a layer with none has no pointer (no stored heads, no entries).
+///   Approved-proposal revisions are never the default anchor, so Story that
+///   grew only through proposals shows as drift from "no entries".
+/// - `set_at_unix` is the later of the two anchored revisions' creation times,
+///   so the 28-day report clock and "approved proposals since the anchor" start
+///   when both anchored layers existed. With neither revision, it is the
+///   agent's earliest revision of any layer (its seed time), or 0 for an agent
+///   with no revisions at all.
+fn default_anchor(conn: &Connection, agent: &str) -> Result<SoulAnchor, SoulProfileError> {
+    let earliest = |layer: SoulLayer| -> Result<Option<(u64, u64)>, SoulProfileError> {
+        Ok(conn
+            .query_row(
+                "SELECT revision, created_at_unix FROM soul_revisions
+                 WHERE agent = ?1 AND layer = ?2 AND source IN (?3, ?4)
+                 ORDER BY revision ASC LIMIT 1",
+                params![
+                    agent,
+                    layer.storage_id(),
+                    SoulSource::Seed.as_str(),
+                    SoulSource::Owner.as_str()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    };
+    let tone = earliest(SoulLayer::Tone)?;
+    let story = earliest(SoulLayer::Story)?;
+    let set_at_unix = match (tone, story) {
+        (None, None) => {
+            let first: Option<i64> = conn.query_row(
+                "SELECT MIN(created_at_unix) FROM soul_revisions WHERE agent = ?1",
+                params![agent],
+                |row| row.get(0),
+            )?;
+            first.map_or(0, |at| u64::try_from(at).unwrap_or(0))
+        }
+        _ => tone
+            .map_or(0, |(_, at)| at)
+            .max(story.map_or(0, |(_, at)| at)),
+    };
+    Ok(SoulAnchor {
+        id: None,
+        tone_revision_id: tone.map(|(revision, _)| revision),
+        story_revision_id: story.map(|(revision, _)| revision),
+        set_at_unix,
+        source: AnchorSource::Default,
+    })
+}
+
+/// The value of one stored revision, or the layer's empty value for `None`.
+fn revision_value<T: serde::de::DeserializeOwned + Default>(
+    conn: &Connection,
+    agent: &str,
+    layer: SoulLayer,
+    revision: Option<u64>,
+) -> Result<T, SoulProfileError> {
+    let Some(revision) = revision else {
+        return Ok(T::default());
+    };
+    let body: Option<String> = conn
+        .query_row(
+            "SELECT body FROM soul_revisions WHERE agent = ?1 AND layer = ?2 AND revision = ?3",
+            params![agent, layer.storage_id(), revision],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(body) = body else {
+        return Err(SoulProfileError::NotFound { layer, revision });
+    };
+    serde_json::from_str(&body)
+        .map_err(|e| SoulProfileError::Storage(format!("corrupt soul revision {revision}: {e}")))
+}
+
+/// Append a revision of `layer` equal to `to_revision`, after checking that
+/// `expected_revision` is the current head. The one rollback path for the
+/// owner's per-layer rollback and for rollback to the anchor.
+fn rollback_in(
+    conn: &Connection,
+    agent: &str,
+    layer: SoulLayer,
+    to_revision: u64,
+    expected_revision: u64,
+    now_unix: u64,
+) -> Result<SoulRevision<serde_json::Value>, SoulProfileError> {
+    let current = current_revision(conn, agent, layer, expected_revision)?;
+    let target: Option<String> = conn
+        .query_row(
+            "SELECT body FROM soul_revisions WHERE agent = ?1 AND layer = ?2 AND revision = ?3",
+            params![agent, layer.storage_id(), to_revision],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(body) = target else {
+        return Err(SoulProfileError::NotFound {
+            layer,
+            revision: to_revision,
+        });
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| SoulProfileError::Storage(e.to_string()))?;
+    let new = NewRevision {
+        agent,
+        layer,
+        revision: current + 1,
+        source: SoulSource::Owner,
+        rolled_back_from: Some(to_revision),
+        proposal_id: None,
+        now_unix,
+    };
+    insert(conn, &new, &value)?;
+    Ok(new.revision_of(value))
+}
+
+/// Make `layer`'s head equal the anchored revision (or the empty value when the
+/// anchor has none), appending nothing when it already does. `current` is the
+/// head revision, already checked by the caller. Returns the new revision.
+fn restore_layer<T>(
+    conn: &Connection,
+    agent: &str,
+    layer: SoulLayer,
+    anchored: Option<u64>,
+    current: u64,
+    now_unix: u64,
+) -> Result<Option<u64>, SoulProfileError>
+where
+    T: serde::de::DeserializeOwned + Serialize + Default + PartialEq,
+{
+    let target: T = revision_value(conn, agent, layer, anchored)?;
+    let present: T = head(conn, agent, layer)?
+        .map(decode::<T>)
+        .transpose()?
+        .map_or_else(T::default, |head| head.value);
+    if present == target {
+        return Ok(None);
+    }
+    match anchored {
+        Some(to_revision) => {
+            let revision = rollback_in(conn, agent, layer, to_revision, current, now_unix)?;
+            Ok(Some(revision.revision))
+        }
+        None => {
+            let new = NewRevision {
+                agent,
+                layer,
+                revision: current + 1,
+                source: SoulSource::Owner,
+                rolled_back_from: None,
+                proposal_id: None,
+                now_unix,
+            };
+            insert(conn, &new, &target)?;
+            Ok(Some(new.revision))
+        }
+    }
+}
+
+fn drift_of(
+    conn: &Connection,
+    agent: &str,
+    configured_tone: zeroclaw_config::persona::PersonaKnobs,
+    now_unix: u64,
+) -> Result<SoulDrift, SoulProfileError> {
+    let anchor = anchor_of(conn, agent)?;
+    let anchor_tone: SoulTone =
+        revision_value(conn, agent, SoulLayer::Tone, anchor.tone_revision_id)?;
+    let anchor_story: SoulStory =
+        revision_value(conn, agent, SoulLayer::Story, anchor.story_revision_id)?;
+    let current = profile_of(conn, agent)?;
+    let anchor_levels = anchor_tone.layered_over(configured_tone);
+    let current_levels = current.tone.as_ref().map_or(configured_tone, |head| {
+        head.value.layered_over(configured_tone)
+    });
+    let mut dials = Vec::with_capacity(SOUL_TONE_TRAIT_KEYS.len());
+    for key in SOUL_TONE_TRAIT_KEYS {
+        let (Some(anchored), Some(now)) = (anchor_levels.level(key), current_levels.level(key))
+        else {
+            return Err(SoulProfileError::Storage(format!(
+                "unknown Tone dial {key:?}"
+            )));
+        };
+        dials.push(DialDrift {
+            key: (*key).to_string(),
+            anchor_level: anchored.as_str().to_string(),
+            current_level: now.as_str().to_string(),
+            steps: now as i8 - anchored as i8,
+        });
+    }
+
+    // Entries have no id: `(kind, text)` is the identity and equal entries are
+    // interchangeable, so the difference is over multisets.
+    let mut balance: BTreeMap<(&str, &str), i64> = BTreeMap::new();
+    for entry in &anchor_story.entries {
+        *balance
+            .entry((entry.kind.as_str(), entry.text.as_str()))
+            .or_default() -= 1;
+    }
+    let current_entries = current
+        .story
+        .as_ref()
+        .map_or(&[][..], |head| head.value.entries.as_slice());
+    for entry in current_entries {
+        *balance
+            .entry((entry.kind.as_str(), entry.text.as_str()))
+            .or_default() += 1;
+    }
+    let (added, retired) = balance
+        .values()
+        .fold((0_i64, 0_i64), |(added, retired), n| {
+            (added + (*n).max(0), retired + (-*n).max(0))
+        });
+
+    let approved: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM soul_proposal_resolutions r
+         JOIN soul_proposals p ON p.id = r.proposal_id
+         WHERE p.agent = ?1 AND r.resolution = ?2
+           AND r.resolved_at_unix >= ?3 AND r.resolved_at_unix <= ?4",
+        params![
+            agent,
+            SoulProposalResolution::Accepted.as_str(),
+            anchor.set_at_unix,
+            now_unix
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(SoulDrift {
+        anchor,
+        dials,
+        story_added: u32::try_from(added).unwrap_or(u32::MAX),
+        story_retired: u32::try_from(retired).unwrap_or(u32::MAX),
+        approved_proposals_since_anchor: u32::try_from(approved).unwrap_or(u32::MAX),
+    })
+}
+
+/// Decode a receipt's `drift_json`. Drift is advisory and derived, so a value
+/// this build cannot read (written by another version, or damaged) reads as
+/// absent with a warning rather than blocking every receipt of the agent, whose
+/// cadence depends on them.
+fn drift_from_column(raw: Option<String>) -> Option<SoulDrift> {
+    let raw = raw?;
+    match serde_json::from_str(&raw) {
+        Ok(drift) => Some(drift),
+        Err(error) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(serde_json::json!({"error": error.to_string()})),
+                "Soul reflection receipt drift is unreadable; treating it as absent"
+            );
+            None
+        }
     }
 }
 
@@ -3059,6 +3512,7 @@ mod tests {
                         user_model_candidates_created: 0,
                         outcome: "ok".into(),
                         ran_at_unix: ran,
+                        drift: None,
                     },
                 )
                 .unwrap();
@@ -3092,6 +3546,7 @@ mod tests {
                     user_model_candidates_created: 1,
                     outcome: "ok".into(),
                     ran_at_unix: 30,
+                    drift: None,
                 },
             )
             .unwrap();
@@ -3111,7 +3566,7 @@ mod tests {
         assert_eq!(
             history,
             serde_json::json!({
-                "identity": [], "principles": [], "story": [], "tone": []
+                "identity": [], "principles": [], "story": [], "tone": [], "anchors": []
             })
         );
         assert_eq!(store.revision_stamp("agent_a").unwrap(), 0);
@@ -3875,5 +4330,644 @@ mod tests {
             .unwrap();
         assert!(columns.contains(&"growth_kind".to_string()));
         assert!(!columns.contains(&"story_kind".to_string()));
+    }
+
+    // ADR-018 §4.3: anchor and drift.
+
+    fn tone_heads(pairs: &[(&str, zeroclaw_config::persona::PersonaLevel)]) -> SoulTone {
+        SoulTone {
+            heads: pairs
+                .iter()
+                .map(|(key, level)| ((*key).to_string(), *level))
+                .collect(),
+        }
+    }
+
+    fn story_of(entries: &[(StoryKind, &str)]) -> SoulStory {
+        SoulStory {
+            entries: entries
+                .iter()
+                .map(|(kind, text)| StoryEntry {
+                    kind: *kind,
+                    text: (*text).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn stored_anchor_rows(store: &SoulProfileStore) -> i64 {
+        store
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM soul_anchors", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn steps(drift: &SoulDrift) -> Vec<(String, i8)> {
+        drift
+            .dials
+            .iter()
+            .map(|dial| (dial.key.clone(), dial.steps))
+            .collect()
+    }
+
+    #[test]
+    fn the_default_anchor_is_the_earliest_seed_or_owner_revisions_and_is_never_written() {
+        use zeroclaw_config::persona::PersonaLevel::{High, Low};
+        let (_dir, store) = store();
+        // No revisions at all: no pointers, clock at 0, nothing stored.
+        assert_eq!(
+            store.anchor("a").unwrap(),
+            SoulAnchor {
+                id: None,
+                tone_revision_id: None,
+                story_revision_id: None,
+                set_at_unix: 0,
+                source: AnchorSource::Default,
+            }
+        );
+        // Seeded Identity only: the clock is the seed time.
+        store.ensure_seeded("a", "A", 5).unwrap();
+        assert_eq!(store.anchor("a").unwrap().set_at_unix, 5);
+
+        store
+            .set_tone("a", tone_heads(&[("warmth", High)]), 0, 10)
+            .unwrap();
+        store
+            .set_story("a", story_of(&[(StoryKind::Bond, "Fridays.")]), 0, 20)
+            .unwrap();
+        store
+            .set_tone("a", tone_heads(&[("warmth", Low)]), 1, 30)
+            .unwrap();
+        assert_eq!(
+            store.anchor("a").unwrap(),
+            SoulAnchor {
+                id: None,
+                tone_revision_id: Some(1),
+                story_revision_id: Some(1),
+                // The later of the two anchored revisions' creation times.
+                set_at_unix: 20,
+                source: AnchorSource::Default,
+            }
+        );
+        store.drift("a", Default::default(), 40).unwrap();
+        assert_eq!(stored_anchor_rows(&store), 0, "a read never writes");
+    }
+
+    #[test]
+    fn approved_proposal_revisions_are_never_the_default_anchor() {
+        let (_dir, store) = store();
+        let id = recorded(
+            store
+                .submit_proposal("a", story_add(StoryKind::SelfView, "I like tidy diffs."), 1)
+                .unwrap(),
+        );
+        store
+            .resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 2)
+            .unwrap();
+        assert_eq!(store.profile("a").unwrap().story.unwrap().revision, 1);
+        assert_eq!(store.anchor("a").unwrap().story_revision_id, None);
+        let drift = store.drift("a", Default::default(), 3).unwrap();
+        assert_eq!((drift.story_added, drift.story_retired), (1, 0));
+        assert_eq!(drift.approved_proposals_since_anchor, 1);
+    }
+
+    #[test]
+    fn dial_drift_is_signed_over_effective_levels_and_ignores_config_changes() {
+        use zeroclaw_config::persona::PersonaKnobs;
+        use zeroclaw_config::persona::PersonaLevel::{High, Low, Medium, Xhigh};
+        let (_dir, store) = store();
+        store
+            .set_tone("a", tone_heads(&[("warmth", High), ("humor", Low)]), 0, 10)
+            .unwrap();
+        let configured = PersonaKnobs::default();
+        let none = store.drift("a", configured, 11).unwrap();
+        assert!(none.is_empty());
+        assert_eq!(none.max_abs_steps(), 0);
+        assert_eq!(
+            none.dials
+                .iter()
+                .map(|dial| dial.key.as_str())
+                .collect::<Vec<_>>(),
+            SOUL_TONE_TRAIT_KEYS
+        );
+
+        store
+            .set_tone("a", tone_heads(&[("warmth", Xhigh), ("humor", Low)]), 1, 20)
+            .unwrap();
+        let drift = store.drift("a", configured, 21).unwrap();
+        assert_eq!(
+            steps(&drift),
+            [
+                ("warmth".to_string(), 1),
+                ("directness".to_string(), 0),
+                ("explanation_density".to_string(), 0),
+                ("challenge".to_string(), 0),
+                ("humor".to_string(), 0),
+            ]
+        );
+        assert_eq!(drift.dials[0].anchor_level, "high");
+        assert_eq!(drift.dials[0].current_level, "xhigh");
+
+        // A stored head wins over configuration; an unstored key follows the
+        // configuration on both sides, so a config change alone moves nothing.
+        let reconfigured = PersonaKnobs {
+            warmth: Low,
+            directness: High,
+            ..PersonaKnobs::default()
+        };
+        let after = store.drift("a", reconfigured, 22).unwrap();
+        assert_eq!(steps(&after), steps(&drift));
+        assert_eq!(after.dials[1].anchor_level, "high");
+        assert_eq!(after.dials[1].current_level, "high");
+
+        // Down by one, and up by three (the owner may set any level).
+        store
+            .set_tone(
+                "a",
+                tone_heads(&[("warmth", Medium), ("humor", Xhigh)]),
+                2,
+                30,
+            )
+            .unwrap();
+        let by_key: std::collections::HashMap<_, _> =
+            steps(&store.drift("a", configured, 31).unwrap())
+                .into_iter()
+                .collect();
+        assert_eq!(by_key["warmth"], -1);
+        assert_eq!(by_key["humor"], 3);
+        let drift = store.drift("a", configured, 31).unwrap();
+        assert_eq!(drift.max_abs_steps(), 3);
+        assert!(!drift.is_empty());
+    }
+
+    #[test]
+    fn story_drift_is_a_multiset_difference_of_kind_and_text() {
+        use StoryKind::{Bond, SelfView};
+        let (_dir, store) = store();
+        store
+            .set_story(
+                "a",
+                story_of(&[(Bond, "Fridays."), (SelfView, "Tidy."), (Bond, "Fridays.")]),
+                0,
+                10,
+            )
+            .unwrap();
+        store
+            .set_story(
+                "a",
+                story_of(&[
+                    (Bond, "Fridays."),
+                    // Same text, other kind: a different entry.
+                    (SelfView, "Fridays."),
+                    (SelfView, "Tidy."),
+                    (SelfView, "New."),
+                ]),
+                1,
+                20,
+            )
+            .unwrap();
+        let drift = store.drift("a", Default::default(), 30).unwrap();
+        assert_eq!((drift.story_added, drift.story_retired), (2, 1));
+        assert!(!drift.is_empty());
+
+        let (_dir, reordered) = self::store();
+        reordered
+            .set_story("a", story_of(&[(Bond, "x"), (SelfView, "y")]), 0, 10)
+            .unwrap();
+        reordered
+            .set_story("a", story_of(&[(SelfView, "y"), (Bond, "x")]), 1, 20)
+            .unwrap();
+        assert!(
+            reordered
+                .drift("a", Default::default(), 30)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn approved_proposals_count_from_the_anchor_time_and_only_when_accepted() {
+        let (_dir, store) = store();
+        store.set_tone("a", tone_heads(&[]), 0, 100).unwrap();
+        store.set_story("a", story_of(&[]), 0, 200).unwrap();
+        let resolve = |text: &str, filed: u64, resolution, at: u64| {
+            let id = recorded(
+                store
+                    .submit_proposal("a", story_add(StoryKind::Bond, text), filed)
+                    .unwrap(),
+            );
+            store
+                .resolve_proposal("a", id, resolution, None, None, at)
+                .unwrap();
+        };
+        // The default anchor time is 200, the later of the two revisions.
+        assert_eq!(store.anchor("a").unwrap().set_at_unix, 200);
+        resolve("before", 150, SoulProposalResolution::Accepted, 199);
+        resolve("at", 150, SoulProposalResolution::Accepted, 200);
+        resolve("dismissed", 210, SoulProposalResolution::Dismissed, 220);
+        resolve("later", 230, SoulProposalResolution::Accepted, 240);
+        let drift = store.drift("a", Default::default(), 300).unwrap();
+        assert_eq!(drift.approved_proposals_since_anchor, 2);
+        // A resolution stamped after `now` is not counted yet.
+        let early = store.drift("a", Default::default(), 230).unwrap();
+        assert_eq!(early.approved_proposals_since_anchor, 1);
+    }
+
+    #[test]
+    fn keeping_the_anchor_is_a_checked_append_of_pointers_only() {
+        use zeroclaw_config::persona::PersonaLevel::High;
+        let (_dir, store) = store();
+        store
+            .set_tone("a", tone_heads(&[("warmth", High)]), 0, 10)
+            .unwrap();
+        store
+            .set_story("a", story_of(&[(StoryKind::Bond, "x")]), 0, 20)
+            .unwrap();
+        store
+            .set_story(
+                "a",
+                story_of(&[(StoryKind::Bond, "x"), (StoryKind::Bond, "y")]),
+                1,
+                30,
+            )
+            .unwrap();
+        let drift = store.drift("a", Default::default(), 31).unwrap();
+        assert_eq!(drift.story_added, 1);
+
+        // Either expected revision being stale refuses, and nothing is stored.
+        assert!(matches!(
+            store.set_anchor_to_current("a", 0, 2, 40),
+            Err(SoulProfileError::Conflict {
+                layer: SoulLayer::Tone,
+                expected: 0,
+                actual: 1
+            })
+        ));
+        assert!(matches!(
+            store.set_anchor_to_current("a", 1, 1, 40),
+            Err(SoulProfileError::Conflict {
+                layer: SoulLayer::Story,
+                expected: 1,
+                actual: 2
+            })
+        ));
+        assert_eq!(stored_anchor_rows(&store), 0);
+
+        let kept = store.set_anchor_to_current("a", 1, 2, 40).unwrap();
+        assert_eq!(
+            kept,
+            SoulAnchor {
+                id: Some(1),
+                tone_revision_id: Some(1),
+                story_revision_id: Some(2),
+                set_at_unix: 40,
+                source: AnchorSource::Owner,
+            }
+        );
+        assert_eq!(store.anchor("a").unwrap(), kept);
+        assert!(store.drift("a", Default::default(), 41).unwrap().is_empty());
+
+        // Moving it again appends; the latest row wins and history stays.
+        store.set_story("a", story_of(&[]), 2, 50).unwrap();
+        let moved = store.set_anchor_to_current("a", 1, 3, 60).unwrap();
+        assert_eq!(moved.id, Some(2));
+        assert_eq!(store.anchor("a").unwrap(), moved);
+        assert_eq!(stored_anchor_rows(&store), 2);
+        // Pointers only: the table has no content column.
+        let columns: Vec<String> = store
+            .conn
+            .lock()
+            .prepare("PRAGMA table_info(soul_anchors)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            columns,
+            [
+                "id",
+                "agent",
+                "tone_revision_id",
+                "story_revision_id",
+                "set_at_unix",
+                "source"
+            ]
+        );
+        // Append-only, even with raw SQL.
+        let conn = store.conn.lock();
+        assert!(
+            conn.execute("UPDATE soul_anchors SET source = 'x'", [])
+                .is_err()
+        );
+        assert!(conn.execute("DELETE FROM soul_anchors", []).is_err());
+    }
+
+    #[test]
+    fn keeping_with_no_tone_or_story_stores_no_pointer() {
+        let (_dir, store) = store();
+        let kept = store.set_anchor_to_current("a", 0, 0, 5).unwrap();
+        assert_eq!(
+            (kept.tone_revision_id, kept.story_revision_id),
+            (None, None)
+        );
+        assert_eq!(store.anchor("a").unwrap(), kept);
+    }
+
+    #[test]
+    fn rolling_back_to_the_anchor_appends_through_the_rollback_path_in_one_transaction() {
+        use zeroclaw_config::persona::PersonaLevel::{High, Low};
+        let (_dir, store) = store();
+        store
+            .set_tone("a", tone_heads(&[("warmth", High)]), 0, 10)
+            .unwrap();
+        store
+            .set_story("a", story_of(&[(StoryKind::Bond, "x")]), 0, 20)
+            .unwrap();
+        let anchor = store.set_anchor_to_current("a", 1, 1, 30).unwrap();
+        store
+            .set_tone("a", tone_heads(&[("warmth", Low)]), 1, 40)
+            .unwrap();
+        store
+            .set_story("a", story_of(&[(StoryKind::Bond, "z")]), 1, 50)
+            .unwrap();
+        assert_eq!(
+            store
+                .drift("a", Default::default(), 60)
+                .unwrap()
+                .max_abs_steps(),
+            2
+        );
+        let stamp = store.revision_stamp("a").unwrap();
+
+        // A stale expectation on either layer writes nothing at all.
+        assert!(matches!(
+            store.rollback_to_anchor("a", 1, 2, 70),
+            Err(SoulProfileError::Conflict {
+                layer: SoulLayer::Tone,
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.rollback_to_anchor("a", 2, 1, 70),
+            Err(SoulProfileError::Conflict {
+                layer: SoulLayer::Story,
+                ..
+            })
+        ));
+        assert_eq!(store.revision_stamp("a").unwrap(), stamp);
+
+        let restored = store.rollback_to_anchor("a", 2, 2, 70).unwrap();
+        assert_eq!(
+            restored,
+            AnchorRollback {
+                tone_revision: Some(3),
+                story_revision: Some(3)
+            }
+        );
+        let profile = store.profile("a").unwrap();
+        let tone = profile.tone.unwrap();
+        let story = profile.story.unwrap();
+        assert_eq!(tone.value, tone_heads(&[("warmth", High)]));
+        assert_eq!(story.value, story_of(&[(StoryKind::Bond, "x")]));
+        // The existing rollback convention: owner source, pointing at the original.
+        assert_eq!(
+            (tone.source, tone.rolled_back_from),
+            (SoulSource::Owner, Some(1))
+        );
+        assert_eq!(
+            (story.source, story.rolled_back_from),
+            (SoulSource::Owner, Some(1))
+        );
+        assert_eq!(story.created_at_unix, 70);
+        // The anchor stays where it was, and drift is gone.
+        assert_eq!(store.anchor("a").unwrap(), anchor);
+        assert!(store.drift("a", Default::default(), 71).unwrap().is_empty());
+
+        // A layer already equal is skipped: nothing more is appended.
+        let again = store.rollback_to_anchor("a", 3, 3, 80).unwrap();
+        assert_eq!(again, AnchorRollback::default());
+        assert_eq!(store.revision_stamp("a").unwrap(), stamp + 2);
+    }
+
+    #[test]
+    fn rolling_back_skips_only_the_layer_that_already_matches() {
+        use zeroclaw_config::persona::PersonaLevel::{High, Low};
+        let (_dir, store) = store();
+        store
+            .set_tone("a", tone_heads(&[("warmth", High)]), 0, 10)
+            .unwrap();
+        store.set_anchor_to_current("a", 1, 0, 20).unwrap();
+        store
+            .set_tone("a", tone_heads(&[("warmth", Low)]), 1, 30)
+            .unwrap();
+        let restored = store.rollback_to_anchor("a", 2, 0, 40).unwrap();
+        assert_eq!(
+            restored,
+            AnchorRollback {
+                tone_revision: Some(3),
+                story_revision: None
+            }
+        );
+        assert!(store.profile("a").unwrap().story.is_none());
+    }
+
+    #[test]
+    fn an_anchor_without_tone_or_story_restores_empty_layers() {
+        use zeroclaw_config::persona::PersonaLevel::High;
+        let (_dir, store) = store();
+        let kept = store.set_anchor_to_current("a", 0, 0, 5).unwrap();
+        // Nothing to restore yet.
+        assert_eq!(
+            store.rollback_to_anchor("a", 0, 0, 6).unwrap(),
+            AnchorRollback::default()
+        );
+        store
+            .set_tone("a", tone_heads(&[("warmth", High)]), 0, 10)
+            .unwrap();
+        store
+            .set_story("a", story_of(&[(StoryKind::Bond, "x")]), 0, 20)
+            .unwrap();
+        let restored = store.rollback_to_anchor("a", 1, 1, 30).unwrap();
+        assert_eq!(
+            restored,
+            AnchorRollback {
+                tone_revision: Some(2),
+                story_revision: Some(2)
+            }
+        );
+        let profile = store.profile("a").unwrap();
+        assert_eq!(profile.tone.as_ref().unwrap().value, SoulTone::default());
+        assert_eq!(profile.story.as_ref().unwrap().value, SoulStory::default());
+        assert_eq!(profile.tone.unwrap().rolled_back_from, None);
+        assert_eq!(store.anchor("a").unwrap(), kept);
+        assert!(store.drift("a", Default::default(), 31).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rolling_back_to_a_default_anchor_restores_the_first_owner_revisions() {
+        use zeroclaw_config::persona::PersonaLevel::{High, Low};
+        let (_dir, store) = store();
+        store
+            .set_tone("a", tone_heads(&[("warmth", High)]), 0, 10)
+            .unwrap();
+        store
+            .set_tone("a", tone_heads(&[("warmth", Low)]), 1, 20)
+            .unwrap();
+        let restored = store.rollback_to_anchor("a", 2, 0, 30).unwrap();
+        assert_eq!(restored.tone_revision, Some(3));
+        assert_eq!(
+            store.profile("a").unwrap().tone.unwrap().value,
+            tone_heads(&[("warmth", High)])
+        );
+        assert_eq!(stored_anchor_rows(&store), 0);
+    }
+
+    #[test]
+    fn export_carries_the_anchor_history_and_agents_stay_isolated() {
+        let (_dir, store) = store();
+        store.set_anchor_to_current("a", 0, 0, 5).unwrap();
+        store
+            .set_story("a", story_of(&[(StoryKind::Bond, "x")]), 0, 6)
+            .unwrap();
+        store.set_anchor_to_current("a", 0, 1, 7).unwrap();
+        store.set_anchor_to_current("b", 0, 0, 8).unwrap();
+        let (_, history) = store.export("a").unwrap();
+        assert_eq!(
+            history["anchors"],
+            serde_json::json!([
+                {"id": 1, "tone_revision_id": null, "story_revision_id": null,
+                 "set_at_unix": 5, "source": "owner"},
+                {"id": 2, "tone_revision_id": null, "story_revision_id": 1,
+                 "set_at_unix": 7, "source": "owner"},
+            ])
+        );
+        assert_eq!(store.anchor("b").unwrap().set_at_unix, 8);
+        assert!(
+            store.export("c").unwrap().1["anchors"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    fn receipt_with(drift: Option<SoulDrift>, ran: u64) -> SoulReflectionReceipt {
+        SoulReflectionReceipt {
+            period_from_unix: ran - 1,
+            messages_read: 1,
+            proposals_created: 0,
+            user_model_candidates_created: 0,
+            outcome: "ok".into(),
+            ran_at_unix: ran,
+            drift,
+        }
+    }
+
+    #[test]
+    fn a_receipt_stores_and_returns_its_drift() {
+        use zeroclaw_config::persona::PersonaLevel::High;
+        let (_dir, store) = store();
+        store
+            .set_tone("a", tone_heads(&[("warmth", High)]), 0, 10)
+            .unwrap();
+        store.set_tone("a", tone_heads(&[]), 1, 20).unwrap();
+        let drift = store.drift("a", Default::default(), 30).unwrap();
+        assert_eq!(drift.max_abs_steps(), 1);
+        store
+            .record_reflection("a", &receipt_with(Some(drift.clone()), 30))
+            .unwrap();
+        store
+            .record_reflection("a", &receipt_with(None, 40))
+            .unwrap();
+        assert!(store.last_reflection("a").unwrap().unwrap().drift.is_none());
+        let all = store.reflections("a", 10).unwrap();
+        assert_eq!(all[1].1.drift, Some(drift));
+        // The wire shape: an object for a drift, null without.
+        let json = serde_json::to_value(&all[1].1).unwrap();
+        assert_eq!(json["drift"]["dials"][0]["steps"], -1);
+        assert_eq!(json["drift"]["anchor"]["source"], "default");
+        assert_eq!(
+            serde_json::to_value(&all[0].1).unwrap()["drift"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn an_unreadable_drift_reads_as_absent_instead_of_blocking_the_receipts() {
+        let (_dir, store) = store();
+        store
+            .record_reflection("a", &receipt_with(None, 30))
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .execute_batch("DROP TRIGGER soul_reflections_no_update; UPDATE soul_reflections SET drift_json = '{\"nope\":1}';")
+            .unwrap();
+        assert!(store.last_reflection("a").unwrap().unwrap().drift.is_none());
+        assert_eq!(store.reflections("a", 5).unwrap().len(), 1);
+    }
+
+    /// An older binary lists the receipt columns it knows and ignores the rest,
+    /// and inserts without `drift_json`; the new column and table must not
+    /// disturb either.
+    #[test]
+    fn an_older_binary_still_reads_and_writes_receipts_beside_drift_json() {
+        use zeroclaw_config::persona::PersonaLevel::High;
+        let (dir, store) = store();
+        store
+            .set_tone("a", tone_heads(&[("warmth", High)]), 0, 10)
+            .unwrap();
+        store.set_tone("a", tone_heads(&[]), 1, 20).unwrap();
+        let drift = store.drift("a", Default::default(), 30).unwrap();
+        store
+            .record_reflection("a", &receipt_with(Some(drift), 30))
+            .unwrap();
+        let conn = Connection::open(dir.path().join(SOUL_PROFILE_DB_FILE)).unwrap();
+        // The pre-drift SELECT shapes, verbatim.
+        let (outcome, candidates): (String, u64) = conn
+            .query_row(
+                "SELECT period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created
+                 FROM soul_reflections WHERE agent = ?1 ORDER BY id DESC LIMIT 1",
+                params!["a"],
+                |row| Ok((row.get(3)?, row.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!((outcome.as_str(), candidates), ("ok", 0));
+        let rows = conn
+            .prepare("SELECT id, period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created FROM soul_reflections WHERE agent = ?1 ORDER BY id DESC LIMIT ?2")
+            .unwrap()
+            .query_map(params!["a", 20], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .count();
+        assert_eq!(rows, 1);
+        // The pre-drift INSERT leaves the column NULL, which reads as None.
+        conn.execute(
+            "INSERT INTO soul_reflections
+             (agent, period_from_unix, messages_read, proposals_created, outcome, ran_at_unix, user_model_candidates_created)
+             VALUES ('a', 1, 1, 0, 'ok', 99, 0)",
+            [],
+        )
+        .unwrap();
+        assert!(store.last_reflection("a").unwrap().unwrap().drift.is_none());
+    }
+
+    #[test]
+    fn a_store_from_before_anchors_gains_the_table_and_the_column_without_losing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("soul.db")).unwrap();
+        conn.execute_batch("CREATE TABLE soul_reflections (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, period_from_unix INTEGER NOT NULL, messages_read INTEGER NOT NULL, proposals_created INTEGER NOT NULL, user_model_candidates_created INTEGER NOT NULL DEFAULT 0, outcome TEXT NOT NULL, ran_at_unix INTEGER NOT NULL); INSERT INTO soul_reflections(agent,period_from_unix,messages_read,proposals_created,outcome,ran_at_unix) VALUES ('nova',10,2,1,'ok',20);").unwrap();
+        drop(conn);
+        let store = SoulProfileStore::open(dir.path()).unwrap();
+        let old = store.last_reflection("nova").unwrap().unwrap();
+        assert_eq!(old.drift, None);
+        assert_eq!(store.reflections("nova", 5).unwrap()[0].1, old);
+        assert_eq!(stored_anchor_rows(&store), 0);
+        assert_eq!(store.anchor("nova").unwrap().source, AnchorSource::Default);
+        store
+            .record_reflection("nova", &receipt_with(None, 30))
+            .unwrap();
+        // Reopening is idempotent.
+        SoulProfileStore::open(dir.path()).unwrap();
     }
 }

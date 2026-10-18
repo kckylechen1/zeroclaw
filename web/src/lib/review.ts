@@ -32,12 +32,35 @@ export interface Candidate {
     evidence: string;
     created_at_unix: number;
 }
+export interface DialDrift {
+    key: string;
+    anchor_level: string;
+    current_level: string;
+    /** Signed distance from the anchor; positive means the dial moved up. */
+    steps: number;
+}
+export interface SoulAnchor {
+    /** Null for a default anchor, which the gateway derives and never stores. */
+    id: number | null;
+    tone_revision_id: number | null;
+    story_revision_id: number | null;
+    set_at_unix: number;
+    source: 'default' | 'owner';
+}
+export interface SoulDrift {
+    anchor: SoulAnchor;
+    dials: DialDrift[];
+    story_added: number;
+    story_retired: number;
+    approved_proposals_since_anchor: number;
+}
 export interface Receipt {
     period_from_unix: number;
     ran_at_unix: number;
     proposals_created: number;
     user_model_candidates_created: number;
     outcome: string;
+    drift?: SoulDrift | null;
 }
 export type InboxItem = {
     id: string;
@@ -94,6 +117,33 @@ export interface CandidateHistory {
         note?: string;
         at_unix: number;
     }[];
+}
+// Only the gateway's own drift shape is trusted; anything else (an older
+// gateway answering with an empty object) shows no card instead of a broken one.
+export function readDrift(value: unknown): SoulDrift | null {
+    if (!value || typeof value !== 'object' || !('drift' in value)) return null;
+    const drift = value.drift as Partial<SoulDrift> | null;
+    if (!drift || typeof drift !== 'object' || !drift.anchor || !Array.isArray(drift.dials)) return null;
+    if (drift.anchor.source !== 'default' && drift.anchor.source !== 'owner') return null;
+    if (typeof drift.story_added !== 'number' || typeof drift.story_retired !== 'number' || typeof drift.approved_proposals_since_anchor !== 'number') return null;
+    return drift as SoulDrift;
+}
+export function driftIsEmpty(drift: SoulDrift): boolean {
+    return drift.story_added === 0 && drift.story_retired === 0 && drift.dials.every(dial => dial.steps === 0);
+}
+export function signedSteps(steps: number): string {
+    return steps > 0 ? `+${steps}` : steps < 0 ? `\u2212${-steps}` : '0';
+}
+// Keep and roll back both name the Tone and Story heads the owner is looking
+// at, so a change made elsewhere since the read stops the action (409).
+export function anchorRequest(soul: Soul, action: 'keep' | 'rollback'): {
+    path: string;
+    body: unknown;
+} {
+    return {
+        path: action === 'keep' ? '/api/soul/anchor' : '/api/soul/anchor/rollback',
+        body: { agent: soul.agent, expected_tone_revision: soul.tone.stored?.revision ?? 0, expected_story_revision: soul.story?.revision ?? 0 },
+    };
 }
 export class ReviewError extends Error {
     constructor(public status: number, public code?: string, public field?: string, public reason?: string) { super(`Review HTTP ${status}`); }
