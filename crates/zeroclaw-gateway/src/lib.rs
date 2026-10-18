@@ -1555,6 +1555,7 @@ pub async fn run_gateway(
         // ── Governed Soul owner surface (ADR-015) ──
         .route("/api/soul", get(api_soul::get_soul))
         .route("/api/soul/history", get(api_soul::get_history))
+        .route("/api/soul/export", get(api_soul::get_export))
         .route("/api/soul/identity", put(api_soul::put_identity))
         .route("/api/soul/principles", put(api_soul::put_principles))
         .route("/api/soul/rollback", post(api_soul::post_rollback))
