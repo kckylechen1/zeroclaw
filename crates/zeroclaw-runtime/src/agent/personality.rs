@@ -175,13 +175,6 @@ impl PersonalityProfile {
     }
 }
 
-/// Loads personality files from a workspace directory.
-/// Each well-known file is read and validated.  Missing files are recorded
-/// in `PersonalityProfile::missing` rather than treated as errors.
-pub fn load_personality(workspace_dir: &Path) -> PersonalityProfile {
-    load_personality_files(workspace_dir, PERSONALITY_FILES)
-}
-
 pub async fn seed_default_personality(
     config: &zeroclaw_config::schema::Config,
     alias: &str,
@@ -269,7 +262,7 @@ mod tests {
             ("IDENTITY.md", "Name: Nova"),
         ]);
 
-        let profile = load_personality(&ws);
+        let profile = load_personality_files(&ws, PERSONALITY_FILES);
         assert_eq!(profile.files.len(), 2);
         assert_eq!(profile.get("SOUL.md").unwrap(), "I am a helpful assistant.");
         assert_eq!(profile.get("IDENTITY.md").unwrap(), "Name: Nova");
@@ -282,7 +275,7 @@ mod tests {
     fn load_personality_records_missing_files() {
         let ws = setup_workspace(&[("SOUL.md", "soul content")]);
 
-        let profile = load_personality(&ws);
+        let profile = load_personality_files(&ws, PERSONALITY_FILES);
         assert_eq!(profile.files.len(), 1);
         assert!(profile.missing.contains(&"IDENTITY.md".to_string()));
         assert!(profile.missing.contains(&"USER.md".to_string()));
@@ -294,7 +287,7 @@ mod tests {
     fn load_personality_treats_empty_files_as_missing() {
         let ws = setup_workspace(&[("SOUL.md", "   \n  ")]);
 
-        let profile = load_personality(&ws);
+        let profile = load_personality_files(&ws, PERSONALITY_FILES);
         assert!(profile.is_empty());
         assert!(profile.missing.contains(&"SOUL.md".to_string()));
 
@@ -306,7 +299,7 @@ mod tests {
         let large = "x".repeat(MAX_FILE_CHARS + 500);
         let ws = setup_workspace(&[("SOUL.md", &large)]);
 
-        let profile = load_personality(&ws);
+        let profile = load_personality_files(&ws, PERSONALITY_FILES);
         let soul = profile.files.iter().find(|f| f.name == "SOUL.md").unwrap();
         assert!(soul.truncated);
         assert_eq!(soul.content.chars().count(), MAX_FILE_CHARS);
@@ -318,7 +311,7 @@ mod tests {
     fn render_produces_markdown_sections() {
         let ws = setup_workspace(&[("SOUL.md", "Be kind."), ("IDENTITY.md", "Name: Nova")]);
 
-        let profile = load_personality(&ws);
+        let profile = load_personality_files(&ws, PERSONALITY_FILES);
         let rendered = profile.render();
         assert!(rendered.contains("### SOUL.md"));
         assert!(rendered.contains("Be kind."));
@@ -333,7 +326,7 @@ mod tests {
         let large = "y".repeat(MAX_FILE_CHARS + 100);
         let ws = setup_workspace(&[("SOUL.md", &large)]);
 
-        let profile = load_personality(&ws);
+        let profile = load_personality_files(&ws, PERSONALITY_FILES);
         let rendered = profile.render();
         assert!(rendered.contains("[... truncated at"));
 
@@ -343,7 +336,7 @@ mod tests {
     #[test]
     fn get_returns_none_for_missing_file() {
         let ws = setup_workspace(&[]);
-        let profile = load_personality(&ws);
+        let profile = load_personality_files(&ws, PERSONALITY_FILES);
         assert!(profile.get("SOUL.md").is_none());
         let _ = std::fs::remove_dir_all(ws);
     }
@@ -362,7 +355,7 @@ mod tests {
     #[test]
     fn empty_workspace_yields_empty_profile() {
         let ws = setup_workspace(&[]);
-        let profile = load_personality(&ws);
+        let profile = load_personality_files(&ws, PERSONALITY_FILES);
         assert!(profile.is_empty());
         assert!(!profile.missing.is_empty());
         let _ = std::fs::remove_dir_all(ws);

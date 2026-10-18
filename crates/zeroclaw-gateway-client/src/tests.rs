@@ -118,6 +118,16 @@ async fn fake_gateway(listener: TcpListener) -> Vec<serde_json::Value> {
             "answer" => {
                 ws.send(send(serde_json::json!({"type":"answer_ack", "request_id":frame["request_id"], "status":"accepted"}))).await.unwrap();
             }
+            "source_resume" => {
+                assert_eq!(frame["control_version"], 1);
+                ws.send(send(serde_json::json!({
+                    "type":"source_ready","intake_version":1,"source":frame["source"],
+                    "cursor":0,"unknown":[],"receipts":[],"control":{
+                        "control_version":1,"revision":1,"turn_id":"a0000000-0000-4000-8000-000000000001",
+                        "idle_message":"idle","unknown_message":"unknown","not_sent_message":"not sent"
+                    }
+                }))).await.unwrap();
+            }
             "approval_response" | "cancel" => {}
             other => panic!("unexpected client frame {other}"),
         }
@@ -331,6 +341,113 @@ async fn requested_surface_requires_the_matching_versioned_acknowledgement() {
             if let Ok(client) = result {
                 client.close().await.unwrap();
             }
+        };
+        tokio::join!(server, exchange);
+    }
+}
+
+#[tokio::test]
+async fn scoped_cancel_wire_carries_the_frozen_target_and_does_not_claim_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let options = ConnectOptions {
+        gateway: format!("ws://{}", listener.local_addr().unwrap()),
+        agent: "main".into(),
+        session_id: None,
+        token: Some("zc_token".into()),
+    };
+    let server = tokio::spawn(fake_gateway(listener));
+    let mut client = Client::connect(&options).await.unwrap();
+    let target = "a0000000-0000-4000-8000-000000000001";
+    assert!(client.cancel_turn("must-not-send", target).await.is_err());
+    client
+        .resume_source_with_control("telegram:7:9")
+        .await
+        .unwrap();
+    client.cancel_turn("stop-1", target).await.unwrap();
+    let frames = server.await.unwrap();
+    assert_eq!(
+        frames.len(),
+        3,
+        "unnegotiated cancel must not write any frame"
+    );
+    assert_eq!(frames[1]["type"], "source_resume");
+    assert_eq!(
+        frames[2],
+        serde_json::json!({"type":"cancel","control_version":1,"id":"stop-1","turn_id":target})
+    );
+    let ack = Frame::parse(&serde_json::json!({"type":"cancel_ack","control_version":1,"id":"stop-1","turn_id":target,"status":"requested","message":"requested"}).to_string()).unwrap();
+    assert!(!ack.is_terminal());
+}
+
+#[tokio::test]
+#[allow(clippy::result_large_err)]
+async fn source_control_requires_a_supported_explicit_snapshot() {
+    for control in [
+        serde_json::Value::Null,
+        serde_json::json!({"control_version":2,"revision":0,"turn_id":null,"idle_message":"idle","unknown_message":"unknown","not_sent_message":"not sent"}),
+        serde_json::json!({"control_version":1,"revision":0,"idle_message":"idle","unknown_message":"unknown","not_sent_message":"not sent"}),
+        serde_json::json!({"control_version":1,"revision":0,"turn_id":"not-a-turn","idle_message":"idle","unknown_message":"unknown","not_sent_message":"not sent"}),
+        serde_json::json!({"control_version":1,"revision":0,"turn_id":null,"idle_message":"idle","unknown_message":"unknown","not_sent_message":"not sent"}),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let options = ConnectOptions {
+            gateway: format!("ws://{}", listener.local_addr().unwrap()),
+            agent: "main".into(),
+            session_id: None,
+            token: None,
+        };
+        let succeeds = control["control_version"] == 1
+            && control
+                .get("turn_id")
+                .is_some_and(serde_json::Value::is_null);
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket=tokio_tungstenite::accept_hdr_async(MaybeTlsStream::Plain(stream),
+                |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    response.headers_mut().insert(header::SEC_WEBSOCKET_PROTOCOL,HeaderValue::from_static(PROTOCOL)); Ok(response)
+                }).await.unwrap();
+            send_json(
+                &mut socket,
+                &serde_json::json!({"type":"session_start","session_id":"shared"}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                next_value(&mut socket).await.unwrap().unwrap()["type"],
+                "connect"
+            );
+            send_json(&mut socket, &serde_json::json!({"type":"connected"}))
+                .await
+                .unwrap();
+            assert_eq!(
+                next_value(&mut socket).await.unwrap().unwrap(),
+                serde_json::json!({"type":"source_resume","source":"telegram:7:9","control_version":1})
+            );
+            send_json(&mut socket,&serde_json::json!({"type":"source_ready","intake_version":1,"source":"telegram:7:9","cursor":0,"unknown":[],"receipts":[],"control":control})).await.unwrap();
+            assert!(
+                matches!(socket.next().await, Some(Ok(Message::Close(_))) | None),
+                "failed negotiation must never be followed by a cancel frame"
+            );
+        };
+        let exchange = async {
+            let mut client = Client::connect(&options).await.unwrap();
+            assert_eq!(
+                client
+                    .resume_source_with_control("telegram:7:9")
+                    .await
+                    .is_ok(),
+                succeeds
+            );
+            if !succeeds {
+                assert!(
+                    client
+                        .cancel_turn("must-not-send", "a0000000-0000-4000-8000-000000000001")
+                        .await
+                        .is_err()
+                );
+            }
+            client.close().await.unwrap();
         };
         tokio::join!(server, exchange);
     }
