@@ -27,22 +27,38 @@
 
 ---
 
+> **Independent fork.** This repository (`kckylechen1/zeroclaw`) is an
+> independently maintained personal-controller fork, **not** the official
+> ZeroClaw Labs repository or release. Its current product direction is one
+> always-on personal agent that can use direct tools and MCP, delegate
+> authorized external harness work through Tachi, and control edge devices
+> through gateway Clients/Nodes. Read the [fork rules](AGENTS.md),
+> [ADR-013](docs/book/src/architecture/decisions/ADR-013-channels-as-gateway-clients.md)
+> and [ADR-017](docs/book/src/architecture/decisions/ADR-017-personal-agent-body-edges-and-delegation.md)
+> for the actual ownership and rollout boundaries. The general feature
+> descriptions below include upstream capabilities; they are not proof that
+> every fork-specific replacement has passed production acceptance.
+
 ZeroClaw is an agent runtime — a single Rust binary you configure and run. It talks to LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), reaches the world through 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, your own CLI), and acts through tools (shell, browser, HTTP, custom MCP servers). Everything runs on your machine, with your keys, in your workspace.
 
 Read the [Philosophy](docs/book/src/philosophy/index.md) for the four opinions that shape it.
 
 ## Install
 
+For **this fork**, clone its source and use its own installer in source mode
+(the upstream prebuilt releases do not certify the fork's code):
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh | bash
+git clone --recurse-submodules https://github.com/kckylechen1/zeroclaw.git
+cd zeroclaw
+./install.sh --source
 ```
 
-Or clone and run:
+The following one-line installer belongs to **upstream ZeroClaw**, not this
+fork. Use it only when you intend to install upstream:
 
 ```bash
-git clone https://github.com/zeroclaw-labs/zeroclaw.git
-cd zeroclaw
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh | bash
 ```
 
 The piped installer uses a prebuilt binary when one is available and falls back to a source build otherwise. It skips interactive setup and prints `zeroclaw quickstart` as the next step.
@@ -54,7 +70,7 @@ When the platform maps to a supported prebuilt target, running `./install.sh` fr
 > or syncing the docs does. Clone with it, or add it to an existing clone:
 >
 > ```bash
-> git clone --recurse-submodules https://github.com/zeroclaw-labs/zeroclaw.git
+> git clone --recurse-submodules https://github.com/kckylechen1/zeroclaw.git
 > git submodule update --init docs/book/po   # existing clone
 > ```
 
@@ -179,13 +195,16 @@ AI-assisted PRs are welcome; see [Contribution culture (RFC #5615)](https://gith
 
 Do not file public issues for security vulnerabilities. Email `security@zeroclaw.dev`. See [SECURITY.md](SECURITY.md) for the full policy.
 
-## Official repository & impersonation notice
+## Official upstream and fork identity
 
-This is the only official ZeroClaw repository:
+The official upstream ZeroClaw Labs repository is
+<https://github.com/zeroclaw-labs/zeroclaw>.
 
-> <https://github.com/zeroclaw-labs/zeroclaw>
-
-Any other repository, organization, domain, or package claiming to be "ZeroClaw" or implying affiliation with ZeroClaw Labs is **unauthorized and not affiliated with this project**.
+This repository (`kckylechen1/zeroclaw`) is an independent fork and does
+**not** claim to be an official ZeroClaw Labs distribution or to be
+affiliated with its maintainers. Upstream badges, documentation, release
+links and contribution information refer to upstream unless explicitly
+marked as fork-specific.
 
 ## License
 
