@@ -51,7 +51,17 @@ default. Every client attached to that session shares one conversation:
   chat.
 - A Telegram message sent while a turn runs waits durably for its own turn.
   Ordinary CLI/PWA messages retain their existing steering behavior.
-- `/cancel` stops the running turn.
+- `/stop` and `/cancel` request cancellation of the turn observed when that
+  command reaches the bridge. The target is frozen before its durable control
+  receipt; a late command cannot stop a newer turn. No observed target means no
+  stop is sent. A requested receipt is shown separately from confirmed `(cancelled)`.
+- Source resume must negotiate turn-control version 1 with Gateway. Unsupported
+  versions fail closed. Upgrade Gateway before the bridge; there is no unscoped
+  cancel fallback. Reconnect replaces the turn snapshot and rejects older buffered
+  state. A sent stop is never resent: a lost outcome is reported as unknown after
+  15 seconds. Up to 32 stop-outcome waiters are retained.
+- Disconnecting the socket leaves the turn running. `/stop` does not cancel a
+  delegated job; explicit run-bound delegated controls belong to #381.
 
 ## Behavior
 
@@ -149,7 +159,7 @@ Downloads are capped at 2 MiB on both advertised and actual bytes and have a
 validates MIME/image signatures and scopes handles to the token, session and
 agent. Handles expire after 15 minutes and do not survive Gateway restart.
 Upload failures are shown to the owner and start no turn. One file transfer may
-be active at a time; Gateway events and `/cancel` remain serviced while it runs.
+be active at a time; Gateway events and `/stop` or `/cancel` remain serviced while it runs.
 An unacknowledged message retains its original request ID and attachment handles
 on reconnect; files are not automatically reuploaded under new handles.
 
@@ -163,7 +173,7 @@ Not yet: groups or durable attachment bytes. A turn's frames that
 arrive while the chat socket is down are not replayed.
 
 While a file uploads, up to 32 subsequent owner text inputs wait behind it in
-arrival order. Gateway events and `/cancel` remain responsive; additional files
+arrival order. Gateway events and `/stop` or `/cancel` remain responsive; additional files
 or text beyond that bound receive a retry response. A correlated durable Gateway rejection ends reconnect retries for that
 request; a plain error frame cannot release the source update.
 

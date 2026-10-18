@@ -1066,3 +1066,12 @@ soul-tone-exemplars-too-many = A Tone can hold at most four exemplars.
 soul-tone-exemplar-empty = Each exemplar needs a situation, your line, and the agent's line.
 soul-tone-exemplar-single-line = An exemplar field must be a single line of text without line breaks or control characters.
 soul-tone-exemplar-too-long = An exemplar field is over its limit: situation 80 bytes, your line 160 bytes, the agent's line 320 bytes.
+# Scoped chat turn cancellation. Requested is not a completed cancellation.
+gateway-cancel-requested = Stop requested for that turn; it has not yet confirmed cancellation.
+gateway-cancel-stale = That turn has ended. The newer turn was not stopped.
+gateway-cancel-no-active = That turn is no longer running.
+gateway-cancel-unauthorized = Current device or scoped bridge authority is required to stop this turn.
+gateway-cancel-invalid = This stop request has no supported version or valid turn target.
+gateway-cancel-idle = No running turn was observed; no stop was sent.
+gateway-cancel-unknown = The stop outcome is unknown. It will not be sent again automatically.
+gateway-cancel-not-sent = The stop was not sent. Reconnect or wait for pending stop outcomes before trying again.

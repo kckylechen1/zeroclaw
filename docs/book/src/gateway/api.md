@@ -101,6 +101,54 @@ WebSocket handshake has no equivalent surface register. This bounded extension
 implements the surface slice of #377/#380; surface-based recall and worker
 projection rules remain separate work.
 
+### Turn-bound bridge stop (control version 1)
+
+The Telegram bridge requests `control_version: 1` on its existing
+`source_resume` frame. `source_ready.control` must confirm version 1 and include
+an explicit `turn_id` (UUID or null), a monotonic `revision`, and Gateway-localized
+`idle_message`, `unknown_message`, and `not_sent_message`. Missing or unsupported control semantics
+refuse the bridge handshake; there is no bare-cancel fallback. Legacy clients
+can omit the extension and retain their existing frames.
+
+The shared Conversation creates the turn UUID when it claims the turn slot and
+uses the same UUID for persisted running-state and trace identity. After control
+negotiation, `turn_state` frames carry `control_version`, `revision`, and
+`turn_id`. Null means idle. Clients replace their revision baseline on reconnect
+from `source_ready.control` and ignore older/equal buffered revisions. These
+frames describe ephemeral ownership; they do not create another durable ledger.
+
+A stop freezes the observed UUID before waiting for its durable source-control
+receipt. The request is:
+
+```json
+{"type":"cancel","control_version":1,"id":"tg:7:9:42","turn_id":"a0000000-0000-4000-8000-000000000001"}
+```
+
+Gateway rechecks current device or exact-session bridge authority and the enabled
+agent, then compares the target with the active turn under the admission lock.
+It replies only to the sender with `cancel_ack`, the same version, ID and target,
+a `status`, and a localized `message`. Status is `requested`, `stale`, `no_active`,
+`unauthorized`, or `invalid`. `requested` means the cancellation token was
+signalled; it does not mean effects have stopped. The existing terminal
+`aborted` event remains the confirmation of turn cancellation. A stale target,
+malformed version/target, or revoked authority cannot cancel another turn.
+
+Only a matching known acknowledgement resolves the bridge's pending outcome.
+The bridge bounds those waiters to 32 for 15 seconds, reports an uncertain
+outcome after timeout, and never resends an attempted stop after reconnect.
+Durable source acceptance and the stop outcome are distinct: a crash after
+recording a control can leave its outcome unknown. Replayed source controls do
+not execute again. Disconnect only detaches the chat; stopping a chat turn never
+issues a delegated-job cancellation. That remains an explicit, run-bound Tachi
+operation under #381.
+
+Upstream `zeroclaw-labs/zeroclaw` was inspected at
+`329e66f76394b00af9d00b767e00ad298133961e`: its WebSocket implementation preserves
+detach-versus-abort but has no equivalent shared-Conversation bridge stop target.
+This leaf extends the fork's existing Conversation owner; it does not import
+upstream Agent orchestration. Real-bot/provider acceptance and the remainder of
+#377 stay separate.
+
 ### Who can attach to a session
 
 A session id names a conversation; it is not a secret or a credential. With
@@ -671,8 +719,11 @@ Soul or the User Model.
 
 Model file tools (`file_write`, `file_edit`, `file_download`, `browser` and
 `screenshot` targets, `git_operations` worktree paths) cannot write `SOUL.md`,
-`IDENTITY.md`, or `USER.md` at an agent workspace root; they share one
-write-target check. `USER.md` stops being injected once the User Model holds an
+`IDENTITY.md`, `USER.md`, `HEARTBEAT.md`, or `BOOTSTRAP.md` at an agent
+workspace root; they share one
+write-target check (`HEARTBEAT.md` is the heartbeat engine's task list and
+`BOOTSTRAP.md` belongs to first-run scaffolding; neither is model-writable by
+design). `USER.md` stops being injected once the User Model holds an
 owner-authorized active revision for the agent (global or agent scope), the
 same way `SOUL.md` and `IDENTITY.md` retire with an owner-authored Identity;
 until then each start logs one WARN naming the migration path. The files the

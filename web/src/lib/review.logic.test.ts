@@ -191,3 +191,43 @@ assert.deepEqual(readExemplarDraftState({ toneExemplarDraft: { agent: 'nova', ..
 for (const state of [null, undefined, {}, 'x', { toneExemplarDraft: null }, { toneExemplarDraft: { agent: '', ...exemplar } }, { toneExemplarDraft: { agent: 'nova', situation: 'x' } }, { toneExemplarDraft: { agent: 'nova', ...exemplar, owner_line: 7 } }])
     assert.equal(readExemplarDraftState(state), null);
 console.log('tone exemplar bounds, request binding, pinned draft and router state passed');
+
+const { candidatePagePath, loadCandidatePage, appendCandidatePage } = await import('./review');
+const cursor = { created_at_unix: 100, id: 'x/y & z' };
+assert.equal(candidatePagePath(), '/api/user-model/candidates?limit=50');
+assert.equal(candidatePagePath(cursor), '/api/user-model/candidates?limit=50&before_created_at=100&before_id=x%2Fy%20%26%20z');
+const pageA = { candidates: [user.item], next_cursor: { created_at_unix: 1, id: user.item.id } };
+const older = { ...user.item, id: 'older', created_at_unix: 0 };
+assert.deepEqual(appendCandidatePage(pageA, { candidates: [user.item, older, older], next_cursor: null }), { candidates: [user.item, older], next_cursor: null });
+const controller = new AbortController();
+globalThis.fetch = async (input, options) => {
+    assert.equal(input, '/controller/api/user-model/candidates?limit=50');
+    assert.equal(options?.signal, controller.signal);
+    assert.equal((options?.headers as Record<string, string>).Authorization, 'Bearer synthetic-owner');
+    assert.equal(options?.cache, 'no-store');
+    return new Response(JSON.stringify(pageA));
+};
+assert.deepEqual(await loadCandidatePage(null, controller.signal), pageA);
+for (const page of [{ candidates: [] }, { candidates: [user.item] }]) {
+    globalThis.fetch = async () => new Response(JSON.stringify(page));
+    await assert.rejects(loadCandidatePage(null, controller.signal), (error: unknown) => error instanceof ReviewError && error.code === 'pagination_unavailable');
+}
+for (const page of [
+    { candidates: Array.from({length: 51}, () => user.item), next_cursor: null },
+    { candidates: [], next_cursor: { created_at_unix: 1, id: 'x' } },
+    { ...pageA, next_cursor: { created_at_unix: 1, id: 'wrong' } },
+    { ...pageA, next_cursor: { created_at_unix: -1, id: user.item.id } },
+    { ...pageA, next_cursor: undefined },
+]) {
+    globalThis.fetch = async () => new Response(JSON.stringify(page));
+    await assert.rejects(loadCandidatePage(null, controller.signal));
+}
+globalThis.fetch = async () => new Response(JSON.stringify(pageA));
+await assert.rejects(loadCandidatePage(pageA.next_cursor, controller.signal));
+globalThis.fetch = async () => new Response(JSON.stringify({ candidates: [], next_cursor: null }));
+assert.deepEqual(await loadCandidatePage(pageA.next_cursor, controller.signal), { candidates: [], next_cursor: null });
+for (const status of [401, 429, 503]) {
+    globalThis.fetch = async () => new Response('{}', { status });
+    await assert.rejects(loadCandidatePage(null, controller.signal), (error: unknown) => error instanceof ReviewError && error.status === status);
+}
+console.log('candidate page contract, bounded response, cursor progress and dedup passed');

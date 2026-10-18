@@ -31,8 +31,18 @@ pub struct ActionTracker {
 
 const ACTION_WINDOW: Duration = Duration::from_secs(3600);
 
-/// Legacy persona files that model file tools must never write (ADR-015 §3).
-pub const PROTECTED_PERSONA_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
+/// Owner-governed files injected into the prompt that model file tools must
+/// never write: the legacy persona files (ADR-015 §3) plus the system-owned
+/// prompt files (ADR-018 §6). `HEARTBEAT.md` is the heartbeat engine's task
+/// list and `BOOTSTRAP.md` belongs to first-run scaffolding; neither has a
+/// model write path by design.
+pub const PROTECTED_PERSONA_FILES: &[&str] = &[
+    "SOUL.md",
+    "IDENTITY.md",
+    "USER.md",
+    "HEARTBEAT.md",
+    "BOOTSTRAP.md",
+];
 
 fn retain_actions_after(actions: &mut Vec<Instant>, cutoff: Option<Instant>) {
     if let Some(cutoff) = cutoff {
@@ -2019,12 +2029,14 @@ impl SecurityPolicy {
         }
 
         // Prefer canonical workspace root so `/a/../b` style config paths don't
-        // cause false positives or negatives.
+        // cause false positives or negatives. Accept the literal form too: on
+        // symlinked roots (macOS TMPDIR, /var) a caller's literal path and the
+        // canonical root are two spellings of the same workspace.
         let workspace_root = self
             .workspace_dir
             .canonicalize()
             .unwrap_or_else(|_| self.workspace_dir.clone());
-        if resolved.starts_with(&workspace_root) {
+        if resolved.starts_with(&workspace_root) || resolved.starts_with(&self.workspace_dir) {
             return true;
         }
 
@@ -2196,9 +2208,16 @@ impl SecurityPolicy {
         let Some(parent) = resolved.parent() else {
             return false;
         };
+        // Compare through the same lens as `runtime_config_dirs`, which
+        // canonicalizes: on symlinked roots (macOS TMPDIR, /var) the literal
+        // and resolved forms differ and a literal comparison would miss the
+        // guard.
+        let canon_parent = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
         self.runtime_config_dirs()
             .iter()
-            .any(|dir| parent == dir.as_path())
+            .any(|dir| dir == &canon_parent)
     }
 
     /// Whether `resolved` is one of the legacy persona files (`SOUL.md`,
@@ -2242,11 +2261,16 @@ impl SecurityPolicy {
 
     /// The one write guard for model tools that write a resolved filesystem
     /// target (ADR-018 §6): refuses runtime config/state files and the
-    /// owner-governed persona files. Every such tool calls this after it
-    /// resolves the final target, so a new write-capable tool needs no
-    /// per-file knowledge. Reads are unaffected, which is why this is not
-    /// part of [`Self::is_resolved_path_allowed`]. `shell` cannot be guarded
-    /// by path and stays behind the approval chain.
+    /// owner-governed prompt-injected files. Every such tool calls this after
+    /// it resolves the final target, so a new write-capable tool needs no
+    /// per-file knowledge — but it must make the call; the guarded-tool
+    /// inventory in the gateway API docs is reviewed together with any new
+    /// tool. Reads are unaffected, which is why this is not part of
+    /// [`Self::is_resolved_path_allowed`]. Residuals that cannot be guarded
+    /// by path: `shell` (behind the approval chain), `git_operations`
+    /// checkout/stash flows (they can change tracked workspace content), and
+    /// hardlink write-through into a protected file via a link created with
+    /// `shell` — all of which reduce to the `shell` residual.
     ///
     /// `Err` carries the tool-facing violation message.
     pub fn check_model_write_target(&self, resolved: &Path) -> Result<(), String> {
