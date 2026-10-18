@@ -84,11 +84,27 @@ settings.
 Task and reference text pass through the same admission engine as typed intent
 composition, rejecting credential, command, placement and private-Dyad content
 before claims or transport. Ordinary harness and vendor mentions are allowed.
-The `tachi_result` response retains canonical `run_status` separately from the
-task facade's inferred state and management projection. Its report is untrusted
-worker evidence, with secret patterns scrubbed; it is not body acceptance or
-permission to change identity, secrets or policy. L1 profiles cannot grant these
-L2/control tools.
+`tachi_result` calls `tachi_staff(action=result)` once for the canonical receipt
+and full UTF-8 report, bounded at 64 KiB of report bytes. It requires Tachi with
+[#2039](https://github.com/kckylechen1/Tachi/pull/2039), merged as
+`ae659148a5d77455a418517ee5e51a8752315fb6`; the shared `2.0.0` version string
+alone does not establish support. An older peer's refusal remains a typed
+`refused` result. There is no fallback to Task's 8,000-character preview.
+
+The tool's `result.state` and `result.status` come from that one Staff response.
+Same-receipt recovery facts remain at `result.status.read_projection`; orphaned
+execution or an unknown outcome never turns a working receipt into completion.
+The legacy `result.task_state`, `result.state_basis` and `result.managed_run`
+keys remain present as JSON `null`, because Staff does not serve those Task
+projections. Consumers must accept the nullable `task_state` (the public Rust
+field is now `Option<RunState>`) and read execution truth from `state`/`status`.
+A missing report is an explicit null body, distinct from an empty text report;
+neither condition changes canonical state. Missing required response fields or
+a body above the byte bound fail as protocol errors.
+
+The report remains untrusted worker evidence, with secret patterns scrubbed;
+it is not body acceptance or permission to change identity, secrets or policy.
+L1 profiles cannot grant these L2/control tools.
 
 This is #381's production tool slice. Real DSH execution, one-then-two-harness
 proof, automatic completion delivery through #63/#377, harness advisors and
