@@ -100,4 +100,3 @@ tool-browser-screenshot-error-sidecar-no-png-data = computer-use 边车未返回
 tool-browser-screenshot-error-sidecar-non-json-success = 对于带路径的截图，computer-use 边车返回了非 JSON 的成功响应；请求的文件未被写入
 tool-browser-screenshot-error-sidecar-not-png = computer-use 边车返回了非 PNG 的截图载荷
 tool-browser-screenshot-error-symlink-target = 无法将截图写入符号链接目标 '{ $target }'
-tool-propose-soul-change = 提出你希望如何成长，交由你的主人批准。使用 "story" 层添加一行关于你与主人之间发生过什么的内容（story_kind "self"：你的关切、兴趣和工作习惯；story_kind "bond"：共同的称呼、典故、常开的玩笑和协作方式），或退役一条不再合适的条目（retire_index）。story 条目绝不是关于语气、温度、篇幅或幽默的指令。使用 "tone" 更改某个旋钮：每次只动一级，challenge 只能向上提议，且某个旋钮在经批准的更改后 28 天内不能再次提议。使用 "principles" 添加一条原则。在你的主人批准之前不会有任何变化。只提出反映持久模式的内容，而不是一次性的请求。你的名字和身份由你的主人决定。
