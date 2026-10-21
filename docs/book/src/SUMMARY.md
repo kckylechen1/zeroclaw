@@ -48,6 +48,7 @@
     - [ADR-016: Growth proposed by the agent, approved by the owner](./architecture/decisions/ADR-016-growth-proposed-by-agent-approved-by-owner.md)
     - [ADR-017: Personal agent body, edge devices, and delegation](./architecture/decisions/ADR-017-personal-agent-body-edges-and-delegation.md)
     - [ADR-018: Soul character model](./architecture/decisions/ADR-018-soul-character-model.md)
+    - [ADR-019: Skill growth under owner review](./architecture/decisions/ADR-019-skill-growth-under-owner-review.md)
   - [Logging](./architecture/logging.md)
   - [Runtime state and persistence](./architecture/runtime-state-and-persistence.md)
   - [Memory and payload lifecycle](./architecture/memory-payload-lifecycle.md)
