@@ -1,0 +1,20 @@
+[package]
+name = "zeroclaw-cost"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cost pricing, budget enforcement, and JSONL accounting for ZeroClaw."
+publish = false
+
+[dependencies]
+zeroclaw-api.workspace = true
+zeroclaw-config.workspace = true
+zeroclaw-log.workspace = true
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+parking_lot = "0.12"
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
+
+[dev-dependencies]
+tempfile = "3.26"

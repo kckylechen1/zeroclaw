@@ -1,7 +1,3 @@
-use super::types::{
-    AgentCostStats, BudgetCheck, CostRecord, CostSummary, ModelStats, TokenUsage, UsagePeriod,
-};
-use crate::schema::CostConfig;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use parking_lot::{Mutex, MutexGuard, RwLock};
@@ -10,6 +6,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use zeroclaw_api::cost::{
+    AgentCostStats, BudgetCheck, CostRecord, CostSummary, ModelStats, TokenUsage, UsagePeriod,
+};
+use zeroclaw_config::schema::CostConfig;
 
 pub struct CostTracker {
     /// Live cost policy. This is hot-swapped on config reload so budget checks
@@ -243,8 +243,7 @@ impl CostTracker {
         };
         let cost_usd = usage.cost_usd;
         let total_tokens = usage.total_tokens;
-        let record =
-            CostRecord::with_attribution(&self.session_id, effective_alias.clone(), task_id, usage);
+        let record = new_record(&self.session_id, effective_alias.clone(), task_id, usage);
 
         {
             let mut storage = self.lock_storage();
@@ -938,9 +937,25 @@ impl CostStorage {
     }
 }
 
+fn new_record(
+    session_id: impl Into<String>,
+    agent_alias: Option<String>,
+    task_id: Option<String>,
+    usage: TokenUsage,
+) -> CostRecord {
+    CostRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        usage,
+        session_id: session_id.into(),
+        agent_alias,
+        task_id,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calculate_token_usage;
     use chrono::Utc;
     use tempfile::TempDir;
 
@@ -957,10 +972,26 @@ mod tests {
         // Write two real, valid records through the normal (now-atomic) path.
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
         tracker
-            .record_usage(TokenUsage::new("test/model", 1000, 500, 0, 1.0, 2.0, 0.0))
+            .record_usage(calculate_token_usage(
+                "test/model",
+                1000,
+                500,
+                0,
+                1.0,
+                2.0,
+                0.0,
+            ))
             .unwrap();
         tracker
-            .record_usage(TokenUsage::new("test/model", 2000, 800, 0, 1.0, 2.0, 0.0))
+            .record_usage(calculate_token_usage(
+                "test/model",
+                2000,
+                800,
+                0,
+                1.0,
+                2.0,
+                0.0,
+            ))
             .unwrap();
 
         // Simulate the legacy interleaved-write artifact: collapse the two
@@ -1010,7 +1041,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
 
-        let usage = TokenUsage::new("test/model", 1000, 500, 0, 1.0, 2.0, 0.0);
+        let usage = calculate_token_usage("test/model", 1000, 500, 0, 1.0, 2.0, 0.0);
         tracker.record_usage(usage).unwrap();
 
         let summary = tracker.get_summary().unwrap();
@@ -1024,7 +1055,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
 
-        let usage = TokenUsage::new("test/model", 1000, 500, 0, 1.0, 2.0, 0.0);
+        let usage = calculate_token_usage("test/model", 1000, 500, 0, 1.0, 2.0, 0.0);
         let expected_cost = usage.cost_usd;
         tracker.record_usage(usage).unwrap();
 
@@ -1042,14 +1073,14 @@ mod tests {
 
         tracker
             .record_usage_with_task_attribution(
-                TokenUsage::new("test/model", 1000, 500, 0, 1.0, 2.0, 0.0),
+                calculate_token_usage("test/model", 1000, 500, 0, 1.0, 2.0, 0.0),
                 Some("agent-a"),
                 Some("goal-a"),
             )
             .unwrap();
         tracker
             .record_usage_with_task_attribution(
-                TokenUsage::new("test/model", 2000, 500, 0, 1.0, 2.0, 0.0),
+                calculate_token_usage("test/model", 2000, 500, 0, 1.0, 2.0, 0.0),
                 Some("agent-a"),
                 Some("goal-b"),
             )
@@ -1073,7 +1104,7 @@ mod tests {
     fn task_usage_totals_report_pricing_reliability_from_ledger() {
         let tmp = TempDir::new().unwrap();
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
-        let mut unpriced = TokenUsage::new("test/unpriced", 1000, 500, 0, 0.0, 0.0, 0.0);
+        let mut unpriced = calculate_token_usage("test/unpriced", 1000, 500, 0, 0.0, 0.0, 0.0);
         unpriced.pricing_available = false;
 
         tracker
@@ -1081,7 +1112,7 @@ mod tests {
             .unwrap();
         tracker
             .record_usage_with_task_attribution(
-                TokenUsage::new("test/priced", 500, 250, 0, 1.0, 2.0, 0.0),
+                calculate_token_usage("test/priced", 500, 250, 0, 1.0, 2.0, 0.0),
                 Some("agent-a"),
                 Some("goal-a"),
             )
@@ -1106,7 +1137,7 @@ mod tests {
 
         tracker
             .record_usage_with_task_attribution(
-                TokenUsage::new("test/priced", 1000, 500, 0, 1.0, 2.0, 0.0),
+                calculate_token_usage("test/priced", 1000, 500, 0, 1.0, 2.0, 0.0),
                 Some("agent-a"),
                 Some("goal-a"),
             )
@@ -1118,7 +1149,7 @@ mod tests {
         assert!(cost > 0.0);
         assert!(pricing_available);
 
-        let mut unpriced = TokenUsage::new("test/unpriced", 500, 250, 0, 0.0, 0.0, 0.0);
+        let mut unpriced = calculate_token_usage("test/unpriced", 500, 250, 0, 0.0, 0.0, 0.0);
         unpriced.pricing_available = false;
         tracker
             .record_usage_with_task_attribution(unpriced, Some("agent-a"), Some("goal-a"))
@@ -1152,17 +1183,17 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
 
-        let first = CostRecord::with_attribution(
+        let first = new_record(
             "legacy-session",
             Some("agent-a".into()),
             Some("goal-a".into()),
-            TokenUsage::new("test/model-a", 1000, 500, 0, 1.0, 2.0, 0.0),
+            calculate_token_usage("test/model-a", 1000, 500, 0, 1.0, 2.0, 0.0),
         );
-        let second = CostRecord::with_attribution(
+        let second = new_record(
             "legacy-session",
             Some("agent-a".into()),
             Some("goal-a".into()),
-            TokenUsage::new("test/model-b", 2000, 250, 0, 1.0, 2.0, 0.0),
+            calculate_token_usage("test/model-b", 2000, 250, 0, 1.0, 2.0, 0.0),
         );
         let joined = format!(
             "{}{}\n",
@@ -1197,7 +1228,7 @@ mod tests {
         let tracker = CostTracker::new(config, tmp.path()).unwrap();
 
         // Record a usage that exceeds the limit
-        let usage = TokenUsage::new("test/model", 10000, 5000, 0, 1.0, 2.0, 0.0); // ~0.02 USD
+        let usage = calculate_token_usage("test/model", 10000, 5000, 0, 1.0, 2.0, 0.0); // ~0.02 USD
         tracker.record_usage(usage).unwrap();
 
         let check = tracker.check_budget(0.01).unwrap();
@@ -1212,9 +1243,11 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
 
-        let prior_today = CostRecord::new(
+        let prior_today = new_record(
             "prior-session",
-            TokenUsage::new("prior/model", 500, 500, 0, 1.0, 1.0, 0.0),
+            None,
+            None,
+            calculate_token_usage("prior/model", 500, 500, 0, 1.0, 1.0, 0.0),
         );
         let mut file = OpenOptions::new()
             .create(true)
@@ -1226,7 +1259,7 @@ mod tests {
 
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
         tracker
-            .record_usage(TokenUsage::new(
+            .record_usage(calculate_token_usage(
                 "session/model",
                 1000,
                 1000,
@@ -1256,8 +1289,8 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
 
-        let valid_usage = TokenUsage::new("test/model", 1000, 0, 0, 1.0, 1.0, 0.0);
-        let valid_record = CostRecord::new("session-a", valid_usage.clone());
+        let valid_usage = calculate_token_usage("test/model", 1000, 0, 0, 1.0, 1.0, 0.0);
+        let valid_record = new_record("session-a", None, None, valid_usage.clone());
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -1281,19 +1314,19 @@ mod tests {
 
         tracker
             .record_usage_with_agent(
-                TokenUsage::new("test/model", 1_000, 1_000, 0, 1.0, 1.0, 0.0),
+                calculate_token_usage("test/model", 1_000, 1_000, 0, 1.0, 1.0, 0.0),
                 Some("scout"),
             )
             .unwrap();
         tracker
             .record_usage_with_agent(
-                TokenUsage::new("test/model", 2_000, 0, 0, 1.0, 1.0, 0.0),
+                calculate_token_usage("test/model", 2_000, 0, 0, 1.0, 1.0, 0.0),
                 Some("scout"),
             )
             .unwrap();
         tracker
             .record_usage_with_agent(
-                TokenUsage::new("test/model", 500, 500, 0, 1.0, 1.0, 0.0),
+                calculate_token_usage("test/model", 500, 500, 0, 1.0, 1.0, 0.0),
                 Some("scribe"),
             )
             .unwrap();
@@ -1331,7 +1364,7 @@ mod tests {
 
         tracker
             .record_usage_with_agent(
-                TokenUsage::new("test/model", 1_000, 1_000, 0, 1.0, 1.0, 0.0),
+                calculate_token_usage("test/model", 1_000, 1_000, 0, 1.0, 1.0, 0.0),
                 Some("scout"),
             )
             .unwrap();
@@ -1372,7 +1405,7 @@ mod tests {
 
         tracker
             .record_usage_with_agent(
-                TokenUsage::new("test/model", 1_000, 1_000, 0, 1.0, 1.0, 0.0),
+                calculate_token_usage("test/model", 1_000, 1_000, 0, 1.0, 1.0, 0.0),
                 Some("agent-a"),
             )
             .expect("record under enabled+track_per_agent");
@@ -1405,13 +1438,13 @@ mod tests {
 
         tracker
             .record_usage_with_agent(
-                TokenUsage::new("test/model", 1_000, 500, 0, 1.0, 2.0, 0.0),
+                calculate_token_usage("test/model", 1_000, 500, 0, 1.0, 2.0, 0.0),
                 Some("future-turn"),
             )
             .expect("disabled future turn should skip without error");
         tracker
             .record_scoped_usage_with_owned_task_attribution(
-                TokenUsage::new("test/model", 2_000, 500, 0, 1.0, 2.0, 0.0),
+                calculate_token_usage("test/model", 2_000, 500, 0, 1.0, 2.0, 0.0),
                 Some("in-flight"),
                 Some("goal-a".into()),
             )
@@ -1505,7 +1538,7 @@ mod tests {
         );
 
         after
-            .record_usage(TokenUsage::new("test/model", 10, 5, 0, 1.0, 2.0, 0.0))
+            .record_usage(calculate_token_usage("test/model", 10, 5, 0, 1.0, 2.0, 0.0))
             .unwrap();
         assert!(
             resolve_storage_path(second_tmp.path()).unwrap().exists(),
@@ -1589,5 +1622,15 @@ mod tests {
             matches!(after.check_budget(0.0).unwrap(), BudgetCheck::Allowed),
             "a disabled resident tracker must short-circuit enforcement"
         );
+    }
+    #[test]
+    fn cost_record_creation() {
+        let usage = calculate_token_usage("test/model", 100, 50, 0, 1.0, 2.0, 0.0);
+        let record = new_record("session-123", None, None, usage);
+
+        assert_eq!(record.session_id, "session-123");
+        assert!(record.task_id.is_none());
+        assert!(!record.id.is_empty());
+        assert_eq!(record.usage.model, "test/model");
     }
 }

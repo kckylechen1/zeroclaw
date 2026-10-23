@@ -1,8 +1,8 @@
 use crate::cost::CostTracker;
-use crate::cost::types::{BudgetCheck, TokenUsage as CostTokenUsage};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
+use zeroclaw_api::cost::BudgetCheck;
 use zeroclaw_config::schema::Config;
 use zeroclaw_providers::pricing::ModelRates;
 
@@ -283,14 +283,14 @@ pub fn record_tool_loop_cost_usage(
         false
     };
 
-    let cost_usage = CostTokenUsage::new_with_cache(
+    let cost_usage = crate::cost::calculate_token_usage(
         model,
         input_tokens,
-        cached_input_tokens,
         output_tokens,
+        cached_input_tokens,
         input_rate,
-        cached_rate,
         output_rate,
+        cached_rate,
     );
 
     if ctx.tracker.is_some() && !priced_from_catalog && input_rate == 0.0 && output_rate == 0.0 {
@@ -749,7 +749,7 @@ mod tests {
 
         let stored = std::fs::read_to_string(workspace.path().join("state").join("costs.jsonl"))
             .expect("costs.jsonl should be written");
-        let record: zeroclaw_config::cost::types::CostRecord =
+        let record: zeroclaw_api::cost::CostRecord =
             serde_json::from_str(stored.lines().next().expect("one record")).unwrap();
         assert_eq!(record.usage.cached_input_tokens, 4_000);
         assert_eq!(record.usage.billable_input_tokens(), 1_000);

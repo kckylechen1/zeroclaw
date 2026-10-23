@@ -17,6 +17,7 @@
       "zeroclaw-api",
       "zeroclaw-bridge-telegram",
       "zeroclaw-commands",
+      "zeroclaw-cost",
       "zeroclaw-eval",
       "zeroclaw-gateway-client",
       "zeroclaw-http",

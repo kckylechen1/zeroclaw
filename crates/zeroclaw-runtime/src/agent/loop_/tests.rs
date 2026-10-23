@@ -10254,7 +10254,7 @@ async fn cost_tracking_enforces_budget() {
     let tracker = Arc::new(CostTracker::new(cost_config.clone(), workspace.path()).unwrap());
     // Record a usage that already exceeds the limit
     tracker
-        .record_usage(crate::cost::types::TokenUsage::new(
+        .record_usage(crate::cost::calculate_token_usage(
             "mock-model",
             100_000,
             50_000,
@@ -10656,7 +10656,7 @@ async fn skill_review_fork_respects_budget_under_parent_scope() {
     let tracker = Arc::new(CostTracker::new(cost_config, workspace.path()).unwrap());
     // Record usage that already exceeds the daily limit.
     tracker
-        .record_usage(crate::cost::types::TokenUsage::new(
+        .record_usage(crate::cost::calculate_token_usage(
             "mock-model",
             100_000,
             50_000,

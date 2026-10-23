@@ -68,6 +68,17 @@ Command construction does not grant approval or start an external agent;
 local tools still apply their existing security policy, and external harness
 sessions remain Tachi-owned under ADR-017.
 
+## Cost accounting ownership
+
+`zeroclaw-config` keeps `[cost]` and its validation. `zeroclaw-cost` owns
+pricing, budget checks, the process-global tracker and `data/state/costs.jsonl`.
+`zeroclaw-api::cost` holds the shared records and reporting types, so a reader
+can consume results without linking the ledger implementation. Runtime, gateway
+and CLI callers use the same tracker through the runtime forwarding module.
+Reload still updates the resident tracker's policy; existing rows retain their
+recorded prices. This is accounting for the existing controller paths, not a
+second task ledger or an external harness execution owner.
+
 ## Remaining config reduction boundaries
 
 [Issue #382](https://github.com/kckylechen1/zeroclaw/issues/382) tracks the
@@ -76,7 +87,7 @@ consumer census; a module's size alone is not permission to remove it.
 | Surface | Current consumers and next boundary |
 | --- | --- |
 | HTTP and local command implementations | Moved to `zeroclaw-http` and `zeroclaw-platform`; config keeps their settings. |
-| `cost/` tracker and cost result types | Runtime budget enforcement, gateway and CLI status still consume them. Separate ledger behavior from shared result types while preserving budget/reload semantics before removing this config responsibility. |
+| Cost ledger and shared results | Moved to `zeroclaw-cost` and `zeroclaw-api::cost`; config retains `CostConfig`. Budget enforcement, ledger compatibility and reload remain covered at the new owner and runtime call sites. |
 | `policy.rs`, pairing and secrets | Retained authorization and credential paths. Any later extraction must preserve their callers and denial behavior; these are not retired settings. |
 | Channel/provider schema sections | Retained listeners and inference clients still read them. Remove exclusive config only after the corresponding #378/#382 consumer replacement or retirement. |
 | `sections`, `field_visibility`, `schema_markdown`, `comment_writer`, `card`, `presets`, `typed_value` | Config editing, onboarding, persistence or generated references still consume these surfaces. #379 owns editor retirement; separate a presentation-only consumer only after tracing its persistence dependencies. |

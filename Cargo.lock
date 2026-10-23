@@ -8471,6 +8471,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-cost"
+version = "0.8.3"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "parking_lot",
+ "serde_json",
+ "tempfile",
+ "uuid",
+ "zeroclaw-api",
+ "zeroclaw-config",
+ "zeroclaw-log",
+]
+
+[[package]]
 name = "zeroclaw-eval"
 version = "0.8.3"
 dependencies = [
@@ -8764,6 +8779,7 @@ dependencies = [
  "wiremock",
  "zeroclaw-api",
  "zeroclaw-config",
+ "zeroclaw-cost",
  "zeroclaw-http",
  "zeroclaw-infra",
  "zeroclaw-log",

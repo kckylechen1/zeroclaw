@@ -6,6 +6,7 @@ pub mod bridge_intake;
 pub mod channel;
 pub mod chat_surface;
 pub mod companion;
+pub mod cost;
 pub mod delegation_admission;
 pub mod delegation_request;
 pub mod device_identity;

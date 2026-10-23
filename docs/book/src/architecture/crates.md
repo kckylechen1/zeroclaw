@@ -85,6 +85,15 @@ Each tool is registered via factory and described to the model via Fluent-locali
 
 ## Layer: Support
 
+### `zeroclaw-cost`
+
+The existing cost ledger, cache-aware token pricing and budget checks.
+`CostTracker` owns `data/state/costs.jsonl` and its process-local aggregates;
+reload updates its `CostConfig` from `zeroclaw-config`. Shared record, summary
+and budget-result shapes live in `zeroclaw-api::cost`, which has no dependency
+on the ledger crate. Runtime, gateway and CLI paths retain their existing
+accounting behavior; this crate does not schedule external harness work.
+
 ### `zeroclaw-memory`
 
 Conversation memory and retrieval. SQLite is the default backend; Lucid and Markdown are the alternatives (the PostgreSQL and Qdrant backends were removed). Optional:
