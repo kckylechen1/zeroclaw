@@ -3,7 +3,7 @@ use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(windows)]
-use zeroclaw_config::platform::native::windows_std_cmd_shell_command;
+use zeroclaw_platform::native::windows_std_cmd_shell_command;
 
 const TEST_FILE_NAME: &str = "TEST.sh";
 

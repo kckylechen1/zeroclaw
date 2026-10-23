@@ -1,1 +1,1 @@
-pub use zeroclaw_config::platform::*;
+pub use zeroclaw_platform::*;

@@ -364,6 +364,10 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
+      - name: Test Windows command adapters
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p zeroclaw-platform --target x86_64-pc-windows-msvc
+
   # `lint` checks the ci-all graph. Keep these distinct no-default-feature
   # graphs in the required gate; check-32bit below covers the 32-bit target.
   check:

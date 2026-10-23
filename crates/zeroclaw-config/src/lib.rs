@@ -26,7 +26,6 @@ pub mod node_allowlist;
 pub mod pairing;
 pub mod paths;
 pub mod persona;
-pub mod platform;
 pub mod policy;
 pub mod presets;
 pub mod provider_aliases;

@@ -57,6 +57,31 @@ cached clients. Process proxy environment variables are applied only before the
 multi-threaded runtime starts, so environment-scope changes still require a
 restart. Existing clients retain their original configuration until recreated.
 
+## Execution adapter ownership
+
+`zeroclaw-config` owns `[runtime]`, including the shell choice and Docker
+isolation settings. `zeroclaw-platform` constructs the native or Docker command
+adapter from that config. The existing runtime factory call sites in CLI turns,
+gateway startup and channel startup remain responsible for construction. The
+shared `RuntimeAdapter` contract and typed mount errors live in `zeroclaw-api`.
+Command construction does not grant approval or start an external agent;
+local tools still apply their existing security policy, and external harness
+sessions remain Tachi-owned under ADR-017.
+
+## Remaining config reduction boundaries
+
+[Issue #382](https://github.com/kckylechen1/zeroclaw/issues/382) tracks the
+consumer census; a module's size alone is not permission to remove it.
+
+| Surface | Current consumers and next boundary |
+| --- | --- |
+| HTTP and local command implementations | Moved to `zeroclaw-http` and `zeroclaw-platform`; config keeps their settings. |
+| `cost/` tracker and cost result types | Runtime budget enforcement, gateway and CLI status still consume them. Separate ledger behavior from shared result types while preserving budget/reload semantics before removing this config responsibility. |
+| `policy.rs`, pairing and secrets | Retained authorization and credential paths. Any later extraction must preserve their callers and denial behavior; these are not retired settings. |
+| Channel/provider schema sections | Retained listeners and inference clients still read them. Remove exclusive config only after the corresponding #378/#382 consumer replacement or retirement. |
+| `sections`, `field_visibility`, `schema_markdown`, `comment_writer`, `card`, `presets`, `typed_value` | Config editing, onboarding, persistence or generated references still consume these surfaces. #379 owns editor retirement; separate a presentation-only consumer only after tracing its persistence dependencies. |
+| Legacy delegation/SOP configuration | #381 owns duplicate execution retirement after replacement proof. Keep L1 reasoning, the Tachi bridge and their shared types. |
+
 ## Env overrides are not saved
 
 Schema-mirror env vars are runtime injections. They land on the in-memory

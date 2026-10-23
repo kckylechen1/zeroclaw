@@ -130,6 +130,18 @@ at startup and reload. This keeps HTTP/TLS dependencies out of configuration-onl
 consumers without coupling network clients to the SQLite infrastructure crate.
 No provider, channel or tool policy is owned by this crate.
 
+### `zeroclaw-platform`
+
+Native and Docker command adapters for the body's local tools. Owns the runtime
+factory, configured-shell validation, Docker workspace mount checks and Windows
+command construction. `zeroclaw-config` retains `[runtime]` and its defaults;
+`zeroclaw-api::runtime_traits` owns the shared adapter contract and typed mount
+errors. `zeroclaw-runtime::platform` re-exports the adapters for existing runtime,
+gateway and channel callers. Providers use the Windows command helper directly.
+
+This crate does not own agent sessions, task state or delegated execution.
+External harnesses continue through Tachi under ADR-017.
+
 ### `zeroclaw-infra`
 
 Process-level support: debouncers, watchdogs, the SQLite session

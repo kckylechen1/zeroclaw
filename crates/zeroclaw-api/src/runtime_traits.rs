@@ -1,6 +1,25 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+/// Canonicalization failures that the runtime layer can present through
+/// localized tool diagnostics without parsing an English error chain.
+#[derive(Debug, thiserror::Error)]
+pub enum DockerWorkspaceMountError {
+    #[error("Failed to canonicalize Docker workspace path {path}")]
+    WorkspacePath {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Failed to canonicalize Docker workspace root {path}")]
+    AllowedRoot {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 /// Runtime adapter that abstracts platform differences for the agent.
 ///
 /// Implement this trait to port the agent to a new execution environment.
