@@ -1,7 +1,7 @@
 # Command-policy fuzz harness
 
 `fuzz_command_validation` passes UTF-8 input to
-`zeroclaw_config::policy::SecurityPolicy::validate_command_execution` with the
+`zeroclaw_policy::SecurityPolicy::validate_command_execution` with the
 default policy and `approved = false`. Shell and cron execution use this same
 policy implementation. The harness checks panic robustness of command parsing,
 allowlisting, and risk validation; it does not execute commands or establish

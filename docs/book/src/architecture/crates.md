@@ -151,6 +151,17 @@ gateway and channel callers. Providers use the Windows command helper directly.
 This crate does not own agent sessions, task state or delegated execution.
 External harnesses continue through Tachi under ADR-017.
 
+### `zeroclaw-policy`
+
+Runtime authorization policy for the body's local tools and delegation
+admission. Owns command and path checks, protected state boundaries, action
+trackers and parent-policy narrowing. Risk/runtime profile settings and the
+canonical command/path defaults remain in `zeroclaw-config`; shared operation
+and risk classifications live in `zeroclaw-api::policy`.
+`zeroclaw-runtime::security::policy` forwards this implementation for existing
+runtime callers. External harness sessions and durable execution truth remain
+Tachi-owned under ADR-017.
+
 ### `zeroclaw-infra`
 
 Process-level support: debouncers, watchdogs, the SQLite session

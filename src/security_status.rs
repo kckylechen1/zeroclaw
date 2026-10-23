@@ -2,8 +2,8 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use zeroclaw_config::config::CredentialSurfaceClass;
-use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::{RiskProfileConfig, SandboxBackend, SandboxConfig};
+use zeroclaw_policy::SecurityPolicy;
 
 use crate::config::Config;
 

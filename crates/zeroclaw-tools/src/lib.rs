@@ -91,8 +91,8 @@ mod memory_tool_names_guard {
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use zeroclaw_api::tool::Tool;
-    use zeroclaw_config::policy::SecurityPolicy;
     use zeroclaw_memory::NoneMemory;
+    use zeroclaw_policy::SecurityPolicy;
 
     #[test]
     fn memory_tool_names_match_tools() {

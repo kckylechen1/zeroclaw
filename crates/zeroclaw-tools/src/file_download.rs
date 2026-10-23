@@ -6,8 +6,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult, with_ephemeral_workspace_warning};
-use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::FileDownloadConfig;
+use zeroclaw_policy::SecurityPolicy;
 
 const RESPONSE_BODY_LIMIT_BYTES: usize = 4 * 1024;
 const TOOL_DESCRIPTION_KEY: &str = "tool-file-download";

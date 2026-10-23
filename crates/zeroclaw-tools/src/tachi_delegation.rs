@@ -13,9 +13,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use zeroclaw_api::delegation_request::DelegationRequestClaim;
 use zeroclaw_api::tool::{Tool, ToolResult};
-use zeroclaw_config::policy::ToolOperation;
 use zeroclaw_config::tachi::TachiConfig;
 use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
+use zeroclaw_policy::ToolOperation;
 
 /// Runtime refusal code for changing the process-selected request ledger.
 /// Live authorization/routing stays separate from this storage identity.

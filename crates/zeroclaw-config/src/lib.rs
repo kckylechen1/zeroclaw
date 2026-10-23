@@ -25,7 +25,7 @@ pub mod node_allowlist;
 pub mod pairing;
 pub mod paths;
 pub mod persona;
-pub mod policy;
+pub mod policy_defaults;
 pub mod presets;
 pub mod provider_aliases;
 pub mod providers;
@@ -50,6 +50,5 @@ pub mod config {
 
 /// Shim module so `Configurable` derive macro's generated `crate::security::*` paths resolve.
 pub mod security {
-    pub use crate::policy::SecurityPolicy;
     pub use crate::secrets::SecretStore;
 }

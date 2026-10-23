@@ -3,8 +3,8 @@ use futures_util::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::FileUploadConfig;
+use zeroclaw_policy::SecurityPolicy;
 
 const RESPONSE_BODY_LIMIT_BYTES: usize = 4 * 1024;
 

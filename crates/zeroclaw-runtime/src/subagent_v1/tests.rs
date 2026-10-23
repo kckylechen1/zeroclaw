@@ -1201,7 +1201,7 @@ fn reasoning_tool() -> ReasoningSubagentTool {
     ReasoningSubagentTool::new(
         reasoning_config(),
         "parent-agent",
-        Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
+        Arc::new(zeroclaw_policy::SecurityPolicy::default()),
     )
 }
 
@@ -1280,7 +1280,7 @@ fn v1_child_capability_set_is_disjoint_from_a_real_parent_registry() {
         "default".to_string(),
         zeroclaw_config::schema::RiskProfileConfig::default(),
     );
-    let security = Arc::new(zeroclaw_config::policy::SecurityPolicy::default());
+    let security = Arc::new(zeroclaw_policy::SecurityPolicy::default());
     let mem: Arc<dyn zeroclaw_memory::Memory> = Arc::from(
         zeroclaw_memory::create_memory(
             &zeroclaw_config::schema::MemoryConfig::default(),
@@ -1893,7 +1893,7 @@ fn advisor_tool() -> ReasoningSubagentTool {
     ReasoningSubagentTool::new(
         advisor_config(),
         "parent-agent",
-        Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
+        Arc::new(zeroclaw_policy::SecurityPolicy::default()),
     )
     .with_advisor("custom.big")
 }
@@ -1905,7 +1905,7 @@ fn advisor_provider_ref_replaces_the_parents_provider() {
     let plain = ReasoningSubagentTool::new(
         advisor_config(),
         "parent-agent",
-        Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
+        Arc::new(zeroclaw_policy::SecurityPolicy::default()),
     );
     let policy = plain.resolve_model_policy(&profile).unwrap();
     assert_eq!(policy.provider_ref, "custom.default");

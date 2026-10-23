@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::mpsc;
 use zeroclaw_api::ingress::IngressContext;
-use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::Config;
+use zeroclaw_policy::SecurityPolicy;
 use zeroclaw_providers::ChatMessage;
 
 use super::safety_net::{CountingTool, ScriptedProvider, text_response, tool_call, tool_response};

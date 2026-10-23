@@ -219,7 +219,7 @@ mod tests {
         // channels.iter().next(). Behavioural coverage of the routing itself
         // lives in zeroclaw-tools::escalate tests.
         let tool = zeroclaw_tools::escalate::EscalateToHumanTool::new(
-            std::sync::Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
+            std::sync::Arc::new(zeroclaw_policy::SecurityPolicy::default()),
             vec![],
             std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
         );

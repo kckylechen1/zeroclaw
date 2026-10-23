@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use zeroclaw_api::runtime_traits::RuntimeAdapter;
-use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::Config;
+use zeroclaw_policy::SecurityPolicy;
 
 use crate::agent::loop_::{
     append_pinned_mcp_section, apply_policy_tool_filter, eager_mcp_tool_allowed,

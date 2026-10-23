@@ -9,7 +9,7 @@ use std::{
 };
 use zeroclaw_api::channel::{Channel, RoomCreationOptions, RoomVisibility};
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::{SecurityPolicy, ToolOperation};
+use zeroclaw_policy::{SecurityPolicy, ToolOperation};
 
 const TOOL_DESCRIPTION_KEY: &str = "tool-channel-room";
 static TOOL_DESCRIPTION: OnceLock<String> = OnceLock::new();

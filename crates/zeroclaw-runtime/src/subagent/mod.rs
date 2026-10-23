@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::Config;
+use zeroclaw_policy::SecurityPolicy;
 
 #[derive(Debug, Clone, Default)]
 pub struct SubAgentOverrides {

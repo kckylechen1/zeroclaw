@@ -184,8 +184,8 @@ fn is_tool_excluded_reflects_denylist_independent_of_allowlist() {
 
 #[test]
 fn from_profiles_propagates_every_risk_profile_field() {
-    use crate::schema::RiskProfileConfig;
     use std::path::Path;
+    use zeroclaw_config::schema::RiskProfileConfig;
 
     let rp = RiskProfileConfig {
         level: AutonomyLevel::ReadOnly,
@@ -204,7 +204,7 @@ fn from_profiles_propagates_every_risk_profile_field() {
         // Deliberately the non-default variant: propagation of a field
         // whose value equals the default is indistinguishable from the
         // field being dropped on the floor.
-        mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+        mcp_discovered_tool_policy: zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
         sandbox_enabled: Some(true),
         sandbox_backend: Some("firejail".into()),
         firejail_args: vec!["--net=none".into()],
@@ -248,7 +248,7 @@ fn from_profiles_propagates_every_risk_profile_field() {
     );
     assert_eq!(
         policy.mcp_discovered_tool_policy,
-        crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+        zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
         "mcp_discovered_tool_policy must reach the policy"
     );
     assert_eq!(policy.sandbox_enabled, Some(true), "sandbox_enabled");
@@ -266,8 +266,8 @@ fn from_profiles_propagates_every_risk_profile_field() {
 
 #[test]
 fn from_profiles_full_autonomy_drops_workspace_only() {
-    use crate::schema::RiskProfileConfig;
     use std::path::Path;
+    use zeroclaw_config::schema::RiskProfileConfig;
 
     let rp = RiskProfileConfig {
         level: AutonomyLevel::Full,
@@ -284,8 +284,8 @@ fn from_profiles_full_autonomy_drops_workspace_only() {
 
 #[test]
 fn from_profiles_absent_allowed_tools_means_unrestricted() {
-    use crate::schema::RiskProfileConfig;
     use std::path::Path;
+    use zeroclaw_config::schema::RiskProfileConfig;
 
     let risk = RiskProfileConfig {
         allowed_tools: None,
@@ -307,8 +307,8 @@ fn from_profiles_absent_allowed_tools_means_unrestricted() {
 /// G1: explicit `allowed_tools = []` in TOML must deny all tools.
 #[test]
 fn risk_profile_allowed_tools_empty_toml_denies_all_tools() {
-    use crate::schema::Config;
     use std::path::Path;
+    use zeroclaw_config::schema::Config;
 
     let toml = r#"
 schema_version = 2
@@ -340,8 +340,8 @@ risk_profile = "deny_all"
 /// G2: omitted `allowed_tools` key stays unrestricted (`None`).
 #[test]
 fn risk_profile_allowed_tools_absent_toml_is_unrestricted() {
-    use crate::schema::Config;
     use std::path::Path;
+    use zeroclaw_config::schema::Config;
 
     let toml = r#"
 schema_version = 2
@@ -371,8 +371,8 @@ risk_profile = "unrestricted"
 /// G3: non-empty `allowed_tools` list is preserved.
 #[test]
 fn risk_profile_allowed_tools_nonempty_toml_preserves_list() {
-    use crate::schema::Config;
     use std::path::Path;
+    use zeroclaw_config::schema::Config;
 
     let toml = r#"
 schema_version = 2
@@ -401,12 +401,12 @@ risk_profile = "shell_only"
 
 #[test]
 fn from_profiles_with_runtime_profile_propagates_budget_caps() {
-    use crate::schema::RuntimeProfileConfig;
     use std::path::Path;
+    use zeroclaw_config::schema::RuntimeProfileConfig;
 
-    let risk = crate::schema::RiskProfileConfig {
+    let risk = zeroclaw_config::schema::RiskProfileConfig {
         level: AutonomyLevel::Supervised,
-        ..crate::schema::RiskProfileConfig::default()
+        ..zeroclaw_config::schema::RiskProfileConfig::default()
     };
     let runtime = RuntimeProfileConfig {
         max_actions_per_hour: 99,
@@ -426,9 +426,9 @@ fn from_profiles_with_runtime_profile_propagates_budget_caps() {
 fn from_profiles_without_runtime_profile_uses_defaults() {
     use std::path::Path;
 
-    let risk = crate::schema::RiskProfileConfig {
+    let risk = zeroclaw_config::schema::RiskProfileConfig {
         level: AutonomyLevel::Supervised,
-        ..crate::schema::RiskProfileConfig::default()
+        ..zeroclaw_config::schema::RiskProfileConfig::default()
     };
 
     let policy = SecurityPolicy::from_profiles(&risk, None, Path::new("/ws"));
@@ -940,7 +940,7 @@ fn dotfile_in_workspace_allowed() {
 
 #[test]
 fn from_config_maps_all_fields() {
-    let risk = crate::schema::RiskProfileConfig {
+    let risk = zeroclaw_config::schema::RiskProfileConfig {
         level: AutonomyLevel::Full,
         workspace_only: false,
         allowed_commands: vec!["docker".into()],
@@ -948,12 +948,12 @@ fn from_config_maps_all_fields() {
         require_approval_for_medium_risk: false,
         block_high_risk_commands: false,
         shell_env_passthrough: vec!["DATABASE_URL".into()],
-        ..crate::schema::RiskProfileConfig::default()
+        ..zeroclaw_config::schema::RiskProfileConfig::default()
     };
-    let runtime = crate::schema::RuntimeProfileConfig {
+    let runtime = zeroclaw_config::schema::RuntimeProfileConfig {
         max_actions_per_hour: 100,
         max_cost_per_day_cents: 1000,
-        ..crate::schema::RuntimeProfileConfig::default()
+        ..zeroclaw_config::schema::RuntimeProfileConfig::default()
     };
     let workspace = PathBuf::from("/tmp/test-workspace");
     let policy = SecurityPolicy::from_profiles(&risk, Some(&runtime), &workspace);
@@ -974,9 +974,9 @@ fn from_config_maps_all_fields() {
 fn from_config_full_autonomy_overrides_workspace_only() {
     //: Full autonomy should disable workspace_only even if the
     // config default keeps it true.
-    let autonomy_config = crate::schema::RiskProfileConfig {
+    let autonomy_config = zeroclaw_config::schema::RiskProfileConfig {
         level: AutonomyLevel::Full,
-        ..crate::schema::RiskProfileConfig::default()
+        ..zeroclaw_config::schema::RiskProfileConfig::default()
     };
     let workspace = PathBuf::from("/tmp/test-workspace");
     let policy = SecurityPolicy::from_risk_profile(&autonomy_config, &workspace);
@@ -990,9 +990,9 @@ fn from_config_full_autonomy_overrides_workspace_only() {
 
 #[test]
 fn from_config_supervised_preserves_workspace_only() {
-    let autonomy_config = crate::schema::RiskProfileConfig {
+    let autonomy_config = zeroclaw_config::schema::RiskProfileConfig {
         level: AutonomyLevel::Supervised,
-        ..crate::schema::RiskProfileConfig::default()
+        ..zeroclaw_config::schema::RiskProfileConfig::default()
     };
     let workspace = PathBuf::from("/tmp/test-workspace");
     let policy = SecurityPolicy::from_risk_profile(&autonomy_config, &workspace);
@@ -1005,9 +1005,9 @@ fn from_config_supervised_preserves_workspace_only() {
 
 #[test]
 fn from_config_normalizes_allowed_roots() {
-    let autonomy_config = crate::schema::RiskProfileConfig {
+    let autonomy_config = zeroclaw_config::schema::RiskProfileConfig {
         allowed_roots: vec!["~/Desktop".into(), "shared-data".into()],
-        ..crate::schema::RiskProfileConfig::default()
+        ..zeroclaw_config::schema::RiskProfileConfig::default()
     };
     let workspace = tp_ws();
     let policy = SecurityPolicy::from_risk_profile(&autonomy_config, &workspace);
@@ -1969,8 +1969,8 @@ fn readable_includes_read_only_allowlist_paths() {
 
 #[test]
 fn for_agent_routes_workspace_access_into_correct_allowlist_tier() {
-    use crate::multi_agent::{AccessMode, AgentAlias};
-    use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    use zeroclaw_config::multi_agent::{AccessMode, AgentAlias};
+    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 
     let mut cfg = Config {
         data_dir: PathBuf::from("/tmp/zeroclaw-for-agent-test"),
@@ -2085,7 +2085,7 @@ fn write_only_root_blocks_reads_and_admits_writes() {
 
 #[test]
 fn for_agent_creates_the_per_agent_workspace_dir() {
-    use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 
     let root =
         std::env::temp_dir().join(format!("zeroclaw-for-agent-mkdir-{}", std::process::id()));
@@ -2126,7 +2126,7 @@ fn for_agent_creates_the_per_agent_workspace_dir() {
 
 #[test]
 fn for_agent_unrestricted_filesystem_disables_workspace_only() {
-    use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 
     let mut cfg = Config {
         data_dir: PathBuf::from("/tmp/zeroclaw-for-agent-unrestricted"),
@@ -2165,13 +2165,13 @@ fn for_agent_unrestricted_filesystem_disables_workspace_only() {
 fn carded_agent_config(
     card_alias: &str,
     profile_alias: &str,
-    grants: Vec<crate::card::ToolGrant>,
-) -> crate::schema::Config {
+    grants: Vec<zeroclaw_config::card::ToolGrant>,
+) -> zeroclaw_config::schema::Config {
     carded_agent_config_with_mcp_policy(
         card_alias,
         profile_alias,
         grants,
-        crate::autonomy::McpDiscoveredToolPolicy::default(),
+        zeroclaw_config::autonomy::McpDiscoveredToolPolicy::default(),
     )
 }
 
@@ -2182,10 +2182,10 @@ fn carded_agent_config(
 fn carded_agent_config_with_mcp_policy(
     card_alias: &str,
     profile_alias: &str,
-    grants: Vec<crate::card::ToolGrant>,
-    mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy,
-) -> crate::schema::Config {
-    use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    grants: Vec<zeroclaw_config::card::ToolGrant>,
+    mcp_discovered_tool_policy: zeroclaw_config::autonomy::McpDiscoveredToolPolicy,
+) -> zeroclaw_config::schema::Config {
+    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 
     let mut cfg = Config {
         data_dir: PathBuf::from(format!("/tmp/zeroclaw-carded-{card_alias}")),
@@ -2201,13 +2201,13 @@ fn carded_agent_config_with_mcp_policy(
     );
     cfg.cards.insert(
         card_alias.into(),
-        crate::card::AgentCard {
+        zeroclaw_config::card::AgentCard {
             risk_profile: profile_alias.into(),
-            grants: crate::card::CardGrants {
+            grants: zeroclaw_config::card::CardGrants {
                 tools: grants,
-                ..crate::card::CardGrants::default()
+                ..zeroclaw_config::card::CardGrants::default()
             },
-            ..crate::card::AgentCard::default()
+            ..zeroclaw_config::card::AgentCard::default()
         },
     );
     cfg.agents.insert(
@@ -2224,7 +2224,7 @@ fn carded_agent_config_with_mcp_policy(
 
 #[test]
 fn a_carded_agent_resolves_and_its_allowed_tools_is_exactly_the_cards_grants() {
-    use crate::card::{GrantClass, ToolGrant};
+    use zeroclaw_config::card::{GrantClass, ToolGrant};
 
     let cfg = carded_agent_config(
         "trader_card",
@@ -2250,7 +2250,7 @@ fn a_carded_agent_resolves_and_its_allowed_tools_is_exactly_the_cards_grants() {
 
 #[test]
 fn is_tool_allowed_follows_the_cards_grants_exactly() {
-    use crate::card::{GrantClass, ToolGrant};
+    use zeroclaw_config::card::{GrantClass, ToolGrant};
 
     let cfg = carded_agent_config(
         "trader_card",
@@ -2286,7 +2286,7 @@ fn a_card_with_no_grants_denies_every_tool_not_unrestricted() {
 
 #[test]
 fn an_uncarded_agents_policy_is_unchanged() {
-    use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 
     let mut cfg = Config {
         data_dir: PathBuf::from("/tmp/zeroclaw-uncarded"),
@@ -2325,7 +2325,7 @@ fn an_uncarded_agents_policy_is_unchanged() {
 
 #[test]
 fn a_carded_agents_mcp_discovered_tool_policy_is_forced_to_explicit_only() {
-    use crate::card::{GrantClass, ToolGrant};
+    use zeroclaw_config::card::{GrantClass, ToolGrant};
 
     // The named profile deliberately sets the permissive variant: a
     // card cannot mean "auto-admit" because naming is its entire
@@ -2335,14 +2335,14 @@ fn a_carded_agents_mcp_discovered_tool_policy_is_forced_to_explicit_only() {
         "trader_card",
         "trading_readonly",
         vec![ToolGrant::new("memory_recall", GrantClass::LocalRead)],
-        crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+        zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
     );
 
     let policy = SecurityPolicy::for_agent(&cfg, "carded_agent").unwrap();
 
     assert_eq!(
         policy.mcp_discovered_tool_policy,
-        crate::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
+        zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
         "a card governs this agent, so the profile's AutoAdmit escape \
          hatch must be closed regardless"
     );
@@ -2350,7 +2350,7 @@ fn a_carded_agents_mcp_discovered_tool_policy_is_forced_to_explicit_only() {
 
 #[test]
 fn an_uncarded_agents_mcp_discovered_tool_policy_keeps_auto_admit() {
-    use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 
     // Regression guard: no card governs this agent, so `for_agent` must
     // not touch `mcp_discovered_tool_policy` at all — it stays whatever
@@ -2363,7 +2363,8 @@ fn an_uncarded_agents_mcp_discovered_tool_policy_keeps_auto_admit() {
     cfg.risk_profiles.insert(
         "default".into(),
         RiskProfileConfig {
-            mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+            mcp_discovered_tool_policy:
+                zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
             ..RiskProfileConfig::default()
         },
     );
@@ -2379,7 +2380,7 @@ fn an_uncarded_agents_mcp_discovered_tool_policy_keeps_auto_admit() {
 
     assert_eq!(
         policy.mcp_discovered_tool_policy,
-        crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+        zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
         "an uncarded agent's mcp_discovered_tool_policy must come from its \
          risk_profile, untouched by card resolution"
     );
@@ -2389,19 +2390,19 @@ fn an_uncarded_agents_mcp_discovered_tool_policy_keeps_auto_admit() {
 
 #[test]
 fn from_config_creates_fresh_tracker() {
-    let risk = crate::schema::RiskProfileConfig {
+    let risk = zeroclaw_config::schema::RiskProfileConfig {
         level: AutonomyLevel::Full,
         workspace_only: false,
         allowed_commands: vec![],
         forbidden_paths: vec![],
         require_approval_for_medium_risk: true,
         block_high_risk_commands: true,
-        ..crate::schema::RiskProfileConfig::default()
+        ..zeroclaw_config::schema::RiskProfileConfig::default()
     };
-    let runtime = crate::schema::RuntimeProfileConfig {
+    let runtime = zeroclaw_config::schema::RuntimeProfileConfig {
         max_actions_per_hour: 10,
         max_cost_per_day_cents: 100,
-        ..crate::schema::RuntimeProfileConfig::default()
+        ..zeroclaw_config::schema::RuntimeProfileConfig::default()
     };
     let workspace = PathBuf::from("/tmp/test");
     let policy = SecurityPolicy::from_profiles(&risk, Some(&runtime), &workspace);
@@ -3481,9 +3482,9 @@ fn from_risk_profile_leaves_allowed_roots_read_only_empty() {
     // RiskProfileConfig has no read-only-roots concept; it's
     // populated by the multi-agent runtime when it builds the
     // per-agent policy from workspace.access.
-    let profile = crate::schema::RiskProfileConfig {
+    let profile = zeroclaw_config::schema::RiskProfileConfig {
         allowed_roots: vec!["/projects".to_string()],
-        ..crate::schema::RiskProfileConfig::default()
+        ..zeroclaw_config::schema::RiskProfileConfig::default()
     };
     let policy = SecurityPolicy::from_risk_profile(&profile, Path::new("/workspace"));
     assert_eq!(policy.allowed_roots, vec![PathBuf::from("/projects")]);
