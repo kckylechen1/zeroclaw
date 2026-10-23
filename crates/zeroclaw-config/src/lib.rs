@@ -15,7 +15,6 @@ pub mod card;
 pub mod comment_writer;
 pub mod companion;
 pub mod composition;
-pub mod cost;
 pub mod domain_matcher;
 pub mod env_overrides;
 pub mod field_visibility;

@@ -1379,7 +1379,7 @@ tags = ["auto-generated"]
         let tracker = Arc::new(CostTracker::new(cost_config, cost_dir.path()).unwrap());
         // Pre-record usage that already exceeds the daily limit.
         tracker
-            .record_usage(crate::cost::types::TokenUsage::new(
+            .record_usage(crate::cost::calculate_token_usage(
                 "mock-model",
                 100_000,
                 50_000,

@@ -7,7 +7,7 @@ pricing rules live in config so operators can edit them without a
 rebuild.
 
 This page describes the schema, the lookup pipeline, and the operator
-surfaces. The code lives in `crates/zeroclaw-config/src/cost/` and
+surfaces. The code lives in `crates/zeroclaw-cost/src/` and
 `crates/zeroclaw-runtime/src/agent/cost.rs`.
 
 ## Config schema
@@ -87,7 +87,7 @@ The pipeline from `[cost.rates.*]` to a recorded `cost_usd` value is:
    records still surface in logs.
 
 4. **CostTracker is a process-global singleton** (`OnceLock` in
-   `crates/zeroclaw-config/src/cost/tracker.rs`). Reload applies the
+   `crates/zeroclaw-cost/src/tracker.rs`). Reload applies the
    latest `CostConfig` to the existing tracker, and if cost tracking
    was disabled at boot, a later reload with `cost.enabled = true`
    constructs the tracker on demand. The orchestrator's pricing map is
