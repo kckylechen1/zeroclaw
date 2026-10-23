@@ -309,7 +309,9 @@
   - changed-files:
       - any-glob-to-any-file:
           - "crates/zeroclaw-runtime/src/security/policy.rs"
-          - "crates/zeroclaw-config/src/policy.rs"
+          - "crates/zeroclaw-policy/**"
+          - "crates/zeroclaw-config/src/policy_defaults.rs"
+          - "crates/zeroclaw-api/src/policy.rs"
 
 "security:secrets":
   - changed-files:

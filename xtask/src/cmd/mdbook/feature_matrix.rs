@@ -147,7 +147,7 @@ fn providers_rows(parity: &Parity) -> Result<Vec<Row>> {
 }
 
 fn tools_rows(parity: &Parity) -> Result<Vec<Row>> {
-    let security = Arc::new(zeroclaw_config::policy::SecurityPolicy::default());
+    let security = Arc::new(zeroclaw_runtime::security::SecurityPolicy::default());
     let mut rows = Vec::new();
     let mut walked = std::collections::BTreeSet::new();
     for tool in default_tools(security) {

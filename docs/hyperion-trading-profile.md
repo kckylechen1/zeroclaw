@@ -111,7 +111,7 @@ letting an unattended agent anywhere near execution-tier tools.
 - `crates/zeroclaw-tools/src/tool_search.rs` — the `explicit_only_*` tests pin
   that an unlisted `<server>__<tool>` name is rejected, and that the same inputs
   under `auto_admit` are not, so the gate is provably the flag.
-- `crates/zeroclaw-config/src/policy.rs` —
+- `crates/zeroclaw-policy/src/tests.rs` —
   `from_profiles_propagates_every_risk_profile_field` pins that the policy
   actually reaches `SecurityPolicy`, using the non-default variant so a dropped
   field cannot pass.
