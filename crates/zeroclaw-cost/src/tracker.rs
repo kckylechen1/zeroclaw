@@ -43,10 +43,7 @@ impl CostTracker {
     pub fn new(config: CostConfig, workspace_dir: &Path) -> Result<Self> {
         let storage_path = resolve_storage_path(workspace_dir)?;
         let storage = CostStorage::new(&storage_path).with_context(|| {
-            format!(
-                "Failed to open cost storage at {}",
-                storage_path.display().to_string()
-            )
+            format!("Failed to open cost storage at {}", storage_path.display())
         })?;
 
         Ok(Self {
@@ -494,12 +491,8 @@ fn resolve_storage_path(workspace_dir: &Path) -> Result<PathBuf> {
 
     if !storage_path.exists() && legacy_path.exists() {
         if let Some(parent) = storage_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create directory {}",
-                    parent.display().to_string()
-                )
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
         }
 
         if let Err(error) = fs::rename(&legacy_path, &storage_path) {
@@ -509,14 +502,14 @@ fn resolve_storage_path(workspace_dir: &Path) -> Result<PathBuf> {
                     .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
                 &format!(
                     "Failed to move legacy cost storage from {} to {}: {error}; falling back to copy",
-                    legacy_path.display().to_string(),
-                    storage_path.display().to_string()
+                    legacy_path.display(),
+                    storage_path.display()
                 )
             );
             fs::copy(&legacy_path, &storage_path).with_context(|| {
                 format!(
                     "Failed to copy legacy cost storage from {} to {}",
-                    legacy_path.display().to_string(),
+                    legacy_path.display(),
                     storage_path.display()
                 )
             })?;
@@ -665,12 +658,8 @@ impl CostStorage {
     /// Create or open cost storage.
     fn new(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create directory {}",
-                    parent.display().to_string()
-                )
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
         }
         let now = Utc::now();
         Ok(Self {
@@ -692,12 +681,8 @@ impl CostStorage {
             return Ok(());
         }
 
-        let file = File::open(&self.path).with_context(|| {
-            format!(
-                "Failed to read cost storage from {}",
-                self.path.display().to_string()
-            )
-        })?;
+        let file = File::open(&self.path)
+            .with_context(|| format!("Failed to read cost storage from {}", self.path.display()))?;
         let reader = BufReader::new(file);
 
         for (line_number, line) in reader.lines().enumerate() {
@@ -803,27 +788,14 @@ impl CostStorage {
             .create(true)
             .append(true)
             .open(&self.path)
-            .with_context(|| {
-                format!(
-                    "Failed to open cost storage at {}",
-                    self.path.display().to_string()
-                )
-            })?;
+            .with_context(|| format!("Failed to open cost storage at {}", self.path.display()))?;
 
         let mut line = serde_json::to_string(&record)?;
         line.push('\n');
-        file.write_all(line.as_bytes()).with_context(|| {
-            format!(
-                "Failed to write cost record to {}",
-                self.path.display().to_string()
-            )
-        })?;
-        file.sync_all().with_context(|| {
-            format!(
-                "Failed to sync cost storage at {}",
-                self.path.display().to_string()
-            )
-        })?;
+        file.write_all(line.as_bytes())
+            .with_context(|| format!("Failed to write cost record to {}", self.path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to sync cost storage at {}", self.path.display()))?;
 
         let timestamp = record.usage.timestamp.naive_utc();
         if timestamp.date() == self.cached_day {
