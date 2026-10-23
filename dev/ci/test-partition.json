@@ -24,6 +24,7 @@
       "zeroclaw-log",
       "zeroclaw-macros",
       "zeroclaw-memory",
+      "zeroclaw-platform",
       "zeroclaw-providers",
       "zeroclaw-sop-graph",
       "zeroclaw-spawn",

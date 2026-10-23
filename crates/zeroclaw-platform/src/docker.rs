@@ -1,27 +1,8 @@
-use crate::schema::DockerRuntimeConfig;
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use zeroclaw_api::runtime_traits::RuntimeAdapter;
-
-/// Canonicalization failures that the runtime layer can present through
-/// localized tool diagnostics without parsing an English error chain.
-#[derive(Debug, thiserror::Error)]
-pub enum DockerWorkspaceMountError {
-    #[error("Failed to canonicalize Docker workspace path {path}")]
-    WorkspacePath {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("Failed to canonicalize Docker workspace root {path}")]
-    AllowedRoot {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-}
+use zeroclaw_api::runtime_traits::{DockerWorkspaceMountError, RuntimeAdapter};
+use zeroclaw_config::schema::DockerRuntimeConfig;
 
 /// Docker runtime with lightweight container isolation.
 #[derive(Debug, Clone)]

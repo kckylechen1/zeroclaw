@@ -1,3 +1,8 @@
+//! Native and Docker command execution adapters for local ZeroClaw tools.
+//!
+//! Configuration stays in `zeroclaw-config`; the shared execution contract is
+//! defined by `zeroclaw-api`. External harness delegation belongs to Tachi.
+
 pub mod docker;
 pub mod native;
 
@@ -5,7 +10,7 @@ pub use docker::DockerRuntime;
 pub use native::NativeRuntime;
 pub use zeroclaw_api::runtime_traits::RuntimeAdapter;
 
-use crate::schema::{RuntimeConfig, RuntimeKind};
+use zeroclaw_config::schema::{RuntimeConfig, RuntimeKind};
 
 pub fn create_runtime(config: &RuntimeConfig) -> anyhow::Result<Box<dyn RuntimeAdapter>> {
     match config.kind {
@@ -111,7 +116,7 @@ fn write_recording_shim(dir: &std::path::Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{RuntimeConfig, RuntimeKind};
+    use zeroclaw_config::schema::{RuntimeConfig, RuntimeKind};
 
     #[test]
     fn factory_native() {

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use zeroclaw_api::tool::ToolSpec;
 #[cfg(windows)]
-use zeroclaw_config::platform::native::windows_std_cmd_shell_command;
+use zeroclaw_platform::native::windows_std_cmd_shell_command;
 
 /// Hostname prefix for the Bedrock Runtime endpoint.
 const ENDPOINT_PREFIX: &str = "bedrock-runtime";

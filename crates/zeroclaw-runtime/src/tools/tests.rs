@@ -195,7 +195,7 @@ async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
         &security,
         &risk,
         "test-agent",
-        Arc::new(zeroclaw_config::platform::NativeRuntime::new()),
+        Arc::new(zeroclaw_platform::NativeRuntime::new()),
         mem,
         None,
         None,

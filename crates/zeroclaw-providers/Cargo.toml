@@ -35,6 +35,9 @@ tokio-stream = { version = "0.1.19", default-features = false, features = ["fs",
 tokio-util = { version = "0.7", default-features = false }
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
 
+[target.'cfg(windows)'.dependencies]
+zeroclaw-platform.workspace = true
+
 [dev-dependencies]
 tokio = { version = "1.50", features = ["test-util"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }

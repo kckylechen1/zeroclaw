@@ -1,4 +1,4 @@
-use zeroclaw_config::platform::docker::DockerWorkspaceMountError;
+use zeroclaw_api::runtime_traits::DockerWorkspaceMountError;
 
 pub(super) fn format_runtime_command_error(error: &anyhow::Error) -> String {
     if let Some(error) = error.downcast_ref::<DockerWorkspaceMountError>() {

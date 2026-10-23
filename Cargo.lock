@@ -8644,6 +8644,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-platform"
+version = "0.8.3"
+dependencies = [
+ "anyhow",
+ "directories",
+ "tempfile",
+ "tokio",
+ "toml 1.1.5+spec-1.1.0",
+ "zeroclaw-api",
+ "zeroclaw-config",
+]
+
+[[package]]
 name = "zeroclaw-providers"
 version = "0.8.3"
 dependencies = [
@@ -8678,6 +8691,7 @@ dependencies = [
  "zeroclaw-config",
  "zeroclaw-http",
  "zeroclaw-log",
+ "zeroclaw-platform",
  "zeroclaw-spawn",
 ]
 
@@ -8755,6 +8769,7 @@ dependencies = [
  "zeroclaw-log",
  "zeroclaw-macros",
  "zeroclaw-memory",
+ "zeroclaw-platform",
  "zeroclaw-providers",
  "zeroclaw-sop-graph",
  "zeroclaw-spawn",
