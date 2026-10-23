@@ -190,8 +190,7 @@ impl WebSearchTool {
         let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.web_search");
         let client = builder.build()?;
 
         let response = client.get(&search_url).send().await?;
@@ -275,8 +274,7 @@ impl WebSearchTool {
         );
 
         let builder = reqwest::Client::builder().timeout(Duration::from_secs(self.timeout_secs));
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.web_search");
         let client = builder.build()?;
 
         let response = client
@@ -381,8 +379,7 @@ impl WebSearchTool {
 
     fn build_tavily_client(&self) -> anyhow::Result<reqwest::Client> {
         let builder = reqwest::Client::builder().timeout(Duration::from_secs(self.timeout_secs));
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.web_search");
         Ok(builder.build()?)
     }
 
@@ -555,8 +552,7 @@ impl WebSearchTool {
         let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
             .user_agent("ZeroClaw/1.0 (https://zeroclaw.ai)");
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.web_search");
         let client = builder.build()?;
 
         // Jina Search API requires POST with JSON body
@@ -693,8 +689,7 @@ impl WebSearchTool {
 
     async fn search_bocha(&self, query: &str) -> anyhow::Result<String> {
         let builder = reqwest::Client::builder().timeout(Duration::from_secs(self.timeout_secs));
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.web_search");
         let client = builder.build()?;
         self.search_bocha_with_client(&client, "https://api.bochaai.com/v1/web-search", query)
             .await
@@ -932,8 +927,7 @@ impl WebSearchTool {
         let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(self.timeout_secs))
             .user_agent("ZeroClaw/1.0");
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.web_search");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.web_search");
         let client = builder.build()?;
 
         let response = client

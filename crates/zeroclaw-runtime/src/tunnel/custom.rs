@@ -116,7 +116,7 @@ impl Tunnel for CustomTunnel {
     async fn health_check(&self) -> bool {
         // If a health URL is configured, try to reach it
         if let Some(ref url) = self.health_url {
-            return zeroclaw_config::schema::build_runtime_proxy_client("tunnel.custom")
+            return zeroclaw_http::build_runtime_proxy_client("tunnel.custom")
                 .get(url)
                 .timeout(std::time::Duration::from_secs(5))
                 .send()

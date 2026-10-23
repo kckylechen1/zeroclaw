@@ -1,0 +1,16 @@
+[package]
+name = "zeroclaw-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared outbound HTTP clients and proxy runtime for ZeroClaw."
+publish = false
+
+[dependencies]
+zeroclaw-config.workspace = true
+zeroclaw-log.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider", "__rustls-ring"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { version = "1.50", default-features = false, features = ["rt", "macros", "sync", "net", "io-util", "time"] }

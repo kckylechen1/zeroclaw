@@ -88,7 +88,7 @@ impl WebhookChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_runtime_proxy_client("channel.webhook")
+        zeroclaw_http::build_runtime_proxy_client("channel.webhook")
     }
 
     /// Compute the backoff delay for a given attempt, bounded by `retry_max_delay_ms`

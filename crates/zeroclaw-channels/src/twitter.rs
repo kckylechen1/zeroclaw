@@ -46,7 +46,7 @@ impl TwitterChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_runtime_proxy_client("channel.twitter")
+        zeroclaw_http::build_runtime_proxy_client("channel.twitter")
     }
 
     fn is_user_allowed(&self, user_id: &str) -> bool {

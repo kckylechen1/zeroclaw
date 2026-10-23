@@ -7,6 +7,7 @@ description = "Memory backends, embeddings, consolidation, and retrieval for Zer
 publish = false
 
 [dependencies]
+zeroclaw-http.workspace = true
 zeroclaw-log.workspace = true
 zeroclaw-api.workspace = true
 zeroclaw-providers.workspace = true

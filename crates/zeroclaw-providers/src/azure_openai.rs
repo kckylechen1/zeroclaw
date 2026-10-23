@@ -430,7 +430,7 @@ impl AzureOpenAiModelProvider {
     }
 
     fn http_client(&self) -> Client {
-        zeroclaw_config::schema::build_runtime_proxy_client_with_timeouts(
+        zeroclaw_http::build_runtime_proxy_client_with_timeouts(
             "model_provider.azure_openai",
             120,
             10,

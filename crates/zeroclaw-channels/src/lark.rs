@@ -953,7 +953,7 @@ impl LarkChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_channel_proxy_client(
+        zeroclaw_http::build_channel_proxy_client(
             self.platform.proxy_service_key(),
             self.proxy_url.as_deref(),
         )

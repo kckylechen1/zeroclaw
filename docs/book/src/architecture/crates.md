@@ -121,6 +121,15 @@ current attribution span so a `record!` emitted inside the spawned
 future inherits the parent's `agent_alias` / `channel` / `session_key`.
 Call sites use `spawn!` instead of `tokio::spawn` directly.
 
+### `zeroclaw-http`
+
+Shared outbound HTTP client construction, proxy application and connection
+caching for providers, channels, memory and tools. The canonical proxy fields
+and validation remain in `zeroclaw-config`; the binary applies the loaded config
+at startup and reload. This keeps HTTP/TLS dependencies out of configuration-only
+consumers without coupling network clients to the SQLite infrastructure crate.
+No provider, channel or tool policy is owned by this crate.
+
 ### `zeroclaw-infra`
 
 Process-level support: debouncers, watchdogs, the SQLite session

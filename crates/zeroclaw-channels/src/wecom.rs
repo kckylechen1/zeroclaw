@@ -29,7 +29,7 @@ impl WeComChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_runtime_proxy_client("channel.wecom")
+        zeroclaw_http::build_runtime_proxy_client("channel.wecom")
     }
 
     fn webhook_url(&self) -> String {

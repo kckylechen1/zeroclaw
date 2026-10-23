@@ -92,7 +92,7 @@ impl RedditChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_runtime_proxy_client("channel.reddit")
+        zeroclaw_http::build_runtime_proxy_client("channel.reddit")
     }
 
     /// Refresh the OAuth2 access token using the refresh token.

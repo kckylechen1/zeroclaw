@@ -323,7 +323,7 @@ impl WeComWsChannel {
             );
         }
 
-        let client = zeroclaw_config::schema::build_channel_proxy_client_with_timeouts(
+        let client = zeroclaw_http::build_channel_proxy_client_with_timeouts(
             "channel.wecom_ws",
             config.proxy_url.as_deref(),
             WECOM_HTTP_TIMEOUT_SECS,

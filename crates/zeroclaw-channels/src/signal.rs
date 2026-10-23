@@ -184,7 +184,7 @@ impl SignalChannel {
 
     fn http_client(&self) -> Client {
         let builder = Client::builder().connect_timeout(Duration::from_secs(10));
-        let builder = zeroclaw_config::schema::apply_channel_proxy_to_builder(
+        let builder = zeroclaw_http::apply_channel_proxy_to_builder(
             builder,
             "channel.signal",
             self.proxy_url.as_deref(),

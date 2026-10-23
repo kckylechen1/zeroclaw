@@ -331,7 +331,7 @@ impl Tool for FileUploadTool {
 
         let form = reqwest::multipart::Form::new().part(self.config.field_name.clone(), part);
 
-        let client = zeroclaw_config::schema::build_runtime_proxy_client_with_timeouts(
+        let client = zeroclaw_http::build_runtime_proxy_client_with_timeouts(
             "tool.file_upload",
             self.config.timeout_secs,
             10,

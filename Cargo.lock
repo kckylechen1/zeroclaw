@@ -8419,6 +8419,7 @@ dependencies = [
  "wiremock",
  "zeroclaw-api",
  "zeroclaw-config",
+ "zeroclaw-http",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-memory",
@@ -8451,7 +8452,6 @@ dependencies = [
  "parking_lot",
  "rand 0.10.3",
  "regex",
- "reqwest 0.12.28",
  "schemars",
  "serde",
  "serde_json",
@@ -8556,6 +8556,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-http"
+version = "0.8.3"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+ "zeroclaw-config",
+ "zeroclaw-log",
+]
+
+[[package]]
 name = "zeroclaw-infra"
 version = "0.8.3"
 dependencies = [
@@ -8625,6 +8636,7 @@ dependencies = [
  "uuid",
  "zeroclaw-api",
  "zeroclaw-config",
+ "zeroclaw-http",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-providers",
@@ -8664,6 +8676,7 @@ dependencies = [
  "uuid",
  "zeroclaw-api",
  "zeroclaw-config",
+ "zeroclaw-http",
  "zeroclaw-log",
  "zeroclaw-spawn",
 ]
@@ -8737,6 +8750,7 @@ dependencies = [
  "wiremock",
  "zeroclaw-api",
  "zeroclaw-config",
+ "zeroclaw-http",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-macros",
@@ -8824,6 +8838,7 @@ dependencies = [
  "wiremock",
  "zeroclaw-api",
  "zeroclaw-config",
+ "zeroclaw-http",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-memory",
@@ -8901,6 +8916,7 @@ dependencies = [
  "zeroclaw-eval",
  "zeroclaw-gateway",
  "zeroclaw-gateway-client",
+ "zeroclaw-http",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-macros",

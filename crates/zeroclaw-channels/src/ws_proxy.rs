@@ -8,7 +8,8 @@
 //! handshake.
 
 use anyhow::Context;
-use zeroclaw_config::schema::{normalize_proxy_url_option, runtime_proxy_config};
+use zeroclaw_config::schema::normalize_proxy_url_option;
+use zeroclaw_http::runtime_proxy_config;
 
 /// Combined async IO trait for boxed WebSocket transport streams.
 trait AsyncReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}

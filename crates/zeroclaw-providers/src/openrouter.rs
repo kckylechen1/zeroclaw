@@ -530,7 +530,7 @@ impl OpenRouterModelProvider {
     }
 
     fn http_client(&self) -> Client {
-        zeroclaw_config::schema::build_runtime_proxy_client_with_timeouts(
+        zeroclaw_http::build_runtime_proxy_client_with_timeouts(
             "model_provider.openrouter",
             self.timeout_secs,
             OPENROUTER_CONNECT_TIMEOUT_SECS,

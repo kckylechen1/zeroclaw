@@ -541,7 +541,7 @@ impl SlackChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_channel_proxy_client_with_timeouts(
+        zeroclaw_http::build_channel_proxy_client_with_timeouts(
             "channel.slack",
             self.proxy_url.as_deref(),
             30,
@@ -2120,7 +2120,7 @@ impl SlackChannel {
     }
 
     fn slack_media_http_client_no_redirect(&self) -> anyhow::Result<reqwest::Client> {
-        let builder = zeroclaw_config::schema::apply_channel_proxy_to_builder(
+        let builder = zeroclaw_http::apply_channel_proxy_to_builder(
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(30))

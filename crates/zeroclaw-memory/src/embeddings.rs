@@ -83,7 +83,7 @@ impl OpenAiEmbedding {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_runtime_proxy_client("memory.embeddings")
+        zeroclaw_http::build_runtime_proxy_client("memory.embeddings")
     }
 
     fn has_explicit_api_path(&self) -> bool {
