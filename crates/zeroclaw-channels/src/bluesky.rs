@@ -116,7 +116,7 @@ impl BlueskyChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_runtime_proxy_client("channel.bluesky")
+        zeroclaw_http::build_runtime_proxy_client("channel.bluesky")
     }
 
     /// Create a new session with handle + app password.

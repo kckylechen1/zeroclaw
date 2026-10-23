@@ -298,11 +298,7 @@ impl OllamaModelProvider {
     }
 
     fn http_client(&self) -> Client {
-        zeroclaw_config::schema::build_runtime_proxy_client_with_timeouts(
-            "model_provider.ollama",
-            300,
-            10,
-        )
+        zeroclaw_http::build_runtime_proxy_client_with_timeouts("model_provider.ollama", 300, 10)
     }
 
     fn resolve_request_details(&self, model: &str) -> anyhow::Result<(String, bool)> {

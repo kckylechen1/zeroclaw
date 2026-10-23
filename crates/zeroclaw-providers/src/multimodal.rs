@@ -4,7 +4,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use zeroclaw_api::model_provider::ChatMessage;
-use zeroclaw_config::schema::{MultimodalConfig, build_runtime_proxy_client_with_timeouts};
+use zeroclaw_config::schema::MultimodalConfig;
+use zeroclaw_http::build_runtime_proxy_client_with_timeouts;
 
 const IMAGE_MARKER_PREFIX: &str = "[IMAGE:";
 const ALLOWED_IMAGE_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];

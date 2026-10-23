@@ -483,7 +483,7 @@ impl Tool for FileUploadBundleTool {
             form = form.text("project_id", pid);
         }
 
-        let client = zeroclaw_config::schema::build_runtime_proxy_client_with_timeouts(
+        let client = zeroclaw_http::build_runtime_proxy_client_with_timeouts(
             "tool.file_upload_bundle",
             self.config.timeout_secs,
             10,

@@ -7,6 +7,7 @@ description = "Tool implementations for agent-callable capabilities."
 publish = false
 
 [dependencies]
+zeroclaw-http.workspace = true
 zeroclaw-log.workspace = true
 zeroclaw-api.workspace = true
 zeroclaw-spawn.workspace = true

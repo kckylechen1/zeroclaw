@@ -59,7 +59,7 @@ impl GithubApi {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_channel_proxy_client_with_timeouts(
+        zeroclaw_http::build_channel_proxy_client_with_timeouts(
             "channel.git.github",
             self.proxy_url.as_deref(),
             30,

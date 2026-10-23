@@ -1878,7 +1878,7 @@ impl AnthropicModelProvider {
     }
 
     fn http_client(&self) -> Client {
-        zeroclaw_config::schema::build_runtime_proxy_client_with_timeouts(
+        zeroclaw_http::build_runtime_proxy_client_with_timeouts(
             "model_provider.anthropic",
             self.timeout_secs,
             10,
@@ -1892,10 +1892,8 @@ impl AnthropicModelProvider {
         let builder = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .read_timeout(STREAM_IDLE_TIMEOUT);
-        let builder = zeroclaw_config::schema::apply_runtime_proxy_to_builder(
-            builder,
-            "model_provider.anthropic",
-        );
+        let builder =
+            zeroclaw_http::apply_runtime_proxy_to_builder(builder, "model_provider.anthropic");
         builder.build()
     }
 

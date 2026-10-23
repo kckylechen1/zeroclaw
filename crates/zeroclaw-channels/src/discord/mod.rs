@@ -744,10 +744,7 @@ impl DiscordChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_channel_proxy_client(
-            "channel.discord",
-            self.proxy_url.as_deref(),
-        )
+        zeroclaw_http::build_channel_proxy_client("channel.discord", self.proxy_url.as_deref())
     }
 
     /// Check if a Discord user ID is in the allowlist.

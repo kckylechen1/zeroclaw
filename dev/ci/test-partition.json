@@ -19,6 +19,7 @@
       "zeroclaw-commands",
       "zeroclaw-eval",
       "zeroclaw-gateway-client",
+      "zeroclaw-http",
       "zeroclaw-infra",
       "zeroclaw-log",
       "zeroclaw-macros",

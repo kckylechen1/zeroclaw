@@ -286,8 +286,7 @@ impl Tool for FileDownloadTool {
             .timeout(Duration::from_secs(self.config.timeout_secs))
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none());
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.file_download");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.file_download");
         let client = match builder.build() {
             Ok(c) => c,
             Err(e) => {

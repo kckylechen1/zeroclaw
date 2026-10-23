@@ -64,10 +64,7 @@ impl DingTalkChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_channel_proxy_client(
-            "channel.dingtalk",
-            self.proxy_url.as_deref(),
-        )
+        zeroclaw_http::build_channel_proxy_client("channel.dingtalk", self.proxy_url.as_deref())
     }
 
     fn is_user_allowed(&self, user_id: &str) -> bool {

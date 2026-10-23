@@ -150,8 +150,7 @@ impl WeatherTool {
             .connect_timeout(Duration::from_secs(WTTR_CONNECT_TIMEOUT_SECS))
             .user_agent("zeroclaw-weather/1.0");
 
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.weather");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.weather");
         let client = builder.build()?;
 
         let response = client.get(&url).send().await?;

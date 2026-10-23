@@ -760,7 +760,7 @@ impl LineChannel {
             pairing,
             webhook_port,
             pending_tokens: Arc::new(RwLock::new(HashMap::new())),
-            client: zeroclaw_config::schema::build_channel_proxy_client("channel.line", None),
+            client: zeroclaw_http::build_channel_proxy_client("channel.line", None),
             api_base_url: "https://api.line.me".to_string(),
             content_api_base_url: "https://api-data.line.me".to_string(),
             sender_name_resolver: Arc::new(|| None),
@@ -809,10 +809,8 @@ impl LineChannel {
 
     /// Override the proxy URL for outbound HTTP calls.
     pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
-        self.client = zeroclaw_config::schema::build_channel_proxy_client(
-            "channel.line",
-            proxy_url.as_deref(),
-        );
+        self.client =
+            zeroclaw_http::build_channel_proxy_client("channel.line", proxy_url.as_deref());
         self
     }
 

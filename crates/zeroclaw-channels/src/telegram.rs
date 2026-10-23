@@ -1114,10 +1114,7 @@ impl TelegramChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_channel_proxy_client(
-            "channel.telegram",
-            self.proxy_url.as_deref(),
-        )
+        zeroclaw_http::build_channel_proxy_client("channel.telegram", self.proxy_url.as_deref())
     }
 
     fn normalize_identity(value: &str) -> String {
@@ -1573,7 +1570,7 @@ impl TelegramChannel {
         let (method, field, filename, mime) = telegram_audio_send_spec("opus")?;
 
         let url = format!("{api_base}/bot{bot_token}/{method}");
-        let client = zeroclaw_config::schema::build_runtime_proxy_client("channel.telegram");
+        let client = zeroclaw_http::build_runtime_proxy_client("channel.telegram");
 
         let mut form = reqwest::multipart::Form::new()
             .text("chat_id", chat_id.to_string())

@@ -51,7 +51,7 @@ impl MochatChannel {
     }
 
     fn http_client(&self) -> reqwest::Client {
-        zeroclaw_config::schema::build_runtime_proxy_client("channel.mochat")
+        zeroclaw_http::build_runtime_proxy_client("channel.mochat")
     }
 
     fn is_user_allowed(&self, user_id: &str) -> bool {

@@ -748,10 +748,8 @@ impl OpenAiCompatibleModelProvider {
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .default_headers(headers);
             let builder = self.add_tls_cert_to_builder(builder);
-            let builder = zeroclaw_config::schema::apply_runtime_proxy_to_builder(
-                builder,
-                "model_provider.compatible",
-            );
+            let builder =
+                zeroclaw_http::apply_runtime_proxy_to_builder(builder, "model_provider.compatible");
 
             return builder.build().unwrap_or_else(|error| {
                 ::zeroclaw_log::record!(
@@ -767,7 +765,7 @@ impl OpenAiCompatibleModelProvider {
             });
         }
 
-        zeroclaw_config::schema::build_runtime_proxy_client_with_timeouts(
+        zeroclaw_http::build_runtime_proxy_client_with_timeouts(
             "model_provider.compatible",
             timeout,
             10,
@@ -818,10 +816,8 @@ impl OpenAiCompatibleModelProvider {
                 .read_timeout(STREAM_IDLE_TIMEOUT)
                 .default_headers(headers);
             let builder = self.add_tls_cert_to_builder(builder);
-            let builder = zeroclaw_config::schema::apply_runtime_proxy_to_builder(
-                builder,
-                "provider.compatible",
-            );
+            let builder =
+                zeroclaw_http::apply_runtime_proxy_to_builder(builder, "provider.compatible");
             return builder.build().unwrap_or_else(|error| {
                 ::zeroclaw_log::record!(
                     WARN,
@@ -839,8 +835,7 @@ impl OpenAiCompatibleModelProvider {
         let builder = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .read_timeout(STREAM_IDLE_TIMEOUT);
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "provider.compatible");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "provider.compatible");
         builder.build().unwrap_or_else(|error| {
             ::zeroclaw_log::record!(
                 WARN,

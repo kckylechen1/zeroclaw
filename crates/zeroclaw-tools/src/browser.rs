@@ -993,7 +993,7 @@ impl BrowserTool {
             }
         });
 
-        let client = zeroclaw_config::schema::build_runtime_proxy_client("tool.browser");
+        let client = zeroclaw_http::build_runtime_proxy_client("tool.browser");
         let mut request = client
             .post(endpoint)
             .timeout(Duration::from_millis(self.computer_use.timeout_ms))

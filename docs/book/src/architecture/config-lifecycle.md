@@ -47,6 +47,16 @@ Config load has a few distinct phases:
 On a fresh install, defaults are saved before env overrides are applied. This
 keeps env-injected secrets and local CI values out of the new file.
 
+## Proxy runtime ownership
+
+`zeroclaw-config` owns `[proxy]`, URL validation and the persisted-config read
+used before runtime startup. `zeroclaw-http` owns HTTP client construction,
+connection caching and the process-wide runtime proxy projection. Startup and
+daemon reload supply that projection from the loaded config; reload invalidates
+cached clients. Process proxy environment variables are applied only before the
+multi-threaded runtime starts, so environment-scope changes still require a
+restart. Existing clients retain their original configuration until recreated.
+
 ## Env overrides are not saved
 
 Schema-mirror env vars are runtime injections. They land on the in-memory

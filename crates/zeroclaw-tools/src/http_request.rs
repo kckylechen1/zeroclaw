@@ -355,8 +355,7 @@ impl HttpRequestTool {
             .timeout(Duration::from_secs(timeout_secs))
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none());
-        let builder =
-            zeroclaw_config::schema::apply_runtime_proxy_to_builder(builder, "tool.http_request");
+        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.http_request");
         let builder = if target.host.parse::<IpAddr>().is_ok() {
             builder
         } else {

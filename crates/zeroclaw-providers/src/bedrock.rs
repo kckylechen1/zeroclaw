@@ -852,11 +852,7 @@ impl BedrockModelProvider {
     }
 
     fn http_client(&self) -> Client {
-        zeroclaw_config::schema::build_runtime_proxy_client_with_timeouts(
-            "model_provider.bedrock",
-            120,
-            10,
-        )
+        zeroclaw_http::build_runtime_proxy_client_with_timeouts("model_provider.bedrock", 120, 10)
     }
 
     /// Percent-encode the model ID for URL path: only encode `:` to `%3A`.

@@ -121,6 +121,15 @@ current attribution span so a `record!` emitted inside the spawned
 future inherits the parent's `agent_alias` / `channel` / `session_key`.
 Call sites use `spawn!` instead of `tokio::spawn` directly.
 
+### `zeroclaw-http`
+
+Shared outbound HTTP client construction, proxy application and connection
+caching for providers, channels, memory and tools. The canonical proxy fields
+and validation remain in `zeroclaw-config`; the binary applies the loaded config
+at startup and reload. This keeps HTTP/TLS dependencies out of configuration-only
+consumers without coupling network clients to the SQLite infrastructure crate.
+No provider, channel or tool policy is owned by this crate.
+
 ### `zeroclaw-infra`
 
 Process-level support: debouncers, watchdogs, the SQLite session
@@ -168,8 +177,8 @@ required. The production delegation entry point and watcher remain separate
 integration work. Building this profile does not prove that a particular harness,
 such as DSH, is configured or has passed an end-to-end run.
 
-Network proxy connection logic belongs to `zeroclaw-channels`, and SQLite memory
-schema migrations belong to `zeroclaw-memory`. Keeping these implementations out
-of `zeroclaw-config` removes its explicit `rustls`, `tokio-rustls`, WebSocket, and
-SQLite dependency edges. The config crate's `reqwest` dependency still enables
-TLS transitively, and other subsystems retain the dependencies they use.
+Shared HTTP clients and proxy runtime state belong to `zeroclaw-http`;
+WebSocket-specific proxy transport belongs to `zeroclaw-channels`, and SQLite
+memory schema migrations belong to `zeroclaw-memory`. The config crate retains
+proxy settings, validation, and persistence without an HTTP client or TLS
+dependency. Each runtime subsystem retains the dependencies it uses.
