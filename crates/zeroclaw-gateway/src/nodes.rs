@@ -380,7 +380,7 @@ pub(crate) fn check_node_auth(
         // a remote timing attack that could leak `nodes.auth_token` one
         // byte at a time. Both sides are `.trim()`-normalized to match
         // the canonical pattern at
-        // `crates/zeroclaw-config/src/pairing.rs:139`.
+        // `crates/zeroclaw-config/src/tokens.rs`.
         if !constant_time_eq(token.trim(), expected_token.trim()) {
             return Some((
                 axum::http::StatusCode::UNAUTHORIZED,
@@ -2146,9 +2146,9 @@ mod tests {
     /// The old code used `if token != expected_token`, which short-circuits
     /// on the first differing byte and leaks the configured `nodes.auth_token`
     /// one byte at a time via response timing. The fix routes through
-    /// `constant_time_eq` (from `zeroclaw_config::pairing`) and trims both
+    /// `constant_time_eq` (from `zeroclaw_config::tokens`) and trims both
     /// sides — matching the canonical pairing pattern at
-    /// `crates/zeroclaw-config/src/pairing.rs:139`.
+    /// `crates/zeroclaw-config/src/tokens.rs`.
     ///
     /// We can't measure wall-clock timing in a unit test, but we can lock
     /// in the behavior contract: trim-normalized inputs match, wrong

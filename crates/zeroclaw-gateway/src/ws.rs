@@ -180,9 +180,7 @@ pub async fn handle_ws_chat(
             )
                 .into_response();
         }
-        Some(zeroclaw_config::pairing::PairingGuard::token_hash(
-            presented,
-        ))
+        Some(zeroclaw_config::tokens::hash_token(presented))
     } else if state.pairing.require_pairing() {
         match state.pairing.authenticate_and_hash(presented) {
             Some(hash) => Some(hash),
@@ -198,7 +196,7 @@ pub async fn handle_ws_chat(
         // Pairing-off permits anonymous chat, not anonymous answers. The
         // guard's authenticate_and_hash deliberately allows everyone in
         // that mode, so check actual stored device membership instead.
-        let hash = zeroclaw_config::pairing::PairingGuard::token_hash(presented);
+        let hash = zeroclaw_config::tokens::hash_token(presented);
         (!presented.is_empty() && state.pairing.tokens().contains(&hash)).then_some(hash)
     };
     let bridge_scope = bridge_scope.map(|(_, scope)| scope);
@@ -1051,7 +1049,7 @@ fn question_answer_authorized(state: &AppState, scope: &WsTurnScope) -> bool {
     let config = state.config.read();
     config.gateway.bridges.values().any(|bridge| {
         bridge.allows_session(&scope.session_id)
-            && zeroclaw_config::pairing::constant_time_eq(
+            && zeroclaw_config::tokens::constant_time_eq(
                 subject,
                 &bridge.token_hash.to_ascii_lowercase(),
             )
@@ -2970,8 +2968,7 @@ mod tests {
     async fn question_answers_require_live_authority_and_the_same_conversation() {
         let mut chat = SharedChat::new();
         let mut a = chat.attach().await;
-        let owner_hash =
-            zeroclaw_config::pairing::PairingGuard::token_hash("question-owner-fixture");
+        let owner_hash = zeroclaw_config::tokens::hash_token("question-owner-fixture");
         chat.state.config.write().gateway.bridges.insert(
             "telegram".into(),
             zeroclaw_config::schema::GatewayBridgeConfig {
@@ -3357,7 +3354,7 @@ mod tests {
             zeroclaw_config::schema::AliasedAgentConfig::default(),
         );
         chat.scope.session_key = "gw_shared\u{1f}web".into();
-        let subject = zeroclaw_config::pairing::PairingGuard::token_hash("synthetic-file-token");
+        let subject = zeroclaw_config::tokens::hash_token("synthetic-file-token");
         chat.scope.auth_subject = Some(subject.clone());
         chat.state.config.write().gateway.bridges.insert(
             "files".into(),
@@ -3455,7 +3452,7 @@ mod tests {
             zeroclaw_config::schema::AliasedAgentConfig::default(),
         );
         chat.scope.session_key = "gw_shared\u{1f}web".into();
-        let subject = zeroclaw_config::pairing::PairingGuard::token_hash("synthetic-file-token");
+        let subject = zeroclaw_config::tokens::hash_token("synthetic-file-token");
         chat.scope.auth_subject = Some(subject.clone());
         chat.state.config.write().gateway.bridges.insert(
             "files".into(),

@@ -7,8 +7,8 @@ use anyhow::{Result, bail};
 use super::{t, ta};
 use crate::BridgeCommands;
 use crate::config::Config;
-use zeroclaw_config::pairing::{PairingGuard, generate_bridge_token};
 use zeroclaw_config::schema::GatewayBridgeConfig;
+use zeroclaw_runtime::security::pairing::{PairingGuard, generate_bridge_token};
 
 pub async fn handle_bridge_command(config: &mut Config, command: BridgeCommands) -> Result<()> {
     match command {

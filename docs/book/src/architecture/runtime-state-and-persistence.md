@@ -57,7 +57,7 @@ new runtime state should be described in terms of `<install>/data/`,
 | Background child results (the retired background `delegate` was the first consumer) | Removed with the control plane | `data/control_plane.db` only as a leftover from an older install | none | Same disposition as background task supervision | The workspace `delegate_results/` file store was retired with the delegate tool; leftover JSON files are ignored. |
 | Runtime logs | `zeroclaw-log` event schema and subscriber layer | `data/state/runtime-trace.jsonl` when persistence is enabled | broadcast hook, JSONL writer, `/api/logs` reader, `Observer` bridge | Rolling/full/none persistence is config-controlled; dashboard SSE receives events even when JSONL is disabled | Logs are evidence and observability, not the source of user config or session state. |
 | Cost ledger | `zeroclaw-cost::CostTracker` plus rate config | `data/state/costs.jsonl` | process-global `CostTracker` | Reload hot-swaps `CostConfig`; the tracker is constructed on demand if cost tracking becomes enabled | Shared results live in `zeroclaw-api::cost`. Existing records keep their recorded price; rate edits affect future requests after reload. |
-| Gateway pairing tokens | `PairingGuard` from `gateway.paired_tokens` | token hashes in config | pairing guard | Reload reconstructs the guard from config | Valid bearer tokens are config state, not `devices.db` rows. |
+| Gateway pairing tokens | Runtime `PairingGuard` from `gateway.paired_tokens` | token hashes in config | runtime pairing guard | Reload reconstructs the guard from config | Valid bearer tokens are config state, not `devices.db` rows. |
 | Paired device metadata | Device registry rows keyed by token hash | `data/devices.db` | `DeviceRegistry` cache plus SQLite | Registry reconciles metadata against the canonical paired-token set | This DB makes paired devices visible/manageable; it does not invent valid tokens. |
 | Health and component status | running subsystems report component state | none | gateway health/status state | Process-local; reset/rebuilt on daemon restart or reload | `/health`, `/api/health`, and `/api/status` are current observations, not durable configuration. |
 | Queues, debouncers, watchdogs | `zeroclaw-infra` process utilities | none unless a caller stores results elsewhere | in-memory queues/debouncers/watchdogs | Process-local; used to serialize, coalesce, or detect stalls | Treat these as coordination state. Persist only the domain data they protect, not the queue itself. |
@@ -103,6 +103,7 @@ the instance.
 - Durable task supervision: removed with the control-plane migration wall; durable work runs through the Tachi bridge (`crates/zeroclaw-runtime/src/tachi_bridge/`)
 - Logs: `crates/zeroclaw-log/`
 - Cost ledger: `crates/zeroclaw-cost/src/tracker.rs`; shared results: `crates/zeroclaw-api/src/cost.rs`
-- Pairing guard: `crates/zeroclaw-config/src/pairing.rs`
+- Pairing guard: `crates/zeroclaw-runtime/src/security/pairing.rs`
+- Stateless token encoding/comparison: `crates/zeroclaw-config/src/tokens.rs`
 - Device registry: `crates/zeroclaw-gateway/src/api_pairing.rs`
 - Reload endpoint: `crates/zeroclaw-gateway/src/lib.rs`

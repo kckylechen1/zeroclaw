@@ -11,7 +11,7 @@ The agent loop, security-policy enforcement, SOP definition loading (the former 
 Notable submodules:
 
 - `agent/`: the main request/response loop, streaming, tool-call orchestration
-- `security/`: policy types, sandbox detection, OTP, emergency stop
+- `security/`: policy forwarding, pairing guard, sandbox detection, OTP, emergency stop
 - `sop/`: Standard Operating Procedure engine (see [SOP → Overview](../sop/index.md))
 - `subagent/`: SubAgent spawning and lifecycle (see [Delegation & SubAgents](../agents/delegation.md))
 - `cron/`, `daemon/`, `heartbeat/`: scheduling and long-running process management
@@ -26,6 +26,7 @@ TOML schema and its validation. Handles:
 - Encrypted secrets store (local key file)
 - Workspace resolution (env vars, Homebrew paths, XDG, container detection)
 - Schema versioning and migration
+- Stateless encoding/comparison for persisted token hashes (`tokens`); runtime owns the pairing guard and its live state
 
 All user-facing config keys are documented in [Reference → Config](../reference/config.md), which is generated from this crate.
 

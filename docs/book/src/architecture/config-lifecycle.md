@@ -93,6 +93,21 @@ operation and shares the existing action tracker. This extraction does not
 change the timing of policy resolution, introduce cached config or transfer
 external session ownership from Tachi.
 
+## Pairing and token ownership
+
+`zeroclaw-runtime::security::pairing` owns `PairingGuard`, pairing-code
+generation and consumption, per-client lockout, and in-memory token revocation.
+Gateway and channel callers retain their existing runtime import paths and
+shared guard handles. Operator bridge-token minting uses the same runtime
+module.
+
+Config retains the paired-token hashes and bridge settings. Its `tokens`
+module owns the stateless SHA-256 encoding and exact-string comparison used by
+both bridge lookup and the guard. Device-registry registration and capability
+updates use that same digest function. The device registry remains a projection
+of the canonical paired-token set; moving the guard does not change admission,
+reload, persistence or revocation behavior.
+
 ## Remaining config reduction boundaries
 
 [Issue #382](https://github.com/kckylechen1/zeroclaw/issues/382) tracks the
@@ -103,7 +118,8 @@ consumer census; a module's size alone is not permission to remove it.
 | HTTP and local command implementations | Moved to `zeroclaw-http` and `zeroclaw-platform`; config keeps their settings. |
 | Cost ledger and shared results | Moved to `zeroclaw-cost` and `zeroclaw-api::cost`; config retains `CostConfig`. Budget enforcement, ledger compatibility and reload remain covered at the new owner and runtime call sites. |
 | Runtime authorization policy | Moved to `zeroclaw-policy`; profile settings and canonical defaults remain in config. Existing denial behavior and shared budgets are retained. |
-| Pairing and secrets | Retained authentication and credential paths. Config's bridge-token lookup still uses pairing token helpers; separate those helpers before moving the live guard. These are not retired settings. |
+| Pairing and token helpers | Stateful pairing moved to the existing runtime owner. Config keeps paired-token/bridge settings and stateless digest/comparison helpers in `tokens`; the same helpers serve runtime authentication and device registration. |
+| Secrets | Retained encryption and credential paths are used by config loading, saving and editing. They are not retired settings. |
 | Channel/provider schema sections | Retained listeners and inference clients still read them. Remove exclusive config only after the corresponding #378/#382 consumer replacement or retirement. |
 | `sections`, `field_visibility`, `schema_markdown`, `comment_writer`, `card`, `presets`, `typed_value` | Config editing, onboarding, persistence or generated references still consume these surfaces. #379 owns editor retirement; separate a presentation-only consumer only after tracing its persistence dependencies. |
 | Legacy delegation/SOP configuration | #381 owns duplicate execution retirement after replacement proof. Keep L1 reasoning, the Tachi bridge and their shared types. |

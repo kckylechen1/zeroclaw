@@ -156,7 +156,7 @@ pub(crate) fn scope_authorized(state: &AppState, scope: &Scope) -> bool {
         && (state.pairing.tokens().contains(&scope.subject)
             || config.gateway.bridges.values().any(|b| {
                 b.allows_session(&scope.session)
-                    && zeroclaw_config::pairing::constant_time_eq(
+                    && zeroclaw_config::tokens::constant_time_eq(
                         &scope.subject,
                         &b.token_hash.to_ascii_lowercase(),
                     )
@@ -177,7 +177,7 @@ fn subject(
         .and_then(|v| v.strip_prefix("Bearer "))
         .filter(|t| !t.is_empty())
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    let hash = zeroclaw_config::pairing::PairingGuard::token_hash(token);
+    let hash = zeroclaw_config::tokens::hash_token(token);
     let config = state.config.read();
     if let Some((_, bridge)) = config.gateway.bridge_for_token(token) {
         if !bridge.allows_session(&query.session_id) {
@@ -486,7 +486,7 @@ mod tests {
         config.gateway.bridges.insert(
             "tg".into(),
             zeroclaw_config::schema::GatewayBridgeConfig {
-                token_hash: zeroclaw_config::pairing::PairingGuard::token_hash("synthetic-token"),
+                token_hash: zeroclaw_config::tokens::hash_token("synthetic-token"),
                 sessions: vec!["main".into(), "owner/用户 space".into()],
                 ..Default::default()
             },

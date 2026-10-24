@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 fn control_chat() -> SharedChat {
     let mut chat = SharedChat::new();
-    let subject = zeroclaw_config::pairing::PairingGuard::token_hash("stop-test-bridge");
+    let subject = zeroclaw_config::tokens::hash_token("stop-test-bridge");
     chat.scope.auth_subject = Some(subject.clone());
     {
         let mut config = chat.state.config.write();
@@ -93,7 +93,7 @@ async fn scoped_stop_requires_version_target_and_current_scoped_authority() {
         chat.send(&a, valid.clone()).unwrap()["status"],
         "unauthorized"
     );
-    chat.scope.auth_subject = Some(zeroclaw_config::pairing::PairingGuard::token_hash(
+    chat.scope.auth_subject = Some(zeroclaw_config::tokens::hash_token(
         "stop-test-bridge",
     ));
     chat.scope.session_id = "outside-scope".into();

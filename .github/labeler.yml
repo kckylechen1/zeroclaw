@@ -302,6 +302,8 @@
   - changed-files:
       - any-glob-to-any-file:
           - "crates/zeroclaw-runtime/src/security/pairing.rs"
+          - "crates/zeroclaw-runtime/tests/pairing_contract.rs"
+          - "crates/zeroclaw-config/src/tokens.rs"
           - "crates/zeroclaw-gateway/src/api_pairing.rs"
           - "web/src/pages/Pairing.tsx"
 
