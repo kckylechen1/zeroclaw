@@ -1,0 +1,14 @@
+[package]
+name = "zeroclaw-schema-markdown"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stateless Markdown rendering of ZeroClaw JSON Schema."
+publish = false
+
+[dependencies]
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+schemars = "1.2"
+zeroclaw-config = { workspace = true, features = ["schema-export"] }

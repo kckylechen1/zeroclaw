@@ -224,6 +224,7 @@
       - any-glob-to-any-file:
           - "src/config/**"
           - "crates/zeroclaw-config/src/**"
+          - "crates/zeroclaw-schema-markdown/**"
 
 "cron":
   - changed-files:

@@ -108,6 +108,16 @@ updates use that same digest function. The device registry remains a projection
 of the canonical paired-token set; moving the guard does not change admission,
 reload, persistence or revocation behavior.
 
+## Schema presentation ownership
+
+`zeroclaw-config` owns the typed schema and its `schema-export` feature.
+`zeroclaw-schema-markdown` renders an in-memory JSON Schema into Markdown and
+HTML field views. It has no normal dependency on config or the agent runtime;
+the CLI and mdBook preprocessor supply the canonical schema at each call.
+The CLI enables the renderer only through `schema-export`, including builds
+without `agent-runtime`. Generated reference text and config persistence are
+unchanged.
+
 ## Remaining config reduction boundaries
 
 [Issue #382](https://github.com/kckylechen1/zeroclaw/issues/382) tracks the
@@ -121,7 +131,8 @@ consumer census; a module's size alone is not permission to remove it.
 | Pairing and token helpers | Stateful pairing moved to the existing runtime owner. Config keeps paired-token/bridge settings and stateless digest/comparison helpers in `tokens`; the same helpers serve runtime authentication and device registration. |
 | Secrets | Retained encryption and credential paths are used by config loading, saving and editing. They are not retired settings. |
 | Channel/provider schema sections | Retained listeners and inference clients still read them. Remove exclusive config only after the corresponding #378/#382 consumer replacement or retirement. |
-| `sections`, `field_visibility`, `schema_markdown`, `comment_writer`, `card`, `presets`, `typed_value` | Config editing, onboarding, persistence or generated references still consume these surfaces. #379 owns editor retirement; separate a presentation-only consumer only after tracing its persistence dependencies. |
+| Schema Markdown rendering | Moved to `zeroclaw-schema-markdown`; CLI and mdBook consume JSON Schema without placing presentation code on every config consumer. Config still owns schema generation. |
+| `sections`, `field_visibility`, `comment_writer`, `card`, `presets`, `typed_value` | Config editing, onboarding and persistence still consume these surfaces. #379 owns editor retirement; keep canonical types and write paths until their retained callers have replacements. |
 | Legacy delegation/SOP configuration | #381 owns duplicate execution retirement after replacement proof. Keep L1 reasoning, the Tachi bridge and their shared types. |
 
 ## Env overrides are not saved

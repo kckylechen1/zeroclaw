@@ -8,7 +8,7 @@ Use this page when a change touches a schema, CLI flag, feature inventory, defau
 
 | Surface | Canonical source | Materializer | Output | Repository state | Consumer |
 | --- | --- | --- | --- | --- | --- |
-| Config reference | `zeroclaw_config::schema::Config` plus `Configurable` derives | `cargo mdbook refs` or `cargo mdbook build`, through `markdown-schema` | `docs/book/src/reference/config.md` | Ignored derived file | Config reference chapter and schema-backed directives |
+| Config reference | `zeroclaw_config::schema::Config` plus `Configurable` derives | `cargo mdbook refs` or `cargo mdbook build`, through `markdown-schema` and `zeroclaw-schema-markdown` | `docs/book/src/reference/config.md` | Ignored derived file | Config reference chapter and schema-backed directives |
 | CLI reference | Clap command tree in `src/main.rs` | `cargo mdbook refs` or `cargo mdbook build`, through `markdown-help` | `docs/book/src/reference/cli.md` | Ignored derived file | CLI reference chapter |
 | Rust API reference | Public Rust items across workspace crates | `cargo doc` inside `cargo mdbook refs` or `cargo mdbook build` | `target/doc/`, copied to `docs/book/book/api/` | Ignored build output | Published API reference |
 | Feature matrix | Channel inventory, model-provider slots, default tools, and `docs/book/feature-matrix-parity.toml` | `xtask/src/cmd/mdbook/feature_matrix.rs` during locale builds | `docs/book/src/_snippets/feature-matrix-*.md` | Ignored derived snippets | Feature comparison pages through `{{#include}}` |
@@ -74,6 +74,7 @@ Required PR CI runs the docs quality and added-link gates, but it does not run t
 
 - mdBook command composition: `xtask/src/cmd/mdbook/`
 - CLI and config references: `xtask/src/cmd/mdbook/refs.rs`
+- Shared schema renderer: `crates/zeroclaw-schema-markdown/src/lib.rs`
 - Locale builds and site assembly: `xtask/src/cmd/mdbook/build.rs`
 - mdBook preprocessor configuration: `docs/book/book.toml`
 - Locale registry: `locales.toml`

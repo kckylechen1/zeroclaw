@@ -28,6 +28,7 @@
       "zeroclaw-platform",
       "zeroclaw-policy",
       "zeroclaw-providers",
+      "zeroclaw-schema-markdown",
       "zeroclaw-sop-graph",
       "zeroclaw-spawn",
       "zeroclaw-tool-call-parser",

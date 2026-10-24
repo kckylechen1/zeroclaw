@@ -17,6 +17,7 @@
 /crates/zeroclaw-tools/**            @Audacity88
 /crates/zeroclaw-gateway/**          @Audacity88
 /crates/zeroclaw-config/**           @Audacity88 @JordanTheJet
+/crates/zeroclaw-schema-markdown/**  @Audacity88 @JordanTheJet
 /crates/zeroclaw-memory/**           @Audacity88
 /crates/zeroclaw-tool-call-parser/** @Audacity88
 /src/agent/**                        @Audacity88
