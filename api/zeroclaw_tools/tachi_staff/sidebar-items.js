@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["HEADER_AGENT_IDENTITY","HEADER_CLIENT","HEADER_PROFILE","HEADER_PROJECT","TACHI_STAFF_TOOL","TACHI_TASK_TOOL"],"enum":["CancelOutcome","RunState","StaffingReason","TachiStaffError"],"struct":["CancelReceipt","RunResult","RunStatus","StaffReceipt","StaffRefs","TachiStaffClient","TachiStaffSettings"]};

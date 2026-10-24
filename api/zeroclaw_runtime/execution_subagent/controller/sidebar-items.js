@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ControllerError"],"struct":["ControllerEvent","GatedSessionController","PromptReceipt","SessionCapabilities","SessionCollectView","SessionEventPage","SessionHandle","SessionStartSpec","SessionStopReceipt"],"trait":["SessionController"]};

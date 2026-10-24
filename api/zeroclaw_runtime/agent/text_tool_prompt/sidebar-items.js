@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["apply_text_tool_prompt_policy","build_tool_instructions","build_tool_instructions_for_names"]};

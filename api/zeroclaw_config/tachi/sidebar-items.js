@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_TACHI_ENDPOINT","DEFAULT_TACHI_POLL_SECS","MAX_TACHI_AGENT_IDENTITY_LEN","MAX_TACHI_POLL_SECS","TACHI_AGENT_IDENTITY_PREFIX"],"fn":["is_valid_tachi_agent_identity"],"struct":["TachiConfig"]};
