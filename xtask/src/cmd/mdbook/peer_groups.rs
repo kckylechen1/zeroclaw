@@ -155,7 +155,7 @@ fn expand_directives(
             "{{#model-provider-fields" => render_model_provider_fields(),
             "{{#channel-streaming-matrix" => {
                 let schema = schemars::schema_for!(zeroclaw_config::schema::Config);
-                zeroclaw_config::schema_markdown::channel_streaming_matrix(&schema.to_value())
+                zeroclaw_schema_markdown::channel_streaming_matrix(&schema.to_value())
             }
             "{{#env-var-bridge" => render_env_var_bridge(env_vars)?,
             "{{#env-var-name " => render_env_var_name(arg)?,
@@ -205,7 +205,7 @@ Open [`/config/{route}`](http://127.0.0.1:42617/config/{route}) in the web dashb
 fn render_config_fields(arg: &str) -> anyhow::Result<String> {
     let path = arg.trim();
     let schema = schemars::schema_for!(zeroclaw_config::schema::Config);
-    zeroclaw_config::schema_markdown::field_table_for_path(&schema.to_value(), path, false, None)
+    zeroclaw_schema_markdown::field_table_for_path(&schema.to_value(), path, false, None)
         .map_err(anyhow::Error::msg)
 }
 
@@ -317,7 +317,7 @@ fn render_sop_trigger(arg: &str) -> anyhow::Result<String> {
     if let Some(obj) = node.as_object_mut() {
         obj.insert("$defs".to_string(), defs);
     }
-    let fields = zeroclaw_config::schema_markdown::field_table(&node, true, None, None);
+    let fields = zeroclaw_schema_markdown::field_table(&node, true, None, None);
 
     Ok(format!(
         r#"{summary}
@@ -827,7 +827,7 @@ fn render_model_provider_fields() -> String {
     let base: std::collections::BTreeSet<String> = providers
         .iter()
         .map(|p| {
-            zeroclaw_config::schema_markdown::section_field_names(
+            zeroclaw_schema_markdown::section_field_names(
                 &schema,
                 &format!("providers.models.{}", p.name),
             )
@@ -841,7 +841,7 @@ fn render_model_provider_fields() -> String {
     // empty set keeps the full base, and the base fields are identical across
     // slots so the choice of slot does not matter.
     if let Some(first) = providers.first() {
-        let base_table = zeroclaw_config::schema_markdown::field_table_for_path(
+        let base_table = zeroclaw_schema_markdown::field_table_for_path(
             &schema,
             &format!("providers.models.{}", first.name),
             false,
@@ -849,13 +849,13 @@ fn render_model_provider_fields() -> String {
         )
         .unwrap_or_default();
         // Trim base_table to only the shared fields by excluding everything else.
-        let extras_of_first = zeroclaw_config::schema_markdown::section_field_names(
+        let extras_of_first = zeroclaw_schema_markdown::section_field_names(
             &schema,
             &format!("providers.models.{}", first.name),
         );
         let non_base: std::collections::BTreeSet<String> =
             extras_of_first.difference(&base).cloned().collect();
-        let base_only = zeroclaw_config::schema_markdown::field_table_for_path_excluding(
+        let base_only = zeroclaw_schema_markdown::field_table_for_path_excluding(
             &schema,
             &format!("providers.models.{}", first.name),
             false,
@@ -887,7 +887,7 @@ fn render_model_provider_fields() -> String {
                 .unwrap_or_else(|| "no fixed default".to_string());
             let local = if p.local { " · local" } else { "" };
             let path = format!("providers.models.{}", p.name);
-            let extras = zeroclaw_config::schema_markdown::field_table_for_path_excluding(
+            let extras = zeroclaw_schema_markdown::field_table_for_path_excluding(
                 &schema,
                 &path,
                 false,

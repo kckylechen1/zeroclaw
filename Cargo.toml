@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-cost", "crates/zeroclaw-http", "crates/zeroclaw-platform", "crates/zeroclaw-policy", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
+members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-schema-markdown", "crates/zeroclaw-cost", "crates/zeroclaw-http", "crates/zeroclaw-platform", "crates/zeroclaw-policy", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -10,6 +10,7 @@ repository = "https://github.com/zeroclaw-labs/zeroclaw"
 rust-version = "1.96.1"
 
 [workspace.dependencies]
+zeroclaw-schema-markdown = { path = "crates/zeroclaw-schema-markdown", version = "0.8.3" }
 zeroclaw-cost = { path = "crates/zeroclaw-cost", version = "0.8.3" }
 zeroclaw-platform = { path = "crates/zeroclaw-platform", version = "0.8.3" }
 zeroclaw-http = { path = "crates/zeroclaw-http", version = "0.8.3" }
@@ -69,6 +70,7 @@ name = "zeroclaw"
 path = "src/lib.rs"
 
 [dependencies]
+zeroclaw-schema-markdown = { workspace = true, optional = true }
 zeroclaw-policy.workspace = true
 zeroclaw-http.workspace = true
 # Internal workspace crates — versions and paths declared once in [workspace.dependencies]
@@ -330,7 +332,7 @@ gateway = [
     "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tower", "dep:tower-http", "dep:http-body-util",
     "dep:mime_guess",
 ]
-schema-export = ["zeroclaw-config/schema-export", "zeroclaw-gateway?/schema-export"]
+schema-export = ["dep:zeroclaw-schema-markdown", "zeroclaw-config/schema-export", "zeroclaw-gateway?/schema-export"]
 
 # Channels — each forwards to zeroclaw-channels.
 channel-email = ["zeroclaw-channels/channel-email", "zeroclaw-runtime?/email-tools", "dep:mail-parser"]

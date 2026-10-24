@@ -1778,10 +1778,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
             #[cfg(feature = "schema-export")]
             {
                 let schema = schemars::schema_for!(config::Config);
-                print!(
-                    "{}",
-                    zeroclaw_config::schema_markdown::generate(&schema.to_value())
-                );
+                print!("{}", zeroclaw_schema_markdown::generate(&schema.to_value()));
                 return Ok(());
             }
             #[cfg(not(feature = "schema-export"))]

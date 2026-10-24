@@ -8270,6 +8270,7 @@ dependencies = [
  "zeroclaw-config",
  "zeroclaw-providers",
  "zeroclaw-runtime",
+ "zeroclaw-schema-markdown",
 ]
 
 [[package]]
@@ -8812,6 +8813,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-schema-markdown"
+version = "0.8.3"
+dependencies = [
+ "schemars",
+ "serde_json",
+ "zeroclaw-config",
+]
+
+[[package]]
 name = "zeroclaw-sop-graph"
 version = "0.8.3"
 dependencies = [
@@ -8974,6 +8984,7 @@ dependencies = [
  "zeroclaw-policy",
  "zeroclaw-providers",
  "zeroclaw-runtime",
+ "zeroclaw-schema-markdown",
  "zeroclaw-spawn",
  "zeroclaw-tool-call-parser",
  "zeroclaw-tools",

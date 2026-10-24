@@ -86,6 +86,14 @@ Each tool is registered via factory and described to the model via Fluent-locali
 
 ## Layer: Support
 
+### `zeroclaw-schema-markdown`
+
+Stateless Markdown and HTML field rendering from a supplied JSON Schema value.
+The CLI's optional `schema-export` feature and the mdBook preprocessor use it;
+the config, API and runtime crates do not depend on the renderer. Its normal
+dependency is `serde_json`; real-config integration tests use config and
+schemars as development dependencies. The schema remains config-owned.
+
 ### `zeroclaw-cost`
 
 The existing cost ledger, cache-aware token pricing and budget checks.
