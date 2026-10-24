@@ -1,11 +1,14 @@
 //! Quickstart apply path.
 
+pub mod presets;
+
 use serde::{Deserialize, Serialize};
 
+use self::presets::{recommended_runtime_preset, risk_preset, runtime_preset};
 use zeroclaw_config::helpers::kebab_to_snake;
 use zeroclaw_config::presets::{
     AgentIdentity, BuilderSubmission, ChannelQuickStart, MemoryChoice, ModelProviderChoice,
-    SelectorChoice, recommended_runtime_preset, risk_preset, runtime_preset,
+    SelectorChoice,
 };
 use zeroclaw_config::schema::{Config, WireApi};
 
@@ -412,10 +415,10 @@ pub struct QuickstartState {
     pub storage: Vec<String>,
     pub model_provider_types: Vec<QuickstartTypeOption>,
     pub channel_types: Vec<QuickstartTypeOption>,
-    /// Risk presets from `zeroclaw_config::presets::RISK_PRESETS`.
-    pub risk_presets: &'static [zeroclaw_config::presets::RiskPreset],
-    /// Runtime presets from `zeroclaw_config::presets::RUNTIME_PRESETS`.
-    pub runtime_presets: &'static [zeroclaw_config::presets::RuntimePreset],
+    /// Risk presets from `presets::RISK_PRESETS`.
+    pub risk_presets: &'static [presets::RiskPreset],
+    /// Runtime presets from `presets::RUNTIME_PRESETS`.
+    pub runtime_presets: &'static [presets::RuntimePreset],
     /// Memory backend snake-case kinds from `MemoryBackendKind`.
     pub memory_kinds: Vec<String>,
     /// Canonical personality filenames the Quickstart will accept.
@@ -484,7 +487,7 @@ pub fn snapshot_state(cfg: &Config) -> QuickstartState {
             kind: info.name.to_string(),
             display_name: info.display_name.to_string(),
             local: info.local,
-            default_runtime_profile: zeroclaw_providers::recommended_runtime_profile(info.name)
+            default_runtime_profile: presets::recommended_runtime_profile(info.name)
                 .and_then(runtime_preset)
                 .map(|preset| preset.preset_name.to_string()),
         })
@@ -512,8 +515,8 @@ pub fn snapshot_state(cfg: &Config) -> QuickstartState {
         storage: collect_aliased_refs(&cfg.storage),
         model_provider_types,
         channel_types,
-        risk_presets: zeroclaw_config::presets::RISK_PRESETS,
-        runtime_presets: zeroclaw_config::presets::RUNTIME_PRESETS,
+        risk_presets: presets::RISK_PRESETS,
+        runtime_presets: presets::RUNTIME_PRESETS,
         memory_kinds: memory_kind_keys(),
         personality_files: crate::agent::personality::EDITABLE_PERSONALITY_FILES,
     }

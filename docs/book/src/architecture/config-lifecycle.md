@@ -118,6 +118,22 @@ The CLI enables the renderer only through `schema-export`, including builds
 without `agent-runtime`. Generated reference text and config persistence are
 unchanged.
 
+## Quickstart preset ownership
+
+`zeroclaw-runtime::quickstart::presets` owns the risk/runtime preset catalogue,
+factories, lookup and fallback policy, and provider recommendations used by
+Quickstart. The CLI consumes this catalogue through the existing Quickstart
+snapshot and apply paths. Provider capability reporting and provider
+construction stay in `zeroclaw-providers`; the Gateway's separate config editor
+and model-catalog helpers are unchanged.
+
+Config retains submission DTOs, profile schemas and canonical policy defaults.
+Preset factories still use those types and defaults. Applying a preset retains
+the existing configured profile when its alias already exists; new profiles
+still go through the same validation, dirty-path persistence and reload path.
+Moving the catalogue does not change preset values, approval rules or external
+harness ownership.
+
 ## Remaining config reduction boundaries
 
 [Issue #382](https://github.com/kckylechen1/zeroclaw/issues/382) tracks the
@@ -133,7 +149,8 @@ consumer census; a module's size alone is not permission to remove it.
 | Channel/provider schema sections | Retained listeners and inference clients still read them. Remove exclusive config only after the corresponding #378/#382 consumer replacement or retirement. |
 | Schema Markdown rendering | Moved to `zeroclaw-schema-markdown`; CLI and mdBook consume JSON Schema without placing presentation code on every config consumer. Config still owns schema generation. |
 | Config-list field visibility | The Gateway's private `api_config::field_visibility` owns its existing HTTP list filters. Config retains schema and persistence ownership. The canonical retention setting remains visible across backend switches: hygiene can still prune an existing SQLite database. This move does not change visibility, validation, write access or authorization. |
-| `sections`, `comment_writer`, `card`, `presets`, `typed_value` | Config editing, onboarding and persistence still consume these surfaces. #379 owns editor retirement; keep canonical types and write paths until their retained callers have replacements. |
+| Quickstart preset selection | Risk/runtime catalogues, factories and provider recommendations moved to the existing Quickstart runtime owner. Config keeps submission DTOs and canonical profile types/defaults. |
+| `sections`, `comment_writer`, `card`, `typed_value` and onboarding DTOs | Config editing, onboarding and persistence still consume these surfaces. #379 owns editor retirement; keep canonical types and write paths until their retained callers have replacements. |
 | Legacy delegation/SOP configuration | #381 owns duplicate execution retirement after replacement proof. Keep L1 reasoning, the Tachi bridge and their shared types. |
 
 ## Env overrides are not saved
