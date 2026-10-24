@@ -8,7 +8,7 @@ use zeroclaw_api::channel::{Channel, SendMessage};
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::multi_agent::OutputModality;
 use zeroclaw_config::multi_agent::PeerGroupConfig;
-use zeroclaw_config::policy::{SecurityPolicy, ToolOperation};
+use zeroclaw_policy::{SecurityPolicy, ToolOperation};
 
 /// Per-tool channel-map handle — matches `zeroclaw_runtime::tools::PerToolChannelHandle`.
 pub type PerToolChannelHandle = Arc<parking_lot::RwLock<HashMap<String, Arc<dyn Channel>>>>;

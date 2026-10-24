@@ -5,9 +5,9 @@ use serde_json::json;
 use std::fmt::Write;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::SecurityPolicy;
-use zeroclaw_config::policy::ToolOperation;
 use zeroclaw_infra::session_backend::SessionBackend;
+use zeroclaw_policy::SecurityPolicy;
+use zeroclaw_policy::ToolOperation;
 
 /// Validate that a session ID is non-empty and contains at least one
 /// alphanumeric character (prevents blank keys after sanitization).

@@ -96,6 +96,6 @@ Follow-up decisions:
 - [Peer groups](../../channels/peer-groups.md)
 - `crates/zeroclaw-config/src/schema.rs`
 - `crates/zeroclaw-config/src/multi_agent.rs`
-- `crates/zeroclaw-config/src/policy.rs`
+- `crates/zeroclaw-policy/src/lib.rs`
 - `crates/zeroclaw-channels/src/orchestrator/mod.rs`
 - `crates/zeroclaw-memory/src/agent_scoped.rs`

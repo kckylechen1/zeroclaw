@@ -9,7 +9,7 @@ relates-to:
   - ADR-016
   - ADR-017
   - crates/zeroclaw-config/src/persona.rs
-  - crates/zeroclaw-config/src/policy.rs
+  - crates/zeroclaw-policy/src/lib.rs
   - crates/zeroclaw-memory/src/companion/soul_profile.rs
   - crates/zeroclaw-memory/src/companion/reflection.rs
   - crates/zeroclaw-runtime/src/agent/persona_projection.rs

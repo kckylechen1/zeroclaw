@@ -1364,8 +1364,7 @@ fn production_tools(
     cfg: &zeroclaw_config::schema::Config,
     live: Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>,
 ) -> Vec<Box<dyn zeroclaw_api::tool::Tool>> {
-    let security =
-        Arc::new(zeroclaw_config::policy::SecurityPolicy::for_agent(cfg, "home").unwrap());
+    let security = Arc::new(zeroclaw_policy::SecurityPolicy::for_agent(cfg, "home").unwrap());
     crate::tools::all_tools_with_runtime(
         Arc::new(cfg.clone()),
         &security,

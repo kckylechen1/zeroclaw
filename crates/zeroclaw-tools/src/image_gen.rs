@@ -4,8 +4,8 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult, with_ephemeral_workspace_warning};
-use zeroclaw_config::policy::SecurityPolicy;
-use zeroclaw_config::policy::ToolOperation;
+use zeroclaw_policy::SecurityPolicy;
+use zeroclaw_policy::ToolOperation;
 
 fn resolve_image_filename(filename_arg: Option<&str>, nanos: u128) -> String {
     filename_arg
@@ -338,7 +338,7 @@ impl Tool for ImageGenTool {
 mod tests {
     use super::*;
     use zeroclaw_config::autonomy::AutonomyLevel;
-    use zeroclaw_config::policy::SecurityPolicy;
+    use zeroclaw_policy::SecurityPolicy;
 
     fn test_security() -> Arc<SecurityPolicy> {
         Arc::new(SecurityPolicy {

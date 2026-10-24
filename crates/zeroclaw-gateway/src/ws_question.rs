@@ -233,7 +233,7 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new()));
         channels.write().insert("wss".into(), channel);
         let tool = zeroclaw_tools::ask_user::AskUserTool::new(
-            Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
+            Arc::new(zeroclaw_policy::SecurityPolicy::default()),
             channels,
         );
         let task = zeroclaw_spawn::spawn!(async move {

@@ -536,7 +536,7 @@ fn fragment_only_url_targeting_private_host_rejected_under_wildcard_public_allow
 
 // ============ Screenshot path validation tests ============
 
-use zeroclaw_config::policy::AutonomyLevel;
+use zeroclaw_policy::AutonomyLevel;
 
 fn screenshot_tool_with_workspace(ws: &std::path::Path) -> BrowserTool {
     let security = Arc::new(SecurityPolicy {

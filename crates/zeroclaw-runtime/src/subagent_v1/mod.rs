@@ -1867,7 +1867,7 @@ pub struct CandidateRoutingRecord {
 pub struct ReasoningSubagentTool {
     config: Arc<Config>,
     parent_alias: String,
-    security: Arc<zeroclaw_config::policy::SecurityPolicy>,
+    security: Arc<zeroclaw_policy::SecurityPolicy>,
     lineage: Option<LineageRef>,
     registry: Mutex<SubAgentProfileRegistry>,
     review_queue: Arc<SubAgentCandidateReviewQueue>,
@@ -1914,7 +1914,7 @@ impl ReasoningSubagentTool {
     pub fn new(
         config: Arc<Config>,
         parent_alias: impl Into<String>,
-        security: Arc<zeroclaw_config::policy::SecurityPolicy>,
+        security: Arc<zeroclaw_policy::SecurityPolicy>,
     ) -> Self {
         Self {
             config,

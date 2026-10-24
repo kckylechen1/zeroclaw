@@ -3,7 +3,7 @@ mod groups;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use zeroclaw_config::policy::SecurityPolicy;
+use zeroclaw_policy::SecurityPolicy;
 
 /// Per-step allow/deny tool scope. Enforcement is opt-in through SOP config.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,7 +79,7 @@ fn normalize(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroclaw_config::policy::SecurityPolicy;
+    use zeroclaw_policy::SecurityPolicy;
 
     fn registry() -> Vec<String> {
         ["read_file", "write_file", "shell", "sop_advance"]

@@ -767,7 +767,7 @@ pub fn all_tools_with_runtime(
                     let mut policy = SecurityPolicy::for_agent(current, &delegation_agent)
                         .map_err(|error| error.to_string())?;
                     if !policy.is_tool_allowed(name)
-                        || (matches!(operation, zeroclaw_config::policy::ToolOperation::Act)
+                        || (matches!(operation, zeroclaw_policy::ToolOperation::Act)
                             && !policy.can_act())
                     {
                         return Err("delegation denied by current agent policy".to_string());

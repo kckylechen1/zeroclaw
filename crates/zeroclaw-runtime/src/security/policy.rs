@@ -1,1 +1,1 @@
-pub use zeroclaw_config::policy::*;
+pub use zeroclaw_policy::*;

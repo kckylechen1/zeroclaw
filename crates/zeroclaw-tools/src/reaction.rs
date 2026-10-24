@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use zeroclaw_api::channel::Channel;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::SecurityPolicy;
-use zeroclaw_config::policy::ToolOperation;
+use zeroclaw_policy::SecurityPolicy;
+use zeroclaw_policy::ToolOperation;
 
 /// Shared handle to the channel map. Starts empty; populated once channels boot.
 pub type ChannelMapHandle = Arc<RwLock<HashMap<String, Arc<dyn Channel>>>>;

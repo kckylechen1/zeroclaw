@@ -97,6 +97,11 @@ executor cannot resolve.
 
 ## Approval and preparation
 
+`zeroclaw-policy` owns the runtime command, filesystem, tool and action-budget
+checks used by tool implementations and delegation admission. Config profiles
+remain their input; the policy crate does not own external agent sessions or
+durable execution records.
+
 Preparation happens before the executor runs a tool:
 
 1. `before_tool_call` hooks may cancel or rewrite the name/arguments.

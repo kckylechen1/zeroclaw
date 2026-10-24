@@ -3,7 +3,7 @@ use serde_json::json;
 use std::fmt::Write;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::SecurityPolicy;
+use zeroclaw_policy::SecurityPolicy;
 
 const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -255,7 +255,7 @@ mod tests {
     use std::path::{Component, Path, PathBuf};
     use tempfile::TempDir;
     use zeroclaw_config::autonomy::AutonomyLevel;
-    use zeroclaw_config::policy::SecurityPolicy;
+    use zeroclaw_policy::SecurityPolicy;
 
     const MINIMAL_PNG: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,

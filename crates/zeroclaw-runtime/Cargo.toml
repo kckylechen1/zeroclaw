@@ -7,6 +7,7 @@ description = "Miscellaneous ZeroClaw subsystems: security, observability, gatew
 publish = false
 
 [dependencies]
+zeroclaw-policy.workspace = true
 zeroclaw-cost.workspace = true
 zeroclaw-platform.workspace = true
 zeroclaw-http.workspace = true

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult, with_ephemeral_workspace_warning};
-use zeroclaw_config::policy::SecurityPolicy;
+use zeroclaw_policy::SecurityPolicy;
 
 pub struct FileEditTool {
     security: Arc<SecurityPolicy>,
@@ -287,7 +287,7 @@ mod tests {
     use super::*;
     use crate::wrappers::{PathGuardedTool, RateLimitedTool};
     use zeroclaw_config::autonomy::AutonomyLevel;
-    use zeroclaw_config::policy::SecurityPolicy;
+    use zeroclaw_policy::SecurityPolicy;
 
     fn test_tool(workspace: std::path::PathBuf) -> FileEditTool {
         let security = Arc::new(SecurityPolicy {

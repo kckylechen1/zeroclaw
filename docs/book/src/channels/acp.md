@@ -344,7 +344,7 @@ This separation ensures that ephemeral coding-assist conversations do not pollut
 - ACP server: `crates/zeroclaw-channels/src/orchestrator/acp_server.rs`
 - ACP back-channel: `crates/zeroclaw-channels/src/acp_channel.rs`
 - Session store (SQLite): `crates/zeroclaw-infra/src/acp_session_store.rs`
-- Per-session path enforcement: `crates/zeroclaw-config/src/policy.rs` (`SecurityPolicy::from_config`), `crates/zeroclaw-runtime/src/agent/agent.rs` (`from_config_with_session_cwd_and_mcp`)
+- Per-session path enforcement: `crates/zeroclaw-policy/src/lib.rs` (`SecurityPolicy`), `crates/zeroclaw-runtime/src/agent/agent.rs` (`from_config_with_session_cwd_and_mcp`)
 - OS-level sandbox detection/backends: `crates/zeroclaw-runtime/src/security/detect.rs`, `landlock.rs`, `bubblewrap.rs`, `seatbelt.rs`
 
 ## See also

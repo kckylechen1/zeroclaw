@@ -3,7 +3,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::SecurityPolicy;
+use zeroclaw_policy::SecurityPolicy;
 
 use crate::helpers::domain_guard;
 
@@ -394,7 +394,7 @@ fn validate_resolved_host_is_public(_host: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use zeroclaw_config::autonomy::AutonomyLevel;
-    use zeroclaw_config::policy::SecurityPolicy;
+    use zeroclaw_policy::SecurityPolicy;
 
     fn test_tool() -> TextBrowserTool {
         let security = Arc::new(SecurityPolicy {

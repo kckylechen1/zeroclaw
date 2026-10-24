@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::FileUploadBundleConfig;
+use zeroclaw_policy::SecurityPolicy;
 
 async fn read_response_bounded(response: reqwest::Response, limit: usize) -> (String, bool) {
     let mut stream = response.bytes_stream();

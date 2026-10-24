@@ -79,6 +79,20 @@ Reload still updates the resident tracker's policy; existing rows retain their
 recorded prices. This is accounting for the existing controller paths, not a
 second task ledger or an external harness execution owner.
 
+## Authorization policy ownership
+
+`zeroclaw-config` owns risk and runtime profiles, cards, and the canonical
+command/path defaults in `policy_defaults`. `zeroclaw-policy` resolves those
+settings into the existing runtime policy and enforces command, filesystem,
+tool, action-budget and child-policy boundaries. The shared `ToolOperation`
+and `CommandRiskLevel` classifications live in `zeroclaw-api::policy`.
+
+Runtime callers retain `zeroclaw-runtime::security::policy` as a forwarding
+module. The Tachi delegation resolver still reads current config for each
+operation and shares the existing action tracker. This extraction does not
+change the timing of policy resolution, introduce cached config or transfer
+external session ownership from Tachi.
+
 ## Remaining config reduction boundaries
 
 [Issue #382](https://github.com/kckylechen1/zeroclaw/issues/382) tracks the
@@ -88,7 +102,8 @@ consumer census; a module's size alone is not permission to remove it.
 | --- | --- |
 | HTTP and local command implementations | Moved to `zeroclaw-http` and `zeroclaw-platform`; config keeps their settings. |
 | Cost ledger and shared results | Moved to `zeroclaw-cost` and `zeroclaw-api::cost`; config retains `CostConfig`. Budget enforcement, ledger compatibility and reload remain covered at the new owner and runtime call sites. |
-| `policy.rs`, pairing and secrets | Retained authorization and credential paths. Any later extraction must preserve their callers and denial behavior; these are not retired settings. |
+| Runtime authorization policy | Moved to `zeroclaw-policy`; profile settings and canonical defaults remain in config. Existing denial behavior and shared budgets are retained. |
+| Pairing and secrets | Retained authentication and credential paths. Config's bridge-token lookup still uses pairing token helpers; separate those helpers before moving the live guard. These are not retired settings. |
 | Channel/provider schema sections | Retained listeners and inference clients still read them. Remove exclusive config only after the corresponding #378/#382 consumer replacement or retirement. |
 | `sections`, `field_visibility`, `schema_markdown`, `comment_writer`, `card`, `presets`, `typed_value` | Config editing, onboarding, persistence or generated references still consume these surfaces. #379 owns editor retirement; separate a presentation-only consumer only after tracing its persistence dependencies. |
 | Legacy delegation/SOP configuration | #381 owns duplicate execution retirement after replacement proof. Keep L1 reasoning, the Tachi bridge and their shared types. |

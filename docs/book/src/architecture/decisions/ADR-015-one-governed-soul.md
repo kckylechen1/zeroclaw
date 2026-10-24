@@ -180,4 +180,4 @@ This ADR is implemented when:
 - [ADR-013: Channels as gateway clients](./ADR-013-channels-as-gateway-clients.md)
 - `crates/zeroclaw-runtime/src/agent/system_prompt.rs` (`BOOTSTRAP_FILES`, `build_system_prompt_with_persona`)
 - `crates/zeroclaw-runtime/src/agent/personality_templates/SOUL.md`, `IDENTITY.md`
-- `crates/zeroclaw-config/src/policy.rs` (`is_runtime_config_path`)
+- `crates/zeroclaw-policy/src/lib.rs` (`is_runtime_config_path`)

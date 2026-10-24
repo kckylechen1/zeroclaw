@@ -1,0 +1,21 @@
+[package]
+name = "zeroclaw-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runtime authorization policy and action budgets for ZeroClaw."
+publish = false
+
+[dependencies]
+zeroclaw-api.workspace = true
+zeroclaw-config.workspace = true
+zeroclaw-log.workspace = true
+anyhow = "1.0"
+parking_lot = "0.12"
+regex = "1.10"
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3.26"
+toml = "1.0"
+uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }

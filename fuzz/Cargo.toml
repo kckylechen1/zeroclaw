@@ -12,7 +12,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-zeroclaw-config = { path = "../crates/zeroclaw-config", default-features = false }
+zeroclaw-policy = { path = "../crates/zeroclaw-policy" }
 
 [[bin]]
 name = "fuzz_command_validation"

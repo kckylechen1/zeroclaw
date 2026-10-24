@@ -10791,7 +10791,7 @@ async fn reflected_skill_creation_records_cost_usage_under_parent_scope() {
 }
 
 use zeroclaw_api::tool::Tool as TestTool;
-use zeroclaw_config::policy::SecurityPolicy as TestPolicy;
+use zeroclaw_policy::SecurityPolicy as TestPolicy;
 
 struct NamedMockTool {
     the_name: &'static str,

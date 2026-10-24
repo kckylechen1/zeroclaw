@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::{process::Stdio, sync::Arc, time::Duration};
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::SecurityPolicy;
+use zeroclaw_policy::SecurityPolicy;
 
 const BROWSER_OPEN_LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -328,7 +328,7 @@ fn extract_host(url: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use zeroclaw_config::autonomy::AutonomyLevel;
-    use zeroclaw_config::policy::SecurityPolicy;
+    use zeroclaw_policy::SecurityPolicy;
 
     fn test_tool(allowed_domains: Vec<&str>) -> BrowserOpenTool {
         let security = Arc::new(SecurityPolicy {

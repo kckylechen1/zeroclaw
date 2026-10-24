@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use zeroclaw_api::channel::ForgeApiRequest;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::{SecurityPolicy, ToolOperation};
+use zeroclaw_policy::{SecurityPolicy, ToolOperation};
 
 use crate::reaction::ChannelMapHandle;
 

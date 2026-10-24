@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::policy::SecurityPolicy;
+use zeroclaw_policy::SecurityPolicy;
 
 const MAX_RESULTS: usize = 1000;
 
@@ -178,7 +178,7 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
     use zeroclaw_config::autonomy::AutonomyLevel;
-    use zeroclaw_config::policy::SecurityPolicy;
+    use zeroclaw_policy::SecurityPolicy;
 
     fn test_security(workspace: PathBuf) -> Arc<SecurityPolicy> {
         Arc::new(SecurityPolicy {

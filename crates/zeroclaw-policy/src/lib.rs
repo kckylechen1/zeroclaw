@@ -1,26 +1,17 @@
+//! Runtime authorization, command/path checks, and shared action budgets.
+//! Operator settings and their defaults remain owned by `zeroclaw-config`.
+
 use anyhow::Context as _;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-// Re-export from zeroclaw-config.
-pub use crate::autonomy::AutonomyLevel;
+// Config owns the operator-selected autonomy and profile settings.
+pub use zeroclaw_config::autonomy::AutonomyLevel;
+use zeroclaw_config::policy_defaults::{default_allowed_commands, default_forbidden_paths};
 
-/// Risk score for shell command execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandRiskLevel {
-    Low,
-    Medium,
-    High,
-}
-
-/// Classifies whether a tool operation is read-only or side-effecting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolOperation {
-    Read,
-    Act,
-}
+pub use zeroclaw_api::policy::{CommandRiskLevel, ToolOperation};
 
 /// Sliding-window action tracker for rate limiting.
 #[derive(Debug)]
@@ -208,7 +199,7 @@ pub struct SecurityPolicy {
     pub excluded_tools: Option<Vec<String>>,
     /// Whether a non-empty `allowed_tools` auto-admits runtime-discovered
     /// MCP tools. Mirrors `RiskProfileConfig.mcp_discovered_tool_policy`.
-    pub mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy,
+    pub mcp_discovered_tool_policy: zeroclaw_config::autonomy::McpDiscoveredToolPolicy,
     /// Tools that never require approval in this profile. Mirrors
     /// `RiskProfileConfig.auto_approve`.
     pub auto_approve: Vec<String>,
@@ -234,7 +225,7 @@ impl SecurityPolicy {
     pub fn is_tool_allowed(&self, name: &str) -> bool {
         let allowed = self.allowed_tools.as_ref().is_none_or(|list| {
             list.iter()
-                .any(|t| crate::node_allowlist::tool_name_matches(t, name))
+                .any(|t| zeroclaw_config::node_allowlist::tool_name_matches(t, name))
         });
         allowed && !self.is_tool_excluded(name)
     }
@@ -242,123 +233,9 @@ impl SecurityPolicy {
     pub fn is_tool_excluded(&self, name: &str) -> bool {
         self.excluded_tools.as_ref().is_some_and(|list| {
             list.iter()
-                .any(|t| crate::node_allowlist::tool_name_matches(t, name))
+                .any(|t| zeroclaw_config::node_allowlist::tool_name_matches(t, name))
         })
     }
-}
-
-/// Default allowed commands for Unix platforms.
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn default_allowed_commands() -> Vec<String> {
-    #[allow(unused_mut)]
-    let mut cmds = vec![
-        "git".into(),
-        "npm".into(),
-        "cargo".into(),
-        "ls".into(),
-        "cat".into(),
-        "grep".into(),
-        "find".into(),
-        "echo".into(),
-        "pwd".into(),
-        "wc".into(),
-        "head".into(),
-        "tail".into(),
-        "date".into(),
-        "df".into(),
-        "du".into(),
-        "uname".into(),
-        "uptime".into(),
-        "hostname".into(),
-        "python".into(),
-        "python3".into(),
-        "pip".into(),
-        "node".into(),
-    ];
-    // `free` is Linux-only; it does not exist on macOS or other BSDs.
-    #[cfg(target_os = "linux")]
-    cmds.push("free".into());
-    cmds
-}
-
-/// Default allowed commands for Windows platforms.
-/// Includes both native Windows commands and their Unix equivalents
-/// (available via Git for Windows, WSL, etc.).
-#[cfg(target_os = "windows")]
-pub(crate) fn default_allowed_commands() -> Vec<String> {
-    vec![
-        // Cross-platform tools
-        "git".into(),
-        "npm".into(),
-        "cargo".into(),
-        "echo".into(),
-        // Windows-native equivalents
-        "dir".into(),
-        "type".into(),
-        "findstr".into(),
-        "where".into(),
-        "more".into(),
-        "date".into(),
-        // Unix commands (available via Git for Windows / MSYS2)
-        "ls".into(),
-        "cat".into(),
-        "grep".into(),
-        "find".into(),
-        "pwd".into(),
-        "wc".into(),
-        "head".into(),
-        "tail".into(),
-        "df".into(),
-        "du".into(),
-        "uname".into(),
-        "uptime".into(),
-        "hostname".into(),
-        "python".into(),
-        "python3".into(),
-        "pip".into(),
-        "node".into(),
-    ]
-}
-
-/// Default forbidden paths for Unix platforms.
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn default_forbidden_paths() -> Vec<String> {
-    vec![
-        "/etc".into(),
-        "/root".into(),
-        "/home".into(),
-        "/usr".into(),
-        "/bin".into(),
-        "/sbin".into(),
-        "/lib".into(),
-        "/opt".into(),
-        "/boot".into(),
-        "/dev".into(),
-        "/proc".into(),
-        "/sys".into(),
-        "/var".into(),
-        "/tmp".into(),
-        "~/.ssh".into(),
-        "~/.gnupg".into(),
-        "~/.aws".into(),
-        "~/.config".into(),
-    ]
-}
-
-/// Default forbidden paths for Windows platforms.
-#[cfg(target_os = "windows")]
-pub(crate) fn default_forbidden_paths() -> Vec<String> {
-    vec![
-        "C:\\Windows".into(),
-        "C:\\Windows\\System32".into(),
-        "C:\\Program Files".into(),
-        "C:\\Program Files (x86)".into(),
-        "C:\\ProgramData".into(),
-        "~/.ssh".into(),
-        "~/.gnupg".into(),
-        "~/.aws".into(),
-        "~/.config".into(),
-    ]
 }
 
 fn roots_contain(roots: &[PathBuf], expanded: &Path) -> bool {
@@ -514,7 +391,8 @@ impl Default for SecurityPolicy {
             shell_timeout_secs: 60,
             allowed_tools: None,
             excluded_tools: None,
-            mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy::default(),
+            mcp_discovered_tool_policy: zeroclaw_config::autonomy::McpDiscoveredToolPolicy::default(
+            ),
             auto_approve: vec![],
             always_ask: vec![],
             sandbox_enabled: None,
@@ -2516,15 +2394,15 @@ impl SecurityPolicy {
     }
 
     pub fn from_risk_profile(
-        risk_profile: &crate::schema::RiskProfileConfig,
+        risk_profile: &zeroclaw_config::schema::RiskProfileConfig,
         workspace_dir: &Path,
     ) -> Self {
         Self::from_profiles(risk_profile, None, workspace_dir)
     }
 
     pub fn from_profiles(
-        risk_profile: &crate::schema::RiskProfileConfig,
-        runtime_profile: Option<&crate::schema::RuntimeProfileConfig>,
+        risk_profile: &zeroclaw_config::schema::RiskProfileConfig,
+        runtime_profile: Option<&zeroclaw_config::schema::RuntimeProfileConfig>,
         workspace_dir: &Path,
     ) -> Self {
         // When autonomy is Full, disable workspace_only so the agent can
@@ -2536,7 +2414,7 @@ impl SecurityPolicy {
             risk_profile.workspace_only
         };
 
-        let runtime_default = crate::schema::RuntimeProfileConfig::default();
+        let runtime_default = zeroclaw_config::schema::RuntimeProfileConfig::default();
         let runtime = runtime_profile.unwrap_or(&runtime_default);
 
         Self {
@@ -2557,7 +2435,7 @@ impl SecurityPolicy {
                 .iter()
                 .filter(|root| {
                     let t = root.trim();
-                    !t.is_empty() && t != crate::traits::UNSET_DISPLAY && t != "*"
+                    !t.is_empty() && t != zeroclaw_config::traits::UNSET_DISPLAY && t != "*"
                 })
                 .map(|root| {
                     let expanded = expand_user_path(root);
@@ -2592,7 +2470,10 @@ impl SecurityPolicy {
         }
     }
 
-    pub fn for_agent(config: &crate::schema::Config, agent_alias: &str) -> anyhow::Result<Self> {
+    pub fn for_agent(
+        config: &zeroclaw_config::schema::Config,
+        agent_alias: &str,
+    ) -> anyhow::Result<Self> {
         let risk_profile = config.risk_profile_for_agent(agent_alias).ok_or_else(|| {
             ::zeroclaw_log::record!(
                 ERROR,
@@ -2669,7 +2550,7 @@ impl SecurityPolicy {
                 // every consumer of `for_agent` (independent-mode delegation,
                 // top-level carded agents) inherits that hole otherwise.
                 policy.mcp_discovered_tool_policy =
-                    crate::autonomy::McpDiscoveredToolPolicy::ExplicitOnly;
+                    zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly;
             }
         }
         policy.config_path = Some(config.config_path.clone());
@@ -2687,13 +2568,13 @@ impl SecurityPolicy {
             for (sibling_alias, mode) in &agent_cfg.workspace.access {
                 let sibling_dir = config.agent_workspace_dir(sibling_alias.as_str());
                 match mode {
-                    crate::multi_agent::AccessMode::Read => {
+                    zeroclaw_config::multi_agent::AccessMode::Read => {
                         policy.allowed_roots_read_only.push(sibling_dir);
                     }
-                    crate::multi_agent::AccessMode::Write => {
+                    zeroclaw_config::multi_agent::AccessMode::Write => {
                         policy.allowed_roots_write_only.push(sibling_dir);
                     }
-                    crate::multi_agent::AccessMode::ReadWrite => {
+                    zeroclaw_config::multi_agent::AccessMode::ReadWrite => {
                         policy.allowed_roots.push(sibling_dir);
                     }
                 }

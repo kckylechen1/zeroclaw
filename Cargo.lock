@@ -8551,6 +8551,7 @@ dependencies = [
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-memory",
+ "zeroclaw-policy",
  "zeroclaw-providers",
  "zeroclaw-runtime",
  "zeroclaw-spawn",
@@ -8672,6 +8673,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-policy"
+version = "0.8.3"
+dependencies = [
+ "anyhow",
+ "parking_lot",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "toml 1.1.5+spec-1.1.0",
+ "uuid",
+ "zeroclaw-api",
+ "zeroclaw-config",
+ "zeroclaw-log",
+]
+
+[[package]]
 name = "zeroclaw-providers"
 version = "0.8.3"
 dependencies = [
@@ -8786,6 +8803,7 @@ dependencies = [
  "zeroclaw-macros",
  "zeroclaw-memory",
  "zeroclaw-platform",
+ "zeroclaw-policy",
  "zeroclaw-providers",
  "zeroclaw-sop-graph",
  "zeroclaw-spawn",
@@ -8873,6 +8891,7 @@ dependencies = [
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-memory",
+ "zeroclaw-policy",
  "zeroclaw-providers",
  "zeroclaw-spawn",
 ]
@@ -8952,6 +8971,7 @@ dependencies = [
  "zeroclaw-log",
  "zeroclaw-macros",
  "zeroclaw-memory",
+ "zeroclaw-policy",
  "zeroclaw-providers",
  "zeroclaw-runtime",
  "zeroclaw-spawn",

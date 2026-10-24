@@ -74,11 +74,12 @@ No `[]`→`None` collapse anywhere. `RiskProfileConfig.allowed_tools` is
 `Option<Vec<String>>` with `#[serde(default)]`
 (`crates/zeroclaw-config/src/schema.rs:11879`). `SecurityPolicy` field doc
 states "`Some(vec![])` denies every tool"
-(`crates/zeroclaw-config/src/policy.rs:187-190`). `from_profiles` passes
-through with `.clone()` (`policy.rs:2131, 2186`); enforcement
+(`crates/zeroclaw-policy/src/lib.rs`, `SecurityPolicy`). `from_profiles` passes
+through with `.clone()`; enforcement
 `is_tool_allowed` uses `is_none_or` — `None` unrestricted, `Some([])` deny-all
-(`policy.rs:221-223`). Test: `from_profiles_absent_allowed_tools_means_unrestricted`
-(`policy.rs:2688`).
+(`SecurityPolicy::is_tool_allowed`). Test:
+`from_profiles_absent_allowed_tools_means_unrestricted` in
+`crates/zeroclaw-policy/src/tests.rs`.
 
 **Upstream today:** `SecurityPolicy::from_profiles()` collapses an empty `Vec`
 to `None` → unrestricted. Leaf #39 tracks the upstream contribution.

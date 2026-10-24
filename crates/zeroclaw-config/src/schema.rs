@@ -9529,8 +9529,8 @@ impl Default for RiskProfileConfig {
         Self {
             level: AutonomyLevel::Supervised,
             workspace_only: true,
-            allowed_commands: crate::policy::default_allowed_commands(),
-            forbidden_paths: crate::policy::default_forbidden_paths(),
+            allowed_commands: crate::policy_defaults::default_allowed_commands(),
+            forbidden_paths: crate::policy_defaults::default_forbidden_paths(),
             require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
             shell_env_passthrough: vec![],

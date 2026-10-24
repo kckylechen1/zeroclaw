@@ -22,7 +22,7 @@ pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
 
 pub fn apply_policy_tool_filter(
     tools: &mut Vec<Box<dyn Tool>>,
-    policy: Option<&zeroclaw_config::policy::SecurityPolicy>,
+    policy: Option<&zeroclaw_policy::SecurityPolicy>,
     caller_allowed: Option<&[String]>,
 ) {
     tools.retain(|t| {
@@ -38,7 +38,7 @@ pub fn apply_policy_tool_filter(
 /// allowlist. Shared by the runtime agent loop and the channels orchestrator
 /// so every MCP registration site gates through identical logic.
 pub fn mcp_tool_access_policy(
-    security: &zeroclaw_config::policy::SecurityPolicy,
+    security: &zeroclaw_policy::SecurityPolicy,
     caller_allowed: Option<&[String]>,
 ) -> Option<zeroclaw_tools::tool_search::ToolAccessPolicy> {
     zeroclaw_tools::tool_search::ToolAccessPolicy::from_security(
