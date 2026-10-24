@@ -101,9 +101,9 @@ pub fn all_integrations(config: &Config) -> Vec<IntegrationEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroclaw_api::config_metadata::ChannelConfig;
     use zeroclaw_config::schema::Config;
     use zeroclaw_config::schema::{IMessageConfig, MatrixConfig, StreamMode, TelegramConfig};
-    use zeroclaw_config::traits::ChannelConfig;
 
     #[test]
     fn registry_has_entries() {

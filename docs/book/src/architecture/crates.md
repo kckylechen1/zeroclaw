@@ -40,6 +40,7 @@ The kernel ABI. Defines the core public traits, including:
 - `Tool`: agent-callable capabilities
 - `Memory`: conversation storage and retrieval
 - `Observer`: typed metrics/observability sink
+- `config_metadata`: shared config introspection types; config owns their generation and mutation rules
 
 The runtime depends only on these traits, not on concrete implementations. This is what makes provider/channel/tool additions a matter of implementing a trait rather than patching the core.
 

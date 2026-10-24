@@ -236,8 +236,8 @@ pub struct ListEntry {
 
 /// Stable wire-form name for a `PropKind` variant. Matches the lower-kebab
 /// convention the rest of the API uses for stable string IDs.
-fn prop_kind_wire(kind: zeroclaw_config::traits::PropKind) -> &'static str {
-    use zeroclaw_config::traits::PropKind;
+fn prop_kind_wire(kind: zeroclaw_api::config_metadata::PropKind) -> &'static str {
+    use zeroclaw_api::config_metadata::PropKind;
     match kind {
         PropKind::String => "string",
         PropKind::Bool => "bool",
@@ -331,15 +331,15 @@ fn lookup_prop_field(
                     category: "Secrets",
                     display_value: zeroclaw_config::traits::UNSET_DISPLAY.to_string(),
                     type_hint: "String",
-                    kind: zeroclaw_config::traits::PropKind::String,
+                    kind: zeroclaw_api::config_metadata::PropKind::String,
                     is_secret: true,
                     enum_variants: None,
                     description: "",
                     derived_from_secret: false,
                     credential_class: Some(
-                        zeroclaw_config::traits::CredentialSurfaceClass::EncryptedSecret,
+                        zeroclaw_api::config_metadata::CredentialSurfaceClass::EncryptedSecret,
                     ),
-                    tab: zeroclaw_config::traits::ConfigTab::None,
+                    tab: zeroclaw_api::config_metadata::ConfigTab::None,
                     alias_source: None,
                     multiline: false,
                 }
@@ -3772,7 +3772,20 @@ mod tests {
         assert_eq!(json_pointer_to_dotted("/"), "");
     }
 
-    use zeroclaw_config::traits::PropKind;
+    use zeroclaw_api::config_metadata::PropKind;
+
+    #[test]
+    fn list_kind_tags_preserve_gateway_wire_format() {
+        for (kind, gateway_tag, metadata_tag) in [
+            (PropKind::AliasRef, "alias-ref", "alias_ref"),
+            (PropKind::StringArray, "string-array", "string_array"),
+            (PropKind::ObjectArray, "object-array", "object_array"),
+        ] {
+            assert_eq!(prop_kind_wire(kind), gateway_tag);
+            assert_eq!(kind.wire_name(), metadata_tag);
+            assert_eq!(serde_json::to_value(kind).unwrap(), metadata_tag);
+        }
+    }
 
     #[test]
     fn test_op_coercion_bool_typed_value_matches_stored() {
@@ -4101,7 +4114,7 @@ mod tests {
         assert!(field.is_secret);
         assert_eq!(
             field.credential_class,
-            Some(zeroclaw_config::traits::CredentialSurfaceClass::EncryptedSecret)
+            Some(zeroclaw_api::config_metadata::CredentialSurfaceClass::EncryptedSecret)
         );
     }
 
