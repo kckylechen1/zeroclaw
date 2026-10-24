@@ -387,11 +387,7 @@ pub async fn submit_pairing_enhanced(
 
     match state.pairing.try_pair(code, &client_id).await {
         Ok(Some(token)) => {
-            let token_hash = {
-                use sha2::{Digest, Sha256};
-                let hash = Sha256::digest(token.as_bytes());
-                hex::encode(hash)
-            };
+            let token_hash = zeroclaw_config::tokens::hash_token(&token);
 
             if let Some(ref registry) = state.device_registry {
                 if let Err(e) = registry.register(
@@ -573,11 +569,7 @@ pub async fn update_my_capabilities(
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "Missing bearer token").into_response(),
     };
-    let token_hash = {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(token.as_bytes());
-        hex::encode(hash)
-    };
+    let token_hash = zeroclaw_config::tokens::hash_token(token);
 
     let capabilities: Vec<String> = body
         .get("capabilities")
@@ -670,7 +662,7 @@ pub async fn rotate_token(
             "message": "Old token revoked. Use this code to re-pair the device.",
         }))
         .into_response(),
-        Err(zeroclaw_config::pairing::GeneratePairingCodeError::Pending) => {
+        Err(zeroclaw_runtime::security::pairing::GeneratePairingCodeError::Pending) => {
             Json(serde_json::json!({
                 "device_id": device_id,
                 "pairing_code": null,
@@ -678,7 +670,7 @@ pub async fn rotate_token(
             }))
             .into_response()
         }
-        Err(zeroclaw_config::pairing::GeneratePairingCodeError::PairingDisabled) => {
+        Err(zeroclaw_runtime::security::pairing::GeneratePairingCodeError::PairingDisabled) => {
             Json(serde_json::json!({
                 "device_id": device_id,
                 "pairing_code": null,
@@ -696,8 +688,8 @@ mod tests {
     use axum::Json;
     use http_body_util::BodyExt;
     use std::sync::Arc;
-    use zeroclaw_config::pairing::PairingGuard;
     use zeroclaw_config::schema::Config;
+    use zeroclaw_runtime::security::pairing::PairingGuard;
 
     /// Build an `AppState` whose device-registry points at a non-existent
     /// path so every SQLite write fails. Pairing enabled so a freshly

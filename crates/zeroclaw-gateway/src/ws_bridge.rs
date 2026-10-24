@@ -430,9 +430,9 @@ fn on_client_frame(bridge: &str, outbox: &BridgeOutbox, text: &str) {
 mod tests {
     use super::*;
     use std::net::SocketAddr;
-    use zeroclaw_config::pairing::PairingGuard;
     use zeroclaw_config::schema::GatewayBridgeConfig;
     use zeroclaw_gateway_client::{BridgeClient, Deliver, Rejected};
+    use zeroclaw_runtime::security::pairing::PairingGuard;
 
     const TOKEN: &str = "zcb_test_bridge_token";
     const WAIT: Duration = Duration::from_secs(10);

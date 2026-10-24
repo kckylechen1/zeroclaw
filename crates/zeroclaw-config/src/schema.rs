@@ -6687,10 +6687,10 @@ impl GatewayConfig {
         if token.is_empty() {
             return None;
         }
-        let hash = crate::pairing::PairingGuard::token_hash(token);
+        let hash = crate::tokens::hash_token(token);
         let mut found = None;
         for (name, bridge) in &self.bridges {
-            if crate::pairing::constant_time_eq(&hash, &bridge.token_hash.to_ascii_lowercase())
+            if crate::tokens::constant_time_eq(&hash, &bridge.token_hash.to_ascii_lowercase())
                 && found.is_none()
             {
                 found = Some((name.as_str(), bridge));

@@ -4,11 +4,11 @@ use zeroclaw_api::review::UserMessageSource;
 #[tokio::test]
 async fn sequential_owner_turns_get_sources_but_anonymous_and_steering_do_not() {
     let mut chat = SharedChat::new();
-    chat.state.pairing = Arc::new(zeroclaw_config::pairing::PairingGuard::new(
+    chat.state.pairing = Arc::new(zeroclaw_runtime::security::pairing::PairingGuard::new(
         false,
         &["owner-source-token".into()],
     ));
-    chat.scope.auth_subject = Some(zeroclaw_config::pairing::PairingGuard::token_hash(
+    chat.scope.auth_subject = Some(zeroclaw_config::tokens::hash_token(
         "owner-source-token",
     ));
     chat.state.session_backend = Some(Arc::new(
@@ -141,11 +141,11 @@ async fn sequential_owner_turns_get_sources_but_anonymous_and_steering_do_not() 
 #[tokio::test]
 async fn note_owner_correction_ws_context_tracks_current_turn_and_live_pairing() {
     let mut chat = SharedChat::new();
-    chat.state.pairing = Arc::new(zeroclaw_config::pairing::PairingGuard::new(
+    chat.state.pairing = Arc::new(zeroclaw_runtime::security::pairing::PairingGuard::new(
         false,
         &["correction-owner-token".into()],
     ));
-    let owner = zeroclaw_config::pairing::PairingGuard::token_hash("correction-owner-token");
+    let owner = zeroclaw_config::tokens::hash_token("correction-owner-token");
     let mut socket = chat.attach().await;
     for (subject, text, admitted) in [
         (Some(owner.clone()), "First correction", true),
@@ -188,11 +188,11 @@ async fn note_owner_correction_attachment_turn_uses_only_original_socket_text() 
             ..Default::default()
         },
     );
-    chat.state.pairing = Arc::new(zeroclaw_config::pairing::PairingGuard::new(
+    chat.state.pairing = Arc::new(zeroclaw_runtime::security::pairing::PairingGuard::new(
         false,
         &["raw-owner-token".into()],
     ));
-    let subject = zeroclaw_config::pairing::PairingGuard::token_hash("raw-owner-token");
+    let subject = zeroclaw_config::tokens::hash_token("raw-owner-token");
     chat.scope.auth_subject = Some(subject.clone());
     let backend = Arc::new(
         zeroclaw_infra::session_sqlite::SqliteSessionBackend::new(chat._tmp.path()).unwrap(),
@@ -278,11 +278,11 @@ async fn note_owner_correction_attachment_turn_uses_only_original_socket_text() 
 #[tokio::test]
 async fn note_owner_correction_mid_turn_steering_revokes_initial_owner_evidence() {
     let mut chat = SharedChat::new();
-    chat.state.pairing = Arc::new(zeroclaw_config::pairing::PairingGuard::new(
+    chat.state.pairing = Arc::new(zeroclaw_runtime::security::pairing::PairingGuard::new(
         false,
         &["owner-fixture".into()],
     ));
-    chat.scope.auth_subject = Some(zeroclaw_config::pairing::PairingGuard::token_hash(
+    chat.scope.auth_subject = Some(zeroclaw_config::tokens::hash_token(
         "owner-fixture",
     ));
     let data_dir = chat._tmp.path().to_path_buf();

@@ -4,7 +4,7 @@ use zeroclaw_api::bridge_intake::{BridgeResume, BridgeSource};
 
 fn intake_chat() -> SharedChat {
     let mut chat = SharedChat::new();
-    let subject = zeroclaw_config::pairing::PairingGuard::token_hash("intake-test-bridge");
+    let subject = zeroclaw_config::tokens::hash_token("intake-test-bridge");
     chat.scope.auth_subject = Some(subject.clone());
     {
         let mut config = chat.state.config.write();
@@ -564,7 +564,7 @@ async fn bridge_token_rotation_preserves_the_same_source_identity() {
     chat.gate.add_permits(1);
     run_intake(&chat, &a, claim.unwrap()).await;
     drop(a);
-    let new_subject = zeroclaw_config::pairing::PairingGuard::token_hash("rotated-intake-fixture");
+    let new_subject = zeroclaw_config::tokens::hash_token("rotated-intake-fixture");
     {
         let mut config = chat.state.config.write();
         let mut bridge = config.gateway.bridges.remove("files").unwrap();

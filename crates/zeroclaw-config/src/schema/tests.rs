@@ -4058,7 +4058,7 @@ async fn bridge_tokens_resolve_by_hash_and_scope_sessions() {
     gateway.bridges.insert(
         "telegram".into(),
         GatewayBridgeConfig {
-            token_hash: crate::pairing::PairingGuard::token_hash(token),
+            token_hash: crate::tokens::hash_token(token),
             session_prefix: Some("tg:".into()),
             sessions: vec!["main".into()],
         },
@@ -4066,7 +4066,7 @@ async fn bridge_tokens_resolve_by_hash_and_scope_sessions() {
     gateway.bridges.insert(
         "closed".into(),
         GatewayBridgeConfig {
-            token_hash: crate::pairing::PairingGuard::token_hash("other"),
+            token_hash: crate::tokens::hash_token("other"),
             ..GatewayBridgeConfig::default()
         },
     );

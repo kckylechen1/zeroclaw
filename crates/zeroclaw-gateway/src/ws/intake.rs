@@ -67,7 +67,7 @@ fn source(
     }
     // An ambiguous credential must not select authority by HashMap order.
     let mut bridges = config.gateway.bridges.iter().filter(|(_, bridge)| {
-        zeroclaw_config::pairing::constant_time_eq(subject, &bridge.token_hash.to_ascii_lowercase())
+        zeroclaw_config::tokens::constant_time_eq(subject, &bridge.token_hash.to_ascii_lowercase())
     });
     let (name, bridge) = bridges.next()?;
     if bridges.next().is_some() || !bridge.allows_session(&scope.session_id) {

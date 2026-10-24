@@ -135,7 +135,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use zeroclaw_config::pairing::PairingGuard;
+    use zeroclaw_runtime::security::pairing::PairingGuard;
 
     async fn request(
         addr: SocketAddr,
