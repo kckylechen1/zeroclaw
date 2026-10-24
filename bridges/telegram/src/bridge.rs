@@ -631,13 +631,14 @@ impl Bridge {
                     }
                     return;
                 };
-                if self.pending_stops.len() >= MAX_PENDING_STOPS || self.client.is_none() {
+                let Some(client) = self
+                    .client
+                    .as_mut()
+                    .filter(|_| self.pending_stops.len() < MAX_PENDING_STOPS)
+                else {
                     if let Some(control) = &self.turn_control {
                         self.reply(&control.not_sent_message).await;
                     }
-                    return;
-                }
-                let Some(client) = &mut self.client else {
                     return;
                 };
                 self.pending_stops.insert(

@@ -216,6 +216,12 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       case 'connected':
         break;
 
+      case 'turn_state':
+        // Turn-control frames from #457. The PWA renders no turn-control UI
+        // yet (#379), so these stay intentionally inert; typed here so the
+        // frame shape is part of the contract instead of silently unknown.
+        break;
+
       case 'thinking':
         setTyping(true);
         pendingThinkingRef.current += msg.content ?? '';

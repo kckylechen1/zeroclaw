@@ -228,7 +228,8 @@ export interface WsMessage {
     | "connected"
     | "approval_request"
     | "history_trimmed"
-    | "aborted";
+    | "aborted"
+    | "turn_state";
   content?: string;
   full_response?: string;
   name?: string;
@@ -256,6 +257,11 @@ export interface WsMessage {
   input_tokens?: number;
   output_tokens?: number;
   last_input_tokens?: number;
+  // Turn-control state (present on "turn_state" frames; see #457). `turn_id`
+  // is null when no turn is active; `revision` orders buffered reconnect events.
+  control_version?: number;
+  revision?: number;
+  turn_id?: string | null;
 }
 
 export type ApprovalDecision = "approve" | "deny" | "always";
