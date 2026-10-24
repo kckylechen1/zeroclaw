@@ -1,8 +1,8 @@
-//! Per-section field visibility helpers.
+//! Request-time presentation filters for the Gateway config list.
 
-use crate::schema::Config;
+use zeroclaw_config::schema::Config;
 
-pub fn memory_backend_excludes(backend: &str) -> Vec<&'static str> {
+fn memory_backend_excludes(backend: &str) -> Vec<&'static str> {
     let mut out = Vec::new();
     if backend != "sqlite" {
         out.push("sqlite-open-timeout-secs");
@@ -11,7 +11,7 @@ pub fn memory_backend_excludes(backend: &str) -> Vec<&'static str> {
     out
 }
 
-pub fn excluded_paths(cfg: &Config, prefix: &str) -> Vec<String> {
+pub(super) fn excluded_paths(cfg: &Config, prefix: &str) -> Vec<String> {
     if prefix == "memory" || prefix.is_empty() {
         let backend = if cfg.memory.backend.is_empty() {
             "sqlite"
@@ -30,7 +30,7 @@ pub fn excluded_paths(cfg: &Config, prefix: &str) -> Vec<String> {
 /// Test whether `path` is one of the excluded entries returned from
 /// `excluded_paths`. Handles both exact matches and sub-table prefix
 /// markers (`"memory.foo."` matches every `memory.foo.*`).
-pub fn is_excluded(path: &str, excludes: &[String]) -> bool {
+pub(super) fn is_excluded(path: &str, excludes: &[String]) -> bool {
     excludes
         .iter()
         .any(|e| path == e || (e.ends_with('.') && path.starts_with(e)))
@@ -39,7 +39,7 @@ pub fn is_excluded(path: &str, excludes: &[String]) -> bool {
 /// Test whether `path` equals `prefix` or sits beneath it at a `.` segment
 /// boundary. A bare `starts_with` is wrong here: prefix `agents.aaa` must
 /// not match `agents.aaalore.workspace`.
-pub fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+pub(super) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
     match path.strip_prefix(prefix) {
         Some(rest) => {
             prefix.is_empty() || rest.is_empty() || rest.starts_with('.') || prefix.ends_with('.')

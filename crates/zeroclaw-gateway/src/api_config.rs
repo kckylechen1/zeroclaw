@@ -1,5 +1,7 @@
 //! Per-property CRUD endpoints for `/api/config/*`.
 
+mod field_visibility;
+
 use axum::{
     Json,
     extract::{ConnectInfo, Query, State},
@@ -8,7 +10,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use zeroclaw_config::api_error::{ConfigApiCode, ConfigApiError};
-use zeroclaw_config::field_visibility;
 use zeroclaw_config::sections::section_for_path;
 use zeroclaw_config::traits::MaskSecrets;
 
@@ -897,9 +898,9 @@ pub async fn handle_list(
     let config = state.config.read().clone();
     let prefix = q.prefix.as_deref();
 
-    // Drop fields that don't apply to the current shape of the config —
-    // azure_* on a non-azure model_provider, qdrant.* when memory.backend is
-    // sqlite, etc. Keeps the form scoped to relevant inputs only.
+    // Keep the existing presentation exclusions at the HTTP owner. Retention
+    // policy remains config-owned and can still apply to an existing SQLite
+    // database after the selected backend changes.
     let excluded = field_visibility::excluded_paths(&config, prefix.unwrap_or(""));
 
     let entries: Vec<ListEntry> = config
@@ -2632,6 +2633,8 @@ fn build_etag_for(body: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    mod list_visibility;
+
     use super::*;
     #[cfg(feature = "nodes")]
     use crate::nodes;

@@ -132,7 +132,8 @@ consumer census; a module's size alone is not permission to remove it.
 | Secrets | Retained encryption and credential paths are used by config loading, saving and editing. They are not retired settings. |
 | Channel/provider schema sections | Retained listeners and inference clients still read them. Remove exclusive config only after the corresponding #378/#382 consumer replacement or retirement. |
 | Schema Markdown rendering | Moved to `zeroclaw-schema-markdown`; CLI and mdBook consume JSON Schema without placing presentation code on every config consumer. Config still owns schema generation. |
-| `sections`, `field_visibility`, `comment_writer`, `card`, `presets`, `typed_value` | Config editing, onboarding and persistence still consume these surfaces. #379 owns editor retirement; keep canonical types and write paths until their retained callers have replacements. |
+| Config-list field visibility | The Gateway's private `api_config::field_visibility` owns its existing HTTP list filters. Config retains schema and persistence ownership. The canonical retention setting remains visible across backend switches: hygiene can still prune an existing SQLite database. This move does not change visibility, validation, write access or authorization. |
+| `sections`, `comment_writer`, `card`, `presets`, `typed_value` | Config editing, onboarding and persistence still consume these surfaces. #379 owns editor retirement; keep canonical types and write paths until their retained callers have replacements. |
 | Legacy delegation/SOP configuration | #381 owns duplicate execution retirement after replacement proof. Keep L1 reasoning, the Tachi bridge and their shared types. |
 
 ## Env overrides are not saved
