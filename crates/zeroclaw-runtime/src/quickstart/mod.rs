@@ -628,7 +628,7 @@ pub struct FieldDescriptor {
     pub help: String,
     /// Wire-tag for the input control to render. Mirrors
     /// `PropKind::wire_name`.
-    pub kind: zeroclaw_config::traits::PropKind,
+    pub kind: zeroclaw_api::config_metadata::PropKind,
     /// `true` for `#[secret]` fields — the modal masks input.
     pub is_secret: bool,
     /// Closed-set choices for `Enum` kind. `None` for everything else.
@@ -786,7 +786,7 @@ fn auth_mode_descriptor(
         key: QUICKSTART_AUTH_MODE_FIELD.to_string(),
         label: crate::i18n::get_required_cli_string(label_key),
         help: crate::i18n::get_required_cli_string(help_key),
-        kind: zeroclaw_config::traits::PropKind::Enum,
+        kind: zeroclaw_api::config_metadata::PropKind::Enum,
         is_secret: false,
         enum_variants: Some(modes.iter().map(|mode| (*mode).to_string()).collect()),
         required: true,

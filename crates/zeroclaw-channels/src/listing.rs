@@ -1,7 +1,7 @@
 //! Enumerate the channel types compiled into this binary.
 
+use zeroclaw_api::config_metadata::ChannelInfo;
 use zeroclaw_config::schema::ChannelsConfig;
-use zeroclaw_config::traits::ChannelInfo;
 
 struct ChannelCompileSpec {
     /// Display name from `ChannelsConfig::channels()`, when the channel lives

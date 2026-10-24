@@ -134,6 +134,21 @@ still go through the same validation, dirty-path persistence and reload path.
 Moving the catalogue does not change preset values, approval rules or external
 harness ownership.
 
+## Shared config metadata ownership
+
+`zeroclaw-api::config_metadata` owns the shared property kinds, tabs,
+credential classifications, secret/nested-option descriptors, integration
+metadata and channel descriptions. Config's `traits` and derive shim re-export
+the same types. `Configurable` still generates metadata from canonical config;
+config retains property coercion, credential classification, secret handling,
+validation and persistence. CLI, Gateway, channels and runtime read the API
+contract directly without a new dependency edge.
+
+This owner split preserves both existing tag formats: metadata serde uses
+snake_case property kinds, while Gateway list responses use kebab-case tags.
+It does not retire the corresponding schema or transfer execution ownership
+from Tachi into ZeroClaw.
+
 ## Remaining config reduction boundaries
 
 [Issue #382](https://github.com/kckylechen1/zeroclaw/issues/382) tracks the
@@ -150,6 +165,7 @@ consumer census; a module's size alone is not permission to remove it.
 | Schema Markdown rendering | Moved to `zeroclaw-schema-markdown`; CLI and mdBook consume JSON Schema without placing presentation code on every config consumer. Config still owns schema generation. |
 | Config-list field visibility | The Gateway's private `api_config::field_visibility` owns its existing HTTP list filters. Config retains schema and persistence ownership. The canonical retention setting remains visible across backend switches: hygiene can still prune an existing SQLite database. This move does not change visibility, validation, write access or authorization. |
 | Quickstart preset selection | Risk/runtime catalogues, factories and provider recommendations moved to the existing Quickstart runtime owner. Config keeps submission DTOs and canonical profile types/defaults. |
+| Shared config metadata | Moved to `zeroclaw-api::config_metadata`; config keeps derive generation and compatibility re-exports. Config-specific traits, coercion, validation and writes remain config-owned. |
 | `sections`, `comment_writer`, `card`, `typed_value` and onboarding DTOs | Config editing, onboarding and persistence still consume these surfaces. #379 owns editor retirement; keep canonical types and write paths until their retained callers have replacements. |
 | Legacy delegation/SOP configuration | #381 owns duplicate execution retirement after replacement proof. Keep L1 reasoning, the Tachi bridge and their shared types. |
 

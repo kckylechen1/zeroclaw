@@ -531,7 +531,7 @@ pub async fn run_quickstart_cli(
                             zeroclaw_runtime::quickstart::model_catalog(&chosen.kind).await;
                         if live && !models.is_empty() {
                             upgraded = zeroclaw_runtime::quickstart::FieldDescriptor {
-                                kind: zeroclaw_config::traits::PropKind::Enum,
+                                kind: zeroclaw_api::config_metadata::PropKind::Enum,
                                 enum_variants: Some(models),
                                 ..d.clone()
                             };
@@ -1281,7 +1281,7 @@ fn prompt_for_field(
     seed: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     use dialoguer::{FuzzySelect, Input, Password};
-    use zeroclaw_config::traits::PropKind;
+    use zeroclaw_api::config_metadata::PropKind;
     if !desc.help.is_empty() {
         println!("  {}", desc.help);
     }

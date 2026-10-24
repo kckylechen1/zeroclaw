@@ -27,7 +27,7 @@ async fn apply_comment_inline(
 pub(crate) fn config_patch_prop_kind(
     config: &Config,
     path: &str,
-) -> Option<crate::config::PropKind> {
+) -> Option<zeroclaw_api::config_metadata::PropKind> {
     config
         .prop_fields()
         .into_iter()
@@ -491,7 +491,7 @@ pub async fn handle(config_command: crate::ConfigCommands, config: &mut Config) 
                     config.set_prop_persistent(&path, &variants[selected])?;
                 } else if field_info
                     .as_ref()
-                    .is_some_and(|f| f.kind == crate::config::PropKind::StringArray)
+                    .is_some_and(|f| f.kind == zeroclaw_api::config_metadata::PropKind::StringArray)
                 {
                     let current_items: Vec<String> = field_info
                         .as_ref()

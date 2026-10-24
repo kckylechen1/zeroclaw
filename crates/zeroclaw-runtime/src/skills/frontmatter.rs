@@ -1,7 +1,8 @@
 //! Canonical `SKILL.md` frontmatter.
 
 use serde::{Deserialize, Serialize};
-use zeroclaw_config::traits::{PropFieldInfo, PropKind};
+use zeroclaw_api::config_metadata::PropKind;
+use zeroclaw_config::traits::PropFieldInfo;
 
 use super::SkillSlashOption;
 
@@ -78,7 +79,7 @@ impl SkillFrontmatter {
                 description: "Free-form tags. The `slash` tag opts the skill into Discord slash commands (zeroclaw-labs/zeroclaw#7490); others drive tiering / registry grouping.",
                 derived_from_secret: false,
                 credential_class: None,
-                tab: zeroclaw_config::config::ConfigTab::None,
+                tab: zeroclaw_api::config_metadata::ConfigTab::None,
                 alias_source: None,
                 multiline: false,
             },
@@ -107,7 +108,7 @@ fn field(
         description,
         derived_from_secret: false,
         credential_class: None,
-        tab: zeroclaw_config::config::ConfigTab::None,
+        tab: zeroclaw_api::config_metadata::ConfigTab::None,
         alias_source: None,
         multiline: false,
     }
