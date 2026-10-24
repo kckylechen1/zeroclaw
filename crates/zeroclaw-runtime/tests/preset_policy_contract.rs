@@ -1,5 +1,5 @@
-use zeroclaw_config::presets::{risk_preset, runtime_preset};
 use zeroclaw_policy::SecurityPolicy;
+use zeroclaw_runtime::quickstart::presets::{risk_preset, runtime_preset};
 
 #[test]
 fn balanced_risk_allows_routine_commands_but_blocks_high_risk() {

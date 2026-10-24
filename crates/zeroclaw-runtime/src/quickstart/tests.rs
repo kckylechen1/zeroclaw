@@ -454,7 +454,7 @@ async fn missing_existing_runtime_leaves_live_config_unchanged() {
 #[test]
 fn validate_only_accepts_every_builtin_risk_preset() {
     let cfg = Config::default();
-    for p in zeroclaw_config::presets::RISK_PRESETS {
+    for p in super::presets::RISK_PRESETS {
         let mut submission = fresh_submission("bot");
         submission.risk_profile = SelectorChoice::Fresh(p.preset_name.into());
         validate_only(&submission, &cfg)

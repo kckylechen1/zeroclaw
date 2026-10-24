@@ -1891,19 +1891,6 @@ fn push_family(
     );
 }
 
-/// Provider-specific runtime recommendations. This is deliberately separate
-/// from `local`: credential-free CLI shims can call cloud models, and local
-/// providers without native tool support must retain text-fallback prompting.
-#[must_use]
-pub fn recommended_runtime_profile(name: &str) -> Option<&'static str> {
-    match name {
-        "lmstudio" | "llamacpp" | "sglang" | "vllm" | "osaurus" => {
-            Some(zeroclaw_config::presets::LOCAL_SMALL_RUNTIME_PRESET_NAME)
-        }
-        _ => None,
-    }
-}
-
 /// Return the list of all known model_providers for display in `zeroclaw model_providers list`.
 ///
 /// This is intentionally separate from the factory match in `create_model_provider`

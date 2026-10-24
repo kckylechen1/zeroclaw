@@ -16,6 +16,7 @@ Notable submodules:
 - `subagent/`: SubAgent spawning and lifecycle (see [Delegation & SubAgents](../agents/delegation.md))
 - `cron/`, `daemon/`, `heartbeat/`: scheduling and long-running process management
 - `skills/`: skill loading and execution
+- `quickstart/`: onboarding apply path, preset catalogue and selection policy
 - `service/`: systemd / launchctl / Windows Service integration
 
 ### `zeroclaw-config`

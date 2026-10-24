@@ -1,47 +1,6 @@
 use super::test_util::{EnvGuard, env_lock};
 use super::*;
 
-#[test]
-fn runtime_recommendations_distinguish_local_backends_from_cli_shims() {
-    let providers = list_model_providers();
-    let recommendation = |name| {
-        providers
-            .iter()
-            .find(|provider| provider.name == name)
-            .and_then(|provider| recommended_runtime_profile(provider.name))
-    };
-
-    assert_eq!(
-        recommendation("lmstudio"),
-        Some(zeroclaw_config::presets::LOCAL_SMALL_RUNTIME_PRESET_NAME),
-    );
-    assert_eq!(recommendation("ollama"), None);
-    assert_eq!(recommendation("atomic_chat"), None);
-    assert_eq!(recommendation("gemini_cli"), None);
-    assert_eq!(recommendation("kilocli"), None);
-    assert_eq!(recommendation("anthropic"), None);
-}
-
-#[test]
-fn recommended_runtime_profiles_require_native_tool_support() {
-    for provider in list_model_providers()
-        .into_iter()
-        .filter(|provider| recommended_runtime_profile(provider.name).is_some())
-    {
-        let instance = create_model_provider(provider.name, None).unwrap_or_else(|error| {
-            panic!(
-                "recommended local provider {} should construct without credentials: {error}",
-                provider.name,
-            )
-        });
-        assert!(
-            instance.supports_native_tools(),
-            "provider {} must not receive strict local_small defaults without native tools",
-            provider.name,
-        );
-    }
-}
-
 // Compile-time proof that both reqwest TLS-root features are enabled.
 // `tls_built_in_webpki_certs` is gated on `rustls-tls-webpki-roots-no-provider`;
 // `tls_built_in_native_certs` is gated on `rustls-tls-native-roots-no-provider`.
