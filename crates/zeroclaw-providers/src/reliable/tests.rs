@@ -1846,6 +1846,20 @@ fn is_context_window_exceeded_detects_llamacpp() {
 }
 
 #[test]
+fn is_context_window_exceeded_detects_snake_case_error_code() {
+    // The reply arrives nested under the fallback wrapper, so the detector
+    // must look through the cause chain; a spaced-prose-only list misses it
+    // and the turn fails instead of trimming the oldest turns and retrying.
+    let err = anyhow::Error::msg(
+        "Custom API error (400 Bad Request): {\"error\":{\"message\":\"context_length_exceeded: prompt is 32866 tokens, over the configured 32768-token prompt-plus-reply window.\",\"code\":\"context_length_exceeded\"}}",
+    )
+    .context("All model providers/models failed after 1 failure event(s)");
+
+    assert!(!err.to_string().contains("context_length_exceeded"));
+    assert!(is_context_window_exceeded(&err));
+}
+
+#[test]
 fn truncate_for_context_drops_oldest_non_system() {
     let mut messages = vec![
         ChatMessage::system("sys"),
