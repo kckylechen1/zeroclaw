@@ -128,57 +128,6 @@ pub struct PeerGroupConfig {
     pub admin_for_agent_scope: bool,
 }
 
-/// Inbound A2A discovery server configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "a2a_server"]
-#[serde(default)]
-pub struct A2aServerConfig {
-    /// Master switch for the inbound A2A surface. Default `false`: no
-    /// well-known route, no per-alias cards, no inbound endpoints.
-    pub enabled: bool,
-    /// Optional advertise-only host override for card endpoint URLs. The
-    /// routes always serve on the gateway's own listener; this only changes
-    /// the host printed in advertised endpoints when A2A is fronted at a
-    /// different address. `None` derives from the gateway host.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bind: Option<String>,
-    /// Optional advertise-only port override, paired with `bind`. `None`
-    /// derives from the gateway port. Advertise-only: nothing binds here.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub port: Option<u16>,
-    /// Operator-supplied base URL advertised in agent card endpoints.
-    pub public_base_url: String,
-}
-
-/// A2A section wrapper that leaves room for future sibling configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "a2a"]
-#[serde(default)]
-pub struct A2aServerSection {
-    /// Inbound A2A discovery server (`[a2a.server]`).
-    #[nested]
-    pub server: A2aServerConfig,
-}
-
-/// Per-agent A2A publication and exposed-skill configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "agent_a2a"]
-#[serde(default)]
-pub struct AgentA2aConfig {
-    /// Publish this alias as a discoverable A2A agent. Default `false`:
-    /// the alias is excluded from the discovery catalog and serves no
-    /// per-alias card even when the server is enabled.
-    pub published: bool,
-    /// Filter selecting which resolved skill ids appear on this alias's
-    /// card. Empty = no skills advertised. Entries that do not resolve to
-    /// a real skill in the alias's bundles are dropped (the bundles are
-    /// canonical; this only selects from them).
-    pub exposed_skills: Vec<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,49 +299,5 @@ output_modality = "voice"
 
         let defaulted: PeerGroupConfig = toml::from_str(r#"channel = "telegram""#).unwrap();
         assert_eq!(defaulted.output_modality, OutputModality::Mirror);
-    }
-
-    #[test]
-    fn a2a_server_config_default_is_closed_with_no_overrides() {
-        let cfg = A2aServerConfig::default();
-        assert!(!cfg.enabled);
-        assert!(cfg.bind.is_none());
-        assert!(cfg.port.is_none());
-        assert!(cfg.public_base_url.is_empty());
-    }
-
-    #[test]
-    fn a2a_server_config_round_trips() {
-        let toml_input = r#"
-enabled = true
-bind = "0.0.0.0"
-port = 9000
-public_base_url = "https://agents.example.com"
-"#;
-        let parsed: A2aServerConfig = toml::from_str(toml_input).unwrap();
-        assert!(parsed.enabled);
-        assert_eq!(parsed.bind.as_deref(), Some("0.0.0.0"));
-        assert_eq!(parsed.port, Some(9000));
-        assert_eq!(parsed.public_base_url, "https://agents.example.com");
-    }
-
-    #[test]
-    fn agent_a2a_config_default_is_unpublished_with_no_skills() {
-        let cfg = AgentA2aConfig::default();
-        assert!(!cfg.published);
-        assert!(cfg.exposed_skills.is_empty());
-    }
-
-    #[test]
-    fn agent_a2a_config_round_trips_with_exposed_skills_filter() {
-        let toml_input = r#"
-published = true
-exposed_skills = ["research", "summarize"]
-"#;
-        let parsed: AgentA2aConfig = toml::from_str(toml_input).unwrap();
-        assert!(parsed.published);
-        assert_eq!(parsed.exposed_skills.len(), 2);
-        assert_eq!(parsed.exposed_skills[0], "research");
-        assert_eq!(parsed.exposed_skills[1], "summarize");
     }
 }

@@ -1944,6 +1944,32 @@ key_path = "/etc/zeroclaw/key.pem"
     assert_eq!(warnings[0].path, "wss");
 }
 
+#[test]
+fn v3_retired_dead_feature_sections_load_with_tombstone_warnings() {
+    // The A2A server/agent cards, the ZeroCode todotracker and the
+    // never-wired conversational_ai section lost their last consumers and
+    // were deleted. Configs still carrying them must keep loading, with one
+    // structured tombstone warning each.
+    for (path, body, code) in [
+        ("a2a", "enabled = true", "a2a_server_removed"),
+        ("todotracker", "enabled = true", "todo_tracker_removed"),
+        (
+            "conversational_ai",
+            "enabled = true",
+            "conversational_ai_removed",
+        ),
+    ] {
+        let (raw, warnings) = load_with_retired_section(path, body);
+        let cfg = migrate_to_current(&raw)
+            .unwrap_or_else(|e| panic!("[{path}] must not fail load: {e:#}"));
+        cfg.validate()
+            .unwrap_or_else(|e| panic!("[{path}] must not fail validation: {e:#}"));
+        assert_eq!(warnings.len(), 1, "[{path}]: {warnings:?}");
+        assert_eq!(warnings[0].code, code, "[{path}]");
+        assert_eq!(warnings[0].path, path);
+    }
+}
+
 /// Insert `section` (a TOML table body) at dotted `path` into a freshly
 /// generated current-schema config, load it, and return the raw text plus
 /// the tombstone warnings it produces.
