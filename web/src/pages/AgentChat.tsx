@@ -8,8 +8,8 @@ import { useDraft } from '@/hooks/useDraft';
 import { t } from '@/lib/i18n';
 import {
   ATTACHMENT_ACCEPTED_MIME,
-  ATTACHMENT_MAX_BYTES,
   ATTACHMENT_MAX_PER_MESSAGE,
+  attachmentMaxBytes,
   uploadAttachment,
 } from '@/lib/api';
 import { getOrCreateSessionId } from '@/lib/ws';
@@ -144,9 +144,13 @@ export function AgentChatInner({
    * server-side scope/authorization remains the enforcing boundary. */
   const addAttachmentFiles = useCallback(async (list: FileList | File[]) => {
     setAttachmentError(null);
+    // Mirror the server's per-type caps client-side: images up to 2 MiB,
+    // text/JSON up to 64 KiB, nothing empty — a file the server would 4xx
+    // never gets a "try again" message that cannot succeed.
     const accepted = Array.from(list).filter((file) => {
       if (!ATTACHMENT_ACCEPTED_MIME.includes(file.type as never)) return false;
-      if (file.size > ATTACHMENT_MAX_BYTES) return false;
+      if (file.size === 0) return false;
+      if (file.size > attachmentMaxBytes(file.type)) return false;
       return true;
     });
     if (accepted.length !== Array.from(list).length) {
@@ -154,20 +158,23 @@ export function AgentChatInner({
     }
     if (accepted.length === 0) return;
     setUploadingAttachment(true);
+    // Concurrent batches are blocked while uploading (paperclip disabled,
+    // drop guarded), so the closure count is authoritative for this batch.
+    let count = attachments.length;
     try {
       const sessionId = getOrCreateSessionId(agentAlias);
-      const uploaded: { id: string; name: string }[] = [];
       for (const file of accepted) {
-        // Re-check the cap per upload so the server never sees an
-        // over-count message the user could not see either.
-        if (attachments.length + uploaded.length >= ATTACHMENT_MAX_PER_MESSAGE) {
+        if (count >= ATTACHMENT_MAX_PER_MESSAGE) {
           setAttachmentError(t('agent.attach_limit').replace('{n}', String(ATTACHMENT_MAX_PER_MESSAGE)));
           break;
         }
         const info = await uploadAttachment(sessionId, agentAlias, file);
-        uploaded.push({ id: info.id, name: info.file_name });
+        count += 1;
+        // Persist each success immediately: a later failure must not
+        // discard handles the server already accepted (they expire on
+        // their own after the TTL).
+        setAttachments((prev) => [...prev, { id: info.id, name: info.file_name }]);
       }
-      setAttachments((prev) => [...prev, ...uploaded]);
     } catch (e) {
       setAttachmentError(t('agent.attach_failed'));
     } finally {
@@ -713,6 +720,7 @@ export function AgentChatInner({
               if (e.dataTransfer.types.includes('Files')) e.preventDefault();
             }}
             onDrop={(e) => {
+              if (uploadingAttachment) return;
               if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                 e.preventDefault();
                 void addAttachmentFiles(e.dataTransfer.files);

@@ -1694,8 +1694,10 @@ export function getCostForAgent(alias: string): Promise<CostSummary> {
 // Attachments
 // ---------------------------------------------------------------------------
 
-/** Server-side cap on one uploaded attachment (bytes). */
+/** Server-side cap on one uploaded image attachment (bytes). */
 export const ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024;
+/** Server-side cap on one text/JSON attachment (bytes) — stricter than images. */
+export const ATTACHMENT_MAX_TEXT_BYTES = 64 * 1024;
 /** Server-side cap on attachments carried by one chat message. */
 export const ATTACHMENT_MAX_PER_MESSAGE = 4;
 /** MIME types the attachment endpoint accepts. */
@@ -1724,6 +1726,13 @@ export interface UploadedAttachment {
  * `/ws/chat` message frame's `attachments` array (already contract-supported
  * server-side). Requires a gateway token and the agent to be enabled.
  */
+/** Effective server-side byte cap for one file by MIME type. */
+export function attachmentMaxBytes(mime: string): number {
+  return mime.startsWith("text/") || mime === "application/json"
+    ? ATTACHMENT_MAX_TEXT_BYTES
+    : ATTACHMENT_MAX_BYTES;
+}
+
 export async function uploadAttachment(
   sessionId: string,
   agent: string,
