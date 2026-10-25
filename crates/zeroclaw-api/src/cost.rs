@@ -127,6 +127,11 @@ pub struct CostSummary {
     /// false` or when no records carry an agent_alias.
     #[serde(default)]
     pub by_agent: std::collections::HashMap<String, AgentCostStats>,
+    /// Ledger lines the scan could not read as complete records. The raw
+    /// lines are never rewritten; the count reports the ledger as
+    /// incomplete so under-reported totals are visible.
+    #[serde(default)]
+    pub rejected_records: usize,
 }
 
 /// Statistics for a specific agent alias.
@@ -185,6 +190,7 @@ impl Default for CostSummary {
             request_count: 0,
             by_model: std::collections::HashMap::new(),
             by_agent: std::collections::HashMap::new(),
+            rejected_records: 0,
         }
     }
 }
