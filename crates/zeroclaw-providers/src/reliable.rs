@@ -276,13 +276,14 @@ pub fn is_tool_schema_error(err: &anyhow::Error) -> bool {
 }
 
 pub fn is_context_window_exceeded(err: &anyhow::Error) -> bool {
-    let lower = err.to_string().to_lowercase();
     let hints = [
         "exceeds the context window",
         "exceeds the available context size",
         "context window of this model",
         "maximum context length",
         "context length exceeded",
+        // snake_case form used by local OpenAI-compatible servers.
+        "context_length_exceeded",
         "too many tokens",
         "token limit exceeded",
         "prompt is too long",
@@ -290,7 +291,10 @@ pub fn is_context_window_exceeded(err: &anyhow::Error) -> bool {
         "prompt exceeds max length",
     ];
 
-    hints.iter().any(|hint| lower.contains(hint))
+    err.chain().any(|cause| {
+        let lower = cause.to_string().to_lowercase();
+        hints.iter().any(|hint| lower.contains(hint))
+    })
 }
 
 /// Check if an error is a rate-limit (429) error.
