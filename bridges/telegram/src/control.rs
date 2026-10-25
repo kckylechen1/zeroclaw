@@ -214,6 +214,7 @@ mod tests {
             method: "sendMessage".into(),
             code: Some(code),
             description: String::new(),
+            retry_after: None,
         };
         assert!(refused(400).is_permanent());
         assert!(refused(403).is_permanent());

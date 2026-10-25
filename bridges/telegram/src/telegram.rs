@@ -66,6 +66,14 @@ pub struct File {
 /// Independent bridge download bound, enforced on advertised and actual bytes.
 pub const DOWNLOAD_LIMIT: usize = 2 * 1024 * 1024;
 
+/// Bridge-side cap on one outbound document. Telegram accepts far more;
+/// a text reply above this size indicates a runaway turn, not a readable
+/// artifact, and is refused instead of shipped.
+pub const DOCUMENT_LIMIT: usize = 10 * 1024 * 1024;
+
+/// Default filename for an outbound full-reply document.
+pub const REPLY_DOCUMENT_NAME: &str = "zeroclaw-reply.txt";
+
 /// Only the correlation field is needed, not a recursive message history.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReplyToMessage {
@@ -105,6 +113,16 @@ struct Reply<T> {
     description: Option<String>,
     #[serde(default)]
     error_code: Option<u16>,
+    #[serde(default)]
+    parameters: Option<ReplyParameters>,
+}
+
+/// Extra fields Telegram attaches to some error replies, notably the
+/// `retry_after` seconds of a 429 rate limit.
+#[derive(Debug, Deserialize)]
+struct ReplyParameters {
+    #[serde(default)]
+    retry_after: Option<u64>,
 }
 
 /// Telegram answered but refused the call (`ok: false`). Returned inside
@@ -114,6 +132,9 @@ pub struct Refused {
     pub method: String,
     pub code: Option<u16>,
     pub description: String,
+    /// Seconds Telegram asked the caller to wait before retrying a 429.
+    /// `None` for every other refusal shape.
+    pub retry_after: Option<u64>,
 }
 
 impl Refused {
@@ -196,11 +217,70 @@ impl Api {
             Reply {
                 description,
                 error_code,
+                parameters,
                 ..
             } => Err(Refused {
                 method: method.to_string(),
                 code: error_code,
                 description: description.unwrap_or_else(|| "no description".into()),
+                retry_after: parameters.and_then(|p| p.retry_after),
+            }
+            .into()),
+        }
+    }
+
+    /// Send a generated text artifact as a document so long replies stay
+    /// readable instead of arriving as a chain of split messages. The reply
+    /// envelope and error mapping match [`Api::call`]; multipart is the only
+    /// Bot API shape that carries file bytes.
+    pub async fn send_document(
+        &self,
+        chat_id: i64,
+        filename: &str,
+        text: &str,
+        caption: &str,
+    ) -> Result<i64> {
+        if text.len() > DOCUMENT_LIMIT {
+            bail!("document exceeds the bridge send limit");
+        }
+        let document = reqwest::multipart::Part::text(text.to_string())
+            .file_name(filename.to_string())
+            .mime_str("text/plain")
+            .context("building the Telegram document part")?;
+        let form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .text("caption", caption.to_string())
+            .part("document", document);
+        let response = self
+            .http
+            .post(format!("{}/sendDocument", self.base))
+            .timeout(SHORT)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("Telegram sendDocument failed")?;
+        let reply: Reply<Sent> = response
+            .json()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("Telegram sendDocument returned an unreadable reply")?;
+        match reply {
+            Reply {
+                ok: true,
+                result: Some(sent),
+                ..
+            } => Ok(sent.message_id),
+            Reply {
+                description,
+                error_code,
+                parameters,
+                ..
+            } => Err(Refused {
+                method: "sendDocument".to_string(),
+                code: error_code,
+                description: description.unwrap_or_else(|| "no description".into()),
+                retry_after: parameters.and_then(|p| p.retry_after),
             }
             .into()),
         }
@@ -463,6 +543,33 @@ mod tests {
 
     fn update(value: Value) -> Update {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn rate_limit_refusals_carry_their_retry_after() {
+        let reply: Reply<Sent> = serde_json::from_value(json!({
+            "ok": false,
+            "error_code": 429,
+            "description": "Too Many Requests: retry after 7",
+            "parameters": {"retry_after": 7}
+        }))
+        .unwrap();
+        match reply {
+            Reply {
+                ok: false,
+                parameters:
+                    Some(ReplyParameters {
+                        retry_after: Some(7),
+                    }),
+                ..
+            } => {}
+            _ => panic!("retry_after missing from the rate-limit reply"),
+        }
+
+        let plain: Reply<Sent> =
+            serde_json::from_value(json!({"ok": false, "error_code": 400, "description": "no"}))
+                .unwrap();
+        assert!(plain.parameters.is_none());
     }
 
     #[test]
