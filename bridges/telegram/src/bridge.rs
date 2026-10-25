@@ -40,8 +40,9 @@ const DOCUMENT_MESSAGE_THRESHOLD: usize = 3;
 /// retry. Telegram can ask for minutes; the owner can re-ask.
 const RETRY_WAIT_CAP: Duration = Duration::from_secs(30);
 
-/// Fixed pause before retrying a plain notice after an explicit server
-/// refusal that names no wait (5xx without `retry_after`).
+/// Fixed pause before retrying a plain notice after a transient refusal
+/// that names no usable wait (5xx without `retry_after`, or a rate-limit
+/// wait beyond `RETRY_WAIT_CAP`).
 const NOTICE_RETRY_PAUSE: Duration = Duration::from_secs(1);
 const MAX_PENDING_STOPS: usize = 32;
 
@@ -1257,7 +1258,12 @@ impl Bridge {
             // never retried: unknown outcomes are not replayed. The cron
             // `deliver` path keeps its own contract in `control.rs`.
             let refused = e.downcast_ref::<Refused>();
-            if refused.is_none_or(|r| r.is_permanent()) {
+            // Only a transient explicit refusal (429 or 5xx) proves the
+            // notice was not delivered AND is worth one retry; envelopes
+            // without a status code are treated as unknown outcomes.
+            let transient =
+                refused.is_some_and(|r| r.code.is_some_and(|code| code == 429 || code >= 500));
+            if !transient {
                 log_send_failure("sendMessage", &e);
                 return;
             }

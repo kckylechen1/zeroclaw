@@ -1434,4 +1434,14 @@ async fn a_refused_bridge_notice_is_retried_once_and_delivered() {
         b["text"].as_str() == Some("Error: provider offline")
     })
     .await;
+    let delivered = {
+        let tg = tg.lock().unwrap();
+        tg.calls
+            .iter()
+            .filter(|(method, body)| {
+                method == "sendMessage" && body["text"].as_str() == Some("Error: provider offline")
+            })
+            .count()
+    };
+    assert_eq!(delivered, 1, "exactly one retry, no more");
 }
