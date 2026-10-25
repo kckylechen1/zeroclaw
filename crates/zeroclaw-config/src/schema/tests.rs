@@ -1,30 +1,3 @@
-#[cfg(test)]
-#[::core::prelude::v1::test]
-fn todotracker_config_defaults() {
-    let cfg = super::TodoTrackerConfig::default();
-    assert!(cfg.enabled);
-    assert!(!cfg.enabled_at_start);
-    assert_eq!(cfg.location, super::TodoTrackerLocation::Right);
-    assert_eq!(cfg.width, 32);
-    assert_eq!(cfg.max_height, 5);
-}
-
-#[::core::prelude::v1::test]
-fn todotracker_config_parses_from_toml() {
-    let toml = r#"
-enabled = true
-enabled_at_start = true
-location = "bottom"
-width = 40
-max_height = 8
-"#;
-    let cfg: super::TodoTrackerConfig = toml::from_str(toml).unwrap();
-    assert!(cfg.enabled_at_start);
-    assert_eq!(cfg.location, super::TodoTrackerLocation::Bottom);
-    assert_eq!(cfg.width, 40);
-    assert_eq!(cfg.max_height, 8);
-}
-
 /// The whole point of splitting the accessor: an operator-facing caller
 /// must be able to tell "unconfigured" from a real 32,000, which a bare
 /// `usize` cannot express.
@@ -822,12 +795,7 @@ async fn validate_does_not_warn_when_a_bundle_exists() {
 
 fn parse_test_config(raw: &str) -> Config {
     let mut merged = raw.trim().to_string();
-    for table in [
-        "data_retention",
-        "conversational_ai",
-        "security",
-        "security_ops",
-    ] {
+    for table in ["data_retention", "security", "security_ops"] {
         if has_test_table(&merged, table) {
             continue;
         }
@@ -2124,7 +2092,6 @@ async fn config_toml_roundtrip() {
         trust: crate::scattered_types::TrustConfig::default(),
         backup: BackupConfig::default(),
         data_retention: DataRetentionConfig::default(),
-        conversational_ai: ConversationalAiConfig::default(),
         security: SecurityConfig::default(),
         security_ops: SecurityOpsConfig::default(),
         runtime: RuntimeConfig {
@@ -2145,7 +2112,6 @@ async fn config_toml_roundtrip() {
             to: Some("123456".into()),
             ..HeartbeatConfig::default()
         },
-        todotracker: TodoTrackerConfig::default(),
         cron: HashMap::new(),
         acp: AcpConfig::default(),
         channels: ChannelsConfig {
@@ -2213,7 +2179,6 @@ async fn config_toml_roundtrip() {
         storage: StorageConfig::default(),
         tunnel: TunnelConfig::default(),
         gateway: GatewayConfig::default(),
-        a2a: crate::multi_agent::A2aServerSection::default(),
         composio: ComposioConfig::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
@@ -3023,7 +2988,6 @@ async fn config_save_and_load_tmpdir() {
         trust: crate::scattered_types::TrustConfig::default(),
         backup: BackupConfig::default(),
         data_retention: DataRetentionConfig::default(),
-        conversational_ai: ConversationalAiConfig::default(),
         security: SecurityConfig::default(),
         security_ops: SecurityOpsConfig::default(),
         runtime: RuntimeConfig::default(),
@@ -3033,7 +2997,6 @@ async fn config_save_and_load_tmpdir() {
         pipeline: PipelineConfig::default(),
         query_classification: QueryClassificationConfig::default(),
         heartbeat: HeartbeatConfig::default(),
-        todotracker: TodoTrackerConfig::default(),
         cron: HashMap::new(),
         acp: AcpConfig::default(),
         channels: ChannelsConfig::default(),
@@ -3041,7 +3004,6 @@ async fn config_save_and_load_tmpdir() {
         storage: StorageConfig::default(),
         tunnel: TunnelConfig::default(),
         gateway: GatewayConfig::default(),
-        a2a: crate::multi_agent::A2aServerSection::default(),
         composio: ComposioConfig::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
@@ -8924,9 +8886,6 @@ async fn generated_config_fields_keep_operator_descriptions() {
         "Cross-agent memory allowlist",
     );
 
-    let a2a = crate::multi_agent::A2aServerConfig::default().prop_fields();
-    assert_description(&a2a, ".public_base_url", "operator-supplied base URL");
-
     let thinking = crate::scattered_types::ThinkingConfig::default().prop_fields();
     assert_description(&thinking, ".native_thinking", "selected level has a budget");
 
@@ -8984,8 +8943,7 @@ async fn generated_config_types_keep_schema_descriptions() {
 
     use crate::autonomy::{ApprovalRoute, AutonomyLevel};
     use crate::multi_agent::{
-        A2aServerConfig, A2aServerSection, AccessMode, AgentA2aConfig, AgentMemoryConfig,
-        AgentWorkspaceConfig, MemoryBackendKind, OutputModality,
+        AccessMode, AgentMemoryConfig, AgentWorkspaceConfig, MemoryBackendKind, OutputModality,
     };
     use crate::presets::{
         BuilderSubmission, ChannelQuickStart, ModelProviderChoice, SelectorChoice,
@@ -9002,9 +8960,6 @@ async fn generated_config_types_keep_schema_descriptions() {
     assert_schema_description::<AgentWorkspaceConfig>("AgentWorkspaceConfig");
     assert_schema_description::<AgentMemoryConfig>("AgentMemoryConfig");
     assert_schema_description::<OutputModality>("OutputModality");
-    assert_schema_description::<A2aServerConfig>("A2aServerConfig");
-    assert_schema_description::<A2aServerSection>("A2aServerSection");
-    assert_schema_description::<AgentA2aConfig>("AgentA2aConfig");
     assert_schema_description::<ModelProviderChoice>("ModelProviderChoice");
     assert_schema_description::<ChannelQuickStart>("ChannelQuickStart");
     assert_schema_description::<BuilderSubmission>("BuilderSubmission");
@@ -12912,66 +12867,10 @@ async fn collect_warnings_context_compression_flags_same_provider_summary_model(
 
 // exposed_skills set with no skill_bundles -> the agent card resolves no
 // skills (skills: []) silently; the diagnostic fires and names the agent.
-#[tokio::test]
-async fn collect_warnings_flags_exposed_skills_without_bundles() {
-    let toml = r#"
-        [risk_profiles.default]
-        level = "supervised"
-
-        [agents.merchant]
-        enabled = true
-        risk_profile = "default"
-
-        [agents.merchant.a2a]
-        published = true
-        exposed_skills = ["ucp_discovery_get", "ucp_merchant_get"]
-    "#;
-    let cfg: Config = toml::from_str(toml).unwrap();
-    let warnings = cfg.collect_warnings();
-    let w = warnings
-        .iter()
-        .find(|w| w.code == "a2a_exposed_skills_without_bundles")
-        .expect("expected a2a_exposed_skills_without_bundles warning");
-    assert_eq!(w.path, "agents.merchant.a2a.exposed_skills");
-    assert!(
-        w.message.contains("merchant"),
-        "message names the agent: {}",
-        w.message
-    );
-    assert!(
-        w.message.contains("skill_bundles"),
-        "message points at skill_bundles: {}",
-        w.message
-    );
-}
 
 // exposed_skills set alongside at least one declared skill_bundle -> no
 // structural diagnostic (disk resolution governs whether ids actually
 // resolve; that is out of scope for this offline check).
-#[tokio::test]
-async fn collect_warnings_silent_for_exposed_skills_with_bundles() {
-    let toml = r#"
-        [risk_profiles.default]
-        level = "supervised"
-
-        [agents.merchant]
-        enabled = true
-        risk_profile = "default"
-        skill_bundles = ["commerce"]
-
-        [agents.merchant.a2a]
-        published = true
-        exposed_skills = ["ucp_discovery_get"]
-    "#;
-    let cfg: Config = toml::from_str(toml).unwrap();
-    let warnings = cfg.collect_warnings();
-    assert!(
-        !warnings
-            .iter()
-            .any(|w| w.code == "a2a_exposed_skills_without_bundles"),
-        "no exposed_skills warning when a bundle is declared: {warnings:?}"
-    );
-}
 
 // Control: same profile + summary_model but both agents on the SAME provider
 // -> no diagnostic (deprecated-but-correct; runtime WARN still nudges).

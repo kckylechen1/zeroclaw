@@ -51,6 +51,20 @@ use serde::{Deserialize, Serialize};
 ///   retired (no in-repo client remained; the web dashboard and
 ///   `zeroclaw chat` use the gateway HTTP API and `/ws/chat`), so the
 ///   section is ignored (see `RETIRED_CONFIG_SURFACES`).
+/// - `a2a_server_removed`: an `[a2a]` section or an
+///   `[agents.<alias>.a2a]` block is still present. The fork delegates all
+///   external work through the Tachi bridge (#381) and never ran the A2A
+///   discovery server or agent cards; the surfaces carried no consumer and
+///   were deleted, so the keys are ignored (see `RETIRED_CONFIG_SURFACES`
+///   and `RETIRED_CONFIG_FIELDS`).
+/// - `todo_tracker_removed`: a `[todotracker]` section is still present. It
+///   configured the ZeroCode Code-pane TodoWrite tracker; ZeroCode was
+///   retired (#387) and no other reader remained, so the section is ignored
+///   (see `RETIRED_CONFIG_SURFACES`).
+/// - `conversational_ai_removed`: a `[conversational_ai]` section is still
+///   present. It carried no consumer in this fork (experimental upstream
+///   feature never wired here), so the section is ignored (see
+///   `RETIRED_CONFIG_SURFACES`).
 /// - `wasm_plugins_removed`: a `[plugins]` section is still present. The
 ///   WASM plugin host, its registry CLI and the `wit/` contracts were
 ///   retired; extensions are served through MCP servers (`[mcp]`), so the
@@ -139,6 +153,9 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("channels.nextcloud_talk", "inbound_webhook_channel_removed"),
     ("channels.gmail_push", "inbound_webhook_channel_removed"),
     ("wss", "wss_transport_removed"),
+    ("a2a", "a2a_server_removed"),
+    ("todotracker", "todo_tracker_removed"),
+    ("conversational_ai", "conversational_ai_removed"),
     ("plugins", "wasm_plugins_removed"),
     ("hardware", "hardware_moved_out_of_core"),
     ("peripherals", "hardware_moved_out_of_core"),
@@ -177,6 +194,7 @@ pub fn is_retired_channel_type(channel_type: &str) -> bool {
 /// checker makes the retirement visible instead of a silent no-op.
 pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
     ("agents.*.delegates", "delegate_config_removed"),
+    ("agents.*.a2a", "a2a_server_removed"),
     (
         "agents.*.delegate_same_risk_profile",
         "delegate_config_removed",
@@ -300,6 +318,11 @@ fn retired_field_reason(code: &str) -> &'static str {
              was removed with its gateway webhook route. WhatsApp is served by the \
              WhatsApp Web backend, which needs a Web selector (session_path, \
              pair_phone, pair_code, ws_url or mode = \"personal\")"
+        }
+        "a2a_server_removed" => {
+            "the A2A discovery server and agent cards were never consumers in \
+             this fork (external work goes through the Tachi bridge); the key is \
+             ignored. Remove it"
         }
         _ => {
             "the legacy delegation key was removed from the schema with the retired \
@@ -533,6 +556,9 @@ model_provider = "openai.default"
 delegates = ["peer"]
 delegate_same_risk_profile = true
 
+[agents.lead.a2a]
+published = true
+
 [risk_profiles.shared]
 delegation_policy = { mode = "allow" }
 "#;
@@ -547,8 +573,19 @@ delegation_policy = { mode = "allow" }
             paths.contains(&"risk_profiles.*.delegation_policy"),
             "{paths:?}"
         );
+        assert!(paths.contains(&"agents.*.a2a"), "{paths:?}");
+        let a2a = warnings
+            .iter()
+            .find(|w| w.path == "agents.*.a2a")
+            .expect("a2a tombstone");
+        assert_eq!(a2a.code, "a2a_server_removed");
+        assert!(
+            a2a.message.contains("Tachi bridge"),
+            "the a2a tombstone must state its own reason, not the delegation text: {}",
+            a2a.message
+        );
         // Untouched fields never warn.
-        assert_eq!(warnings.len(), 3, "{paths:?}");
+        assert_eq!(warnings.len(), 4, "{paths:?}");
     }
 
     #[test]

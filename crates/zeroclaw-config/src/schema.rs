@@ -209,17 +209,6 @@ pub struct Config {
     #[group = "Operations"]
     pub data_retention: DataRetentionConfig,
 
-    /// Conversational AI agent builder configuration (`[conversational_ai]`).
-    ///
-    /// Experimental / future feature — not yet wired into the agent runtime.
-    /// Omitted from generated config files when disabled (the default).
-    /// Existing configs that already contain this section will continue to
-    /// deserialize correctly thanks to `#[serde(default)]`.
-    #[serde(default, skip_serializing_if = "ConversationalAiConfig::is_disabled")]
-    #[nested]
-    #[group = "Operations"]
-    pub conversational_ai: ConversationalAiConfig,
-
     /// Managed cybersecurity service configuration (`[security_ops]`).
     #[serde(default)]
     #[nested]
@@ -280,13 +269,6 @@ pub struct Config {
     #[group = "Agent"]
     pub heartbeat: HeartbeatConfig,
 
-    /// ZeroCode live task tracker (`[todotracker]`), the read-only
-    /// TodoWrite visual tracker in the Code pane.
-    #[serde(default)]
-    #[nested]
-    #[group = "Operations"]
-    pub todotracker: TodoTrackerConfig,
-
     /// Declarative cron jobs (`[cron.<alias>]`), alias-keyed.
     ///
     /// Each entry is a named scheduled job synced into the database at
@@ -327,14 +309,6 @@ pub struct Config {
     #[nested]
     #[group = "Network"]
     pub gateway: GatewayConfig,
-
-    /// Inbound A2A discovery server (`[a2a.server]`). Default-closed:
-    /// serves the well-known catalog card and per-alias agent cards only
-    /// when `enabled = true`. See `crate::multi_agent::A2aServerConfig`.
-    #[serde(default)]
-    #[nested]
-    #[group = "Network"]
-    pub a2a: crate::multi_agent::A2aServerSection,
 
     /// Composio managed OAuth tools integration (`[composio]`).
     #[serde(default)]
@@ -3556,16 +3530,6 @@ pub struct AliasedAgentConfig {
     #[serde(default)]
     #[nested]
     pub identity: IdentityConfig,
-
-    /// Per-agent A2A publication block (`[agents.<alias>.a2a]`). Gates
-    /// whether this alias is discoverable as a spec-conforming A2A agent
-    /// and which resolved skills appear on its card. Default-closed
-    /// (`published = false`, no exposed skills). See
-    /// `crate::multi_agent::AgentA2aConfig`.
-    #[tab(General)]
-    #[serde(default)]
-    #[nested]
-    pub a2a: crate::multi_agent::AgentA2aConfig,
 }
 
 impl Default for AliasedAgentConfig {
@@ -3594,7 +3558,6 @@ impl Default for AliasedAgentConfig {
             workspace: crate::multi_agent::AgentWorkspaceConfig::default(),
             memory: crate::multi_agent::AgentMemoryConfig::default(),
             identity: IdentityConfig::default(),
-            a2a: crate::multi_agent::AgentA2aConfig::default(),
         }
     }
 }
@@ -10254,74 +10217,6 @@ impl Default for HeartbeatConfig {
     }
 }
 
-// ── TodoTracker ──────────────────────────────────────────────────
-
-/// Location of the ZeroCode TodoWrite tracker panel.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, zeroclaw_macros::ConfigEnum,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum TodoTrackerLocation {
-    /// Horizontal strip between the transcript and the input bar (Claude Code style).
-    Bottom,
-    /// Vertical side panel on the left.
-    Left,
-    /// Vertical side panel on the right (OpenCode style). Default.
-    #[default]
-    Right,
-}
-
-/// ZeroCode live task tracker configuration (`[todotracker]` section).
-///
-/// Read-only visual tracker driven by the model's `TodoWrite` tool.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "todotracker"]
-pub struct TodoTrackerConfig {
-    /// Master switch. When `false` the tracker never renders and never
-    /// auto-pops. Default: `true`.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Whether the panel is visible at launch (when `enabled`). When
-    /// `false` it stays hidden until toggled or auto-popped by the first
-    /// plan. Default: `false`.
-    #[serde(default)]
-    pub enabled_at_start: bool,
-    /// Panel location: `bottom` (between transcript and input), `left`,
-    /// or `right` (default).
-    #[serde(default)]
-    pub location: TodoTrackerLocation,
-    /// Side-panel target column width (left/right). Runtime-clamped to at
-    /// most half the terminal width. Ignored for `bottom`. Default: `32`.
-    #[serde(default = "default_todotracker_width")]
-    pub width: u16,
-    /// Bottom-strip maximum height in rows (grows up to this). Ignored for
-    /// left/right. Default: `5`.
-    #[serde(default = "default_todotracker_max_height")]
-    pub max_height: u16,
-}
-
-fn default_todotracker_width() -> u16 {
-    32
-}
-
-fn default_todotracker_max_height() -> u16 {
-    5
-}
-
-impl Default for TodoTrackerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            enabled_at_start: false,
-            location: TodoTrackerLocation::Right,
-            width: default_todotracker_width(),
-            max_height: default_todotracker_max_height(),
-        }
-    }
-}
-
 // ── Cron ────────────────────────────────────────────────────────
 
 /// A declarative cron job definition (`[cron.<alias>]`).
@@ -14677,92 +14572,6 @@ impl Default for NotionConfig {
     }
 }
 
-// ── Conversational AI ──────────────────────────────────────────────
-
-fn default_conversational_ai_language() -> String {
-    "en".into()
-}
-
-fn default_conversational_ai_supported_languages() -> Vec<String> {
-    vec!["en".into(), "de".into(), "fr".into(), "it".into()]
-}
-
-fn default_conversational_ai_escalation_threshold() -> f64 {
-    0.3
-}
-
-fn default_conversational_ai_max_turns() -> usize {
-    50
-}
-
-fn default_conversational_ai_timeout_secs() -> u64 {
-    1800
-}
-
-/// Conversational AI agent builder configuration (`[conversational_ai]` section).
-///
-/// **Status: Reserved for future use.** This configuration is parsed but not yet
-/// consumed by the runtime. Setting `enabled = true` will produce a startup warning.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "conversational_ai"]
-pub struct ConversationalAiConfig {
-    /// Enable conversational AI features. Default: false.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Default language for conversations (BCP-47 tag). Default: "en".
-    #[serde(default = "default_conversational_ai_language")]
-    pub default_language: String,
-    /// Supported languages for conversations. Default: [`en`, `de`, `fr`, `it`].
-    #[serde(default = "default_conversational_ai_supported_languages")]
-    pub supported_languages: Vec<String>,
-    /// Automatically detect user language from message content. Default: true.
-    #[serde(default = "default_true")]
-    pub auto_detect_language: bool,
-    /// Intent confidence below this threshold triggers escalation. Default: 0.3.
-    #[serde(default = "default_conversational_ai_escalation_threshold")]
-    pub escalation_confidence_threshold: f64,
-    /// Maximum conversation turns before auto-ending. Default: 50.
-    #[serde(default = "default_conversational_ai_max_turns")]
-    pub max_conversation_turns: usize,
-    /// Conversation timeout in seconds (inactivity). Default: 1800.
-    #[serde(default = "default_conversational_ai_timeout_secs")]
-    pub conversation_timeout_secs: u64,
-    /// Enable conversation analytics tracking. Default: false (privacy-by-default).
-    #[serde(default)]
-    pub analytics_enabled: bool,
-    /// Optional tool name for RAG-based knowledge base lookup during conversations.
-    #[serde(default)]
-    pub knowledge_base_tool: Option<String>,
-}
-
-impl ConversationalAiConfig {
-    /// Returns `true` when the feature is disabled (the default).
-    ///
-    /// Used by `#[serde(skip_serializing_if)]` to omit the entire
-    /// `[conversational_ai]` section from newly-generated config files,
-    /// avoiding user confusion over an undocumented / experimental section.
-    pub fn is_disabled(&self) -> bool {
-        !self.enabled
-    }
-}
-
-impl Default for ConversationalAiConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            default_language: default_conversational_ai_language(),
-            supported_languages: default_conversational_ai_supported_languages(),
-            auto_detect_language: true,
-            escalation_confidence_threshold: default_conversational_ai_escalation_threshold(),
-            max_conversation_turns: default_conversational_ai_max_turns(),
-            conversation_timeout_secs: default_conversational_ai_timeout_secs(),
-            analytics_enabled: false,
-            knowledge_base_tool: None,
-        }
-    }
-}
-
 // ── Security ops config ─────────────────────────────────────────
 
 /// Managed Cybersecurity Service (MCSS) dashboard agent configuration (`[security_ops]`).
@@ -14856,7 +14665,6 @@ impl Default for Config {
             trust: crate::scattered_types::TrustConfig::default(),
             backup: BackupConfig::default(),
             data_retention: DataRetentionConfig::default(),
-            conversational_ai: ConversationalAiConfig::default(),
             security: SecurityConfig::default(),
             security_ops: SecurityOpsConfig::default(),
             runtime: RuntimeConfig::default(),
@@ -14867,7 +14675,6 @@ impl Default for Config {
             skills: SkillsConfig::default(),
             pipeline: PipelineConfig::default(),
             heartbeat: HeartbeatConfig::default(),
-            todotracker: TodoTrackerConfig::default(),
             cron: HashMap::new(),
             acp: AcpConfig::default(),
             channels: ChannelsConfig::default(),
@@ -14875,7 +14682,6 @@ impl Default for Config {
             storage: StorageConfig::default(),
             tunnel: TunnelConfig::default(),
             gateway: GatewayConfig::default(),
-            a2a: crate::multi_agent::A2aServerSection::default(),
             composio: ComposioConfig::default(),
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
@@ -16198,7 +16004,6 @@ impl Config {
         warnings.extend(self.retired_surface_warnings.iter().cloned());
         self.collect_fallback_warnings(&mut warnings);
         self.collect_cross_provider_summary_model_warnings(&mut warnings);
-        self.collect_a2a_exposed_skills_warnings(&mut warnings);
         self.collect_memory_semantic_search_warnings(&mut warnings);
         // Must run after `collect_cross_provider_summary_model_warnings`: it
         // scans `warnings` to suppress its generic inert `summary_model`
@@ -16320,41 +16125,6 @@ impl Config {
             && !provider.eq_ignore_ascii_case("none")
             && !model.is_empty()
             && dimensions > 0
-    }
-
-    /// Surface the A2A `exposed_skills` filter that can never resolve a skill.
-    /// `exposed_skills` is a narrowing filter over the agent's resolved skill
-    /// set, which comes from `skill_bundles`. An agent that lists
-    /// `a2a.exposed_skills` but declares no `skill_bundles` advertises an empty
-    /// `skills: []` array on its agent card with no error, because every wanted
-    /// id is dropped for belonging to a bundle the agent does not declare. The
-    /// same silent emptiness happens when a wanted id names no skill in any
-    /// declared bundle, or when the owning bundle's include/exclude filter
-    /// excludes it; those need disk resolution, so this offline check covers the
-    /// common structural case: exposed skills with zero declared bundles.
-    fn collect_a2a_exposed_skills_warnings(
-        &self,
-        warnings: &mut Vec<crate::validation_warnings::ValidationWarning>,
-    ) {
-        for (agent_alias, agent) in &self.agents {
-            if agent.a2a.exposed_skills.is_empty() {
-                continue;
-            }
-            if !agent.skill_bundles.is_empty() {
-                continue;
-            }
-            warnings.push(crate::validation_warnings::ValidationWarning::new(
-                "a2a_exposed_skills_without_bundles",
-                format!(
-                    "agent `{agent_alias}` lists a2a.exposed_skills but declares no \
-                     skill_bundles, so its agent card advertises no skills (skills: []). \
-                     exposed_skills is a filter over the agent's resolved skill set; add \
-                     the owning bundle(s) to agents.{agent_alias}.skill_bundles so the \
-                     listed skills resolve."
-                ),
-                format!("agents.{agent_alias}.a2a.exposed_skills"),
-            ));
-        }
     }
 
     /// Surface cross-provider ambiguity in a legacy config while reporting

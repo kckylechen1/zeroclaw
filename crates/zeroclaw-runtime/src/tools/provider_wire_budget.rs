@@ -39,12 +39,7 @@ const MEMORY_MARKER: &str = "HYPERION_LEAN_MEMORY_MD_MARKER";
 /// fixture + ExplicitOnly MCP + WeChat `inject_memory = false`).
 const LEAN_PROVIDER_WIRE_TOKEN_CEILING: usize = 5_000;
 
-const PARSE_HELPER_TABLES: &[&str] = &[
-    "data_retention",
-    "conversational_ai",
-    "security",
-    "security_ops",
-];
+const PARSE_HELPER_TABLES: &[&str] = &["data_retention", "security", "security_ops"];
 
 #[derive(Debug, Clone)]
 struct ToolWireRow {
