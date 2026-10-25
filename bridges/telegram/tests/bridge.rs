@@ -32,16 +32,66 @@ struct FakeTelegram {
     next_message: i64,
     /// Refuse this many `sendMessage` calls with a retryable error.
     fail_sends: usize,
+    /// Refuse this many `sendDocument` calls with a rate limit that names
+    /// its wait, then count every attempt.
+    fail_document_429: usize,
+    document_attempts: usize,
 }
 
 type Shared = Arc<Mutex<FakeTelegram>>;
 
+/// Read one `name="..."` multipart field value out of a raw body.
+fn multipart_field(body: &[u8], name: &str) -> Option<String> {
+    let marker = format!("name=\"{name}\"").into_bytes();
+    let start = body
+        .windows(marker.len())
+        .position(|window| window == marker)?;
+    let value_start = start + body[start..].windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let value_end = body[value_start..]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|offset| value_start + offset)
+        .unwrap_or(body.len());
+    Some(String::from_utf8_lossy(&body[value_start..value_end]).into_owned())
+}
+
 async fn bot_api(
     State(tg): State<Shared>,
     Path((bot, method)): Path<(String, String)>,
-    Json(body): Json<Value>,
+    raw: axum::body::Bytes,
 ) -> Json<Value> {
     assert_eq!(bot, "botTEST", "the token travels in the path");
+    if method == "sendDocument" {
+        let mut tg = tg.lock().unwrap();
+        tg.document_attempts += 1;
+        if tg.fail_document_429 > 0 {
+            tg.fail_document_429 -= 1;
+            return Json(json!({
+                "ok": false, "error_code": 429,
+                "description": "Too Many Requests: retry after 0",
+                "parameters": {"retry_after": 0}
+            }));
+        }
+        let body = json!({
+            "chat_id": multipart_field(&raw, "chat_id").and_then(|v| v.parse::<i64>().ok()),
+            "caption": multipart_field(&raw, "caption"),
+            "filename": raw
+                .windows(10)
+                .position(|w| w == b"filename=\"")
+                .map(|at| {
+                    let rest = &raw[at + 10..];
+                    let end = rest.iter().position(|&b| b == b'"').unwrap_or(rest.len());
+                    String::from_utf8_lossy(&rest[..end]).into_owned()
+                }),
+            "bytes": raw.len(),
+        });
+        tg.calls.push((method, body));
+        tg.next_message += 1;
+        return Json(json!({ "ok": true, "result": {
+            "message_id": tg.next_message, "chat": { "id": OWNER, "type": "private" }
+        }}));
+    }
+    let body: Value = serde_json::from_slice(&raw).expect("non-document calls are JSON");
     if method == "getMe" {
         return Json(json!({"ok":true,"result":{"id":9000,"is_bot":true}}));
     }
@@ -1207,4 +1257,132 @@ async fn stop_waiter_capacity_refuses_the_33rd_wire_request_and_recovers_after_t
     );
     running.abort();
     server.abort();
+}
+
+#[tokio::test]
+async fn an_overlong_final_reply_arrives_as_one_document() {
+    let tg: Shared = Arc::default();
+    let tg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tg_addr = tg_listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/{bot}/{method}", post(bot_api))
+        .with_state(tg.clone());
+    tokio::spawn(async move { axum::serve(tg_listener, app).await.unwrap() });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_url = format!("ws://{}", listener.local_addr().unwrap());
+    let mut gateway = fake_gateway(listener);
+    let _bridge = tokio::spawn(run(BridgeConfig {
+        telegram_api: format!("http://{tg_addr}"),
+        telegram_token: "TEST".into(),
+        owner_id: OWNER,
+        gateway: ConnectOptions {
+            gateway: gateway_url,
+            agent: "assistant".into(),
+            session_id: Some("main".into()),
+            token: Some("zc_token".into()),
+        },
+        poll_wait: Duration::from_secs(1),
+    }));
+    let mut ws = attach(&mut gateway).await;
+
+    // Five Telegram messages' worth of text: past the three-message
+    // threshold, so the completed turn must arrive as one document.
+    let long = "R".repeat(4096 * 5);
+    FakeTelegram::text(&tg, OWNER, "dump the report");
+    let message = recv(&mut ws).await;
+    let id = message["id"].clone();
+    for frame in [
+        json!({ "type": "ack", "id": id, "status": "accepted", "turn": "started" }),
+        json!({ "type": "chunk", "content": long[..4096].to_string() }),
+        json!({ "type": "done", "id": id, "full_response": long }),
+    ] {
+        send(&mut ws, frame).await;
+    }
+
+    let document = FakeTelegram::wait_for(&tg, "sendDocument", |b| b["chat_id"] == OWNER).await;
+    assert_eq!(document["caption"], "(full reply attached)");
+    assert_eq!(document["filename"], "zeroclaw-reply.txt");
+    assert!(
+        document["bytes"].as_u64().unwrap() > (4096 * 5) as u64,
+        "the document carries the complete reply"
+    );
+
+    // The streaming head is capped at the threshold: no more than three
+    // R-piece messages were ever sent.
+    let pieces = {
+        let tg = tg.lock().unwrap();
+        tg.calls
+            .iter()
+            .filter(|(method, body)| {
+                method == "sendMessage" && body["text"].as_str().is_some_and(|t| t.starts_with('R'))
+            })
+            .count()
+    };
+    assert!(
+        pieces <= 3,
+        "head messages must stop at the threshold, got {pieces}"
+    );
+}
+
+#[tokio::test]
+async fn a_rate_limited_document_is_retried_after_its_wait() {
+    let tg: Shared = Arc::new(Mutex::new(FakeTelegram {
+        fail_document_429: 1,
+        ..FakeTelegram::default()
+    }));
+    let tg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tg_addr = tg_listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/{bot}/{method}", post(bot_api))
+        .with_state(tg.clone());
+    tokio::spawn(async move { axum::serve(tg_listener, app).await.unwrap() });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_url = format!("ws://{}", listener.local_addr().unwrap());
+    let mut gateway = fake_gateway(listener);
+    let _bridge = tokio::spawn(run(BridgeConfig {
+        telegram_api: format!("http://{tg_addr}"),
+        telegram_token: "TEST".into(),
+        owner_id: OWNER,
+        gateway: ConnectOptions {
+            gateway: gateway_url,
+            agent: "assistant".into(),
+            session_id: Some("main".into()),
+            token: Some("zc_token".into()),
+        },
+        poll_wait: Duration::from_secs(1),
+    }));
+    let mut ws = attach(&mut gateway).await;
+
+    let long = "D".repeat(4096 * 4);
+    FakeTelegram::text(&tg, OWNER, "dump it");
+    let message = recv(&mut ws).await;
+    let id = message["id"].clone();
+    for frame in [
+        json!({ "type": "ack", "id": id, "status": "accepted", "turn": "started" }),
+        json!({ "type": "done", "id": id, "full_response": long }),
+    ] {
+        send(&mut ws, frame).await;
+    }
+
+    // The first attempt was refused with a 429 naming its wait; the retry
+    // after that wait delivers the document.
+    FakeTelegram::wait_for(&tg, "sendDocument", |b| b["chat_id"] == OWNER).await;
+    let attempts = tg.lock().unwrap().document_attempts;
+    assert_eq!(attempts, 2, "exactly one rate-limited retry");
+    // The refused turn did not lose the reply to an error notice instead.
+    let error_noted = {
+        let tg = tg.lock().unwrap();
+        tg.calls.iter().any(|(method, body)| {
+            method == "sendMessage"
+                && body["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("could not be attached"))
+        })
+    };
+    assert!(
+        !error_noted,
+        "the retried document must not also send a failure note"
+    );
 }

@@ -18,7 +18,9 @@ use zeroclaw_log::{Action, Event, EventOutcome, record};
 use crate::render::{
     ApprovalKeys, EDIT_INTERVAL, decode_callback, edit_due, encode_callback, split_message,
 };
-use crate::telegram::{Api, Inbound, MESSAGE_LIMIT, Update, classify};
+use crate::telegram::{
+    Api, Inbound, MESSAGE_LIMIT, REPLY_DOCUMENT_NAME, Refused, Update, classify,
+};
 
 /// Telegram shows "typing" for about five seconds per action.
 const TYPING_INTERVAL: Duration = Duration::from_secs(4);
@@ -26,6 +28,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A final reply that would chain more than this many Telegram messages is
+/// delivered as one document attachment carrying the complete text, after the
+/// head messages already streamed. Upstream #11509's "prefer attachments for
+/// large generated artifacts" policy, adapted to the thin bridge: the bridge
+/// holds only text, so the artifact is the reply itself (#377).
+const DOCUMENT_MESSAGE_THRESHOLD: usize = 3;
+
+/// Longest rate-limit wait the bridge will honor before its one document
+/// retry. Telegram can ask for minutes; the owner can re-ask.
+const DOCUMENT_RETRY_WAIT_CAP: Duration = Duration::from_secs(30);
 const MAX_PENDING_STOPS: usize = 32;
 
 /// Replies the bridge writes itself. English only: the bridge carries no
@@ -43,6 +56,7 @@ mod text {
     pub const APPROVED: &str = "Approved";
     pub const ALWAYS_APPROVED: &str = "Approved (always)";
     pub const DENIED: &str = "Denied";
+    pub const DOCUMENT_CAPTION: &str = "(full reply attached)";
 
     pub fn error(message: &str) -> String {
         format!("Error: {message}")
@@ -814,8 +828,8 @@ impl Bridge {
                 }
                 Ok(Err(e)) => {
                     log_send_failure("sendMessage", &e);
-                    if e.downcast_ref::<crate::telegram::Refused>()
-                        .is_some_and(crate::telegram::Refused::is_permanent)
+                    if e.downcast_ref::<Refused>()
+                        .is_some_and(Refused::is_permanent)
                     {
                         break;
                     }
@@ -1079,10 +1093,81 @@ impl Bridge {
     }
 
     async fn end_turn(&mut self) {
-        self.flush().await;
+        let overlong = self.stream.as_ref().is_some_and(|stream| {
+            split_message(&stream.text, MESSAGE_LIMIT).len() > DOCUMENT_MESSAGE_THRESHOLD
+        });
+        if overlong {
+            // Head pieces only: flush stops at the threshold. The complete
+            // text follows as one document so the owner reads the reply as a
+            // file instead of a split-message chain.
+            self.flush().await;
+            self.send_full_reply_document().await;
+        } else {
+            self.flush().await;
+        }
         self.stream = None;
         self.typing_at = None;
         self.questions.clear();
+    }
+
+    /// Deliver the complete final reply as one document, retrying once when
+    /// Telegram answers with a rate limit that names its wait (#11650's
+    /// lesson: never retry a 429 immediately). Any other failure logs and
+    /// leaves the already-delivered head messages in place.
+    async fn send_full_reply_document(&mut self) {
+        let Some(stream) = &self.stream else {
+            return;
+        };
+        let text = stream.text.clone();
+        let attempt = self
+            .api
+            .send_document(
+                self.owner_id,
+                REPLY_DOCUMENT_NAME,
+                &text,
+                text::DOCUMENT_CAPTION,
+            )
+            .await;
+        let sent = match attempt {
+            Ok(message_id) => Some(message_id),
+            Err(e) => {
+                let wait = e
+                    .downcast_ref::<Refused>()
+                    .and_then(|refused| refused.retry_after)
+                    .map(Duration::from_secs)
+                    .filter(|wait| *wait <= DOCUMENT_RETRY_WAIT_CAP);
+                match wait {
+                    Some(wait) => {
+                        log_send_failure("sendDocument", &e);
+                        sleep(wait).await;
+                        match self
+                            .api
+                            .send_document(
+                                self.owner_id,
+                                REPLY_DOCUMENT_NAME,
+                                &text,
+                                text::DOCUMENT_CAPTION,
+                            )
+                            .await
+                        {
+                            Ok(message_id) => Some(message_id),
+                            Err(retry_error) => {
+                                log_send_failure("sendDocument", &retry_error);
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        log_send_failure("sendDocument", &e);
+                        None
+                    }
+                }
+            }
+        };
+        if sent.is_none() {
+            self.reply("The full reply could not be attached; ask again or narrower")
+                .await;
+        }
     }
 
     /// Bring Telegram up to date with the streamed text: edit the messages
@@ -1097,6 +1182,12 @@ impl Bridge {
             .into_iter()
             .enumerate()
         {
+            // While the reply is still streaming, stop chaining messages once
+            // the text passes the document threshold: the completed turn
+            // delivers the full text as one document instead.
+            if index >= DOCUMENT_MESSAGE_THRESHOLD {
+                break;
+            }
             match stream.sent.get_mut(index) {
                 Some((_, shown)) if *shown == piece => {}
                 Some((message_id, shown)) => {
