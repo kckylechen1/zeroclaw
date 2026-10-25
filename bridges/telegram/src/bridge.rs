@@ -1138,8 +1138,10 @@ impl Bridge {
                     .filter(|wait| *wait <= DOCUMENT_RETRY_WAIT_CAP);
                 match wait {
                     Some(wait) => {
+                        log_send_failure("sendDocument", &e);
                         sleep(wait).await;
-                        self.api
+                        match self
+                            .api
                             .send_document(
                                 self.owner_id,
                                 REPLY_DOCUMENT_NAME,
@@ -1147,7 +1149,13 @@ impl Bridge {
                                 text::DOCUMENT_CAPTION,
                             )
                             .await
-                            .ok()
+                        {
+                            Ok(message_id) => Some(message_id),
+                            Err(retry_error) => {
+                                log_send_failure("sendDocument", &retry_error);
+                                None
+                            }
+                        }
                     }
                     None => {
                         log_send_failure("sendDocument", &e);
