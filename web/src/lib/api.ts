@@ -1691,6 +1691,57 @@ export function getCostForAgent(alias: string): Promise<CostSummary> {
 }
 
 // ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+/** Server-side cap on one uploaded attachment (bytes). */
+export const ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024;
+/** Server-side cap on attachments carried by one chat message. */
+export const ATTACHMENT_MAX_PER_MESSAGE = 4;
+/** MIME types the attachment endpoint accepts. */
+export const ATTACHMENT_ACCEPTED_MIME = [
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "application/json",
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+] as const;
+
+export interface UploadedAttachment {
+  id: string;
+  file_name: string;
+  mime_type: string;
+  size: number;
+  expires_in_secs: number;
+}
+
+/**
+ * Upload one attachment for the chat's session. The raw file body is sent
+ * with its MIME type; the handle comes back as `id` and travels on the
+ * `/ws/chat` message frame's `attachments` array (already contract-supported
+ * server-side). Requires a gateway token and the agent to be enabled.
+ */
+export async function uploadAttachment(
+  sessionId: string,
+  agent: string,
+  file: File,
+): Promise<UploadedAttachment> {
+  const qs = new URLSearchParams({
+    session_id: sessionId,
+    agent,
+    file_name: file.name || "attachment",
+  });
+  return apiFetch<UploadedAttachment>(`/api/attachments?${qs}`, {
+    method: "POST",
+    headers: { "Content-Type": file.type || "text/plain" },
+    body: file,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 

@@ -42,7 +42,7 @@ export interface ChatMessage {
 
 interface AgentContextValue {
   messages: ChatMessage[];
-  sendMessage: (content: string) => void;
+  sendMessage: (content: string, attachments?: string[]) => void;
   connected: boolean;
   error: string | null;
   typing: boolean;
@@ -594,10 +594,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     };
   }, [modelInfoVersion, agentAlias]);
 
-  const sendMessage = useCallback((content: string) => {
+  const sendMessage = useCallback((content: string, attachments?: string[]) => {
     if (!wsRef.current?.connected) return;
     try {
-      wsRef.current.sendMessage(content);
+      wsRef.current.sendMessage(content, attachments);
       setTyping(true);
       pendingContentRef.current = '';
       pendingThinkingRef.current = '';
