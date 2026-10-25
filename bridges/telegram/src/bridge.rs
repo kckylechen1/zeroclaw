@@ -36,9 +36,13 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 /// holds only text, so the artifact is the reply itself (#377).
 const DOCUMENT_MESSAGE_THRESHOLD: usize = 3;
 
-/// Longest rate-limit wait the bridge will honor before its one document
+/// Longest rate-limit wait the bridge will honor before its one paced
 /// retry. Telegram can ask for minutes; the owner can re-ask.
-const DOCUMENT_RETRY_WAIT_CAP: Duration = Duration::from_secs(30);
+const RETRY_WAIT_CAP: Duration = Duration::from_secs(30);
+
+/// Fixed pause before retrying a plain notice after an explicit server
+/// refusal that names no wait (5xx without `retry_after`).
+const NOTICE_RETRY_PAUSE: Duration = Duration::from_secs(1);
 const MAX_PENDING_STOPS: usize = 32;
 
 /// Replies the bridge writes itself. English only: the bridge carries no
@@ -1135,7 +1139,7 @@ impl Bridge {
                     .downcast_ref::<Refused>()
                     .and_then(|refused| refused.retry_after)
                     .map(Duration::from_secs)
-                    .filter(|wait| *wait <= DOCUMENT_RETRY_WAIT_CAP);
+                    .filter(|wait| *wait <= RETRY_WAIT_CAP);
                 match wait {
                     Some(wait) => {
                         log_send_failure("sendDocument", &e);
@@ -1247,7 +1251,26 @@ impl Bridge {
 
     async fn reply(&self, text: &str) {
         if let Err(e) = self.api.send_message(self.owner_id, text, None).await {
+            // An explicit non-permanent refusal (5xx, rate limit) proves the
+            // notice was not delivered, so one paced retry cannot duplicate
+            // it. A transport failure leaves the outcome unknown and is
+            // never retried: unknown outcomes are not replayed. The cron
+            // `deliver` path keeps its own contract in `control.rs`.
+            let refused = e.downcast_ref::<Refused>();
+            if refused.is_none_or(|r| r.is_permanent()) {
+                log_send_failure("sendMessage", &e);
+                return;
+            }
             log_send_failure("sendMessage", &e);
+            let wait = refused
+                .and_then(|r| r.retry_after)
+                .map(Duration::from_secs)
+                .filter(|wait| *wait <= RETRY_WAIT_CAP)
+                .unwrap_or(NOTICE_RETRY_PAUSE);
+            sleep(wait).await;
+            if let Err(retry_error) = self.api.send_message(self.owner_id, text, None).await {
+                log_send_failure("sendMessage", &retry_error);
+            }
         }
     }
 

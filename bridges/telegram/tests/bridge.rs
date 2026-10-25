@@ -1386,3 +1386,52 @@ async fn a_rate_limited_document_is_retried_after_its_wait() {
         "the retried document must not also send a failure note"
     );
 }
+
+#[tokio::test]
+async fn a_refused_bridge_notice_is_retried_once_and_delivered() {
+    let tg: Shared = Arc::new(Mutex::new(FakeTelegram {
+        fail_sends: 1,
+        ..FakeTelegram::default()
+    }));
+    let tg_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tg_addr = tg_listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/{bot}/{method}", post(bot_api))
+        .with_state(tg.clone());
+    tokio::spawn(async move { axum::serve(tg_listener, app).await.unwrap() });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_url = format!("ws://{}", listener.local_addr().unwrap());
+    let mut gateway = fake_gateway(listener);
+    let _bridge = tokio::spawn(run(BridgeConfig {
+        telegram_api: format!("http://{tg_addr}"),
+        telegram_token: "TEST".into(),
+        owner_id: OWNER,
+        gateway: ConnectOptions {
+            gateway: gateway_url,
+            agent: "assistant".into(),
+            session_id: Some("main".into()),
+            token: Some("zc_token".into()),
+        },
+        poll_wait: Duration::from_secs(1),
+    }));
+    let mut ws = attach(&mut gateway).await;
+
+    // The first sendMessage is refused with an explicit 502. The error
+    // notice is a bridge-owned message with a known-not-delivered outcome,
+    // so exactly one paced retry must deliver it. Without the retry this
+    // notice would be lost.
+    FakeTelegram::text(&tg, OWNER, "go");
+    let message = recv(&mut ws).await;
+    let id = message["id"].clone();
+    for frame in [
+        json!({ "type": "ack", "id": id, "status": "accepted", "turn": "started" }),
+        json!({ "type": "error", "id": id, "message": "provider offline" }),
+    ] {
+        send(&mut ws, frame).await;
+    }
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| {
+        b["text"].as_str() == Some("Error: provider offline")
+    })
+    .await;
+}
