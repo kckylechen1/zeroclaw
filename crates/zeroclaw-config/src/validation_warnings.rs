@@ -319,6 +319,11 @@ fn retired_field_reason(code: &str) -> &'static str {
              WhatsApp Web backend, which needs a Web selector (session_path, \
              pair_phone, pair_code, ws_url or mode = \"personal\")"
         }
+        "a2a_server_removed" => {
+            "the A2A discovery server and agent cards were never consumers in \
+             this fork (external work goes through the Tachi bridge); the key is \
+             ignored. Remove it"
+        }
         _ => {
             "the legacy delegation key was removed from the schema with the retired \
              delegate tool and has no runtime consumer"
@@ -551,6 +556,9 @@ model_provider = "openai.default"
 delegates = ["peer"]
 delegate_same_risk_profile = true
 
+[agents.lead.a2a]
+published = true
+
 [risk_profiles.shared]
 delegation_policy = { mode = "allow" }
 "#;
@@ -565,8 +573,19 @@ delegation_policy = { mode = "allow" }
             paths.contains(&"risk_profiles.*.delegation_policy"),
             "{paths:?}"
         );
+        assert!(paths.contains(&"agents.*.a2a"), "{paths:?}");
+        let a2a = warnings
+            .iter()
+            .find(|w| w.path == "agents.*.a2a")
+            .expect("a2a tombstone");
+        assert_eq!(a2a.code, "a2a_server_removed");
+        assert!(
+            a2a.message.contains("Tachi bridge"),
+            "the a2a tombstone must state its own reason, not the delegation text: {}",
+            a2a.message
+        );
         // Untouched fields never warn.
-        assert_eq!(warnings.len(), 3, "{paths:?}");
+        assert_eq!(warnings.len(), 4, "{paths:?}");
     }
 
     #[test]

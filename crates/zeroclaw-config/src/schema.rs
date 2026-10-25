@@ -14572,8 +14572,6 @@ impl Default for NotionConfig {
     }
 }
 
-// ── Conversational AI ──────────────────────────────────────────────
-
 // ── Security ops config ─────────────────────────────────────────
 
 /// Managed Cybersecurity Service (MCSS) dashboard agent configuration (`[security_ops]`).
