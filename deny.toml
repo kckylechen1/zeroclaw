@@ -154,7 +154,7 @@ version = "=0.27.2"
 
 [[bans.skip]]
 name = "syn"
-version = "=3.0.4"
+version = "=3.0.9"
 
 [[bans.skip]]
 name = "strum_macros"
