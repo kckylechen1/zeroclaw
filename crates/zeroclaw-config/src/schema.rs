@@ -209,12 +209,6 @@ pub struct Config {
     #[group = "Operations"]
     pub data_retention: DataRetentionConfig,
 
-    /// Conversational AI agent builder configuration (`[conversational_ai]`).
-    ///
-    /// Experimental / future feature — not yet wired into the agent runtime.
-    /// Omitted from generated config files when disabled (the default).
-    /// Existing configs that already contain this section will continue to
-    /// deserialize correctly thanks to `#[serde(default)]`.
     /// Managed cybersecurity service configuration (`[security_ops]`).
     #[serde(default)]
     #[nested]
@@ -275,8 +269,6 @@ pub struct Config {
     #[group = "Agent"]
     pub heartbeat: HeartbeatConfig,
 
-    /// ZeroCode live task tracker (`[todotracker]`), the read-only
-    /// TodoWrite visual tracker in the Code pane.
     /// Declarative cron jobs (`[cron.<alias>]`), alias-keyed.
     ///
     /// Each entry is a named scheduled job synced into the database at
