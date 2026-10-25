@@ -260,6 +260,11 @@ const translations: Record<Locale, Record<string, string>> = {
 
     // Slash commands (#7137)
     'agent.cmd_unknown': '未知命令：{cmd}。输入 /help 查看可用命令。',
+    'agent.attach': '添加附件',
+    'agent.attach_remove': '移除附件',
+    'agent.attach_rejected': '部分文件被拒绝：仅支持文本/Markdown/CSV/JSON 与 PNG/JPEG/GIF/WebP；文本/JSON 不超过 64 KiB，图片不超过 2 MiB。',
+    'agent.attach_limit': '每条消息最多 {n} 个附件。',
+    'agent.attach_failed': '附件上传失败，请重试。',
     'agent.cmd_help_header': '可用命令：',
     'agent.cmd_help_help': '显示此命令列表',
     'agent.cmd_help_clear': '清空对话',
@@ -1278,6 +1283,11 @@ const translations: Record<Locale, Record<string, string>> = {
     'agent.delete_message': 'Delete message',
     // Slash commands (#7137)
     'agent.cmd_unknown': 'Unknown command: {cmd}. Type /help to see available commands.',
+    'agent.attach': 'Attach files',
+    'agent.attach_remove': 'Remove attachment',
+    'agent.attach_rejected': 'Some files were rejected: only text/Markdown/CSV/JSON (up to 64 KiB) and PNG/JPEG/GIF/WebP images (up to 2 MiB) are accepted.',
+    'agent.attach_limit': 'At most {n} attachments per message.',
+    'agent.attach_failed': 'Attachment upload failed; try again.',
     'agent.cmd_help_header': 'Available commands:',
     'agent.cmd_help_help': 'show this list of commands',
     'agent.cmd_help_clear': 'clear the conversation',

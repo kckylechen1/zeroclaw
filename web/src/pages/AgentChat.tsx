@@ -1,11 +1,18 @@
 import { memo, useState, useEffect, useRef, useCallback } from 'react';
 import { Navigate, useNavigate, useParams } from 'react-router-dom';
-import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, BarChart2, Quote } from 'lucide-react';
+import { Send, Square, Bot, User, AlertCircle, Copy, Check, X, Trash2, Minimize2, Maximize2, ChevronDown, Wrench, BarChart2, Quote, Paperclip } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useAgent, type ChatMessage } from '@/contexts/AgentContext';
 import { useDraft } from '@/hooks/useDraft';
 import { t } from '@/lib/i18n';
+import {
+  ATTACHMENT_ACCEPTED_MIME,
+  ATTACHMENT_MAX_PER_MESSAGE,
+  attachmentMaxBytes,
+  uploadAttachment,
+} from '@/lib/api';
+import { getOrCreateSessionId } from '@/lib/ws';
 import { pinnedExemplarDraft, type ChatRow } from '@/lib/review';
 import {
   COMMANDS,
@@ -127,6 +134,54 @@ export function AgentChatInner({
 
   const { draft, saveDraft, clearDraft } = useDraft(`${DRAFT_KEY_PREFIX}.${agentAlias}`);
   const [input, setInput] = useState(draft);
+  const [attachments, setAttachments] = useState<{ id: string; name: string }[]>([]);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /** Upload selected files as scoped attachments. Invalid types/sizes and
+   * files past the per-message cap are rejected client-side with a notice;
+   * server-side scope/authorization remains the enforcing boundary. */
+  const addAttachmentFiles = useCallback(async (list: FileList | File[]) => {
+    setAttachmentError(null);
+    // Mirror the server's per-type caps client-side: images up to 2 MiB,
+    // text/JSON up to 64 KiB, nothing empty — a file the server would 4xx
+    // never gets a "try again" message that cannot succeed.
+    const accepted = Array.from(list).filter((file) => {
+      if (!ATTACHMENT_ACCEPTED_MIME.includes(file.type as never)) return false;
+      if (file.size === 0) return false;
+      if (file.size > attachmentMaxBytes(file.type)) return false;
+      return true;
+    });
+    if (accepted.length !== Array.from(list).length) {
+      setAttachmentError(t('agent.attach_rejected'));
+    }
+    if (accepted.length === 0) return;
+    setUploadingAttachment(true);
+    // Concurrent batches are blocked while uploading (paperclip disabled,
+    // drop guarded), so the closure count is authoritative for this batch.
+    let count = attachments.length;
+    try {
+      const sessionId = getOrCreateSessionId(agentAlias);
+      for (const file of accepted) {
+        if (count >= ATTACHMENT_MAX_PER_MESSAGE) {
+          setAttachmentError(t('agent.attach_limit').replace('{n}', String(ATTACHMENT_MAX_PER_MESSAGE)));
+          break;
+        }
+        const info = await uploadAttachment(sessionId, agentAlias, file);
+        count += 1;
+        // Persist each success immediately: a later failure must not
+        // discard handles the server already accepted (they expire on
+        // their own after the TTL).
+        setAttachments((prev) => [...prev, { id: info.id, name: info.file_name }]);
+      }
+    } catch (e) {
+      setAttachmentError(t('agent.attach_failed'));
+    } finally {
+      setUploadingAttachment(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }, [agentAlias, attachments.length]);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   // Slash-command autocomplete popover (#7137). Shown while the input begins
   // with a single '/' and the token still matches at least one command.
@@ -262,10 +317,17 @@ export function AgentChatInner({
       if (!connected) return;
       // `//` is the documented escape for a literal leading slash (#7223);
       // strip one `/` so `//foo` is sent to the agent as `/foo`.
-      sendMessage(trimmed.startsWith('//') ? trimmed.slice(1) : trimmed);
+      // Attachments ride the same frame; the text stays the caption the
+      // agent reads first.
+      sendMessage(
+        trimmed.startsWith('//') ? trimmed.slice(1) : trimmed,
+        attachments.length > 0 ? attachments.map((a) => a.id) : undefined,
+      );
     }
     setShowCommandHint(false);
     setInput('');
+    setAttachments([]);
+    setAttachmentError(null);
     clearDraft();
     if (inputRef.current) {
       inputRef.current.style.height = 'auto';
@@ -613,12 +675,57 @@ export function AgentChatInner({
           </div>
         )}
         <div className="flex items-end gap-3 max-w-4xl mx-auto">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={ATTACHMENT_ACCEPTED_MIME.join(',')}
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files && e.target.files.length > 0) {
+                void addAttachmentFiles(e.target.files);
+              }
+            }}
+          />
+          {(attachments.length > 0 || attachmentError) && (
+            <div className="flex flex-wrap items-center gap-1 px-1 pb-1 text-xs">
+              {attachments.map((a) => (
+                <span
+                  key={a.id}
+                  className="inline-flex max-w-[200px] items-center gap-1 rounded-full border border-pc-border bg-pc-input px-2 py-0.5 text-pc-text"
+                >
+                  <span className="truncate">{a.name}</span>
+                  <button
+                    type="button"
+                    aria-label={t('agent.attach_remove')}
+                    onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))}
+                    className="text-pc-text-muted hover:text-pc-text"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+              {attachmentError && (
+                <span className="text-red-500" role="alert">{attachmentError}</span>
+              )}
+            </div>
+          )}
           <textarea
             ref={inputRef}
             rows={1}
             value={input}
             onChange={handleTextareaChange}
             onKeyDown={handleKeyDown}
+            onDragOver={(e) => {
+              if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+            }}
+            onDrop={(e) => {
+              if (uploadingAttachment) return;
+              if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                e.preventDefault();
+                void addAttachmentFiles(e.dataTransfer.files);
+              }
+            }}
             onCompositionStart={() => { isComposingRef.current = true; }}
             onCompositionEnd={() => { isComposingRef.current = false; }}
             placeholder={!connected
@@ -630,6 +737,17 @@ export function AgentChatInner({
             className="flex-1 px-4 text-sm resize-none rounded-[var(--radius-md)] border border-pc-border bg-pc-input text-pc-text placeholder:text-pc-text-muted transition-colors focus:outline-none focus:border-pc-accent focus:ring-2 focus:ring-pc-accent/30 disabled:opacity-40"
             style={{ minHeight: '40px', maxHeight: '200px', paddingTop: '9px', paddingBottom: '9px' }}
           />
+          <Button
+            variant="ghost"
+            size="md"
+            disabled={!connected || typing || uploadingAttachment}
+            onClick={() => fileInputRef.current?.click()}
+            aria-label={t('agent.attach')}
+            title={t('agent.attach')}
+            className="flex-shrink-0 w-10 px-0"
+          >
+            <Paperclip className={`h-4 w-4 ${uploadingAttachment ? 'animate-pulse' : ''}`} />
+          </Button>
           {typing ? (
             <Button
               variant="danger"
