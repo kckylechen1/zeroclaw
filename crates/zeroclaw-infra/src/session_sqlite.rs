@@ -25,6 +25,10 @@ const REQUEST_RECEIPTS_PER_SESSION: i64 = 256;
 /// all receipts are protected, new inputs fail closed; no session data is touched.
 const REQUEST_RECEIPTS_GLOBAL_CAP: i64 = 16384;
 
+/// How long opening the session store waits on another connection that holds
+/// the database.
+const OPEN_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// SQLite-backed session store with FTS5 and WAL mode.
 pub struct SqliteSessionBackend {
     conn: Mutex<Connection>,
@@ -32,6 +36,13 @@ pub struct SqliteSessionBackend {
 
 impl SqliteSessionBackend {
     /// Open or create the sessions database.
+    ///
+    /// The daemon's gateway, channels and bridge intake each open this
+    /// database when they start, so on a fresh data dir their first opens
+    /// race. The switch to WAL is retried while another opener holds the
+    /// file, and the schema and column migrations run in one IMMEDIATE
+    /// transaction: a later opener waits for the first and then finds every
+    /// column in place.
     pub fn new(workspace_dir: &Path) -> Result<Self> {
         let sessions_dir = workspace_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).context("Failed to create sessions directory")?;
@@ -39,16 +50,20 @@ impl SqliteSessionBackend {
 
         let mut conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open session DB: {}", db_path.display()))?;
+        conn.busy_timeout(OPEN_BUSY_TIMEOUT)
+            .context("Failed to set the session DB busy timeout")?;
 
+        Self::enable_wal(&conn)?;
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 5000;
+            "PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
              PRAGMA mmap_size = 4194304;",
         )?;
 
-        conn.execute_batch(
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("Failed to lock the session DB for schema setup")?;
+        tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_key TEXT NOT NULL,
@@ -106,23 +121,22 @@ impl SqliteSessionBackend {
         )
         .context("Failed to initialize session schema")?;
 
-        delegation::migrate_route_provenance(&mut conn)?;
-        bridge_intake::initialize(&conn)?;
+        bridge_intake::initialize(&tx)?;
 
         // Historical messages have no attributable ingress source. Leave
         // them NULL rather than guessing from the session's latest sender.
-        let has_source: bool = conn.query_row(
+        let has_source: bool = tx.query_row(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('sessions') WHERE name = 'message_source'",
             [],
             |row| row.get(0),
         )?;
         if !has_source {
-            conn.execute("ALTER TABLE sessions ADD COLUMN message_source TEXT", [])
+            tx.execute("ALTER TABLE sessions ADD COLUMN message_source TEXT", [])
                 .context("Failed to add session message source")?;
         }
 
         // Migration: add name column to existing databases
-        let has_name: bool = conn
+        let has_name: bool = tx
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('session_metadata') WHERE name = 'name'",
                 [],
@@ -130,11 +144,11 @@ impl SqliteSessionBackend {
             )
             .unwrap_or(false);
         if !has_name {
-            let _ = conn.execute("ALTER TABLE session_metadata ADD COLUMN name TEXT", []);
+            let _ = tx.execute("ALTER TABLE session_metadata ADD COLUMN name TEXT", []);
         }
 
         // Migration: add state tracking columns
-        let has_state: bool = conn
+        let has_state: bool = tx
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('session_metadata') WHERE name = 'state'",
                 [],
@@ -142,19 +156,19 @@ impl SqliteSessionBackend {
             )
             .unwrap_or(false);
         if !has_state {
-            let _ = conn.execute(
+            let _ = tx.execute(
                 "ALTER TABLE session_metadata ADD COLUMN state TEXT NOT NULL DEFAULT 'idle'",
                 [],
             );
-            let _ = conn.execute("ALTER TABLE session_metadata ADD COLUMN turn_id TEXT", []);
-            let _ = conn.execute(
+            let _ = tx.execute("ALTER TABLE session_metadata ADD COLUMN turn_id TEXT", []);
+            let _ = tx.execute(
                 "ALTER TABLE session_metadata ADD COLUMN turn_started_at TEXT",
                 [],
             );
         }
 
         // Migration: add agent_alias column for per-agent attribution
-        let has_agent_alias: bool = conn
+        let has_agent_alias: bool = tx
             .query_row(
                 "SELECT COUNT(*) > 0 FROM pragma_table_info('session_metadata') WHERE name = 'agent_alias'",
                 [],
@@ -162,11 +176,11 @@ impl SqliteSessionBackend {
             )
             .unwrap_or(false);
         if !has_agent_alias {
-            let _ = conn.execute(
+            let _ = tx.execute(
                 "ALTER TABLE session_metadata ADD COLUMN agent_alias TEXT",
                 [],
             );
-            let _ = conn.execute(
+            let _ = tx.execute(
                 "CREATE INDEX IF NOT EXISTS idx_session_metadata_agent_alias \
                  ON session_metadata(agent_alias)",
                 [],
@@ -187,7 +201,7 @@ impl SqliteSessionBackend {
                 "ALTER TABLE session_metadata ADD COLUMN sender_id TEXT",
             ),
         ] {
-            let present: bool = conn
+            let present: bool = tx
                 .query_row(
                     "SELECT COUNT(*) > 0 FROM pragma_table_info('session_metadata') \
                      WHERE name = ?1",
@@ -196,29 +210,62 @@ impl SqliteSessionBackend {
                 )
                 .unwrap_or(false);
             if !present {
-                let _ = conn.execute(ddl, []);
+                let _ = tx.execute(ddl, []);
             }
         }
-        let _ = conn.execute(
+        let _ = tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_session_metadata_channel_id \
              ON session_metadata(channel_id)",
             [],
         );
-        let _ = conn.execute(
+        let _ = tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_session_metadata_room_id \
              ON session_metadata(room_id)",
             [],
         );
-        let _ = conn.execute(
+        let _ = tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_session_metadata_sender_id \
              ON session_metadata(sender_id)",
             [],
         );
 
+        tx.commit().context("Failed to commit the session schema")?;
+        // Opens its own IMMEDIATE transaction, so it runs after the schema
+        // transaction rather than inside it; idempotent for late openers.
+        delegation::migrate_route_provenance(&mut conn)
+            .context("Failed to migrate session schema")?;
+
         crate::sqlite_perms::harden_sqlite_owner_only(&db_path);
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Switch the database to WAL, retrying while another connection holds it.
+    ///
+    /// A second first-time opener of a fresh file can get `SQLITE_BUSY` from
+    /// the journal-mode change at once: SQLite skips the busy handler where
+    /// waiting could deadlock, so the busy timeout alone does not cover it.
+    fn enable_wal(conn: &Connection) -> Result<()> {
+        let deadline = std::time::Instant::now() + OPEN_BUSY_TIMEOUT;
+        let mut pause = std::time::Duration::from_millis(5);
+        loop {
+            match conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
+                row.get::<_, String>(0)
+            }) {
+                Ok(_) => return Ok(()),
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.code == rusqlite::ErrorCode::DatabaseBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(std::time::Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(error).context("Failed to switch the session DB to WAL");
+                }
+            }
+        }
     }
 
     fn append_message(
@@ -1144,6 +1191,41 @@ impl SessionBackend for SqliteSessionBackend {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// The daemon's gateway, channels and bridge intake open the store
+    /// together when it starts. On a fresh data dir every one of them must
+    /// get a working store, not a lost `ALTER` race or a busy journal-mode
+    /// switch.
+    #[test]
+    fn concurrent_first_openers_of_a_fresh_store_all_succeed() {
+        const TRIALS: usize = 40;
+        const OPENERS: usize = 4;
+        for trial in 0..TRIALS {
+            let tmp = TempDir::new().unwrap();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(OPENERS));
+            let openers: Vec<_> = (0..OPENERS)
+                .map(|opener| {
+                    let (dir, start) = (tmp.path().to_path_buf(), std::sync::Arc::clone(&start));
+                    std::thread::spawn(move || {
+                        start.wait();
+                        let backend = SqliteSessionBackend::new(&dir).map_err(|error| {
+                            format!("trial {trial}, opener {opener}: {error:#}")
+                        })?;
+                        backend
+                            .append(&format!("opener-{opener}"), &ChatMessage::user("hello"))
+                            .map_err(|error| {
+                                format!("trial {trial}, opener {opener} append: {error:#}")
+                            })
+                    })
+                })
+                .collect();
+            for opener in openers {
+                opener.join().unwrap().unwrap();
+            }
+            let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+            assert_eq!(backend.list_sessions().len(), OPENERS);
+        }
+    }
 
     #[test]
     fn round_trip_sqlite() {
