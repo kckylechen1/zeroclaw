@@ -27,6 +27,7 @@ use zeroclaw_infra::session_backend::RequestReceipt;
 mod device;
 pub(crate) mod intake;
 mod surface;
+pub(crate) mod turn_control;
 
 /// Default wall-clock budget for the operator to answer an
 /// `approval_request` frame before the channel auto-denies. Mirrors the
@@ -598,6 +599,7 @@ async fn handle_socket(
     // client, during turns as well.
     let mut broadcast_rx = state.event_tx.subscribe();
     let mut next_text = first_msg_fallback;
+    let mut turn_negotiated = false;
 
     loop {
         let text = match next_text.take() {
@@ -617,11 +619,19 @@ async fn handle_socket(
                     match frame {
                         Ok(frame) => {
                             if !device::permitted(&state, &scope, &agent_alias, "chat") { break; }
-                            if sender.send(Message::Text(frame.to_string().into())).await.is_err() {
+                            if turn_negotiated && !serde_json::from_str::<serde_json::Value>(&frame).is_ok_and(|frame| {
+                                matches!(frame["type"].as_str(), Some("approval_request" | "question" | "answer_ack"))
+                            }) { continue; }
+                            if turn_negotiated && !question_answer_authorized(&state, &scope) { break; }
+                            if !turn_control::send(&mut sender, Message::Text(frame.to_string().into()), turn_negotiated).await {
                                 break;
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            if turn_negotiated {
+                                let _ = turn_control::send(&mut sender, Message::Text(turn_control::gap().to_string().into()), true).await;
+                                break;
+                            }
                             ::zeroclaw_log::record!(
                                 WARN,
                                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -637,14 +647,36 @@ async fn handle_socket(
                     continue;
                 }
 
+                // Negotiated output cannot consume the legacy ring's capacity.
+                frame = subscription.control_frames.recv(), if turn_negotiated => {
+                    if !device::permitted(&state, &scope, &agent_alias, "chat")
+                        || !question_answer_authorized(&state, &scope) { break; }
+                    match frame {
+                        Ok(frame) => {
+                            if !serde_json::from_str::<serde_json::Value>(&frame).is_ok_and(|frame| {
+                                state.ws_conversations.turn_control.visible(subscription.conversation.key(), scope.auth_subject.as_deref(), &frame)
+                            }) { continue; }
+                            if !turn_control::send(&mut sender, Message::Text(frame.to_string().into()), true).await { break; }
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let _ = turn_control::send(&mut sender, Message::Text(turn_control::gap().to_string().into()), true).await;
+                            break;
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                    continue;
+                }
+
                 // ── Broadcast event addressed to this session ─────────
                 event = broadcast_rx.recv() => {
                     if !device::permitted(&state, &scope, &agent_alias, "chat") { break; }
                     if let Ok(event) = event
                         && event_matches_session(&event, &scope.session_id)
                         && !is_observability_telemetry(&event)
+                        && (!turn_negotiated || !matches!(event["type"].as_str(), Some("chunk" | "done" | "aborted" | "error")))
                     {
-                        let _ = sender.send(Message::Text(event.to_string().into())).await;
+                        if turn_negotiated && !question_answer_authorized(&state, &scope) { break; }
+                        if !turn_control::send(&mut sender, Message::Text(event.to_string().into()), turn_negotiated).await { break; }
                     }
                     continue;
                 }
@@ -652,13 +684,16 @@ async fn handle_socket(
         };
 
         if !device::permitted(&state, &scope, &agent_alias, "chat") {
-            let _ = sender
-                .send(Message::Text(
+            let _ = turn_control::send(
+                &mut sender,
+                Message::Text(
                     device::refusal("BRIDGE_OPERATION_DENIED")
                         .to_string()
                         .into(),
-                ))
-                .await;
+                ),
+                turn_negotiated,
+            )
+            .await;
             break;
         }
 
@@ -667,7 +702,10 @@ async fn handle_socket(
         {
             // Multi-instance shape: presence in the map = enabled.
             let duplex_enabled = !state.config.read().channels.voice_duplex.is_empty();
-            if duplex_enabled && device::permitted(&state, &scope, &agent_alias, "voice") {
+            if !turn_negotiated
+                && duplex_enabled
+                && device::permitted(&state, &scope, &agent_alias, "voice")
+            {
                 if let Some(voice_event) = crate::voice_duplex::try_parse_voice_event(&text) {
                     if let Some(error_frame) = crate::voice_duplex::handle_voice_event(voice_event)
                     {
@@ -680,14 +718,38 @@ async fn handle_socket(
             }
         }
 
-        let (reply, start) = handle_client_text(&state, &subscription.conversation, &scope, &text);
-        // The ACK goes out before the turn starts, so it precedes the
-        // turn's frames on this socket.
-        if let Some(reply) = reply {
-            let _ = sender.send(Message::Text(reply.to_string().into())).await;
-        }
+        let extension = turn_negotiated
+            || serde_json::from_str::<serde_json::Value>(&text)
+                .is_ok_and(|frame| frame["type"] == "turn_control");
+        let (reply, start) = if extension {
+            turn_control::handle(
+                &state,
+                &subscription.conversation,
+                &scope,
+                &mut turn_negotiated,
+                &text,
+            )
+        } else {
+            handle_client_text(&state, &subscription.conversation, &scope, &text)
+        };
+        // Acceptance is independent of delivering its ACK. Even a failed/slow
+        // writer must release the admitted claim to execution and recovery.
+        let sent = match reply {
+            Some(reply) => {
+                turn_control::send(
+                    &mut sender,
+                    Message::Text(reply.to_string().into()),
+                    turn_negotiated,
+                )
+                .await
+            }
+            None => true,
+        };
         if let Some(claim) = start {
             start_ws_turns(&state, &subscription.conversation, &scope, claim);
+        }
+        if turn_negotiated && !sent {
+            break;
         }
     }
 }
@@ -1492,7 +1554,13 @@ async fn run_ws_turns(
                 let admitted = if !permitted {
                     let mut denied = device::refusal("BRIDGE_OPERATION_DENIED");
                     stamp_request_id(&mut denied, request_id.as_deref());
-                    conversation.publish(&denied);
+                    turn_control::publish(
+                        &state,
+                        &conversation,
+                        request_id.as_deref(),
+                        &turn_id,
+                        &denied,
+                    );
                     Ok(false)
                 } else {
                     intake::begin(&state, &conversation, &scope, intake.as_ref())
@@ -1531,7 +1599,13 @@ async fn run_ws_turns(
                     "code": session_queue_ws_error_code(&e)
                 });
                 stamp_request_id(&mut frame, request_id.as_deref());
-                conversation.publish(&frame);
+                turn_control::publish(
+                    &state,
+                    &conversation,
+                    request_id.as_deref(),
+                    &turn_id,
+                    &frame,
+                );
                 (Vec::new(), "error")
             }
         };
@@ -1546,6 +1620,13 @@ async fn run_ws_turns(
         } else if let Some(id) = &request_id {
             set_request_state(&state, &conversation, &scope.session_key, id, outcome);
         }
+        turn_control::finish(
+            &state,
+            &conversation,
+            request_id.as_deref(),
+            &turn_id,
+            outcome,
+        );
         if !late.is_empty()
             && let Submitted::Start(mut claim) = conversation.submit(late.join("\n\n"))
         {
@@ -1983,7 +2064,7 @@ async fn process_chat_message(
                         }
                         other => turn_event_ws_frame(other, &leak_detection),
                     };
-                    conversation.publish(&ws_msg);
+                    turn_control::publish(state, conversation, request_id, turn_id, &ws_msg);
                 }
             }
         }
@@ -2070,7 +2151,7 @@ async fn process_chat_message(
         // Inform the client the turn was aborted
         let mut aborted = serde_json::json!({ "type": "aborted" });
         stamp_request_id(&mut aborted, request_id);
-        conversation.publish(&aborted);
+        turn_control::publish(state, conversation, request_id, turn_id, &aborted);
 
         if let Some(ref backend) = state.session_backend
             && backend.session_exists(session_key)
@@ -2210,7 +2291,7 @@ async fn process_chat_message(
             });
             let mut done = done;
             stamp_request_id(&mut done, request_id);
-            conversation.publish(&done);
+            turn_control::publish(state, conversation, request_id, turn_id, &done);
 
             // Set session state to idle
             if let Some(ref backend) = state.session_backend {
@@ -2289,7 +2370,7 @@ async fn process_chat_message(
             });
             let mut err = err;
             stamp_request_id(&mut err, request_id);
-            conversation.publish(&err);
+            turn_control::publish(state, conversation, request_id, turn_id, &err);
 
             // Broadcast error event
             let _ = state.event_tx.send(serde_json::json!({

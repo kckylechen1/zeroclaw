@@ -101,6 +101,78 @@ WebSocket handshake has no equivalent surface register. This bounded extension
 implements the surface slice of #377/#380; surface-based recall and worker
 projection rules remain separate work.
 
+### Non-Telegram turn controls (version 1)
+
+After the ordinary authenticated `connect` / `connected` exchange, opt in with
+`{"type":"turn_control","version":1,"op":"negotiate"}`. Require `turn_ready`
+with the same version before sending any controlled input. Unsupported versions
+fail closed; never fall back to an unscoped cancel or invent a Telegram source.
+Negotiation changes transport semantics, not the authenticated agent/session or
+any permission. Restricted bridges still need `chat` and, for cancellation,
+`cancel`; they never acquire approval authority.
+
+Controlled requests use `type: "turn_control"`, `version: 1`, the negotiated
+`epoch`, a client-generated UUID `request_id`, and one of these operations:
+
+| Operation | Additional fields | Meaning |
+| --- | --- | --- |
+| `message` | `content` | Claim the idle Conversation turn; busy refuses without steering or queuing. |
+| `resume` | `after_seq` | Recover the retained binding and events after this sequence. Zero starts from the beginning. |
+| `cancel` | `turn_id` | Cancel only the exact known request/turn pair; acknowledgement is not completed cancellation. |
+
+A request ID names immutable input in its authenticated principal/session/agent
+scope. Retry the same ID and body after a lost ACK; do not generate a fresh ID
+for an uncertain result. A conflicting body is refused. Disconnect only detaches
+this subscriber. It does not cancel the shared turn, and execution does not wait
+for a successful socket ACK.
+
+`turn_event` wraps the original event with `epoch`, `request_id`, `turn_id` and
+monotonic `seq`. The original `done` is a payload event; only the extension's
+explicit terminal settles its turn. Consumers must track every sequence from the
+start (or an explicitly reconciled replay cursor) and must not claim complete
+stream delivery from a terminal alone. Replayed events can overlap live events;
+deduplicate by the complete identity and sequence.
+
+The `turn_ready.limits` object advertises fixed bounds: 256 accepted requests
+per gateway process epoch (global across principals/sessions), 64 KiB input,
+64 KiB / 128 retained payload events per request, and a five-second write
+timeout. Entries are not evicted: exhaustion returns `REQUEST_CAPACITY` without
+execution. Repeated requests and recovery remain available at capacity. A
+planned gateway restart creates a new epoch; reconcile outstanding work first,
+and never submit an unknown old request as new work merely to bypass this cap.
+This initial bounded implementation is not an unlimited-lifetime intake service.
+
+Each managed Conversation has a separate 64-frame extension broadcast buffer;
+the original 1024-frame legacy buffer is unchanged. Falling behind reports
+`turn_gap` and closes the subscription. A socket write timeout closes it; clients
+must treat any close before a verified contiguous terminal as incomplete and
+resume. Oversized output becomes an explicit `OUTPUT_TOO_LARGE` gap event.
+`stream_complete: false` on the authoritative terminal means retained replay is
+incomplete even if a particular live reader received more. `true` does not
+replace client-side sequence verification. A replay response carries `gap`,
+`last_seq`, `terminal` and retained `events`; zero retained events never proves
+that nothing executed. `turn_ack.status: unknown` and `EPOCH_MISMATCH` are
+recovery failures, not execution permits.
+
+Negotiation does not adopt an already-running legacy or Telegram request.
+Unnegotiated same-session peers can still steer a managed turn under the legacy
+contract. The extension does not grant exclusive control of the conversation.
+
+Recovery is bounded and process-local. The existing session receipt remains the
+acceptance owner; ConversationHub owns only bounded correlation/replay data.
+Successful session deletion redacts retained input/output and leaves only a
+non-content tombstone preventing the same request from executing again.
+An accepted ACK does not promise a durable input body or restart resumption.
+Missing or overflowed replay reports unknown/gap. A different process epoch
+invalidates old controls. Neither unknown nor gap authorizes automatic replay of
+the original effects. These controls promise neither durable streaming nor
+exactly-once external effects. No session ledger migration is introduced.
+
+Unnegotiated clients keep legacy framing, busy steering and cancellation behavior.
+Stop extension clients before reverting the gateway extension. Retain the session
+ledger; do not rebuild it to recover transport state. This is a prerequisite for
+an adapter, not an adapter implementation or a change to Telegram intake.
+
 ### Turn-bound bridge stop (control version 1)
 
 The Telegram bridge requests `control_version: 1` on its existing

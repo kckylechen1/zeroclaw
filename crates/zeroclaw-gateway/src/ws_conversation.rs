@@ -147,6 +147,7 @@ pub(crate) struct Conversation<A> {
     /// The agent state. A turn holds this lock for its whole duration.
     pub(crate) agent: tokio::sync::Mutex<A>,
     frames: FrameSink,
+    control_frames: broadcast::Sender<Frame>,
     pub(crate) pending_approvals: PendingApprovals,
     pub(crate) questions: Arc<super::ws_question::Questions>,
     turn: parking_lot::Mutex<Option<ActiveTurn>>,
@@ -166,6 +167,7 @@ impl<A> Conversation<A> {
             key,
             agent: tokio::sync::Mutex::new(agent),
             frames,
+            control_frames: broadcast::channel(64).0,
             pending_approvals,
             questions,
             turn: parking_lot::Mutex::new(None),
@@ -187,6 +189,12 @@ impl<A> Conversation<A> {
     /// Send a frame to every current subscriber.
     pub(crate) fn publish(&self, frame: &serde_json::Value) {
         self.frames.publish(frame);
+    }
+
+    /// Extension traffic has a separate bounded ring, so opting in cannot
+    /// reduce the legacy subscriber's existing frame retention.
+    pub(crate) fn publish_control(&self, frame: &serde_json::Value) {
+        let _ = self.control_frames.send(Arc::from(frame.to_string()));
     }
 
     /// Start a turn if none is running, otherwise steer the running one.
@@ -352,6 +360,8 @@ type Slot<A> = Arc<OnceCell<Arc<Conversation<A>>>>;
 
 /// Live conversations keyed by session key.
 pub struct ConversationHub<A> {
+    /// Bounded process-epoch request/turn replay; execution stays in Conversation.
+    pub(crate) turn_control: crate::ws::turn_control::Store,
     /// Canonical bounded ephemeral payload bytes for this gateway.
     pub(crate) attachments: crate::api_attachments::Store,
     /// Scheduling ownership in this process, not a copy of durable input state.
@@ -367,6 +377,7 @@ impl<A> Default for ConversationHub<A> {
         Self {
             slots: parking_lot::Mutex::new(HashMap::new()),
             attachments: crate::api_attachments::Store::default(),
+            turn_control: crate::ws::turn_control::Store::default(),
             intake: crate::ws::intake::Scheduling::default(),
             requests: parking_lot::Mutex::default(),
         }
@@ -479,12 +490,14 @@ impl<A> ConversationHub<A> {
                 .subscribers
                 .fetch_add(1, Ordering::AcqRel);
             let frames = conversation.frames.frames.subscribe();
+            let control_frames = conversation.control_frames.subscribe();
             drop(slots);
             return Ok((
                 Subscription {
                     hub: Arc::clone(self),
                     conversation,
                     frames,
+                    control_frames,
                 },
                 built,
             ));
@@ -526,6 +539,7 @@ pub(crate) struct Subscription<A> {
     hub: Arc<ConversationHub<A>>,
     pub(crate) conversation: Arc<Conversation<A>>,
     pub(crate) frames: broadcast::Receiver<Frame>,
+    pub(crate) control_frames: broadcast::Receiver<Frame>,
 }
 
 impl<A> Drop for Subscription<A> {

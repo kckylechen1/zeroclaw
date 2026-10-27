@@ -1706,7 +1706,15 @@ pub async fn handle_api_session_delete(
     }
 
     match backend.delete_session(&session_key) {
-        Ok(true) => Json(serde_json::json!({"deleted": true, "session_id": id})).into_response(),
+        Ok(true) => {
+            // The backend call has released its lock before the transport
+            // journal is redacted. Preserve only replay-prevention tombstones.
+            state
+                .ws_conversations
+                .turn_control
+                .redact_session(&session_key);
+            Json(serde_json::json!({"deleted": true, "session_id": id})).into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Session not found"})),
