@@ -24,6 +24,7 @@ use zeroclaw_api::channel::ChannelApprovalResponse;
 use zeroclaw_api::chat_surface::ChatSurface;
 use zeroclaw_infra::session_backend::RequestReceipt;
 
+mod device;
 pub(crate) mod intake;
 mod surface;
 
@@ -142,6 +143,13 @@ pub async fn handle_ws_chat(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if !device::authenticated_mode(&state, &state.config.read()) {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(device::refusal("BRIDGE_BINDING_REJECTED")),
+        )
+            .into_response();
+    }
     // Auth: check header, subprotocol, then query param (precedence order). On
     // success derive a STABLE transport-authenticated subject (the paired-token
     // hash) so a required-group approval policy can be satisfied over WS; an
@@ -199,7 +207,7 @@ pub async fn handle_ws_chat(
         let hash = zeroclaw_config::tokens::hash_token(presented);
         (!presented.is_empty() && state.pairing.tokens().contains(&hash)).then_some(hash)
     };
-    let bridge_scope = bridge_scope.map(|(_, scope)| scope);
+    let bridge_scope = bridge_scope.map(|(name, initial)| device::Binding { name, initial });
 
     // Echo Sec-WebSocket-Protocol if the client requests our sub-protocol.
     // Absence is allowed: `/ws/chat` is not fail-closed on a missing token.
@@ -230,6 +238,19 @@ pub async fn handle_ws_chat(
             )
                 .into_response();
         }
+    }
+
+    if let Some(binding) = &bridge_scope
+        && (!params.session_id.as_deref().is_some_and(|session| {
+            binding.allows(&state.config.read(), &agent_alias, session, "chat")
+        }) || (binding.restricted()
+            && (params.cwd.is_some() || params.workspace_dir.is_some())))
+    {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(device::refusal("BRIDGE_BINDING_REJECTED")),
+        )
+            .into_response();
     }
 
     let surface = match surface::resolve(None, params.surface.as_deref()) {
@@ -299,7 +320,7 @@ async fn handle_socket(
     // gate can be satisfied by an identified WS caller.
     auth_subject: Option<String>,
     // Set when a bridge token opened the socket: the sessions it may use.
-    bridge_scope: Option<zeroclaw_config::schema::GatewayBridgeConfig>,
+    bridge_scope: Option<device::Binding>,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -308,6 +329,30 @@ async fn handle_socket(
     let session_key = format!("{GW_SESSION_PREFIX}{session_id}");
     // Match the sanitized form persisted by memory backend migrations.
     let mut memory_session_id = zeroclaw_api::session_keys::sanitize_session_key(&session_id);
+
+    let restricted = bridge_scope
+        .as_ref()
+        .is_some_and(device::Binding::restricted);
+    if let Some(binding) = &bridge_scope {
+        let alias_matches = !restricted
+            || state.session_backend.as_ref().is_none_or(|backend| {
+                backend
+                    .get_session_agent_alias(&session_key)
+                    .is_ok_and(|stored| stored.is_none_or(|alias| alias == agent_alias))
+            });
+        if !alias_matches
+            || !binding.allows(&state.config.read(), &agent_alias, &session_id, "chat")
+        {
+            let _ = sender
+                .send(Message::Text(
+                    device::refusal("BRIDGE_BINDING_REJECTED")
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    }
 
     // Hydrate session metadata from persistence (if available). Agent
     // construction is deferred until after the optional `connect` frame so the
@@ -324,12 +369,14 @@ async fn handle_socket(
             stored_messages = messages;
             resumed = true;
         }
-        effective_name = stamp_session(
-            backend.as_ref(),
-            &session_key,
-            &agent_alias,
-            session_name.as_deref(),
-        );
+        if !restricted {
+            effective_name = stamp_session(
+                backend.as_ref(),
+                &session_key,
+                &agent_alias,
+                session_name.as_deref(),
+            );
+        }
     }
 
     // Send session_start message to client
@@ -354,6 +401,21 @@ async fn handle_socket(
     if let Some(first) = receiver.next().await {
         match first {
             Ok(Message::Text(text)) => {
+                if restricted
+                    && let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text)
+                    && frame["type"] == "connect"
+                    && (!device::connect_matches(&frame, &agent_alias, &session_id)
+                        || serde_json::from_value::<ConnectParams>(frame).is_err())
+                {
+                    let _ = sender
+                        .send(Message::Text(
+                            device::refusal("BRIDGE_BINDING_REJECTED")
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+                    return;
+                }
                 if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text)
                     && frame["type"] == "connect"
                     && surface::connect_value(surface, &frame).is_err()
@@ -371,7 +433,7 @@ async fn handle_socket(
                         surface = cp.surface.or(surface);
                         ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"session_id": cp.session_id, "device_name": cp.device_name, "capabilities": cp.capabilities, "cwd": cp.cwd})), "WebSocket connect params received");
                         if let (Some(sid), Some(scope)) = (&cp.session_id, &bridge_scope)
-                            && !scope.allows_session(sid)
+                            && !scope.initial.allows_session(sid)
                         {
                             let err = serde_json::json!({
                                 "type": "error",
@@ -416,6 +478,23 @@ async fn handle_socket(
             Ok(Message::Close(_)) | Err(_) => return,
             _ => {}
         }
+    }
+
+    // Recheck after the asynchronous handshake, before stamping or constructing an Agent.
+    if let Some(binding) = &bridge_scope
+        && !binding.allows(&state.config.read(), &agent_alias, &session_id, "chat")
+    {
+        let _ = sender
+            .send(Message::Text(
+                device::refusal("BRIDGE_BINDING_REJECTED")
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
+    if restricted && let Some(backend) = &state.session_backend {
+        stamp_session(backend.as_ref(), &session_key, &agent_alias, None);
     }
 
     let session_cwd = match resolve_ws_session_cwd(requested_cwd.as_deref(), &config, &agent_alias)
@@ -511,6 +590,7 @@ async fn handle_socket(
         session_id,
         auth_subject,
         surface,
+        bridge: bridge_scope,
     };
 
     // Subscribe to the shared broadcast channel so events addressed to this
@@ -536,6 +616,7 @@ async fn handle_socket(
                 frame = subscription.frames.recv() => {
                     match frame {
                         Ok(frame) => {
+                            if !device::permitted(&state, &scope, &agent_alias, "chat") { break; }
                             if sender.send(Message::Text(frame.to_string().into())).await.is_err() {
                                 break;
                             }
@@ -558,6 +639,7 @@ async fn handle_socket(
 
                 // ── Broadcast event addressed to this session ─────────
                 event = broadcast_rx.recv() => {
+                    if !device::permitted(&state, &scope, &agent_alias, "chat") { break; }
                     if let Ok(event) = event
                         && event_matches_session(&event, &scope.session_id)
                         && !is_observability_telemetry(&event)
@@ -569,12 +651,23 @@ async fn handle_socket(
             },
         };
 
+        if !device::permitted(&state, &scope, &agent_alias, "chat") {
+            let _ = sender
+                .send(Message::Text(
+                    device::refusal("BRIDGE_OPERATION_DENIED")
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            break;
+        }
+
         // ── Voice duplex event dispatch (gated by feature flag + runtime config) ──
         #[cfg(feature = "gateway-voice-duplex")]
         {
             // Multi-instance shape: presence in the map = enabled.
             let duplex_enabled = !state.config.read().channels.voice_duplex.is_empty();
-            if duplex_enabled {
+            if duplex_enabled && device::permitted(&state, &scope, &agent_alias, "voice") {
                 if let Some(voice_event) = crate::voice_duplex::try_parse_voice_event(&text) {
                     if let Some(error_frame) = crate::voice_duplex::handle_voice_event(voice_event)
                     {
@@ -615,6 +708,7 @@ struct WsTurnScope {
     // the socket that opened the conversation, if it was authenticated.
     auth_subject: Option<String>,
     surface: Option<ChatSurface>,
+    bridge: Option<device::Binding>,
 }
 
 /// Build the agent for a new shared conversation and wire its approval
@@ -908,6 +1002,14 @@ fn handle_client_text(
         Ok(v) => v,
         Err(e) => return error(format!("Invalid JSON: {e}"), "INVALID_JSON"),
     };
+    let alias = conversation
+        .key()
+        .rsplit_once('\u{1f}')
+        .map(|(_, alias)| alias)
+        .unwrap_or("");
+    if !device::permitted(state, scope, alias, device::frame_operation(&parsed)) {
+        return (Some(device::refusal("BRIDGE_OPERATION_DENIED")), None);
+    }
     match parsed["type"].as_str().unwrap_or("") {
         "source_resume" => intake::resume(state, conversation, scope, &parsed),
         "source_disposition" => intake::receive(state, conversation, scope, &parsed),
@@ -957,7 +1059,7 @@ fn handle_client_text(
                     "INVALID_APPROVAL_RESPONSE",
                 );
             }
-            // Any subscriber may answer; only the first answer counts.
+            // Only an operation-authorized subscriber may answer; first answer counts.
             if !conversation.resolve_approval(request_id, decision) {
                 ::zeroclaw_log::record!(
                     DEBUG,
@@ -1381,8 +1483,21 @@ async fn run_ws_turns(
         let (late, outcome) = match state.session_queue.acquire(&scope.session_key).await {
             Ok(_session_guard) => {
                 let mut session = conversation.agent.lock().await;
-                let admitted = intake::begin(&state, &conversation, &scope, intake.as_ref());
-                allow_resume = admitted.is_ok();
+                let alias = conversation
+                    .key()
+                    .rsplit_once('\u{1f}')
+                    .map(|(_, alias)| alias)
+                    .unwrap_or("");
+                let permitted = device::permitted(&state, &scope, alias, "chat");
+                let admitted = if !permitted {
+                    let mut denied = device::refusal("BRIDGE_OPERATION_DENIED");
+                    stamp_request_id(&mut denied, request_id.as_deref());
+                    conversation.publish(&denied);
+                    Ok(false)
+                } else {
+                    intake::begin(&state, &conversation, &scope, intake.as_ref())
+                };
+                allow_resume = permitted && admitted.is_ok();
                 if !admitted.is_ok_and(|started| started) {
                     conversation.finish_turn(generation);
                     // Legacy clients may already have received a steering
@@ -1396,7 +1511,7 @@ async fn run_ws_turns(
                         &conversation,
                         &mut session,
                         &scope,
-                        initial_claim && intake.is_none(),
+                        initial_claim && intake.is_none() && scope.bridge.is_none(),
                         original_input.as_deref(),
                         &input,
                         request_id.as_deref(),
@@ -2840,6 +2955,10 @@ mod tests {
         include!("ws/surface_tests.rs");
     }
 
+    mod device_tests {
+        include!("ws/device_tests.rs");
+    }
+
     struct SharedChat {
         vision: bool,
         state: AppState,
@@ -2869,6 +2988,7 @@ mod tests {
                     session_id: "shared".into(),
                     auth_subject: None,
                     surface: None,
+                    bridge: None,
                 },
                 gate: Arc::new(tokio::sync::Semaphore::new(0)),
                 seen: Arc::default(),
@@ -2975,6 +3095,7 @@ mod tests {
                 token_hash: owner_hash.clone(),
                 sessions: vec!["shared".into()],
                 session_prefix: None,
+                device: None,
             },
         );
         let port = super::super::ws_question::QuestionPort {
@@ -3013,6 +3134,7 @@ mod tests {
                 token_hash: chat.scope.auth_subject.clone().unwrap(),
                 sessions: vec!["shared".into()],
                 session_prefix: None,
+                device: None,
             },
         );
         assert!(chat.send(&a, answer.clone()).is_none());

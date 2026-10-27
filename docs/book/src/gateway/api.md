@@ -271,6 +271,81 @@ not a bridge token.
 - `/ws/bridge` accepts only bridge tokens, whether or not `require_pairing`
   is set. The bridge's identity comes from the token, never from the query.
 
+### Restricted device bridges
+
+A dedicated bridge credential can opt into a smaller `/ws/chat` contract:
+
+```toml
+[gateway.bridges.device_chat]
+token_hash = "<sha256-of-a-new-dedicated-bridge-token>"
+sessions = ["device-session"]
+
+[gateway.bridges.device_chat.device]
+agent = "device-agent" # must name a configured, enabled agent
+operations = ["chat"] # optionally also "answer" and "cancel"
+```
+
+The existing bridge configuration owns the credential and session scope. The
+optional `device` table binds one agent and explicitly permits operations.
+An omitted or empty `operations` list permits nothing, including attachment.
+Unknown operations or an unconfigured agent reject configuration validation.
+Omitting the entire `device` table preserves legacy owner-bridge behavior; it
+is **not** a safe way to disable a device credential.
+
+Device policies require `gateway.require_pairing = true`. The chat route also
+fails closed if its live pairing guard still allows anonymous access, including
+on already-open sockets after an incompatible policy change. Enable owner
+authentication and restart before provisioning a device bridge.
+
+Use a new token dedicated to this bridge, never an owner paired token, vendor
+credential or token shared by another bridge. Do not reclassify an already
+connected legacy channel bridge in place: revoke its old credential and close
+its sockets first, then provision a new dedicated token. Connect with the exact configured
+agent and an allowed `session_id` in the query. Device session IDs must be
+nonempty and already canonical (letters, digits, `_` or `-`), so normalization
+cannot alias another memory session. If the first `connect` frame
+repeats a session or agent, it must agree exactly. Device callers cannot select
+`cwd`/`workspace_dir`. Existing persisted session ownership must also agree with
+the configured agent before the device can attach. The gateway supplies identity;
+client-provided names or presentation surfaces do not confer authority.
+
+| Operation | Device authorization |
+| --- | --- |
+| `message` without source claims or attachments | Requires `chat` |
+| `answer` to a pending question | Requires `answer` and the existing question/session checks |
+| `cancel` | Requires `cancel`; existing bare/turn-bound semantics remain unchanged |
+| `approval_response`, including `approve`, `always` and `deny` | Always refused |
+| Source intake/recovery, attachments, voice and unknown frames | Always refused |
+| `/ws/bridge` proactive outbox and HTTP attachment access | Refused |
+
+Owner approval remains on a separately authenticated owner connection. Chat
+access may observe the authorized session's output and approval requests; it
+cannot consume or decide those approvals. Device input is persisted as chat
+history without Operator learning provenance, even if a misconfigured token is
+also present in the paired-token set. Other owner-authenticated entrypoints are
+not a sandbox for such reused tokens, so dedicated credentials are mandatory.
+The agent's existing risk profile and tool approval policy still govern tools;
+this policy does not make all chat-triggered tools read-only.
+
+Each socket retains its initial bridge identity and permission ceiling. Every
+new operation, queued turn admission and subsequent output checks the live
+configuration too. Removing/rotating the bridge credential or reducing its
+permissions therefore rejects new work on an open socket after the configuration
+change has been applied. Removing the `device` restriction cannot upgrade that
+socket to owner authority. Widened permissions need a new attachment. Revocation
+does not undo an already admitted effect or promise cancellation of a dispatched
+turn. Configuration reload timing is separate from operation authorization.
+
+Binding conflicts return HTTP 403 or `BRIDGE_BINDING_REJECTED`; denied operations
+return `BRIDGE_OPERATION_DENIED` or close an already revoked socket. Existing
+owner clients and legacy channel bridges retain their protocol. No additional
+session store, endpoint or transport version is introduced.
+
+Before downgrading to a gateway without this policy, revoke/remove the dedicated
+bridge entry and disconnect it. An old binary ignores the new table and would
+treat a remaining credential as a legacy bridge. Preserve owner access while
+checking that the removed token cannot reconnect; only then revert the binary.
+
 ### Control socket
 
 The gateway sends `{"type":"bridge_start","bridge":"<name>"}` when the socket

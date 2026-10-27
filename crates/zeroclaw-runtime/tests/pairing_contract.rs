@@ -29,6 +29,7 @@ paired_tokens = ["268099d88852e81cfbc7b1861b4e5a035686f7364609e8351f3b0d891da2e1
             token_hash: hash_token(&bridge_token),
             session_prefix: Some("fixture:".to_string()),
             sessions: vec!["fixture-session".to_string()],
+            device: None,
         },
     );
 
