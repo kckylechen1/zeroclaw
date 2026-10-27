@@ -3988,6 +3988,7 @@ async fn checklist_gateway_serde_roundtrip() {
                 token_hash: "ab".repeat(32),
                 session_prefix: Some("tg:".into()),
                 sessions: vec!["main".into()],
+                device: None,
             },
         )]),
     };
@@ -4023,6 +4024,7 @@ async fn bridge_tokens_resolve_by_hash_and_scope_sessions() {
             token_hash: crate::tokens::hash_token(token),
             session_prefix: Some("tg:".into()),
             sessions: vec!["main".into()],
+            device: None,
         },
     );
     gateway.bridges.insert(
@@ -13822,4 +13824,20 @@ async fn no_new_raw_risk_profile_reads_outside_the_resolver_and_validation() {
         }
         false
     }
+}
+
+#[test]
+async fn restricted_device_bridge_cannot_coexist_with_anonymous_owner_chat() {
+    let mut config = Config::default();
+    config.gateway.require_pairing = false;
+    config.gateway.bridges.insert(
+        "device".into(),
+        GatewayBridgeConfig {
+            token_hash: "0f".repeat(32),
+            device: Some(GatewayDeviceBridgeConfig::default()),
+            ..Default::default()
+        },
+    );
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("gateway.require_pairing"), "{err}");
 }

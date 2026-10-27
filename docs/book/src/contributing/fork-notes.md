@@ -119,3 +119,22 @@ Only the device prototype is adapted here. A physical consumer now exists, which
 makes this bounded source-import leaf useful; it does not close #61 or activate
 high-risk device authority. Boot installers and cross-build/deployment acceptance
 remain separate. No existing controller dependency or default capability is added.
+
+## Restricted device chat admission
+
+The #495 leaf under #377 adds an optional `gateway.bridges.<name>.device`
+policy to the existing shared chat route. Its configuration is the authority
+owner; the existing session backend and Conversation remain the history and
+turn owners. See [restricted device bridges](../gateway/api.md#restricted-device-bridges)
+for bindings, per-operation grants, revocation and downgrade discipline.
+Chat authority never grants owner approval or Operator learning provenance.
+
+Upstream `zeroclaw-labs/zeroclaw` was inspected at
+`5d4b18d335780af8bf15979b2f45e541f91c5eb9`, against fork baseline
+`79a8320132f5866b3846ca561eaaf054241d37b5`. Upstream `src/gateway/ws.rs` and
+`src/gateway/ws_approval.rs` contain chat/approval transport, but no equivalent
+restricted bridge policy. This fork already owns shared Conversations, bridge
+credentials and session scopes, so this leaf extends those owners rather than
+porting the upstream session implementation. No existing route or consumer is
+retired. Turn streaming/recovery, adapter integration and Node invocation remain
+separate slices; #377 and #380 remain open.

@@ -5,6 +5,7 @@ pub mod v1;
 pub mod v2;
 
 use crate::autonomy::AutonomyLevel;
+pub use crate::bridge_access::GatewayDeviceBridgeConfig;
 use crate::domain_matcher::DomainMatcher;
 use crate::traits::{ChannelConfig, HasPropKind, PropKind};
 use crate::validation_bail;
@@ -6628,6 +6629,10 @@ pub struct GatewayBridgeConfig {
     /// `main`, the owner's shared session). With neither this nor
     /// `session_prefix` set the token opens no chat session.
     pub sessions: Vec<String>,
+    /// Opt-in device access. Missing preserves the legacy owner-bridge contract;
+    /// present with no operations grants no access. Never permits approvals.
+    #[nested]
+    pub device: Option<GatewayDeviceBridgeConfig>,
 }
 
 impl GatewayBridgeConfig {
@@ -16930,6 +16935,27 @@ impl Config {
         }
 
         for (name, bridge) in &self.gateway.bridges {
+            if bridge.device.is_some() && !self.gateway.require_pairing {
+                validation_bail!(
+                    InvalidFormat,
+                    "gateway.require_pairing",
+                    "restricted device bridges require authenticated owner access (require_pairing = true)"
+                );
+            }
+            if let Some(device) = &bridge.device
+                && (device.agent.is_empty()
+                    || !self.agents.contains_key(&device.agent)
+                    || device
+                        .operations
+                        .iter()
+                        .any(|op| !matches!(op.as_str(), "chat" | "answer" | "cancel")))
+            {
+                validation_bail!(
+                    InvalidFormat,
+                    &format!("gateway.bridges.{name}.device"),
+                    "device bridge requires a configured agent and operations from chat, answer, cancel"
+                );
+            }
             let hash = bridge.token_hash.trim();
             if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
                 validation_bail!(

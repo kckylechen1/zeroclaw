@@ -70,7 +70,10 @@ fn source(
         zeroclaw_config::tokens::constant_time_eq(subject, &bridge.token_hash.to_ascii_lowercase())
     });
     let (name, bridge) = bridges.next()?;
-    if bridges.next().is_some() || !bridge.allows_session(&scope.session_id) {
+    if bridge.device.is_some()
+        || bridges.next().is_some()
+        || !bridge.allows_session(&scope.session_id)
+    {
         return None;
     }
 

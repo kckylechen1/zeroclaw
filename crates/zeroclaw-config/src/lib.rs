@@ -11,6 +11,7 @@ pub mod alias_refs;
 pub mod api_error;
 pub mod attention;
 pub mod autonomy;
+pub mod bridge_access;
 pub mod card;
 pub mod comment_writer;
 pub mod companion;

@@ -1093,3 +1093,6 @@ gateway-cancel-invalid = This stop request has no supported version or valid tur
 gateway-cancel-idle = No running turn was observed; no stop was sent.
 gateway-cancel-unknown = The stop outcome is unknown. It will not be sent again automatically.
 gateway-cancel-not-sent = The stop was not sent. Reconnect or wait for pending stop outcomes before trying again.
+
+# Restricted device bridges never inherit owner approval authority.
+gateway-bridge-access-denied = This bridge is not authorized for the requested binding or operation.

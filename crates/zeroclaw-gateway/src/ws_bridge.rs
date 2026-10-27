@@ -110,6 +110,7 @@ pub async fn handle_ws_bridge(
         let bridge = config
             .gateway
             .bridge_for_token(token)
+            .filter(|(_, bridge)| bridge.device.is_none())
             .map(|(name, _)| name.to_string());
         (bridge, config.data_dir.clone())
     };
@@ -445,6 +446,7 @@ mod tests {
                 token_hash: PairingGuard::token_hash(TOKEN),
                 session_prefix: Some("tg:".into()),
                 sessions: vec!["main".into()],
+                device: None,
             },
         );
         state
