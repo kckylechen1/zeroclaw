@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["harden_sqlite_owner_only"]};

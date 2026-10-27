@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AnchorSource","UserMessageSource"],"static":["OWNER_CORRECTION_CONTEXT"],"struct":["DialDrift","OwnerCorrectionContext","ReflectionMessage","SoulAnchor","SoulDrift","SoulReflectionReceipt","UserMessageIngress"],"type":["OwnerCorrectionResolver"]};

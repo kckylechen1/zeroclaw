@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_RUNTIME_PRESET_NAME","LOCAL_SMALL_RUNTIME_PRESET_NAME","RISK_PRESETS","RUNTIME_PRESETS"],"fn":["recommended_runtime_preset","recommended_runtime_profile","risk_preset","runtime_preset"],"struct":["RiskPreset","RuntimePreset"]};

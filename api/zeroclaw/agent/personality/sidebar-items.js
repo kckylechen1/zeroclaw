@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["EDITABLE_PERSONALITY_FILES","MAX_FILE_CHARS","NOTES_FILES","NOTES_FRAMING_LINE","NOTES_HEADING","PERSONALITY_FILES"],"fn":["governed_personality_files","load_personality_files","seed_default_personality"],"struct":["PersonalityFile","PersonalityProfile"]};

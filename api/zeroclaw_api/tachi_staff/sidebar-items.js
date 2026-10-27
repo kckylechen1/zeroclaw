@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CancelOutcome","RunState","StaffingReason","TachiStaffError"],"struct":["CancelReceipt","RunResult","RunStatus","StaffReceipt","StaffRefs"]};
