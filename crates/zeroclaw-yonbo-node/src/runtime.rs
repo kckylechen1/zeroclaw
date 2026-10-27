@@ -68,9 +68,9 @@ fn starttime() -> Result<String> {
         s.rsplit_once(')')
             .and_then(|(_, s)| s.split_whitespace().nth(19))
             .map(str::to_owned)
-            .ok_or("proc_identity");
+            .ok_or("proc_identity")
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     Ok("native-test".to_owned())
 }
 
