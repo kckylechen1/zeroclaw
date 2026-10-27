@@ -8925,6 +8925,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-yonbo-node"
+version = "0.8.3"
+
+[[package]]
 name = "zeroclawlabs"
 version = "0.8.3"
 dependencies = [

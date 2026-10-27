@@ -1,0 +1,19 @@
+[package]
+name = "zeroclaw-yonbo-node"
+description = "Opt-in, bounded Yonbo device host; independent of Gateway Node v2"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "yonbo-node"
+path = "src/main.rs"
+
+[[test]]
+name = "system"
+path = "tests/system.rs"
+
+[dependencies]

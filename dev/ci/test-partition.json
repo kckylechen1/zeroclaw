@@ -32,7 +32,8 @@
       "zeroclaw-sop-graph",
       "zeroclaw-spawn",
       "zeroclaw-tool-call-parser",
-      "zeroclaw-tools"
+      "zeroclaw-tools",
+      "zeroclaw-yonbo-node"
     ]
   },
   "features": {
