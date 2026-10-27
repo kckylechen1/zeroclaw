@@ -65,7 +65,7 @@ fn starttime() -> Result<String> {
     #[cfg(target_os = "linux")]
     {
         let s = fs::read_to_string("/proc/self/stat").map_err(|_| "proc_identity")?;
-        return s
+        s
             .rsplit_once(')')
             .and_then(|(_, s)| s.split_whitespace().nth(19))
             .map(str::to_owned)
