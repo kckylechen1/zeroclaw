@@ -140,7 +140,7 @@ pub(crate) async fn consume_provider_streaming_response(
                     }
                     .into());
                 }
-                return Err(anyhow::Error::msg(message));
+                return Err(anyhow::Error::new(err).context(message));
             }
         };
         match event {

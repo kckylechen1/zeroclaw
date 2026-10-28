@@ -845,9 +845,7 @@ pub(crate) async fn run_responses_sse(
     let http_response = match request_builder.send().await {
         Ok(r) => r,
         Err(err) => {
-            let _ = tx
-                .send(Err(StreamError::ModelProvider(err.to_string())))
-                .await;
+            let _ = tx.send(Err(StreamError::Http(err.to_string()))).await;
             return;
         }
     };
@@ -1402,6 +1400,38 @@ impl ::zeroclaw_api::attribution::Attributable for OpenAiResponsesModelProvider 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn responses_send_failure_preserves_transport_kind_for_auth_looking_urls() {
+        for path in ["unauthorized", "forbidden"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let request = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .post(format!("http://{addr}/{path}"));
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(run_responses_sse(request, &tx, false), async {
+                    // Drop the accepted connection before sending response headers.
+                    let (socket, _) = listener.accept().await.unwrap();
+                    drop(socket);
+                });
+            })
+            .await
+            .expect("request send failure must complete");
+            drop(tx);
+            let error = rx.recv().await.unwrap().unwrap_err();
+            match error {
+                StreamError::Http(message) => {
+                    assert!(message.contains(path), "{message}");
+                }
+                other => panic!("transport failure was misclassified: {other:?}"),
+            }
+            assert!(rx.recv().await.is_none());
+        }
+    }
 
     #[tokio::test]
     async fn responses_completed_ignores_trailing_events_without_eof() {
