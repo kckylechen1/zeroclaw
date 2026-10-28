@@ -1,5 +1,14 @@
 use super::*;
 
+// Preserve 4 MiB of real TCP pressure without making the fixture a benchmark
+// of cumulative-prefix sanitization. Each projected chunk stays below 64 KiB.
+const LARGE_STREAM_CHUNKS: usize = 128;
+const LARGE_STREAM_CHUNK_BYTES: usize = 32 * 1024;
+const LARGE_STREAM_PROVIDER_SECS: u64 = 30;
+// Provider timeout and runtime settlement are distinct phases. Keep one finite
+// recovery deadline with room for draining/sanitizing after the provider ends.
+const LARGE_STREAM_SETTLE: Duration = Duration::from_secs(2 * LARGE_STREAM_PROVIDER_SECS);
+
 /// Marker-only behavior in the real HTTP provider. No Conversation injection,
 /// no fake gateway output: all frames pass through the runtime streaming path.
 pub(super) async fn provider_response(request: &Value) -> Option<axum::response::Response> {
@@ -19,16 +28,16 @@ pub(super) async fn provider_response(request: &Value) -> Option<axum::response:
         return None;
     }
     let stream = futures_util::stream::unfold(0usize, |index| async move {
-        if index > 512 {
+        if index > LARGE_STREAM_CHUNKS {
             return None;
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
-        let bytes = if index == 512 {
+        let bytes = if index == LARGE_STREAM_CHUNKS {
             "data: [DONE]\n\n".to_string()
         } else {
             format!(
                 "data: {}\n\n",
-                json!({"id":"s2-local-stream","choices":[{"index":0,"delta":{"content":format!("{} ", "x".repeat(8191))},"finish_reason":null}]})
+                json!({"id":"s2-local-stream","choices":[{"index":0,"delta":{"content":format!("{} ", "x".repeat(LARGE_STREAM_CHUNK_BYTES - 1))},"finish_reason":null}]})
             )
         };
         Some((Ok::<_, std::io::Error>(bytes), index + 1))
@@ -349,7 +358,7 @@ async fn s2_wire_slow_reader_has_explicit_recovery_gap_without_blocking_other_se
         .get_mut("test")
         .unwrap()
         .base
-        .timeout_secs = Some(30);
+        .timeout_secs = Some(LARGE_STREAM_PROVIDER_SECS);
     let mut slow = fixture.socket(DEVICE_TOKEN).await;
     let epoch = negotiate(&mut slow).await;
     let id = uuid::Uuid::new_v4().to_string();
@@ -391,8 +400,14 @@ async fn s2_wire_slow_reader_has_explicit_recovery_gap_without_blocking_other_se
     .expect("slow reader must not block unrelated Conversation");
     let mut recovery = fixture.socket(DEVICE_TOKEN).await;
     assert_eq!(negotiate(&mut recovery).await, epoch);
+    assert_eq!(
+        LARGE_STREAM_CHUNKS * LARGE_STREAM_CHUNK_BYTES,
+        4 * 1024 * 1024
+    );
     let mut snapshot = Value::Null;
-    tokio::time::timeout(Duration::from_secs(30), async {
+    let mut live_events = 0usize;
+    let mut last_sequence = 0u64;
+    let settled = tokio::time::timeout(LARGE_STREAM_SETTLE, async {
         loop {
             recovery.send(json!({"type":"turn_control","version":1,"op":"resume","epoch":epoch,"request_id":id,"after_seq":0})).await;
             // Live output can race the replay response. Bound each frame while
@@ -407,16 +422,31 @@ async fn s2_wire_slow_reader_has_explicit_recovery_gap_without_blocking_other_se
             loop {
                 let frame = recovery.next_with_limit(32 * 1024 * 1024).await.unwrap();
                 assert_ne!(frame["type"], "turn_gap", "draining recovery client fell behind");
-                if frame["type"] == "turn_event" && frame["terminal"] == true { break; }
+                if frame["type"] == "turn_event" {
+                    live_events += 1;
+                    last_sequence = frame["seq"].as_u64().unwrap();
+                    if frame["terminal"] == true { break; }
+                }
             }
         }
-    }).await.expect("bounded streamed turn must settle");
+    }).await;
+    assert!(
+        settled.is_ok(),
+        "bounded streamed turn must settle within {LARGE_STREAM_SETTLE:?}; live_events={live_events}, last_sequence={last_sequence}, snapshot_terminal={}, snapshot_last_seq={}",
+        snapshot["terminal"],
+        snapshot["last_seq"]
+    );
     assert_eq!(snapshot["request_id"], id);
     assert_eq!(
         snapshot["gap"], true,
         "overflow must not claim complete replay"
     );
     assert_eq!(snapshot["terminal"], true);
+    assert_eq!(
+        snapshot["events"].as_array().unwrap().last().unwrap()["event"]["outcome"],
+        "done",
+        "a provider timeout must not masquerade as successful stream settlement"
+    );
     assert_eq!(
         snapshot["events"].as_array().unwrap().last().unwrap()["stream_complete"],
         false,
