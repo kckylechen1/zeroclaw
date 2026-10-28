@@ -138,3 +138,19 @@ credentials and session scopes, so this leaf extends those owners rather than
 porting the upstream session implementation. No existing route or consumer is
 retired. Turn streaming/recovery, adapter integration and Node invocation remain
 separate slices; #377 and #380 remain open.
+
+## Non-Telegram turn control
+
+The #497 leaf adds opt-in request/turn correlation to the existing shared
+Conversation, following restricted bridge authority in #495. It does not borrow
+Telegram source identifiers, replace the session ledger, or add another Agent.
+
+Upstream comparison: `zeroclaw-labs/zeroclaw` at
+`5d4b18d335780af8bf15979b2f45e541f91c5eb9`,
+`crates/zeroclaw-gateway/src/ws.rs`; fork baseline `eaf007c95`.
+The upstream socket lifecycle and cancel-token helpers are not equivalent to
+this fork's shared Conversation and durable request receipts. Retain the local
+owners and extend their transport boundary; do not port a second runtime.
+The extension's bounded in-process replay cache is owned by ConversationHub.
+It is not a durable input queue or an execution-retry promise. Missing recovery
+state is unknown, never permission to repeat effects.

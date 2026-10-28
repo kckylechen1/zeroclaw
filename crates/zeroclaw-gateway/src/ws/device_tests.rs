@@ -85,6 +85,10 @@ impl DeviceWire {
     }
 
     async fn next(&mut self) -> Option<Value> {
+        self.next_with_limit(65_536).await
+    }
+
+    async fn next_with_limit(&mut self, max_bytes: u64) -> Option<Value> {
         tokio::time::timeout(LIMIT, async {
             loop {
                 let first = match self.0.read_u8().await {
@@ -100,7 +104,7 @@ impl DeviceWire {
                     127 => self.0.read_u64().await.unwrap(),
                     len => u64::from(len),
                 };
-                assert!(len <= 65_536, "oversized test frame");
+                assert!(len <= max_bytes, "oversized test frame");
                 let mut payload = vec![0; len as usize];
                 self.0.read_exact(&mut payload).await.unwrap();
                 match first & 0xf {
@@ -152,6 +156,9 @@ async fn device_provider(
     axum::Json(request): axum::Json<Value>,
 ) -> impl IntoResponse {
     seen.lock().push(request.clone());
+    if let Some(response) = turn_control_tests::provider_response(&request).await {
+        return response;
+    }
     let messages = request["messages"].as_array().unwrap();
     let tool_needed = messages.last().is_some_and(|message| {
         message["role"] == "user" && message["content"].to_string().contains("approval-probe")
@@ -282,6 +289,10 @@ impl DeviceFixture {
         }
         let app = axum::Router::new()
             .route("/ws/chat", axum::routing::get(handle_ws_chat))
+            .route(
+                "/api/sessions/{id}",
+                axum::routing::delete(crate::api::handle_api_session_delete),
+            )
             .route(
                 "/ws/bridge",
                 axum::routing::get(crate::ws_bridge::handle_ws_bridge),
@@ -797,4 +808,8 @@ async fn device_wire_live_policy_activation_closes_an_existing_anonymous_socket(
         fixture.seen.lock().is_empty(),
         "hot activation must not preserve anonymous operation authority"
     );
+}
+
+mod turn_control_tests {
+    include!("turn_control_tests.rs");
 }
