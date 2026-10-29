@@ -462,6 +462,8 @@ async fn handle_socket(
                         }
                         let ack = serde_json::json!({
                             "type": "connected",
+                            "owner_bridge_approval_once": bridge_scope.as_ref().is_some_and(|binding|
+                                binding.initial.owner.is_some() && binding.allows(&state.config.read(), &agent_alias, &session_id, "approval_response")),
                             "message": "Connection established",
                             "surface_version": surface::VERSION,
                             "surface": surface,
@@ -3181,6 +3183,7 @@ mod tests {
                 token_hash: owner_hash.clone(),
                 sessions: vec!["shared".into()],
                 session_prefix: None,
+                owner: None,
                 device: None,
             },
         );
@@ -3220,6 +3223,7 @@ mod tests {
                 token_hash: chat.scope.auth_subject.clone().unwrap(),
                 sessions: vec!["shared".into()],
                 session_prefix: None,
+                owner: None,
                 device: None,
             },
         );

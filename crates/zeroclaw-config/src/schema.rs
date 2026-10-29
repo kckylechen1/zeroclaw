@@ -5,7 +5,7 @@ pub mod v1;
 pub mod v2;
 
 use crate::autonomy::AutonomyLevel;
-pub use crate::bridge_access::GatewayDeviceBridgeConfig;
+pub use crate::bridge_access::{GatewayDeviceBridgeConfig, GatewayOwnerBridgeConfig};
 use crate::domain_matcher::DomainMatcher;
 use crate::traits::{ChannelConfig, HasPropKind, PropKind};
 use crate::validation_bail;
@@ -6629,13 +6629,21 @@ pub struct GatewayBridgeConfig {
     /// `main`, the owner's shared session). With neither this nor
     /// `session_prefix` set the token opens no chat session.
     pub sessions: Vec<String>,
-    /// Opt-in device access. Missing preserves the legacy owner-bridge contract;
+    /// Opt-in device access. Missing both classes preserves the legacy bridge contract;
     /// present with no operations grants no access. Never permits approvals.
     #[nested]
     pub device: Option<GatewayDeviceBridgeConfig>,
+    /// Explicit bounded owner bridge; mutually exclusive with device.
+    #[nested]
+    pub owner: Option<GatewayOwnerBridgeConfig>,
 }
 
 impl GatewayBridgeConfig {
+    /// Explicit operation-limited bridge, as opposed to a legacy channel bridge.
+    pub fn scoped(&self) -> bool {
+        self.device.is_some() || self.owner.is_some()
+    }
+
     /// Whether the bridge token may open the chat session `session_id`.
     pub fn allows_session(&self, session_id: &str) -> bool {
         if self.sessions.iter().any(|s| s == session_id) {
@@ -16935,11 +16943,11 @@ impl Config {
         }
 
         for (name, bridge) in &self.gateway.bridges {
-            if bridge.device.is_some() && !self.gateway.require_pairing {
+            if bridge.scoped() && !self.gateway.require_pairing {
                 validation_bail!(
                     InvalidFormat,
                     "gateway.require_pairing",
-                    "restricted device bridges require authenticated owner access (require_pairing = true)"
+                    "scoped bridges require authenticated owner access (require_pairing = true)"
                 );
             }
             if let Some(device) = &bridge.device
@@ -16954,6 +16962,21 @@ impl Config {
                     InvalidFormat,
                     &format!("gateway.bridges.{name}.device"),
                     "device bridge requires a configured agent and operations from chat, answer, cancel"
+                );
+            }
+            if bridge.device.is_some() && bridge.owner.is_some() {
+                anyhow::bail!("gateway.bridges.{name}: device and owner are mutually exclusive");
+            }
+            if let Some(owner) = &bridge.owner
+                && (owner.agent.is_empty()
+                    || !self.agents.contains_key(&owner.agent)
+                    || owner
+                        .operations
+                        .iter()
+                        .any(|op| !matches!(op.as_str(), "chat" | "cancel" | "approval_response")))
+            {
+                anyhow::bail!(
+                    "gateway.bridges.{name}.owner requires a configured agent and operations from chat, cancel, approval_response"
                 );
             }
             let hash = bridge.token_hash.trim();

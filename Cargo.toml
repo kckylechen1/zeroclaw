@@ -65,6 +65,11 @@ include = [
 name = "zeroclaw"
 path = "src/main.rs"
 
+[[bin]]
+name = "zeroclaw-acp-bridge"
+path = "src/bin/zeroclaw-acp-bridge.rs"
+required-features = ["agent-runtime"]
+
 [lib]
 name = "zeroclaw"
 path = "src/lib.rs"

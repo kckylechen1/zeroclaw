@@ -207,6 +207,11 @@ impl DeviceFixture {
     }
 
     async fn with_pairing(operations: &[&str], require_pairing: bool) -> Self {
+        Self::with_address(operations, require_pairing, "127.0.0.1:0".parse().unwrap()).await
+    }
+
+    async fn with_address(operations: &[&str], require_pairing: bool, address: std::net::SocketAddr) -> Self {
+        assert!(address.ip().is_loopback());
         let tmp = tempfile::tempdir().unwrap();
         let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -280,6 +285,7 @@ impl DeviceFixture {
                     token_hash: zeroclaw_config::tokens::hash_token(DEVICE_TOKEN),
                     sessions: vec![SESSION.into()],
                     session_prefix: None,
+                    owner: None,
                     device: Some(GatewayDeviceBridgeConfig {
                         agent: "device-agent".into(),
                         operations: operations.iter().map(|op| (*op).into()).collect(),
@@ -299,7 +305,7 @@ impl DeviceFixture {
             )
             .with_state(state.clone())
             .merge(crate::api_attachments::routes(state.clone(), 5));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
         let address = listener.local_addr().unwrap();
         let gateway_task = ::zeroclaw_spawn::spawn!(async move {
             axum::serve(listener, app).await.unwrap();
@@ -812,4 +818,101 @@ async fn device_wire_live_policy_activation_closes_an_existing_anonymous_socket(
 
 mod turn_control_tests {
     include!("turn_control_tests.rs");
+}
+
+fn owner_bridge(fixture: &DeviceFixture, operations: &[&str]) {
+    let mut config = fixture.state.config.write();
+    let bridge = config.gateway.bridges.get_mut("device").unwrap();
+    bridge.device = None;
+    bridge.owner = Some(zeroclaw_config::schema::GatewayOwnerBridgeConfig {
+        agent: "device-agent".into(),
+        operations: operations.iter().map(|s| (*s).into()).collect(),
+    });
+}
+
+#[tokio::test]
+async fn owner_bridge_once_approval_is_explicit_and_never_always() {
+    for decision in ["approve", "deny"] {
+        let fixture = DeviceFixture::new(&["chat", "cancel"]).await;
+        owner_bridge(&fixture, &["chat", "cancel", "approval_response"]);
+        let (status, mut client) = DeviceWire::upgrade(fixture.address, &format!("agent=device-agent&session_id={SESSION}"), DEVICE_TOKEN).await;
+        assert_eq!(status, 101);
+        client.until("session_start").await;
+        client.send(json!({"type":"connect"})).await;
+        assert_eq!(client.until("connected").await["owner_bridge_approval_once"], true);
+        client.send(json!({"type":"turn_control","version":1,"op":"negotiate"})).await;
+        let epoch = client.until("turn_ready").await["epoch"].clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        client.send(json!({"type":"turn_control","version":1,"epoch":epoch,"op":"message","request_id":id,"content":"approval-probe"})).await;
+        let approval = client.until("approval_request").await;
+        client.send(json!({"type":"approval_response","request_id":approval["request_id"],"decision":"always"})).await;
+        assert_eq!(client.until("error").await["code"], "BRIDGE_OPERATION_DENIED");
+        assert!(!fixture.workspace.join("approved.txt").exists());
+        client.send(json!({"type":"approval_response","request_id":approval["request_id"],"decision":decision})).await;
+        loop { let event = client.until("turn_event").await; if event["terminal"] == true { assert_eq!(event["event"]["outcome"], "done"); break; } }
+        assert_eq!(fixture.workspace.join("approved.txt").exists(), decision == "approve");
+    }
+}
+
+#[tokio::test]
+async fn owner_bridge_missing_grant_and_class_switch_do_not_elevate() {
+    let fixture = DeviceFixture::new(&["chat", "cancel"]).await;
+    let mut device = fixture.socket(DEVICE_TOKEN).await;
+    owner_bridge(&fixture, &["chat", "cancel", "approval_response"]);
+    device.send(json!({"type":"approval_response","request_id":"irrelevant","decision":"approve"})).await;
+    device.denied().await;
+    let mut owner = fixture.socket(DEVICE_TOKEN).await;
+    fixture.state.config.write().gateway.bridges.get_mut("device").unwrap().owner.as_mut().unwrap().operations = vec!["chat".into()];
+    owner.send(json!({"type":"approval_response","request_id":"irrelevant","decision":"deny"})).await;
+    owner.denied().await;
+    let mut missing = fixture.socket(DEVICE_TOKEN).await;
+    missing.send(json!({"type":"approval_response","request_id":"irrelevant","decision":"approve"})).await;
+    missing.denied().await;
+}
+
+#[tokio::test]
+async fn owner_bridge_keeps_agent_workspace_and_auxiliary_surfaces_closed() {
+    let fixture = DeviceFixture::new(&["chat", "cancel"]).await;
+    owner_bridge(&fixture, &["chat", "cancel", "approval_response"]);
+    for query in ["agent=other-agent&session_id=device-session", "agent=device-agent&session_id=wrong", "agent=device-agent&session_id=device-session&cwd=%2Ftmp"] {
+        assert_eq!(DeviceWire::upgrade(fixture.address, query, DEVICE_TOKEN).await.0, 403);
+    }
+    assert_eq!(DeviceWire::upgrade_path(fixture.address, "/ws/bridge", DEVICE_TOKEN).await.0, 401);
+    let mut client = fixture.socket(DEVICE_TOKEN).await;
+    fixture.state.config.write().gateway.bridges.get_mut("device").unwrap().owner = None;
+    client.send(json!({"type":"approval_response","request_id":"irrelevant","decision":"approve"})).await;
+    client.denied().await;
+}
+
+/// Opt-in real gateway fixture for desktop ACP acceptance. Uses temporary data,
+/// the production Conversation/approval path and a deterministic HTTP provider.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual desktop acceptance; requires ZEROCLAW_ACP_ACCEPTANCE_DIR"]
+async fn acp_desktop_gateway_fixture() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = PathBuf::from(std::env::var_os("ZEROCLAW_ACP_ACCEPTANCE_DIR").expect("explicit output directory"));
+    assert!(directory.is_absolute() && directory.is_dir());
+    let address = std::fs::read_to_string(directory.join("bind-address")).unwrap_or_else(|_| "127.0.0.1:0".into()).trim().parse().unwrap();
+    let fixture = DeviceFixture::with_address(&["chat", "cancel"], true, address).await;
+    owner_bridge(&fixture, &["chat", "cancel", "approval_response"]);
+    let token = std::fs::read_to_string(directory.join("credential")).unwrap_or_else(|_| format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()));
+    {
+        let mut config = fixture.state.config.write();
+        let bridge = config.gateway.bridges.get_mut("device").unwrap();
+        bridge.token_hash = zeroclaw_config::tokens::hash_token(&token);
+        bridge.session_prefix = Some("acp-".into());
+    }
+    let credential = directory.join("credential");
+    std::fs::write(&credential, token).unwrap();
+    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let config = format!("[acp_bridge]\nenabled = true\nendpoint = \"ws://{}/ws/chat\"\nagent = \"device-agent\"\nsession_prefix = \"acp-\"\ncredential_file = {:?}\n", fixture.address, credential);
+    std::fs::write(directory.join("adapter.toml"), config).unwrap();
+    std::fs::write(directory.join("ready.json"), json!({"address":fixture.address.to_string(),"workspace":fixture.workspace,"pid":std::process::id()}).to_string()).unwrap();
+    for _ in 0..1800 {
+        if directory.join("stop").exists() { break; }
+        std::fs::write(directory.join("provider-count.json"), fixture.seen.lock().len().to_string()).unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    std::fs::write(directory.join("provider-requests.json"), serde_json::to_vec_pretty(&*fixture.seen.lock()).unwrap()).unwrap();
 }

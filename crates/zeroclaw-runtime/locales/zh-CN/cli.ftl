@@ -905,3 +905,6 @@ tool-runtime-command-docker-workspace-path = 构建运行时命令失败：无�
 turn-max-iterations-reached = *回合已停止：达到工具迭代上限（{ $max_iterations }）。*
 
 voice-html-omitted = 本条回复包含标记内容，已跳过朗读。
+
+acp-bridge-allow-once = 允许一次
+acp-bridge-reject-once = 拒绝一次

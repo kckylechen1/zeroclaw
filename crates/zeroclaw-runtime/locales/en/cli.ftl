@@ -1102,3 +1102,6 @@ spoken-task-complete = Completed:
 spoken-task-pending = Pending:
 spoken-deleted = Deleted text:
 voice-html-omitted = This reply contains markup and has been skipped for speech.
+
+acp-bridge-allow-once = Allow once
+acp-bridge-reject-once = Reject once

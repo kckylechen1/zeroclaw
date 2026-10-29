@@ -906,3 +906,6 @@ tool-runtime-command-build-failed = Échec de construction de la commande d'exé
 tool-runtime-command-docker-allowed-root = Échec de construction de la commande d'exécution : impossible de canoniser la racine de l'espace de travail Docker {$path} : {$cause}
 tool-runtime-command-docker-workspace-path = Échec de construction de la commande d'exécution : impossible de canoniser le chemin de l'espace de travail Docker {$path} : {$cause}
 turn-max-iterations-reached = *Tour arrêté : nombre maximal d'itérations d'outils atteint ({ $max_iterations }).*
+
+acp-bridge-allow-once = Autoriser une fois
+acp-bridge-reject-once = Refuser une fois
