@@ -136,6 +136,37 @@ pub(crate) fn enforce_tool_loop_budget() -> Result<()> {
     Ok(())
 }
 
+// Stream errors have no typed status/auth variant. Keep classification local to
+// the fallback boundary: provider-declared auth failures are terminal, while
+// transport/IO errors (including auth-looking URLs or OS permission errors) are not.
+fn is_stream_auth_error(error: &anyhow::Error) -> bool {
+    use zeroclaw_providers::traits::StreamError;
+
+    let Some(StreamError::ModelProvider(message)) = error.downcast_ref::<StreamError>() else {
+        return false;
+    };
+    let lower = message.to_ascii_lowercase();
+    // These are the auth hints used by reliable::is_non_retryable, plus expired
+    // tokens from reliable::is_auth_error. Deliberately exclude its bare
+    // `access_token` hint: a request URL can contain that without an auth failure.
+    [
+        "invalid api key",
+        "incorrect api key",
+        "missing api key",
+        "api key not set",
+        "authentication failed",
+        "auth failed",
+        "unauthorized",
+        "forbidden",
+        "permission denied",
+        "access denied",
+        "invalid token",
+        "token expired",
+    ]
+    .iter()
+    .any(|hint| lower.contains(hint))
+}
+
 /// One provider call: streaming via `consume_provider_streaming_response`
 /// with non-streaming fallback, or plain non-streaming chat with optional
 /// per-step timeout and cancel select. See [`ProviderCallOutcome`] for the
@@ -187,6 +218,7 @@ pub(crate) async fn call_provider(
             }
             Err(stream_err)
                 if is_tool_loop_cancelled(&stream_err)
+                    || is_stream_auth_error(&stream_err)
                     || stream_err
                         .downcast_ref::<StreamInterruptedAfterOutput>()
                         .is_some() =>
@@ -482,5 +514,230 @@ mod payload_capture_tests {
         );
 
         zeroclaw_log::clear_broadcast_hook();
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use crate::observability::NoopObserver;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zeroclaw_config::schema::PacingConfig;
+    use zeroclaw_providers::compatible::{AuthStyle, OpenAiCompatibleModelProvider};
+
+    fn test_ctx<'a>(observer: &'a NoopObserver, pacing: &'a PacingConfig) -> TurnCtx<'a> {
+        TurnCtx {
+            parent_agent_alias: None,
+            observer,
+            provider_name: "stub",
+            model: "stub-model",
+            temperature: None,
+            approval: None,
+            channel_name: "test",
+            channel_reply_target: None,
+            cancellation_token: None,
+            on_delta: None,
+            event_tx: None,
+            hooks: None,
+            dedup_exempt_tools: &[],
+            pacing,
+            strict_tool_parsing: false,
+            channel: None,
+            agent_alias: None,
+            turn_id: "trace-req-test",
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_stream_failure_sends_one_endpoint_request() {
+        for status in [401, 403] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("rejected"))
+                .mount(&server)
+                .await;
+            let provider = OpenAiCompatibleModelProvider::builder("auth-test")
+                .display_name("Auth test")
+                .base_url(&server.uri())
+                .auth_style(AuthStyle::Bearer)
+                .credential(Some("test-key"))
+                .build();
+            let observer = NoopObserver;
+            let pacing = PacingConfig::default();
+            let outcome = call_provider(
+                &test_ctx(&observer, &pacing),
+                &provider,
+                "test-model",
+                &[ChatMessage::user("hello")],
+                None,
+                true,
+                0,
+            )
+            .await
+            .unwrap();
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1, "HTTP {status} must not retry");
+            let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(body["stream"], true);
+            let error = outcome.chat_result.unwrap_err().to_string();
+            assert!(error.contains(&status.to_string()), "{error}");
+            assert!(error.contains("model_provider stream error"), "{error}");
+        }
+    }
+    struct FailingStreamProvider {
+        error: &'static str,
+        transport: bool,
+        stream_calls: std::sync::atomic::AtomicUsize,
+        chat_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl zeroclaw_api::attribution::Attributable for FailingStreamProvider {
+        fn role(&self) -> zeroclaw_api::attribution::Role {
+            use zeroclaw_api::attribution::{ModelProviderKind, ProviderKind, Role};
+            Role::Provider(ProviderKind::Model(ModelProviderKind::Custom))
+        }
+
+        fn alias(&self) -> &str {
+            "fallback-test"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for FailingStreamProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> Result<String> {
+            unreachable!("call_provider dispatches chat")
+        }
+
+        async fn chat(
+            &self,
+            request: ChatRequest<'_>,
+            model: &str,
+            temperature: Option<f64>,
+        ) -> Result<ChatResponse> {
+            self.chat_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(model, "test-model");
+            assert_eq!(temperature, None);
+            assert_eq!(request.messages.len(), 1);
+            assert_eq!(request.messages[0].content, "hello");
+            Ok(ChatResponse {
+                text: Some("fallback reply".into()),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+            })
+        }
+
+        fn stream_chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: Option<f64>,
+            _options: zeroclaw_providers::traits::StreamOptions,
+        ) -> futures_util::stream::BoxStream<
+            'static,
+            zeroclaw_providers::traits::StreamResult<zeroclaw_api::model_provider::StreamEvent>,
+        > {
+            use zeroclaw_providers::traits::StreamError;
+            self.stream_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let error = if self.transport {
+                StreamError::Http(self.error.into())
+            } else {
+                StreamError::ModelProvider(self.error.into())
+            };
+            Box::pin(futures_util::stream::once(async move { Err(error) }))
+        }
+    }
+
+    async fn check_stream_fallback(error: &'static str, transport: bool, should_fallback: bool) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let provider = FailingStreamProvider {
+            error,
+            transport,
+            stream_calls: AtomicUsize::new(0),
+            chat_calls: AtomicUsize::new(0),
+        };
+        let observer = NoopObserver;
+        let pacing = PacingConfig::default();
+        let outcome = call_provider(
+            &test_ctx(&observer, &pacing),
+            &provider,
+            "test-model",
+            &[ChatMessage::user("hello")],
+            None,
+            true,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(provider.stream_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            provider.chat_calls.load(Ordering::SeqCst),
+            usize::from(should_fallback),
+            "{error}"
+        );
+        if should_fallback {
+            assert_eq!(
+                outcome.chat_result.unwrap().text.as_deref(),
+                Some("fallback reply")
+            );
+        } else {
+            assert!(outcome.chat_result.unwrap_err().to_string().contains(error));
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_auth_stream_failure_does_not_fallback() {
+        for error in [
+            "authentication failed (non_retryable)",
+            "OpenAI API key not set",
+            "missing api key",
+            "invalid api key",
+            "incorrect api key",
+            "auth failed",
+            "unauthorized",
+            "forbidden",
+            "permission denied",
+            "access denied",
+            "invalid token",
+            "token expired",
+        ] {
+            check_stream_fallback(error, false, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_stream_failure_retains_fallback() {
+        for error in [
+            "connection reset by peer",
+            "error sending request for url (https://example.invalid/access_token): connection reset by peer",
+            "error sending request for url (https://example.invalid/unauthorized): connection reset by peer",
+            "error sending request for url (https://example.invalid/forbidden): connection reset by peer",
+            "permission denied",
+        ] {
+            check_stream_fallback(error, true, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn non_auth_stream_failures_retain_fallback() {
+        for error in [
+            "400 Bad Request",
+            "404 Not Found",
+            "429 Too Many Requests",
+            "500 Internal Server Error",
+            "",
+            "0",
+        ] {
+            check_stream_fallback(error, false, true).await;
+        }
     }
 }
