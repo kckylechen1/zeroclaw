@@ -3,7 +3,10 @@
 //! No owner/persona identity, memory, history, or raw execution authority is sent.
 //! Protocol caller identity and routing metadata accompany the admitted task.
 
-use crate::tachi_staff::{StaffRefs, StaffingReason, TachiStaffClient, TachiStaffError};
+use crate::tachi_staff::{
+    MirrorCallSite, StaffRefs, StaffingReason, TachiStaffClient, TachiStaffError,
+    nonterminal_status_for_dispatch, run_status_from_receipt,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -301,6 +304,13 @@ impl Tool for TachiDelegationTool {
                 Ok(DelegationRequestClaim::Existing {
                     dispatch_id: Some(id),
                 }) => {
+                    client
+                        .capture_staff_mirror_experience(
+                            &id,
+                            &nonterminal_status_for_dispatch(&id),
+                            MirrorCallSite::BoundReplay,
+                        )
+                        .await;
                     return Ok(ToolResult::ok(
                         json!({"request_id":request_id,"dispatch_id":id,"accepted":true,"replayed":true}),
                     ));
@@ -347,11 +357,14 @@ impl Tool for TachiDelegationTool {
             };
             let id = receipt.dispatch_id.clone();
             let output_request_id = request_id.clone();
+            let bind_id = id.clone();
             let stored = tokio::task::spawn_blocking(move || {
-                db.bind_delegation_request(&scope, &request_id, &digest, &route_digest, &id)
+                db.bind_delegation_request(&scope, &request_id, &digest, &route_digest, &bind_id)
             })
             .await?;
             if let Err(error) = stored {
+                // Binding failure keeps today's partial receipt; do not conceal
+                // it with mirror work or attempt register repair here.
                 return Ok(ToolResult::partial(
                     json!({"code":"binding_write_failed", "request_id":output_request_id, "receipt":receipt}),
                     crate::i18n::get_required_tool_string_with_args(
@@ -363,6 +376,13 @@ impl Tool for TachiDelegationTool {
                     ),
                 ));
             }
+            client
+                .capture_staff_mirror_experience(
+                    &id,
+                    &run_status_from_receipt(&receipt),
+                    MirrorCallSite::StartBind,
+                )
+                .await;
             return Ok(ToolResult::ok(
                 json!({"request_id":output_request_id,"accepted":true,"receipt":receipt,"replayed":false}),
             ));
@@ -392,20 +412,108 @@ impl Tool for TachiDelegationTool {
             Err(error) => return Ok(failure("storage_error", &error.to_string())),
         };
         let output = match self.action {
-            DelegationAction::Status => client.status(&dispatch_id).await.map(|status| json!({"request_id":request_id,"status":status})),
-            DelegationAction::Result => client.result(&dispatch_id).await.map(|mut result| {
-                result.body = result.body.map(|body| zeroclaw_providers::scrub_secret_patterns(&body));
-                json!({"request_id":request_id,"result":result,"trust":"untrusted_external_report","accepted_by_body":false})
-            }),
+            DelegationAction::Status => match client.status(&dispatch_id).await {
+                Ok(status) => {
+                    client
+                        .capture_staff_mirror_experience(
+                            &dispatch_id,
+                            &status,
+                            MirrorCallSite::Status,
+                        )
+                        .await;
+                    Ok(json!({"request_id":request_id,"status":status}))
+                }
+                Err(error) => Err(error),
+            },
+            DelegationAction::Result => match client.result(&dispatch_id).await {
+                Ok(mut result) => {
+                    client
+                        .capture_staff_mirror_experience(
+                            &dispatch_id,
+                            &result.status,
+                            MirrorCallSite::Result,
+                        )
+                        .await;
+                    result.body = result
+                        .body
+                        .map(|body| zeroclaw_providers::scrub_secret_patterns(&body));
+                    Ok(
+                        json!({"request_id":request_id,"result":result,"trust":"untrusted_external_report","accepted_by_body":false}),
+                    )
+                }
+                Err(error) => Err(error),
+            },
             DelegationAction::Cancel => {
                 let cancel: CancelArgs = serde_json::from_value(args)?;
-                client.cancel(&dispatch_id, cancel.expected_status_revision).await.map(|receipt| json!({"request_id":request_id,"dispatch_id":dispatch_id,"receipt":receipt}))
+                match client
+                    .cancel(&dispatch_id, cancel.expected_status_revision)
+                    .await
+                {
+                    Ok(receipt) => {
+                        // Cancel receipt is not a RunStatus; re-read canonical
+                        // status then share the same capture helper.
+                        match client.status(&dispatch_id).await {
+                            Ok(status) => {
+                                client
+                                    .capture_staff_mirror_experience(
+                                        &dispatch_id,
+                                        &status,
+                                        MirrorCallSite::CancelReread,
+                                    )
+                                    .await;
+                            }
+                            Err(error) => {
+                                ::zeroclaw_log::record!(
+                                    WARN,
+                                    ::zeroclaw_log::Event::new(
+                                        module_path!(),
+                                        ::zeroclaw_log::Action::Fail,
+                                    )
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                    .with_attrs(json!({
+                                        "mirror": true,
+                                        "site": "cancel_reread",
+                                        "op": "capture_gap",
+                                        "dispatch_id": dispatch_id,
+                                        "error": zeroclaw_providers::sanitize_api_error(&error.to_string()),
+                                    })),
+                                    "tachi_staff: mirror capture gap after cancel (status re-read failed)"
+                                );
+                            }
+                        }
+                        Ok(
+                            json!({"request_id":request_id,"dispatch_id":dispatch_id,"receipt":receipt}),
+                        )
+                    }
+                    Err(error) => Err(error),
+                }
             }
             DelegationAction::Watch => {
                 let watch: WatchArgs = serde_json::from_value(args)?;
-                client.wait_until_terminal(&dispatch_id, Duration::from_secs(watch.max_wait_secs)).await.map(|status| json!({"request_id":request_id,"terminal":status.is_terminal(),"status":status,"watch":"bounded_polling"}))
+                match client
+                    .wait_until_terminal(&dispatch_id, Duration::from_secs(watch.max_wait_secs))
+                    .await
+                {
+                    Ok(status) => {
+                        // Watch timeout while still running is nonterminal: helper
+                        // ensures register only and does not observe.
+                        client
+                            .capture_staff_mirror_experience(
+                                &dispatch_id,
+                                &status,
+                                MirrorCallSite::Watch,
+                            )
+                            .await;
+                        Ok(
+                            json!({"request_id":request_id,"terminal":status.is_terminal(),"status":status,"watch":"bounded_polling"}),
+                        )
+                    }
+                    Err(error) => Err(error),
+                }
             }
-            DelegationAction::Start => Err(TachiStaffError::Protocol("start reached read path".to_string())),
+            DelegationAction::Start => Err(TachiStaffError::Protocol(
+                "start reached read path".to_string(),
+            )),
         };
         Ok(match output {
             Ok(value) => ToolResult::ok(value),
