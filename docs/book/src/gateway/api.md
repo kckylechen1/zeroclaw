@@ -173,6 +173,24 @@ Stop extension clients before reverting the gateway extension. Retain the sessio
 ledger; do not rebuild it to recover transport state. This is a prerequisite for
 an adapter, not an adapter implementation or a change to Telegram intake.
 
+### Streaming chunk completeness
+
+The `chunk` stream is a progressive hint. The outbound redactor releases only
+stable prefixes and may withhold the trailing token (the content after the last
+whitespace). Concatenating all chunks is not guaranteed to reproduce the final
+response, even when every event was delivered.
+
+`done.full_response` is the authoritative final text, sanitized in full.
+Consumers must use it as the final response, replacing any accumulated chunk
+preview when `done` arrives.
+
+For negotiated turn controls, `stream_complete` describes only whether the
+event journal is contiguous and has no gaps. It makes no promise about chunk
+content completeness, and `true` still requires client-side sequence verification.
+For example, a consumer that only concatenates chunks can display `"Hello "`
+instead of `"Hello world"`, losing the withheld `world` tail even with
+`stream_complete: true`.
+
 ### Turn-bound bridge stop (control version 1)
 
 The Telegram bridge requests `control_version: 1` on its existing
