@@ -191,6 +191,26 @@ For example, a consumer that only concatenates chunks can display `"Hello "`
 instead of `"Hello world"`, losing the withheld `world` tail even with
 `stream_complete: true`.
 
+### Streaming turn deadlines
+
+The OpenAI-compatible provider's `timeout_secs` is an HTTP request timeout for
+the non-streaming path, not an absolute streaming turn deadline. Streaming turns
+have no absolute deadline: the streaming HTTP client uses a 10-second connect
+timeout and a 300-second idle-read bound, and the turn can be cancelled.
+The idle-read bound limits silence between reads, not total turn duration;
+a provider that keeps data arriving within that bound can keep the turn running
+beyond `timeout_secs`.
+
+Consumers that need a definite turn time limit must enforce their own deadline,
+request cancellation when it expires, and verify the cancellation terminal
+before treating the turn as cancelled; a cancellation acknowledgement alone is
+not a terminal. The S3 ZeroClawBridge's 10-second budget followed by cancellation
+and terminal verification is the reference pattern recorded in #503.
+
+An absolute deadline through `timeout_secs` or a separate
+`streaming_deadline_secs` setting remains a future behavior-change option
+in #503; neither is promised by this contract.
+
 ### Turn-bound bridge stop (control version 1)
 
 The Telegram bridge requests `control_version: 1` on its existing
