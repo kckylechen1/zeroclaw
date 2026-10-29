@@ -1096,3 +1096,8 @@ gateway-cancel-not-sent = The stop was not sent. Reconnect or wait for pending s
 
 # Restricted device bridges never inherit owner approval authority.
 gateway-bridge-access-denied = This bridge is not authorized for the requested binding or operation.
+
+# Spoken presentation retains semantic Markdown status.
+spoken-task-complete = Completed:
+spoken-task-pending = Pending:
+spoken-deleted = Deleted text:

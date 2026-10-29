@@ -8,4 +8,6 @@ pub enum ChatSurface {
     Web,
     Telegram,
     Cli,
+    /// Spoken-text presentation. Gateway builds must opt in explicitly.
+    Voice,
 }

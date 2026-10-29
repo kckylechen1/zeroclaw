@@ -623,7 +623,7 @@ async fn handle_socket(
                                 matches!(frame["type"].as_str(), Some("approval_request" | "question" | "answer_ack"))
                             }) { continue; }
                             if turn_negotiated && !question_answer_authorized(&state, &scope) { break; }
-                            if !turn_control::send(&mut sender, Message::Text(frame.to_string().into()), turn_negotiated).await {
+                            if !turn_control::send(&mut sender, Message::Text(surface::wire(&state, scope.surface, &frame).into()), turn_negotiated).await {
                                 break;
                             }
                         }
@@ -656,7 +656,7 @@ async fn handle_socket(
                             if !serde_json::from_str::<serde_json::Value>(&frame).is_ok_and(|frame| {
                                 state.ws_conversations.turn_control.visible(subscription.conversation.key(), scope.auth_subject.as_deref(), &frame)
                             }) { continue; }
-                            if !turn_control::send(&mut sender, Message::Text(frame.to_string().into()), true).await { break; }
+                            if !turn_control::send(&mut sender, Message::Text(surface::wire(&state, scope.surface, &frame).into()), true).await { break; }
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             let _ = turn_control::send(&mut sender, Message::Text(turn_control::gap().to_string().into()), true).await;
@@ -676,7 +676,7 @@ async fn handle_socket(
                         && (!turn_negotiated || !matches!(event["type"].as_str(), Some("chunk" | "done" | "aborted" | "error")))
                     {
                         if turn_negotiated && !question_answer_authorized(&state, &scope) { break; }
-                        if !turn_control::send(&mut sender, Message::Text(event.to_string().into()), turn_negotiated).await { break; }
+                        if !turn_control::send(&mut sender, Message::Text(surface::wire(&state, scope.surface, &event.to_string()).into()), turn_negotiated).await { break; }
                     }
                     continue;
                 }
@@ -738,7 +738,7 @@ async fn handle_socket(
             Some(reply) => {
                 turn_control::send(
                     &mut sender,
-                    Message::Text(reply.to_string().into()),
+                    Message::Text(surface::wire(&state, scope.surface, &reply.to_string()).into()),
                     turn_negotiated,
                 )
                 .await
@@ -1861,6 +1861,11 @@ async fn process_chat_message(
 ) -> (Vec<String>, &'static str) {
     use zeroclaw_runtime::agent::TurnEvent;
 
+    // A paired transport authenticates the client, not the person speaking.
+    // Voice has no verified-speaker contract and therefore no owner learning.
+    let initial_operator_input = initial_operator_input
+        && scope.surface != Some(ChatSurface::Voice)
+        && scope.bridge.is_none();
     let WsSession { agent, ws_memory } = session;
     let session_key = scope.session_key.as_str();
     // Resolve canonical paired-device membership when storing this input.
