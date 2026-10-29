@@ -167,6 +167,48 @@ impl NodeRegistry {
         });
     }
 
+    fn finish_timeout(&self, connection: &str, call_id: &str) -> ToolResult {
+        let pending = self
+            .live
+            .write()
+            .get_mut(connection)
+            .and_then(|socket| socket.invocation.pending.remove(call_id));
+        // A concurrent result/revoke/shutdown may have removed the record after
+        // timeout won its select. Absence is never proof that nothing was sent.
+        ToolResult::err(if pending.is_some_and(|pending| !pending.sent) {
+            "timeout_before_send"
+        } else {
+            "timeout_unknown_outcome"
+        })
+    }
+
+    async fn invoke_current(&self, device: &str, cap: &str, args: serde_json::Value) -> ToolResult {
+        if !validate_args(cap, &args) {
+            return ToolResult::err("invalid_or_unsupported_capability");
+        }
+        let snapshot = {
+            let live = self.live.read();
+            live.values()
+                .find(|socket| socket.device_id.as_deref() == Some(device))
+                .map(|socket| {
+                    if socket.invocation.advertised
+                        && socket.invocation.caps.iter().any(|value| value == cap)
+                    {
+                        Ok((socket.connection_id.clone(), socket.invocation.revision))
+                    } else {
+                        Err("capability_unavailable")
+                    }
+                })
+                .unwrap_or(Err("node_unavailable"))
+        };
+        match snapshot {
+            Ok((connection, revision)) => {
+                self.invoke(device, &connection, revision, cap, args).await
+            }
+            Err(reason) => ToolResult::err(reason),
+        }
+    }
+
     async fn invoke(
         &self,
         device: &str,
@@ -247,18 +289,7 @@ impl NodeRegistry {
         match tokio::time::timeout(CALL_TIMEOUT, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => ToolResult::err("disconnected_unknown_outcome"),
-            Err(_) => {
-                let mut live = self.live.write();
-                let sent = live
-                    .get_mut(connection)
-                    .and_then(|s| s.invocation.pending.remove(&call_id))
-                    .is_some_and(|p| p.sent);
-                ToolResult::err(if sent {
-                    "timeout_unknown_outcome"
-                } else {
-                    "timeout_before_send"
-                })
-            }
+            Err(_) => self.finish_timeout(connection, &call_id),
         }
     }
 }
@@ -280,8 +311,6 @@ struct NodeTool {
     registry: NodeRegistry,
     name: String,
     device: String,
-    connection: String,
-    revision: u64,
     cap: String,
 }
 impl Attributable for NodeTool {
@@ -310,13 +339,7 @@ impl Tool for NodeTool {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         Ok(self
             .registry
-            .invoke(
-                &self.device,
-                &self.connection,
-                self.revision,
-                &self.cap,
-                args,
-            )
+            .invoke_current(&self.device, &self.cap, args)
             .await)
     }
 }
@@ -326,22 +349,26 @@ impl NodeTools for NodeRegistry {
             return Vec::new();
         }
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-        for socket in self.live.read().values() {
-            let Some(device) = &socket.device_id else {
+        // Long-lived Agents retain these authorized specs across connection changes.
+        // Every execute resolves a new live snapshot; existing pending never migrate.
+        for name in allowed {
+            let Some((device, cap)) = name
+                .strip_prefix("node:")
+                .and_then(|name| name.split_once(':'))
+            else {
                 continue;
             };
-            for cap in &socket.invocation.caps {
-                let name = format!("node:{device}:{cap}");
-                if SAFE_CAPS.contains(&cap.as_str()) && allowed.contains(&name) {
-                    tools.push(Box::new(NodeTool {
-                        registry: self.clone(),
-                        name,
-                        device: device.clone(),
-                        connection: socket.connection_id.clone(),
-                        revision: socket.invocation.revision,
-                        cap: cap.clone(),
-                    }));
-                }
+            if !device.is_empty()
+                && device != "*"
+                && SAFE_CAPS.contains(&cap)
+                && !tools.iter().any(|tool| tool.name() == name)
+            {
+                tools.push(Box::new(NodeTool {
+                    registry: self.clone(),
+                    name: name.clone(),
+                    device: device.into(),
+                    cap: cap.into(),
+                }));
             }
         }
         tools
@@ -425,5 +452,39 @@ mod tests {
         );
         assert_eq!(registry.pending_invocations(), 0);
         assert!(!registry.set_caps(&connection, vec!["test.echo".into()], 1));
+    }
+    #[tokio::test]
+    async fn timeout_after_terminal_removal_never_claims_before_send() {
+        for terminal in ["result", "revoke", "shutdown"] {
+            let (registry, device, connection, mut wire) = queued_registry();
+            let r = registry.clone();
+            let d = device.clone();
+            let c = connection.clone();
+            let task = tokio::spawn(async move {
+                r.invoke(&d, &c, 1, "test.echo", serde_json::json!({"text":""}))
+                    .await
+            });
+            let frame = wire.recv().await.unwrap();
+            assert!(registry.prepare_send(&connection, &frame));
+            let GatewayToNode::Invoke { call_id, .. } = frame else {
+                panic!("invoke")
+            };
+            match terminal {
+                "result" => registry.complete(&connection, &call_id, ToolResult::ok("")),
+                "revoke" => {
+                    registry.revoke_device(&device).unwrap();
+                }
+                _ => registry.shutdown(),
+            }
+            assert_eq!(
+                registry
+                    .finish_timeout(&connection, &call_id)
+                    .error
+                    .as_deref(),
+                Some("timeout_unknown_outcome")
+            );
+            task.await.unwrap();
+            assert_eq!(registry.pending_invocations(), 0);
+        }
     }
 }

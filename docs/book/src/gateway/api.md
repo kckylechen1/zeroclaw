@@ -1206,6 +1206,9 @@ on standard input. With the existing operator-authenticated identity API:
    `node:<device_id>:test.echo` to the requesting agent's risk-profile
    `allowed_tools`. This first slice requires exact entries; wildcard grants do
    not expose these tools. Existing excluded-tools and caller restrictions apply.
+   Tools remain available to the same conversation across host connection changes;
+   each call checks live admission. Offline or removed capabilities return a typed
+   unavailable result. Calls already pending never migrate to a new connection.
 
 `system.info` takes `{}` and returns only OS and architecture. `test.echo` takes
 `{"text":"..."}` with at most 4096 UTF-8 bytes; an empty string is valid. No shell,
@@ -1213,7 +1216,7 @@ filesystem, camera, microphone, motion, face or other actuation is available.
 `approved=true` and grant-proof arguments cannot expand this set.
 
 The foreground stdin commands are `info-only` (reduce the live advertisement),
-`reconnect` (same process-held identity, new connection) and `stop`. EOF, Ctrl-C,
+`reconnect` (same process-held identity and local allowlist, new connection) and `stop`. EOF, Ctrl-C,
 SIGTERM or gateway closure exits the host. There is no unattended retry or replay.
 Restarting the host generates a fresh key and requires enrollment again; this
 slice adds no host credential store. Revoke retired identities through the

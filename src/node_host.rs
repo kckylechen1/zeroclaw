@@ -92,6 +92,8 @@ pub async fn run() -> Result<()> {
     }
     #[cfg(test)]
     let mut hold_results = false;
+    // Local reductions survive reconnect; a fresh connection grants nothing new.
+    let mut caps: Vec<String> = SAFE_CAPS.iter().map(|s| (*s).into()).collect();
     loop {
         let mut request = format!("ws://{}/ws/nodes", session.address).into_client_request()?;
         request
@@ -134,7 +136,6 @@ pub async fn run() -> Result<()> {
         .await?;
         let mut connection = String::new();
         let mut revision = 1;
-        let mut caps: Vec<String> = SAFE_CAPS.iter().map(|s| (*s).into()).collect();
         let mut seen: HashMap<String, (String, NodeToGateway)> = HashMap::new();
         let mut authenticated = false;
         let handshake_deadline = tokio::time::Instant::now() + Duration::from_secs(10);

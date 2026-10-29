@@ -34,8 +34,13 @@ struct Host {
     input: ChildStdin,
     events: mpsc::Receiver<Value>,
     device: String,
+    init: Value,
 }
 impl Host {
+    async fn connect(&mut self) {
+        self.command(&self.init.to_string()).await;
+        self.event("ready").await;
+    }
     async fn event(&mut self, name: &str) -> Value {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -167,6 +172,11 @@ impl Fixture {
         }
     }
     async fn host(&self) -> Host {
+        let mut host = self.pending_host().await;
+        host.connect().await;
+        host
+    }
+    async fn pending_host(&self) -> Host {
         let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--exact", "host_process", "--nocapture"])
             .stdin(Stdio::piped())
@@ -193,6 +203,7 @@ impl Fixture {
             input,
             events,
             device: String::new(),
+            init: Value::Null,
         };
         let key = host.event("public_key").await;
         let store = self.registry.identities().unwrap();
@@ -203,8 +214,7 @@ impl Fixture {
             .enroll(&code, key["public_key"].as_str().unwrap())
             .unwrap();
         host.device = identity.device_id.clone();
-        host.command(&json!({"address":self.address, "device_id":identity.device_id, "identity_epoch":identity.identity_epoch, "token":self.token}).to_string()).await;
-        host.event("ready").await;
+        host.init = json!({"address":self.address, "device_id":identity.device_id, "identity_epoch":identity.identity_epoch, "token":self.token});
         host
     }
     async fn tool(&self, host: &Host, cap: &str) -> Box<dyn Tool> {
@@ -263,9 +273,21 @@ impl Fixture {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seven_real_process_scenarios() {
     let fixture = Fixture::new().await;
-    let mut host = fixture.host().await;
+    let mut host = fixture.pending_host().await;
     fixture.negative(&host);
-    let echo = fixture.tool(&host, "test.echo").await;
+    // Exactly one scoped assembly per tool, BEFORE the host connects. These same
+    // objects remain in a long-lived Agent across all first-host lifecycle cases.
+    let echo: Arc<dyn Tool> = fixture.tool(&host, "test.echo").await.into();
+    let info: Arc<dyn Tool> = fixture.tool(&host, "system.info").await.into();
+    assert_eq!(
+        echo.execute(json!({"text":"offline"}))
+            .await
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("node_unavailable")
+    );
+    host.connect().await;
     for args in [
         json!({}),
         json!({"text":null}),
@@ -278,20 +300,14 @@ async fn seven_real_process_scenarios() {
     let result = echo.execute(json!({"text":""})).await.unwrap();
     assert!(result.success);
     assert_eq!(result.output, "");
-    let first = host.event("executed").await;
-    assert_eq!(first["count"], 1);
-    let info = fixture
-        .tool(&host, "system.info")
-        .await
-        .execute(json!({}))
-        .await
-        .unwrap();
-    assert!(info.success);
-    assert!(info.output.contains(std::env::consts::OS));
+    assert_eq!(host.event("executed").await["count"], 1);
+    let result = info.execute(json!({})).await.unwrap();
+    assert!(result.success);
+    assert!(result.output.contains(std::env::consts::OS));
     assert_eq!(host.event("executed").await["count"], 2);
     assert_eq!(fixture.registry.pending_invocations(), 0);
     println!(
-        "PASS immediate: real child, v2 auth, empty echo/info, pending drain, typed invalid args"
+        "PASS immediate: same scoped tools offline -> online, real child/v2 auth, empty echo/info, pending drain, invalid args"
     );
     println!(
         "PASS duplicate: proxy repeats each Invoke, child execution counts 1/2; duplicate Results ignored"
@@ -300,34 +316,34 @@ async fn seven_real_process_scenarios() {
         "PASS high-risk: exact allowlist only; face/drive/shell/camera/wildcards absent; approved=true rejected"
     );
 
+    host.command("hold").await;
+    host.event("holding").await;
+    let tool = echo.clone();
+    let old = tokio::spawn(async move { tool.execute(json!({"text":"old"})).await.unwrap() });
+    host.event("executed").await;
     host.command("reconnect").await;
     host.event("ready").await;
-    assert_eq!(
-        echo.execute(json!({"text":"old"}))
-            .await
-            .unwrap()
-            .error
-            .as_deref(),
-        Some("stale_connection")
-    );
-    let current = fixture
-        .tool(&host, "test.echo")
-        .await
-        .execute(json!({"text":"new"}))
-        .await
-        .unwrap();
+    let old = old.await.unwrap();
+    assert!(!old.success);
+    assert!(matches!(
+        old.error.as_deref(),
+        Some("disconnected_unknown_outcome" | "stale_connection_unknown_outcome")
+    ));
+    host.command("release").await;
+    host.event("released").await;
+    let current = echo.execute(json!({"text":"new"})).await.unwrap();
     assert!(current.success);
     assert_eq!(current.output, "new");
-    host.event("executed").await;
+    assert_eq!(host.event("executed").await["count"], 1);
     println!(
-        "PASS old connection: saved old tool refused, same identity reconnect works, injected stale Result cannot settle"
+        "PASS old connection: old pending drained, same tool reconnects without reassembly, injected stale Result cannot settle"
     );
 
     host.command("hold").await;
     host.event("holding").await;
-    let echo = fixture.tool(&host, "test.echo").await;
+    let tool = echo.clone();
     let pending =
-        tokio::spawn(async move { echo.execute(json!({"text":"reduce"})).await.unwrap() });
+        tokio::spawn(async move { tool.execute(json!({"text":"reduce"})).await.unwrap() });
     host.event("executed").await;
     host.command("info-only").await;
     host.event("ready").await;
@@ -335,31 +351,54 @@ async fn seven_real_process_scenarios() {
         pending.await.unwrap().error.as_deref(),
         Some("capability_changed")
     );
-    assert!(
-        zeroclaw_api::node_tools::tools(
-            fixture.dir.path(),
-            Some(&[format!("node:{}:test.echo", host.device)])
-        )
-        .is_empty()
+    assert_eq!(
+        echo.execute(json!({"text":"denied"}))
+            .await
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("capability_unavailable")
     );
     assert_eq!(fixture.registry.pending_invocations(), 0);
+    host.command("release").await;
+    host.event("released").await;
+    assert!(info.execute(json!({})).await.unwrap().success);
+    host.event("executed").await;
+    host.command("reconnect").await;
+    host.event("ready").await;
+    assert_eq!(
+        echo.execute(json!({"text":"still-denied"}))
+            .await
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("capability_unavailable")
+    );
+    assert!(info.execute(json!({})).await.unwrap().success);
+    assert_eq!(host.event("executed").await["count"], 1);
     println!(
-        "PASS reduction: revision invalidates pending, removed capability not routable, no orphan pending"
+        "PASS reduction: pending invalidated, same info tool survives revision; local echo reduction survives reconnect"
     );
 
-    let info = fixture.tool(&host, "system.info").await;
-    let pending = tokio::spawn(async move { info.execute(json!({})).await.unwrap() });
+    host.command("hold").await;
+    host.event("holding").await;
+    let tool = info.clone();
+    let pending = tokio::spawn(async move { tool.execute(json!({})).await.unwrap() });
     host.event("executed").await;
     fixture.registry.revoke_device(&host.device).unwrap();
     assert_eq!(
         pending.await.unwrap().error.as_deref(),
         Some("revoked_unknown_outcome")
     );
+    assert_eq!(
+        info.execute(json!({})).await.unwrap().error.as_deref(),
+        Some("node_unavailable")
+    );
     assert_eq!(fixture.registry.pending_invocations(), 0);
     fixture.negative(&host);
     host.exit().await;
     println!(
-        "PASS revoke: mid-flight result refused, routing removed, child socket closes, pending zero"
+        "PASS revoke: mid-flight result refused, retained tool cannot route, child exits, pending zero"
     );
 
     let mut host = fixture.host().await;
