@@ -191,10 +191,10 @@ impl Fixture {
         ::zeroclaw_spawn::spawn!(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                if let Ok(event) = serde_json::from_str::<Value>(&line) {
-                    if tx.send(event).await.is_err() {
-                        break;
-                    }
+                if let Ok(event) = serde_json::from_str::<Value>(&line)
+                    && tx.send(event).await.is_err()
+                {
+                    break;
                 }
             }
         });
@@ -223,9 +223,14 @@ impl Fixture {
             scoped::{ScopedAssembly, ScopedToolRegistry},
         };
         let name = format!("node:{}:{cap}", host.device);
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.data_dir = self.dir.path().to_path_buf();
-        config.nodes.enabled = true;
+        let config = zeroclaw_config::schema::Config {
+            data_dir: self.dir.path().to_path_buf(),
+            nodes: zeroclaw_config::schema::NodesConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let security = Arc::new(zeroclaw_policy::SecurityPolicy {
             allowed_tools: Some(vec![name.clone()]),
             ..Default::default()
@@ -319,7 +324,8 @@ async fn seven_real_process_scenarios() {
     host.command("hold").await;
     host.event("holding").await;
     let tool = echo.clone();
-    let old = ::zeroclaw_spawn::spawn!(async move { tool.execute(json!({"text":"old"})).await.unwrap() });
+    let old =
+        ::zeroclaw_spawn::spawn!(async move { tool.execute(json!({"text":"old"})).await.unwrap() });
     host.event("executed").await;
     host.command("reconnect").await;
     host.event("ready").await;
@@ -343,7 +349,9 @@ async fn seven_real_process_scenarios() {
     host.event("holding").await;
     let tool = echo.clone();
     let pending =
-        ::zeroclaw_spawn::spawn!(async move { tool.execute(json!({"text":"reduce"})).await.unwrap() });
+        ::zeroclaw_spawn::spawn!(
+            async move { tool.execute(json!({"text":"reduce"})).await.unwrap() }
+        );
     host.event("executed").await;
     host.command("info-only").await;
     host.event("ready").await;

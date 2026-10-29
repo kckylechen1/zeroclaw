@@ -55,7 +55,15 @@ pub async fn run() -> Result<()> {
         std::future::pending::<()>().await;
     };
     tokio::pin!(terminate);
-    let key = DeviceKeyPair::generate().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let key = DeviceKeyPair::generate().map_err(|e| {
+        ::zeroclaw_log::record!(
+            ERROR,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+            "node host key generation failed"
+        );
+        anyhow::Error::msg(e.to_string())
+    })?;
     emit(json!({"event":"public_key", "public_key":key.public_key_hex()}));
     // Tokio stdin uses an uncancellable blocking read that can keep its runtime
     // alive after socket shutdown. A detached, bounded input thread has no such
