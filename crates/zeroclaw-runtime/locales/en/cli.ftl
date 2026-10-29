@@ -1101,3 +1101,4 @@ gateway-bridge-access-denied = This bridge is not authorized for the requested b
 spoken-task-complete = Completed:
 spoken-task-pending = Pending:
 spoken-deleted = Deleted text:
+voice-html-omitted = This reply contains markup and has been skipped for speech.
