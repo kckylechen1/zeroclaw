@@ -89,7 +89,10 @@ default builds reject it on both the query and connect paths. It is spoken-text
 presentation only: no audio capture, speech recognition or new transport.
 It adds no prompt instruction. Each voice socket receives a plain-text rendering
 of the sanitized final response; Markdown structure becomes text and table cells
-are separated, while HTML prose is retained without its tags or script/style content.
+are separated. HTML content is not spoken: block, inline, comment, script/style
+and ordinary HTML prose are omitted as non-speakable structures. Text outside
+closed elements is retained; unclosed or ambiguous HTML conservatively omits the
+remaining suffix. This omission rule also applies to tags exposed by decoding.
 Task completion and struck-out text retain their status through spoken labels.
 Rendered text is scanned again under the configured credential-leak policy. Chunk envelopes have empty
 content until `done.full_response` is available. Control and approval frames keep
