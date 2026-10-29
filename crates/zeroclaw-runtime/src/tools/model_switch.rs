@@ -347,7 +347,7 @@ impl ModelSwitchTool {
 
 #[cfg(test)]
 impl ModelSwitchTool {
-    fn with_catalog_resolver<F, Fut>(mut self, f: F) -> Self
+    pub(super) fn with_catalog_resolver<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = anyhow::Result<Vec<String>>> + Send + 'static,
@@ -627,16 +627,25 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_prefers_live_catalog_when_reachable() {
-        let live = match zeroclaw_providers::catalog::list_models_for_family("openai").await {
-            Ok(live) if !live.is_empty() => live,
-            _ => {
-                eprintln!("skipping: models.dev catalog unreachable (offline)");
-                return;
-            }
-        };
-
-        let result = tool()
-            .handle_list_models(&json!({ "model_provider": "openai.default" }))
+        // Two independent public fetches can legitimately select different sources:
+        // models.dev may fail first (OpenRouter fallback), then recover on retry.
+        // Pin this contract's live input with the existing test-only resolver. Keep
+        // exact output equality and fallback rejection, without a network skip.
+        let live = vec![
+            "openai-live-first".to_string(),
+            "openai-live-second".to_string(),
+        ];
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver_calls = calls.clone();
+        let supplied = live.clone();
+        let tool = tool().with_catalog_resolver(move |family| {
+            assert_eq!(family, "openai", "resolve the configured provider family");
+            resolver_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let supplied = supplied.clone();
+            async move { Ok(supplied) }
+        });
+        let result = tool
+            .execute(json!({ "action": "list_models", "model_provider": "openai.default" }))
             .await
             .expect("list_models should return a tool result");
         assert!(result.success, "unexpected error: {:?}", result.error);
@@ -649,6 +658,8 @@ mod tests {
             .map(|m| m.as_str().unwrap_or_default().to_string())
             .collect();
 
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(output["model_provider"], "openai.default");
         // The returned set must be the live catalog, not the stale hardcoded
         // five-element list.
         assert_eq!(
