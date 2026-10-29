@@ -421,7 +421,7 @@ mod tests {
         let r = registry.clone();
         let d = device.clone();
         let c = connection.clone();
-        let task = tokio::spawn(async move {
+        let task = ::zeroclaw_spawn::spawn!(async move {
             r.invoke(&d, &c, 1, "test.echo", serde_json::json!({"text":""}))
                 .await
         });
@@ -438,7 +438,7 @@ mod tests {
         let (registry, device, connection, mut wire) = queued_registry();
         let r = registry.clone();
         let c = connection.clone();
-        let task = tokio::spawn(async move {
+        let task = ::zeroclaw_spawn::spawn!(async move {
             r.invoke(&device, &c, 1, "test.echo", serde_json::json!({"text":""}))
                 .await
         });
@@ -460,7 +460,7 @@ mod tests {
             let r = registry.clone();
             let d = device.clone();
             let c = connection.clone();
-            let task = tokio::spawn(async move {
+            let task = ::zeroclaw_spawn::spawn!(async move {
                 r.invoke(&d, &c, 1, "test.echo", serde_json::json!({"text":""}))
                     .await
             });
