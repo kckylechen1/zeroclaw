@@ -214,6 +214,14 @@ impl ScopedToolRegistry {
             tools_registry.push(Box::new(tools::ArcToolRef(Arc::clone(tool))));
         }
 
+        // Nodes remain opt-in and require an explicit per-device requester allowlist.
+        if config.nodes.enabled {
+            tools_registry.extend(zeroclaw_api::node_tools::tools(
+                &config.data_dir,
+                security.allowed_tools.as_deref(),
+            ));
+        }
+
         // 2. Built-in allow/deny filter (uniform: the gateway used to skip it entirely).
         //    `caller_allowed` narrows on top of the policy, for the `run` path only.
         let before_filter = tools_registry.len();

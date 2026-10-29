@@ -41,7 +41,11 @@
       "zeroclaw-runtime/heavy-tests"
     ],
     "channels": [
-      "zeroclaw-channels/heavy-tests"
+      "zeroclaw-channels/heavy-tests",
+      "zeroclaw-gateway/nodes"
+    ],
+    "app": [
+      "zeroclawlabs/nodes"
     ]
   },
   "extra_runs": {

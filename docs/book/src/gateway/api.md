@@ -1182,3 +1182,51 @@ release for 16 minutes from their first acceptance. The Gateway admits at most
 256 unexpired IDs per session and 1024 such recent sessions; new inputs are
 refused when either receipt bound is full rather than evicting live IDs. This does not provide
 restart recovery. Attachment handles expire after 15 minutes regardless.
+
+## Local read-only Node host
+
+Build the opt-in foreground host with
+`scripts/dev/cargo-local.sh build --bin zeroclaw-node-host --features nodes`.
+The gateway also needs the `nodes` feature and `[nodes] enabled = true`.
+Keep the gateway listener on loopback for this local proof. The existing node
+bearer authentication and Ed25519 pairing are both required; starting the host
+or possessing a bearer does not grant a capability.
+
+The host prints a `public_key` event and waits for an operator-enrolled identity
+on standard input. With the existing operator-authenticated identity API:
+
+1. Issue a pairing code at `POST /api/node-identities/pairing`, with
+   `capability_ceiling` equal to `["system.info", "test.echo"]`.
+2. Enroll the printed public key at `POST /api/node-identities`, with `code` and
+   `public_key`. The private key stays in the host process.
+3. Supply one JSON line to the host containing `address` (numeric loopback IP and
+   gateway port), `device_id`, `identity_epoch`, and `token` (the existing node
+   bearer). Supply credentials through private stdin, not command arguments or logs.
+4. Add the exact tools `node:<device_id>:system.info` and
+   `node:<device_id>:test.echo` to the requesting agent's risk-profile
+   `allowed_tools`. This first slice requires exact entries; wildcard grants do
+   not expose these tools. Existing excluded-tools and caller restrictions apply.
+
+`system.info` takes `{}` and returns only OS and architecture. `test.echo` takes
+`{"text":"..."}` with at most 4096 UTF-8 bytes; an empty string is valid. No shell,
+filesystem, camera, microphone, motion, face or other actuation is available.
+`approved=true` and grant-proof arguments cannot expand this set.
+
+The foreground stdin commands are `info-only` (reduce the live advertisement),
+`reconnect` (same process-held identity, new connection) and `stop`. EOF, Ctrl-C,
+SIGTERM or gateway closure exits the host. There is no unattended retry or replay.
+Restarting the host generates a fresh key and requires enrollment again; this
+slice adds no host credential store. Revoke retired identities through the
+existing operator API rather than accumulating obsolete enrollments.
+
+Calls have a two-second deadline and at most sixteen pending entries per socket.
+The host remembers at most 1024 distinct calls per connection and closes on
+exhaustion instead of evicting entries and allowing duplicate execution. Pending
+calls settle once. Disconnect, revocation, capability revision changes and gateway
+shutdown invalidate pending calls. A sent call's timeout or disconnect reports an
+unknown outcome: failure to receive a result does not prove the host did not execute
+the read. Device output is evidence, not an approval or acceptance receipt.
+
+To disable the surface, set `[nodes] enabled = false` and restart the gateway;
+remove the exact requester grants and stop the host. No new persistent invocation
+ledger needs migration or cleanup.
