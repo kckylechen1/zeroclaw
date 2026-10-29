@@ -14,9 +14,11 @@ use serde_json::{Value, json};
 use zeroclaw_config::tachi::TachiConfig;
 
 use super::staff::{
-    CancelOutcome, HEADER_AGENT_IDENTITY, HEADER_CLIENT, HEADER_PROFILE, HEADER_PROJECT, RunState,
-    RunStatus, StaffReceipt, StaffRefs, StaffingReason, TACHI_STAFF_TOOL, TACHI_TASK_TOOL,
-    TachiStaffClient, TachiStaffError,
+    CancelOutcome, HEADER_AGENT_IDENTITY, HEADER_CLIENT, HEADER_PROFILE, HEADER_PROJECT,
+    MIRROR_EXECUTION_ORIGIN, MIRROR_HARNESS, MIRROR_LIFECYCLE_OWNER, RunState, RunStatus,
+    StaffReceipt, StaffRefs, StaffingReason, TACHI_AGENT_EVAL_TOOL, TACHI_STAFF_TOOL,
+    TACHI_TASK_TOOL, TachiStaffClient, TachiStaffError, mirror_observe_args, mirror_register_args,
+    mirror_terminal_outcome,
 };
 
 /// Tachi's golden external-staffing contract (copied verbatim from
@@ -81,6 +83,22 @@ impl Fake {
             .expect("calls lock")
             .iter()
             .map(|call| (call.tool.clone(), call.args.clone()))
+            .collect()
+    }
+
+    /// Staff-only calls. Seam A mirror traffic uses `tachi_agent_eval` and is
+    /// excluded so existing Staff binding/control assertions stay stable.
+    fn staff_calls(&self) -> Vec<(String, Value)> {
+        self.calls()
+            .into_iter()
+            .filter(|(tool, _)| tool == TACHI_STAFF_TOOL)
+            .collect()
+    }
+
+    fn mirror_calls(&self) -> Vec<(String, Value)> {
+        self.calls()
+            .into_iter()
+            .filter(|(tool, _)| tool == TACHI_AGENT_EVAL_TOOL)
             .collect()
     }
 }
@@ -171,9 +189,59 @@ async fn handle(
     }
 }
 
+fn default_mirror_fixture(args: &Value) -> Reply {
+    match args["action"].as_str() {
+        Some("get") => Reply::ToolError(format!(
+            "no mirror eval run found for eval_run_id=None native_child_id=Some({:?})",
+            args.get("native_child_id")
+        )),
+        Some("register") => {
+            let native = args["native_child_id"].as_str().unwrap_or("missing");
+            Reply::Ok(json!({
+                "eval_run_id": "00000000-0000-4000-8000-000000000001",
+                "created_at": "2026-10-29T00:00:00Z",
+                "native_child_id": native,
+                "execution_origin": args.get("execution_origin").cloned().unwrap_or(Value::Null),
+                "lifecycle_owner": args.get("lifecycle_owner").cloned().unwrap_or(Value::Null),
+                "harness": args.get("harness").cloned().unwrap_or(Value::Null),
+                "frozen_contract_ref": args.get("frozen_contract_ref").cloned().unwrap_or(Value::Null),
+                "requested_role": null,
+                "requested_task_type": null
+            }))
+        }
+        Some("observe") => Reply::Ok(json!({
+            "observation_id": "00000000-0000-4000-8000-000000000002",
+            "native_child_id": args.get("native_child_id").cloned().unwrap_or(Value::Null),
+            "terminal_outcome": args.get("terminal_outcome").cloned().unwrap_or(Value::Null),
+            "result_ref": args.get("result_ref").cloned().unwrap_or(Value::Null),
+        })),
+        other => Reply::ToolError(format!("unexpected default mirror action {other:?}")),
+    }
+}
+
 async fn serve(
     script: impl Fn(&str, &Value) -> Reply + Send + Sync + 'static,
 ) -> (Arc<Fake>, String) {
+    serve_inner(script, true).await
+}
+
+/// Like [`serve`], but the script also owns `tachi_agent_eval` replies.
+async fn serve_mirror_script(
+    script: impl Fn(&str, &Value) -> Reply + Send + Sync + 'static,
+) -> (Arc<Fake>, String) {
+    serve_inner(script, false).await
+}
+
+async fn serve_inner(
+    script: impl Fn(&str, &Value) -> Reply + Send + Sync + 'static,
+    default_mirror: bool,
+) -> (Arc<Fake>, String) {
+    let script = move |tool: &str, args: &Value| {
+        if default_mirror && tool == TACHI_AGENT_EVAL_TOOL {
+            return default_mirror_fixture(args);
+        }
+        script(tool, args)
+    };
     let fake = Arc::new(Fake {
         script: Box::new(script),
         calls: Mutex::new(Vec::new()),
@@ -1488,7 +1556,7 @@ async fn production_content_block_diagnostics_preserve_start_status_result_and_w
     assert_eq!(watch.output.data().unwrap()["terminal"], true);
     assert_eq!(watch.output.data().unwrap()["status"]["status_revision"], 5);
     assert_eq!(status_reads.load(Ordering::SeqCst), 3);
-    let calls = fake.calls();
+    let calls = fake.staff_calls();
     assert_eq!(calls.len(), 5);
     assert_eq!(
         calls
@@ -1501,6 +1569,10 @@ async fn production_content_block_diagnostics_preserve_start_status_result_and_w
         calls
             .iter()
             .all(|(tool, args)| tool == TACHI_STAFF_TOOL && args["format"] == "json")
+    );
+    assert!(
+        !fake.mirror_calls().is_empty(),
+        "Seam A mirror must attempt register/observe beside Staff"
     );
 }
 
@@ -1522,7 +1594,7 @@ async fn production_result_refusal_from_an_older_peer_has_no_task_fallback() {
     let result = invoke(&tools, "tachi_result", json!({"request_id":"old-peer"})).await;
     assert!(!result.success);
     assert_eq!(result.output.data().unwrap()["code"], "refused");
-    let calls = fake.calls();
+    let calls = fake.staff_calls();
     assert_eq!(
         calls.len(),
         2,
@@ -1537,7 +1609,7 @@ async fn production_result_refusal_from_an_older_peer_has_no_task_fallback() {
             json!({"action":"result", "format":"json", "dispatch_id":"d-old-peer"})
         )
     );
-    assert!(calls.iter().all(|(tool, _)| tool != TACHI_TASK_TOOL));
+    assert!(fake.calls().iter().all(|(tool, _)| tool != TACHI_TASK_TOOL));
 }
 
 #[tokio::test]
@@ -1731,10 +1803,20 @@ async fn production_unsent_initialize_failure_releases_claim_and_same_id_can_ret
         retry.output.data().unwrap()["receipt"]["dispatch_id"],
         "d-after-outage"
     );
-    assert_eq!(fake.calls().len(), 1);
+    assert_eq!(fake.staff_calls().len(), 1);
     let replay = invoke(&tools, "tachi_start", start_args("same-id")).await;
     assert_eq!(replay.output.data().unwrap()["replayed"], true);
-    assert_eq!(fake.calls().len(), 1);
+    assert_eq!(
+        fake.staff_calls().len(),
+        1,
+        "replay must not start another Staff worker"
+    );
+    assert!(
+        fake.mirror_calls()
+            .iter()
+            .any(|(_, args)| args["action"] == "get" || args["action"] == "register"),
+        "bound replay must attempt mirror register repair"
+    );
 }
 
 #[tokio::test]
@@ -1849,7 +1931,7 @@ async fn assert_route_changes_keep_one_claim(accepted: bool, changes: &[&str]) {
         } else {
             assert_eq!(first.output.data().unwrap()["code"], "submission_unknown");
         }
-        assert_eq!(old.calls().len(), 1);
+        assert_eq!(old.staff_calls().len(), 1);
         {
             let mut config = live.write();
             match change {
@@ -1900,9 +1982,9 @@ async fn assert_route_changes_keep_one_claim(accepted: bool, changes: &[&str]) {
                 );
             }
             assert_eq!(
-                old.calls().len(),
+                old.staff_calls().len(),
                 1,
-                "no old reference forwarded after {change}"
+                "no old Staff reference forwarded after {change}"
             );
             assert!(
                 other.calls().is_empty(),
@@ -1934,7 +2016,7 @@ async fn assert_route_changes_keep_one_claim(accepted: bool, changes: &[&str]) {
                 "d-route-original"
             );
             assert_eq!(
-                old.calls().len(),
+                old.staff_calls().len(),
                 2,
                 "only original-route status positive control"
             );
@@ -1953,7 +2035,7 @@ async fn assert_route_changes_keep_one_claim(accepted: bool, changes: &[&str]) {
                 status.output.data().unwrap()["code"],
                 "submission_unresolved"
             );
-            assert_eq!(old.calls().len(), 1);
+            assert_eq!(old.staff_calls().len(), 1);
         }
         assert!(other.calls().is_empty());
         let conn = rusqlite::Connection::open(cfg.data_dir.join("sessions/sessions.db")).unwrap();
@@ -2181,4 +2263,311 @@ async fn production_live_policy_and_profile_revocations_apply_before_submission(
     );
     assert!(fake.calls().is_empty());
     assert_eq!(fake.sessions_opened.load(Ordering::SeqCst), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Seam A Staff experience mirror (#509)
+// ─────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn mirror_register_observe_on_status_result_and_watch_share_one_payload() {
+    let store = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+    let observations = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let store_get = store.clone();
+    let store_reg = store.clone();
+    let obs = observations.clone();
+    let (fake, endpoint) = serve_mirror_script(move |tool, args| match (tool, args["action"].as_str()) {
+        (TACHI_STAFF_TOOL, Some("start")) => Reply::Ok(working_receipt("d-mirror")),
+        (TACHI_STAFF_TOOL, Some("status")) | (TACHI_STAFF_TOOL, Some("result")) => {
+            let status = json!({
+                "dispatch_id":"d-mirror",
+                "state":"TASK_STATE_COMPLETED",
+                "status_revision":3,
+                "updated_at":"2026-10-29T12:00:00Z",
+                "result_written":true
+            });
+            if args["action"] == "result" {
+                Reply::Ok(json!({
+                    "dispatch_id":"d-mirror",
+                    "state":"TASK_STATE_COMPLETED",
+                    "status_revision":3,
+                    "updated_at":"2026-10-29T12:00:00Z",
+                    "result_written":true,
+                    "result":{"body":"Worker report with costs ignored", "truncated":true}
+                }))
+            } else {
+                Reply::Ok(status)
+            }
+        }
+        (TACHI_AGENT_EVAL_TOOL, Some("get")) => {
+            let native = args["native_child_id"].as_str().unwrap_or("").to_string();
+            match store_get.lock().expect("store").get(&native).cloned() {
+                Some(row) => Reply::Ok(row),
+                None => Reply::ToolError(format!(
+                    "no mirror eval run found for eval_run_id=None native_child_id=Some({native:?})"
+                )),
+            }
+        }
+        (TACHI_AGENT_EVAL_TOOL, Some("register")) => {
+            let native = args["native_child_id"].as_str().unwrap_or("").to_string();
+            let expected = mirror_register_args(&native);
+            assert_eq!(args, &expected, "frozen register payload");
+            let row = json!({
+                "eval_run_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "created_at":"2026-10-29T12:00:00Z",
+                "native_child_id":native,
+                "execution_origin":MIRROR_EXECUTION_ORIGIN,
+                "lifecycle_owner":MIRROR_LIFECYCLE_OWNER,
+                "harness":MIRROR_HARNESS,
+                "frozen_contract_ref":expected["frozen_contract_ref"],
+                "observation":null,
+                "adjudications":[]
+            });
+            store_reg
+                .lock()
+                .expect("store")
+                .insert(native, row.clone());
+            Reply::Ok(row)
+        }
+        (TACHI_AGENT_EVAL_TOOL, Some("observe")) => {
+            obs.lock().expect("obs").push(args.clone());
+            Reply::Ok(json!({
+                "observation_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "native_child_id":args["native_child_id"],
+                "terminal_outcome":args["terminal_outcome"]
+            }))
+        }
+        _ => panic!("unexpected call {tool} {args}"),
+    })
+    .await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
+    let started = invoke(&tools, "tachi_start", start_args("req-mirror")).await;
+    assert!(started.success, "{:?}", started.error);
+    assert_eq!(
+        store.lock().expect("store").len(),
+        1,
+        "start_bind must register"
+    );
+
+    let status = invoke(&tools, "tachi_status", json!({"request_id":"req-mirror"})).await;
+    assert!(status.success, "{:?}", status.error);
+    let result = invoke(&tools, "tachi_result", json!({"request_id":"req-mirror"})).await;
+    assert!(result.success, "{:?}", result.error);
+    let watch = invoke(
+        &tools,
+        "tachi_watch",
+        json!({"request_id":"req-mirror","max_wait_secs":1}),
+    )
+    .await;
+    assert!(watch.success, "{:?}", watch.error);
+
+    let observed = observations.lock().expect("obs").clone();
+    assert_eq!(observed.len(), 3, "status/result/watch each observe once");
+    let expected = mirror_observe_args("d-mirror", "success");
+    for payload in &observed {
+        assert_eq!(payload, &expected);
+    }
+    for (_, args) in fake.mirror_calls() {
+        let wire = args.to_string();
+        assert!(!wire.contains("Worker report"));
+        assert!(!wire.contains("SOUL"));
+        assert_ne!(
+            args.get("execution_origin"),
+            Some(&json!("host_native_subagent"))
+        );
+        assert_ne!(args.get("lifecycle_owner"), Some(&json!("host")));
+    }
+}
+
+#[tokio::test]
+async fn mirror_peer_errors_are_fail_soft_and_never_replay_staff_start() {
+    let staff_starts = Arc::new(AtomicUsize::new(0));
+    let starts = staff_starts.clone();
+    let (fake, endpoint) =
+        serve_mirror_script(move |tool, args| match (tool, args["action"].as_str()) {
+            (TACHI_STAFF_TOOL, Some("start")) => {
+                starts.fetch_add(1, Ordering::SeqCst);
+                Reply::Ok(working_receipt("d-failsoft"))
+            }
+            (TACHI_STAFF_TOOL, Some("status")) => Reply::Ok(json!({
+                "dispatch_id":"d-failsoft",
+                "state":"TASK_STATE_FAILED",
+                "status_revision":2
+            })),
+            (TACHI_AGENT_EVAL_TOOL, _) => Reply::ToolError("mirror peer refused".into()),
+            _ => panic!("unexpected call {tool} {args}"),
+        })
+        .await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
+    let started = invoke(&tools, "tachi_start", start_args("req-failsoft")).await;
+    assert!(
+        started.success,
+        "Staff start must succeed when mirror fails"
+    );
+    let status = invoke(&tools, "tachi_status", json!({"request_id":"req-failsoft"})).await;
+    assert!(
+        status.success,
+        "Staff status must succeed when mirror fails"
+    );
+    assert_eq!(
+        status.output.data().unwrap()["status"]["state"],
+        "TASK_STATE_FAILED"
+    );
+    assert_eq!(staff_starts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fake.staff_calls()
+            .iter()
+            .filter(|(_, args)| args["action"] == "start")
+            .count(),
+        1
+    );
+    assert!(
+        !fake.mirror_calls().is_empty(),
+        "mirror attempts still happen under fail-soft"
+    );
+}
+
+#[tokio::test]
+async fn mirror_restart_after_bind_repairs_register_before_terminal_observe() {
+    let store = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+    let registered = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(AtomicUsize::new(0));
+    let store_get = store.clone();
+    let store_reg = store.clone();
+    let reg_count = registered.clone();
+    let obs_count = observed.clone();
+    let (fake, endpoint) = serve_mirror_script(move |tool, args| match (tool, args["action"].as_str()) {
+        (TACHI_STAFF_TOOL, Some("start")) => Reply::Ok(working_receipt("d-restart")),
+        (TACHI_STAFF_TOOL, Some("status")) => Reply::Ok(json!({
+            "dispatch_id":"d-restart",
+            "state":"TASK_STATE_CANCELED",
+            "status_revision":9
+        })),
+        (TACHI_AGENT_EVAL_TOOL, Some("get")) => {
+            let native = args["native_child_id"].as_str().unwrap_or("").to_string();
+            match store_get.lock().expect("store").get(&native).cloned() {
+                Some(row) => Reply::Ok(row),
+                None => Reply::ToolError(format!(
+                    "no mirror eval run found for eval_run_id=None native_child_id=Some({native:?})"
+                )),
+            }
+        }
+        (TACHI_AGENT_EVAL_TOOL, Some("register")) => {
+            reg_count.fetch_add(1, Ordering::SeqCst);
+            let native = args["native_child_id"].as_str().unwrap_or("").to_string();
+            let row = json!({
+                "eval_run_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                "native_child_id":native,
+                "execution_origin":MIRROR_EXECUTION_ORIGIN,
+                "lifecycle_owner":MIRROR_LIFECYCLE_OWNER,
+                "harness":MIRROR_HARNESS,
+                "frozen_contract_ref":format!("zeroclaw:staff:{native}"),
+                "observation":null
+            });
+            store_reg
+                .lock()
+                .expect("store")
+                .insert(native, row.clone());
+            Reply::Ok(row)
+        }
+        (TACHI_AGENT_EVAL_TOOL, Some("observe")) => {
+            obs_count.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(args, &mirror_observe_args("d-restart", "aborted"));
+            Reply::Ok(json!({"observation_id":"obs-1"}))
+        }
+        _ => panic!("unexpected call {tool} {args}"),
+    })
+    .await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+    let tools = production_tools(&cfg, live.clone());
+    let started = invoke(&tools, "tachi_start", start_args("req-restart")).await;
+    assert!(started.success, "{:?}", started.error);
+    assert_eq!(registered.load(Ordering::SeqCst), 1);
+    // Simulate lost mirror row after bind (crash before durable ledger ack).
+    store.lock().expect("store").clear();
+    drop(tools);
+    let tools = production_tools(&cfg, live);
+    let status = invoke(&tools, "tachi_status", json!({"request_id":"req-restart"})).await;
+    assert!(status.success, "{:?}", status.error);
+    assert_eq!(
+        registered.load(Ordering::SeqCst),
+        2,
+        "status must repair register"
+    );
+    assert_eq!(observed.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        mirror_terminal_outcome(&RunStatus {
+            dispatch_id: "d-restart".into(),
+            state: RunState::Canceled,
+            revision: Some(9),
+            closure_kind: None,
+            result_written: None,
+            updated_at: None,
+            read_projection: None,
+        }),
+        Some("aborted")
+    );
+    assert_eq!(
+        fake.staff_calls()
+            .iter()
+            .filter(|(_, args)| args["action"] == "start")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn mirror_watch_timeout_while_running_does_not_observe() {
+    let observed = Arc::new(AtomicUsize::new(0));
+    let obs = observed.clone();
+    let (_fake, endpoint) =
+        serve_mirror_script(move |tool, args| match (tool, args["action"].as_str()) {
+            (TACHI_STAFF_TOOL, Some("start")) => Reply::Ok(working_receipt("d-watch")),
+            (TACHI_STAFF_TOOL, Some("status")) => Reply::Ok(json!({
+                "dispatch_id":"d-watch",
+                "state":"TASK_STATE_WORKING",
+                "status_revision":1
+            })),
+            (TACHI_AGENT_EVAL_TOOL, Some("get")) => Reply::ToolError(
+                "no mirror eval run found for eval_run_id=None native_child_id=Some(\"d-watch\")"
+                    .into(),
+            ),
+            (TACHI_AGENT_EVAL_TOOL, Some("register")) => Reply::Ok(json!({
+                "eval_run_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                "native_child_id":"d-watch",
+                "execution_origin":MIRROR_EXECUTION_ORIGIN,
+                "lifecycle_owner":MIRROR_LIFECYCLE_OWNER,
+                "harness":MIRROR_HARNESS,
+                "frozen_contract_ref":"zeroclaw:staff:d-watch"
+            })),
+            (TACHI_AGENT_EVAL_TOOL, Some("observe")) => {
+                obs.fetch_add(1, Ordering::SeqCst);
+                Reply::Ok(json!({}))
+            }
+            _ => panic!("unexpected call {tool} {args}"),
+        })
+        .await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
+    assert!(
+        invoke(&tools, "tachi_start", start_args("req-watch"))
+            .await
+            .success
+    );
+    let watch = invoke(
+        &tools,
+        "tachi_watch",
+        json!({"request_id":"req-watch","max_wait_secs":1}),
+    )
+    .await;
+    assert!(watch.success, "{:?}", watch.error);
+    assert_eq!(watch.output.data().unwrap()["terminal"], false);
+    assert_eq!(observed.load(Ordering::SeqCst), 0);
 }

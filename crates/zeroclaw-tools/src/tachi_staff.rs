@@ -26,6 +26,10 @@
 //!   profile.
 //! - **Tolerant reads.** Responses are parsed for the fields used here only;
 //!   extra fields are ignored so Tachi can grow its receipts freely.
+//! - **Fail-soft Staff experience mirror (#509).** After an accepted bind and on
+//!   authorized terminal reads, the client may call `tachi_agent_eval`
+//!   register/observe beside Staff. Mirror errors never fail Staff and never
+//!   replay a Staff start.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -49,6 +53,17 @@ pub const TACHI_STAFF_TOOL: &str = "tachi_staff";
 /// Tachi's task read-model name, retained for compatibility. Staff result reads
 /// never call it or fall back to its report preview.
 pub const TACHI_TASK_TOOL: &str = "tachi_task";
+/// Public experience-ledger facade used for Seam A Staff mirror intake (#509).
+pub const TACHI_AGENT_EVAL_TOOL: &str = "tachi_agent_eval";
+
+/// Frozen `execution_origin` for Staff L2 mirror rows (#509).
+pub const MIRROR_EXECUTION_ORIGIN: &str = "zeroclaw_tachi_staff";
+/// Frozen `lifecycle_owner` for Staff L2 mirror rows (#509).
+pub const MIRROR_LIFECYCLE_OWNER: &str = "tachi";
+/// Frozen `harness` carrier label for Staff L2 mirror rows (#509).
+pub const MIRROR_HARNESS: &str = "zeroclaw_tachi_staff";
+/// Per mirror MCP call timeout. Constant; no `[tachi]` config key this slice.
+const MIRROR_CALL_TIMEOUT_SECS: u64 = 5;
 
 /// Tool profile header. ZeroClaw always asks for the ordinary `standard`
 /// profile; privileged Tachi profiles need a local proxy capability.
@@ -79,6 +94,24 @@ fn log_failure(op: &str, error: &TachiStaffError) {
             .with_outcome(::zeroclaw_log::EventOutcome::Failure)
             .with_attrs(json!({ "op": op, "error": zeroclaw_providers::sanitize_api_error(&error.to_string()) })),
         "tachi_staff: call failed"
+    );
+}
+
+fn log_mirror_event(action: ::zeroclaw_log::Action, site: &str, attrs: Value, message: &str) {
+    ::zeroclaw_log::record!(
+        WARN,
+        ::zeroclaw_log::Event::new(module_path!(), action)
+            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+            .with_attrs({
+                let mut object = match attrs {
+                    Value::Object(map) => map,
+                    _ => serde_json::Map::new(),
+                };
+                object.insert("site".to_string(), Value::String(site.to_string()));
+                object.insert("mirror".to_string(), Value::Bool(true));
+                Value::Object(object)
+            }),
+        message
     );
 }
 
@@ -441,6 +474,156 @@ impl TachiStaffClient {
         }
     }
 
+    // ── Staff experience mirror (#509) ─────────────────────────────────
+
+    /// Best-effort register/observe for one Staff dispatch beside the ledger.
+    ///
+    /// Always attempts to ensure the frozen registration exists. Observes only
+    /// when [`RunStatus::is_terminal`] maps to a frozen outcome. Mirror
+    /// transport/refusal/conflict/timeout failures are logged and swallowed;
+    /// they never fail the Staff tool outcome and never replay Staff start.
+    pub async fn capture_staff_mirror_experience(
+        &self,
+        dispatch_id: &str,
+        status: &RunStatus,
+        site: MirrorCallSite,
+    ) {
+        if let Err(error) = self
+            .capture_staff_mirror_experience_inner(dispatch_id, status, site)
+            .await
+        {
+            log_mirror_event(
+                ::zeroclaw_log::Action::Fail,
+                site.as_str(),
+                json!({
+                    "op": "capture",
+                    "dispatch_id": dispatch_id,
+                    "error": zeroclaw_providers::sanitize_api_error(&error.to_string()),
+                }),
+                "tachi_staff: mirror capture failed (fail-soft)",
+            );
+        }
+    }
+
+    async fn capture_staff_mirror_experience_inner(
+        &self,
+        dispatch_id: &str,
+        status: &RunStatus,
+        site: MirrorCallSite,
+    ) -> Result<(), TachiStaffError> {
+        let dispatch_id = dispatch_id.trim();
+        if dispatch_id.is_empty() {
+            return Ok(());
+        }
+        if !self
+            .ensure_staff_mirror_registration(dispatch_id, site)
+            .await?
+        {
+            return Ok(());
+        }
+        let Some(outcome) = mirror_terminal_outcome(status) else {
+            return Ok(());
+        };
+        self.mirror_observe(dispatch_id, outcome, site).await
+    }
+
+    /// Ensure the frozen register row exists for `dispatch_id`.
+    ///
+    /// Returns `Ok(true)` when the row is ours (present or just registered),
+    /// `Ok(false)` on an ownership conflict (do not observe), and `Err` on
+    /// transport/protocol failures the caller logs fail-soft.
+    async fn ensure_staff_mirror_registration(
+        &self,
+        dispatch_id: &str,
+        site: MirrorCallSite,
+    ) -> Result<bool, TachiStaffError> {
+        match self.mirror_get(dispatch_id).await {
+            Ok(payload) => {
+                if mirror_registration_matches(&payload, dispatch_id) {
+                    return Ok(true);
+                }
+                log_mirror_event(
+                    ::zeroclaw_log::Action::Fail,
+                    site.as_str(),
+                    json!({
+                        "op": "register_conflict",
+                        "dispatch_id": dispatch_id,
+                        "execution_origin": payload.get("execution_origin"),
+                        "lifecycle_owner": payload.get("lifecycle_owner"),
+                        "harness": payload.get("harness"),
+                    }),
+                    "tachi_staff: mirror register conflict (not minting second id)",
+                );
+                Ok(false)
+            }
+            Err(error) if is_mirror_get_miss(&error) => {
+                self.mirror_register(dispatch_id, site).await?;
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn mirror_get(&self, dispatch_id: &str) -> Result<Value, TachiStaffError> {
+        self.call_mirror("mirror_get", mirror_get_args(dispatch_id))
+            .await
+    }
+
+    async fn mirror_register(
+        &self,
+        dispatch_id: &str,
+        _site: MirrorCallSite,
+    ) -> Result<(), TachiStaffError> {
+        let payload = self
+            .call_mirror("mirror_register", mirror_register_args(dispatch_id))
+            .await?;
+        // Identical-content replay returns the same eval_run_id. A conflicting
+        // payload is a Refused from the peer and surfaces as Err above.
+        if payload.get("eval_run_id").and_then(Value::as_str).is_none()
+            && payload.get("native_child_id").and_then(Value::as_str) != Some(dispatch_id)
+        {
+            return Err(TachiStaffError::Protocol(
+                "mirror_register: missing eval_run_id".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn mirror_observe(
+        &self,
+        dispatch_id: &str,
+        terminal_outcome: &str,
+        _site: MirrorCallSite,
+    ) -> Result<(), TachiStaffError> {
+        let _payload = self
+            .call_mirror(
+                "mirror_observe",
+                mirror_observe_args(dispatch_id, terminal_outcome),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// MCP call to `tachi_agent_eval` with the frozen 5s mirror budget.
+    async fn call_mirror(&self, op: &str, args: Value) -> Result<Value, TachiStaffError> {
+        match tokio::time::timeout(
+            Duration::from_secs(MIRROR_CALL_TIMEOUT_SECS),
+            self.call(op, TACHI_AGENT_EVAL_TOOL, args),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                // Cancelled call drops the taken session; clear any remnant.
+                let mut session = self.session.lock().await;
+                *session = None;
+                Err(TachiStaffError::Unavailable(format!(
+                    "{op} timed out after {MIRROR_CALL_TIMEOUT_SECS}s"
+                )))
+            }
+        }
+    }
+
     // ── transport ───────────────────────────────────────────────────────
 
     fn transport_config(&self) -> McpServerConfig {
@@ -627,4 +810,288 @@ fn decode<T: serde::de::DeserializeOwned>(op: &str, payload: Value) -> Result<T,
         log_failure(op, &error);
         error
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Staff experience mirror helpers (#509)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Call sites that must share one capture helper (no per-site payloads).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MirrorCallSite {
+    /// After a fresh accepted bind.
+    StartBind,
+    /// Already-bound start replay (no second Staff start).
+    BoundReplay,
+    /// Authorized `tachi_status` terminal/nonterminal read.
+    Status,
+    /// Authorized `tachi_result` read (observe from `RunResult.status`).
+    Result,
+    /// Authorized bounded `tachi_watch` return.
+    Watch,
+    /// After cancel: best-effort status re-read then capture.
+    CancelReread,
+}
+
+impl MirrorCallSite {
+    /// Stable diagnostic label for logs/metrics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StartBind => "start_bind",
+            Self::BoundReplay => "bound_replay",
+            Self::Status => "status",
+            Self::Result => "result",
+            Self::Watch => "watch",
+            Self::CancelReread => "cancel_reread",
+        }
+    }
+}
+
+/// Synthetic `frozen_contract_ref` for an accepted Staff work item.
+#[must_use]
+pub fn mirror_frozen_contract_ref(dispatch_id: &str) -> String {
+    format!("zeroclaw:staff:{dispatch_id}")
+}
+
+/// Opaque Staff result pointer used on observe.
+#[must_use]
+pub fn mirror_result_ref(dispatch_id: &str) -> String {
+    format!("tachi_staff:{dispatch_id}")
+}
+
+/// Frozen register arguments reconstructible from `dispatch_id` alone.
+#[must_use]
+pub fn mirror_register_args(dispatch_id: &str) -> Value {
+    json!({
+        "action": "register",
+        "frozen_contract_ref": mirror_frozen_contract_ref(dispatch_id),
+        "execution_origin": MIRROR_EXECUTION_ORIGIN,
+        "lifecycle_owner": MIRROR_LIFECYCLE_OWNER,
+        "harness": MIRROR_HARNESS,
+        "native_child_id": dispatch_id,
+    })
+}
+
+/// Minimal observe arguments; identical across status/result/watch for one terminal.
+#[must_use]
+pub fn mirror_observe_args(dispatch_id: &str, terminal_outcome: &str) -> Value {
+    json!({
+        "action": "observe",
+        "native_child_id": dispatch_id,
+        "terminal_outcome": terminal_outcome,
+        "result_ref": mirror_result_ref(dispatch_id),
+        "artifacts": [],
+    })
+}
+
+/// Get-by-native-id selector for reconcile/restart recovery.
+#[must_use]
+pub fn mirror_get_args(dispatch_id: &str) -> Value {
+    json!({
+        "action": "get",
+        "native_child_id": dispatch_id,
+    })
+}
+
+/// Map a canonical Staff status to a mirror `terminal_outcome`.
+///
+/// Returns `None` when the status is nonterminal or unsupported for observe.
+#[must_use]
+pub fn mirror_terminal_outcome(status: &RunStatus) -> Option<&'static str> {
+    if !status.is_terminal() {
+        return None;
+    }
+    match status.state {
+        RunState::Completed => Some("success"),
+        RunState::Failed => Some("failure"),
+        RunState::Canceled => Some("aborted"),
+        RunState::InputRequired if status.closure_kind.as_deref() == Some("partial") => {
+            Some("partial")
+        }
+        _ => None,
+    }
+}
+
+/// Build a [`RunStatus`] projection from a start receipt (typically nonterminal).
+#[must_use]
+pub fn run_status_from_receipt(receipt: &StaffReceipt) -> RunStatus {
+    RunStatus {
+        dispatch_id: receipt.dispatch_id.clone(),
+        state: receipt.state.clone(),
+        revision: None,
+        closure_kind: None,
+        result_written: None,
+        updated_at: None,
+        read_projection: None,
+    }
+}
+
+/// Nonterminal status used on bound-replay register repair (no Staff status read).
+#[must_use]
+pub fn nonterminal_status_for_dispatch(dispatch_id: &str) -> RunStatus {
+    RunStatus {
+        dispatch_id: dispatch_id.to_string(),
+        state: RunState::Working,
+        revision: None,
+        closure_kind: None,
+        result_written: None,
+        updated_at: None,
+        read_projection: None,
+    }
+}
+
+fn is_mirror_get_miss(error: &TachiStaffError) -> bool {
+    match error {
+        TachiStaffError::Refused(message) => {
+            let lowered = message.to_ascii_lowercase();
+            lowered.contains("no mirror eval run found")
+                || (lowered.contains("not found") && lowered.contains("native_child_id"))
+        }
+        _ => false,
+    }
+}
+
+fn mirror_registration_matches(payload: &Value, dispatch_id: &str) -> bool {
+    let expected_contract = mirror_frozen_contract_ref(dispatch_id);
+    payload.get("native_child_id").and_then(Value::as_str) == Some(dispatch_id)
+        && payload.get("execution_origin").and_then(Value::as_str) == Some(MIRROR_EXECUTION_ORIGIN)
+        && payload.get("lifecycle_owner").and_then(Value::as_str) == Some(MIRROR_LIFECYCLE_OWNER)
+        && payload.get("harness").and_then(Value::as_str) == Some(MIRROR_HARNESS)
+        && payload.get("frozen_contract_ref").and_then(Value::as_str)
+            == Some(expected_contract.as_str())
+}
+
+#[cfg(test)]
+mod mirror_contract_tests {
+    use super::*;
+
+    fn status(state: RunState, closure_kind: Option<&str>) -> RunStatus {
+        RunStatus {
+            dispatch_id: "d-1".to_string(),
+            state,
+            revision: Some(1),
+            closure_kind: closure_kind.map(str::to_string),
+            result_written: None,
+            updated_at: Some("2026-10-29T00:00:00Z".to_string()),
+            read_projection: Some(json!({"execution_state": "running"})),
+        }
+    }
+
+    #[test]
+    fn frozen_register_labels_are_reconstructible_and_exclude_host_defaults() {
+        let args = mirror_register_args("disp-abc");
+        assert_eq!(args["action"], "register");
+        assert_eq!(args["execution_origin"], MIRROR_EXECUTION_ORIGIN);
+        assert_eq!(args["lifecycle_owner"], MIRROR_LIFECYCLE_OWNER);
+        assert_eq!(args["harness"], MIRROR_HARNESS);
+        assert_eq!(args["native_child_id"], "disp-abc");
+        assert_eq!(args["frozen_contract_ref"], "zeroclaw:staff:disp-abc");
+        assert_ne!(args["execution_origin"], "host_native_subagent");
+        assert_ne!(args["lifecycle_owner"], "host");
+        assert!(args.get("requested_model").is_none());
+        assert!(args.get("requested_profile").is_none());
+        assert!(args.get("requested_agent").is_none());
+        assert!(args.get("task").is_none());
+        let object = args.as_object().expect("object");
+        assert_eq!(
+            object.len(),
+            6,
+            "only allow-listed register fields: {object:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_mapping_table() {
+        assert_eq!(
+            mirror_terminal_outcome(&status(RunState::Completed, None)),
+            Some("success")
+        );
+        assert_eq!(
+            mirror_terminal_outcome(&status(RunState::Failed, None)),
+            Some("failure")
+        );
+        assert_eq!(
+            mirror_terminal_outcome(&status(RunState::Canceled, None)),
+            Some("aborted")
+        );
+        assert_eq!(
+            mirror_terminal_outcome(&status(RunState::InputRequired, Some("partial"))),
+            Some("partial")
+        );
+        assert_eq!(
+            mirror_terminal_outcome(&status(RunState::InputRequired, None)),
+            None
+        );
+        assert_eq!(
+            mirror_terminal_outcome(&status(RunState::InputRequired, Some("other"))),
+            None
+        );
+        assert_eq!(
+            mirror_terminal_outcome(&status(RunState::Submitted, None)),
+            None
+        );
+        assert_eq!(
+            mirror_terminal_outcome(&status(RunState::Working, None)),
+            None
+        );
+        assert_eq!(
+            mirror_terminal_outcome(&status(RunState::Other("TASK_STATE_UNKNOWN".into()), None)),
+            None
+        );
+    }
+
+    #[test]
+    fn observe_payload_identical_across_reader_sites_and_ignores_enrichment() {
+        let status_first = mirror_observe_args("d-9", "success");
+        let result_first = mirror_observe_args("d-9", "success");
+        let watch_first = mirror_observe_args("d-9", "success");
+        assert_eq!(status_first, result_first);
+        assert_eq!(result_first, watch_first);
+        assert_eq!(status_first["result_ref"], "tachi_staff:d-9");
+        assert_eq!(status_first["artifacts"], json!([]));
+        assert!(status_first.get("duration_ms").is_none());
+        assert!(status_first.get("cost_usd").is_none());
+        assert!(status_first.get("effective_model").is_none());
+        assert!(status_first.get("updated_at").is_none());
+        assert!(status_first.get("body").is_none());
+        let object = status_first.as_object().expect("object");
+        assert_eq!(
+            object.len(),
+            5,
+            "only allow-listed observe fields: {object:?}"
+        );
+    }
+
+    #[test]
+    fn registration_match_rejects_host_owned_rows() {
+        let ok = json!({
+            "native_child_id": "d-1",
+            "execution_origin": MIRROR_EXECUTION_ORIGIN,
+            "lifecycle_owner": MIRROR_LIFECYCLE_OWNER,
+            "harness": MIRROR_HARNESS,
+            "frozen_contract_ref": "zeroclaw:staff:d-1",
+            "eval_run_id": "11111111-1111-1111-1111-111111111111"
+        });
+        assert!(mirror_registration_matches(&ok, "d-1"));
+        let host = json!({
+            "native_child_id": "d-1",
+            "execution_origin": "host_native_subagent",
+            "lifecycle_owner": "host",
+            "harness": "claude_code_task_tool",
+            "frozen_contract_ref": "zeroclaw:staff:d-1",
+        });
+        assert!(!mirror_registration_matches(&host, "d-1"));
+    }
+
+    #[test]
+    fn get_miss_detection_matches_phase0_shape() {
+        let miss = TachiStaffError::Refused(
+            "no mirror eval run found for eval_run_id=None native_child_id=Some(\"x\")".to_string(),
+        );
+        assert!(is_mirror_get_miss(&miss));
+        assert!(!is_mirror_get_miss(&TachiStaffError::Unavailable(
+            "down".into()
+        )));
+    }
 }
