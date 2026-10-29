@@ -10,7 +10,31 @@ pub fn render(markdown: &str) -> String {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut hidden_inline: Option<String> = None;
+    let mut html_block: Option<String> = None;
     for event in Parser::new_ext(markdown, options) {
+        // Raw HTML arrives as line fragments. Keep extractor state by converting
+        // the entire parser-delimited block, including comments and attributes.
+        match &event {
+            Event::Start(Tag::HtmlBlock) => {
+                html_block = Some(String::new());
+                continue;
+            }
+            Event::Html(html) if html_block.is_some() => {
+                if let Some(block) = &mut html_block {
+                    block.push_str(html);
+                }
+                continue;
+            }
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some(block) = html_block.take() {
+                    out.push('\n');
+                    out.push_str(&html_text(&block));
+                    out.push('\n');
+                }
+                continue;
+            }
+            _ => {}
+        }
         if let Event::InlineHtml(html) = &event {
             let tag = html.trim().trim_start_matches('<');
             let closing = tag.starts_with('/');
@@ -174,6 +198,37 @@ mod preservation_tests {
         assert_eq!(
             render("~~pay 12~~ pay 0"),
             format!("{deleted} pay 12; pay 0")
+        );
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::render;
+    #[test]
+    fn multiline_script_block_is_not_spoken() {
+        assert_eq!(
+            render("Before.\n\n<script>\nnever speak this\n</script>\n\nAfter."),
+            "Before.\nAfter."
+        );
+        assert_eq!(render("<script>\nunclosed script"), "");
+    }
+    #[test]
+    fn multiline_style_block_is_not_spoken() {
+        assert_eq!(
+            render("<style>\nbody { color: red; }\n</style>\n\nVisible."),
+            "Visible."
+        );
+    }
+    #[test]
+    fn multiline_comment_block_is_not_spoken() {
+        assert_eq!(render("<!--\nprivate comment\n-->\n\nVisible."), "Visible.");
+    }
+    #[test]
+    fn multiline_prose_block_preserves_boundaries_and_split_attributes() {
+        assert_eq!(
+            render("<div\nclass='plain'>\nDo not\npay 12.\n</div>\n\nAfter."),
+            "Do not pay 12.\nAfter."
         );
     }
 }
