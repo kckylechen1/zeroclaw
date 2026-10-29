@@ -53,6 +53,15 @@
         ],
         "filter": "landlock"
       }
+    ],
+    "channels": [
+      {
+        "name": "voice-surface",
+        "features": [
+          "zeroclaw-gateway/voice-surface"
+        ],
+        "filter": "surface_tests"
+      }
     ]
   },
   "excluded": []

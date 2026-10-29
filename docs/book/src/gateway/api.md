@@ -79,10 +79,30 @@ The register belongs to the initiating connection and is resolved for each turn,
 not captured by the first socket's shared Agent. It adds one repository-owned
 `## Surface` line about length and Markdown. Identity, Soul and Tone stay
 identical; surface grants no authority and does not change authentication,
-allowlists, session identity or the `wss` runtime channel. All subscribers receive
-the same output. Steering and a late steering continuation retain the original
+allowlists, session identity or the `wss` runtime channel. Web, CLI and Telegram subscribers receive
+the same canonical output; opted-in voice subscribers render a private copy. Steering and a late steering continuation retain the original
 turn's register. Durable source inputs retain the register accepted with their
 body, including after reconnect or restart.
+
+The additive `voice` surface requires a build with `--features voice-surface`;
+default builds reject it on both the query and connect paths. It is spoken-text
+presentation only: no audio capture, speech recognition or new transport.
+It adds no prompt instruction. Each voice socket receives a plain-text rendering
+of the sanitized final response; Markdown structure becomes text and table cells
+are separated. Spoken form uses a binary markup rule: if the original reply
+contains `<` immediately followed by `/`, `!`, or an ASCII letter, the entire
+spoken reply is a localized fixed notice that markup caused speech to be skipped.
+This includes HTML, comments, autolinks and markup in code; no tag-boundary
+analysis or partial HTML reading occurs. Otherwise only Markdown rendering runs;
+entity-decoded text is not reclassified as HTML.
+Task completion and struck-out text retain their status through spoken labels.
+Rendered text is scanned again under the configured credential-leak policy. Chunk envelopes have empty
+content until `done.full_response` is available. Control and approval frames keep
+their existing meaning; consumers must not feed these frames to speech output.
+The same rendering applies to negotiated events and replay, without modifying
+shared history, journals or Web/CLI subscribers. A voice connection never supplies
+owner-learning evidence, even when its transport has an operator token: there is
+no verified-speaker contract. Unknown speakers cannot self-identify as the owner.
 
 The Web client sends `surface=web`; the CLI and Telegram bridge use the connect
 frame and require a matching version 1 acknowledgement. Upgrade Gateway before

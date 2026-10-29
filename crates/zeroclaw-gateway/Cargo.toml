@@ -98,6 +98,8 @@ channel-nostr = ["zeroclaw-channels/channel-nostr"]
 channel-wechat = ["zeroclaw-channels/channel-wechat"]
 whatsapp-web = ["zeroclaw-channels/whatsapp-web"]
 gateway-voice-duplex = []
+# Explicit opt-in to spoken-text presentation; no audio transport.
+voice-surface = []
 # Enables OPTIONS /api/config* responses with the schemars-generated
 # JSON Schema body. Turning it off returns a small placeholder instead.
 schema-export = ["zeroclaw-config/schema-export", "zeroclaw-runtime/schema-export", "dep:schemars"]

@@ -234,6 +234,7 @@ non_row_features = [
     "landlock",
     "metrics",
     "embedded-web",
+    "voice-surface",
 ]
 # Features intentionally added to the lean Cargo defaults for standard
 # distribution artifacts. This list is the complete positive policy beyond
@@ -392,8 +393,11 @@ embedded-web = ["zeroclaw-gateway/embedded-web"]
 landlock = ["sandbox-landlock"]
 metrics = ["observability-prometheus"]
 
+voice-surface = ["gateway", "zeroclaw-gateway/voice-surface"]
+
 # CI meta-feature
 ci-all = [
+    "voice-surface",
     "agent-runtime",
     "channels-full",
     "channel-nostr", "channel-matrix", "whatsapp-web",

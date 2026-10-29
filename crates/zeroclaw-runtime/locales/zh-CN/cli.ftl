@@ -903,3 +903,5 @@ tool-runtime-command-build-failed = 构建运行时命令失败：{$error}
 tool-runtime-command-docker-allowed-root = 构建运行时命令失败：无法规范化 Docker 工作区根 {$path}：{$cause}
 tool-runtime-command-docker-workspace-path = 构建运行时命令失败：无法规范化 Docker 工作区路径 {$path}：{$cause}
 turn-max-iterations-reached = *回合已停止：达到工具迭代上限（{ $max_iterations }）。*
+
+voice-html-omitted = 本条回复包含标记内容，已跳过朗读。
