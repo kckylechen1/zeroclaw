@@ -397,6 +397,7 @@ voice-surface = ["gateway", "zeroclaw-gateway/voice-surface"]
 
 # CI meta-feature
 ci-all = [
+    "nodes",
     "voice-surface",
     "agent-runtime",
     "channels-full",
@@ -480,3 +481,12 @@ path = "tests/test_architecture.rs"
 [[bench]]
 name = "agent_benchmarks"
 harness = false
+
+[[bin]]
+name = "zeroclaw-node-host"
+path = "src/bin/zeroclaw-node-host.rs"
+required-features = ["gateway", "nodes", "agent-runtime"]
+
+[[test]]
+name = "node_v2_process"
+required-features = ["gateway", "nodes", "agent-runtime"]

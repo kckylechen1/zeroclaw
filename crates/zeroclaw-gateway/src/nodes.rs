@@ -34,6 +34,7 @@ use zeroclaw_api::node::{
 };
 use zeroclaw_runtime::security::pairing::{PairingGuard, constant_time_eq};
 
+pub mod invocation;
 pub mod mdns;
 
 /// Prefix used in `Sec-WebSocket-Protocol` to carry a bearer token.
@@ -72,12 +73,14 @@ struct LiveSocket {
     key_fingerprint: Option<String>,
     close_tx: tokio::sync::watch::Sender<bool>,
     widen_refusals: u32,
+    invocation: invocation::InvocationState,
 }
 
 /// Registry of all connected nodes and their capabilities.
 #[derive(Clone)]
 pub struct NodeRegistry {
     max_nodes: usize,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
     next_generation: Arc<AtomicU64>,
     identities: Option<DeviceIdentityStore>,
     pending_challenges: Arc<RwLock<HashMap<String, PendingChallenge>>>,
@@ -100,6 +103,7 @@ impl NodeRegistry {
     pub fn new(max_nodes: usize) -> Self {
         Self {
             max_nodes,
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             next_generation: Arc::new(AtomicU64::new(0)),
             identities: {
                 #[cfg(test)]
@@ -152,7 +156,7 @@ impl NodeRegistry {
     pub fn try_reserve(&self) -> Option<(NodeConnection, tokio::sync::watch::Receiver<bool>)> {
         self.sweep_challenges();
         let mut live = self.live.write();
-        if live.len() >= self.max_nodes {
+        if self.stopped.load(Ordering::SeqCst) || live.len() >= self.max_nodes {
             return None;
         }
         let conn = self.mint_connection();
@@ -165,6 +169,7 @@ impl NodeRegistry {
                 key_fingerprint: None,
                 close_tx,
                 widen_refusals: 0,
+                invocation: invocation::InvocationState::new(),
             },
         );
         Some((conn, close_rx))
@@ -202,6 +207,19 @@ impl NodeRegistry {
         store
             .with_active(&device_id, &key_fingerprint, || {
                 let mut live = self.live.write();
+                let old: Vec<String> = live
+                    .iter()
+                    .filter(|(id, s)| {
+                        id.as_str() != connection_id && s.device_id.as_deref() == Some(&device_id)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in old {
+                    if let Some(mut socket) = live.remove(&id) {
+                        socket.invocation.drain("stale_connection_unknown_outcome");
+                        let _ = socket.close_tx.send(true);
+                    }
+                }
                 let socket = live.get_mut(connection_id)?;
                 socket.device_id = Some(device_id.clone());
                 socket.key_fingerprint = Some(key_fingerprint.clone());
@@ -218,7 +236,9 @@ impl NodeRegistry {
     }
 
     pub fn detach_socket(&self, connection_id: &str) {
-        self.live.write().remove(connection_id);
+        if let Some(mut socket) = self.live.write().remove(connection_id) {
+            socket.invocation.drain("disconnected_unknown_outcome");
+        }
         self.pending_challenges.write().remove(connection_id);
     }
 
@@ -237,6 +257,7 @@ impl NodeRegistry {
         let mut live = self.live.write();
         live.retain(|_, socket| {
             if socket.device_id.as_deref() == Some(device_id) {
+                socket.invocation.drain("revoked_unknown_outcome");
                 let _ = socket.close_tx.send(true);
                 torn.push(socket.connection_id.clone());
                 false
@@ -669,13 +690,18 @@ fn apply_advertise(
         return (protocol_error_frame(NodeErrorCode::IdentityRejected), true);
     };
     match registry.admit_advertised_caps(&device_id, &key_fingerprint, caps) {
-        Ok(admitted) => (
-            GatewayToNode::Admitted {
-                caps: admitted,
-                cap_revision,
-            },
-            false,
-        ),
+        Ok(admitted) => {
+            if !registry.set_caps(&conn.connection_id, admitted.clone(), cap_revision) {
+                return (protocol_error_frame(NodeErrorCode::CapabilityWiden), false);
+            }
+            (
+                GatewayToNode::Admitted {
+                    caps: admitted,
+                    cap_revision,
+                },
+                false,
+            )
+        }
         Err(crate::device_identity::IdentityError::WidenRefused) => {
             ::zeroclaw_log::record!(
                 WARN,
@@ -728,6 +754,29 @@ fn process_post_handshake_text(
                 ));
             }
             Some(apply_advertise(registry, conn, &caps, cap_revision))
+        }
+        NodeToGateway::Result {
+            call_id,
+            connection_id,
+            success,
+            output,
+            error,
+        } => {
+            if connection_id == conn.connection_id
+                && output.len() <= 8192
+                && error.as_ref().is_none_or(|e| e.len() <= 1024)
+            {
+                registry.complete(
+                    &conn.connection_id,
+                    &call_id,
+                    zeroclaw_api::tool::ToolResult {
+                        success,
+                        output: output.into(),
+                        error,
+                    },
+                );
+            }
+            None
         }
         NodeToGateway::Auth { signature, .. } => {
             if signature.len() > MAX_AUTH_SIGNATURE_BYTES {
@@ -787,27 +836,39 @@ pub async fn handle_ws_nodes(
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let nodes_config = state.config.read().nodes.clone();
-    match admit_node_ws(
+    upgrade_node_socket(
         &nodes_config,
         &state.pairing,
+        state.node_registry.clone(),
         &headers,
         params.token.as_deref(),
-    ) {
+        ws,
+    )
+}
+
+/// Shared HTTP admission and socket owner, also used by isolated process proofs.
+pub fn upgrade_node_socket(
+    config: &zeroclaw_config::schema::NodesConfig,
+    pairing: &PairingGuard,
+    registry: Arc<NodeRegistry>,
+    headers: &HeaderMap,
+    token: Option<&str>,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
+    match admit_node_ws(config, pairing, headers, token) {
         NodeWsAdmission::Ok => {}
         NodeWsAdmission::Legacy { status, body } => return (status, body).into_response(),
         NodeWsAdmission::Typed { status, code } => {
             return (status, Json(NodeProtocolReject { code })).into_response();
         }
     }
-    if state.node_registry.identities().is_none() {
+    if registry.identities().is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "identity store unavailable",
         )
             .into_response();
     }
-
-    let registry = state.node_registry.clone();
     ws.protocols([WS_NODES_V2])
         .max_message_size(WS_MAX_MESSAGE_SIZE)
         .max_frame_size(WS_MAX_MESSAGE_SIZE)
@@ -937,6 +998,7 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
         }
     }
 
+    let mut invoke_rx = registry.attach_invocations(&conn.connection_id);
     let ack = hello_ack(&conn, protocol_version);
     if send_json(&mut sender, &ack).await.is_err() {
         return;
@@ -947,6 +1009,13 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
             changed = close_rx.changed() => {
                 if changed.is_err() || *close_rx.borrow() {
                     let _ = close_protocol(&mut sender, NodeErrorCode::IdentityRejected.as_str()).await;
+                    return;
+                }
+            }
+            frame = invoke_rx.recv() => {
+                let Some(frame) = frame else { return };
+                if registry.prepare_send(&conn.connection_id, &frame)
+                    && !matches!(tokio::time::timeout(invocation::CALL_TIMEOUT, send_json(&mut sender, &frame)).await, Ok(Ok(()))) {
                     return;
                 }
             }
@@ -977,23 +1046,29 @@ async fn send_json<T: Serialize>(
     value: &T,
 ) -> Result<(), ()> {
     let json = serde_json::to_string(value).map_err(|_| ())?;
-    sender
-        .send(Message::Text(json.into()))
-        .await
-        .map_err(|_| ())
+    tokio::time::timeout(
+        invocation::CALL_TIMEOUT,
+        sender.send(Message::Text(json.into())),
+    )
+    .await
+    .map_err(|_| ())?
+    .map_err(|_| ())
 }
 
 async fn close_protocol(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     reason: &'static str,
 ) -> Result<(), ()> {
-    sender
-        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+    tokio::time::timeout(
+        invocation::CALL_TIMEOUT,
+        sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
             code: 1002,
             reason: axum::extract::ws::Utf8Bytes::from_static(reason),
-        })))
-        .await
-        .map_err(|_| ())
+        }))),
+    )
+    .await
+    .map_err(|_| ())?
+    .map_err(|_| ())
 }
 
 #[cfg(test)]

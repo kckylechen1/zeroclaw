@@ -1266,6 +1266,16 @@ pub async fn run_gateway(
         registry
     });
     #[cfg(feature = "nodes")]
+    {
+        zeroclaw_api::node_tools::install(&config.data_dir, node_registry.clone());
+        let registry = node_registry.clone();
+        let mut shutdown = shutdown_tx.subscribe();
+        ::zeroclaw_spawn::spawn!(async move {
+            let _ = shutdown.changed().await;
+            registry.shutdown();
+        });
+    }
+    #[cfg(feature = "nodes")]
     let mdns_config_state = Arc::clone(&config_state);
     #[cfg(feature = "nodes")]
     let mdns_peer_registry =

@@ -214,6 +214,14 @@ impl ScopedToolRegistry {
             tools_registry.push(Box::new(tools::ArcToolRef(Arc::clone(tool))));
         }
 
+        // Nodes remain opt-in and require an explicit per-device requester allowlist.
+        if config.nodes.enabled {
+            tools_registry.extend(zeroclaw_api::node_tools::tools(
+                &config.data_dir,
+                security.allowed_tools.as_deref(),
+            ));
+        }
+
         // 2. Built-in allow/deny filter (uniform: the gateway used to skip it entirely).
         //    `caller_allowed` narrows on top of the policy, for the `run` path only.
         let before_filter = tools_registry.len();
@@ -971,6 +979,103 @@ mod tests {
         })
         .await;
         out.registry.iter().map(|t| t.name().to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn node_allowlist_does_not_redirect_model_switch_catalog() {
+        struct NodeCatalogProbe(Arc<AtomicUsize>);
+        impl zeroclaw_api::node_tools::NodeTools for NodeCatalogProbe {
+            fn tools(&self, allowed: &[String]) -> Vec<Box<dyn Tool>> {
+                assert!(
+                    allowed
+                        .iter()
+                        .any(|name| name == "node:fixture:system.info")
+                );
+                self.0.fetch_add(1, Ordering::SeqCst);
+                vec![Box::new(MockTool("node:fixture:system.info"))]
+            }
+        }
+
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = Config {
+                data_dir: dir.path().to_path_buf(),
+                nodes: zeroclaw_config::schema::NodesConfig {
+                    enabled,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            config.providers.models.ensure("openai", "default").unwrap();
+            config
+                .providers
+                .models
+                .ensure("anthropic", "review")
+                .unwrap();
+            let config = Arc::new(config);
+            let security = Arc::new(SecurityPolicy {
+                allowed_tools: Some(vec![
+                    "model_switch".into(),
+                    "node:fixture:system.info".into(),
+                ]),
+                ..Default::default()
+            });
+            let node_calls = Arc::new(AtomicUsize::new(0));
+            let nodes = Arc::new(NodeCatalogProbe(node_calls.clone()));
+            zeroclaw_api::node_tools::install(&config.data_dir, nodes.clone());
+            let families = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let resolved = families.clone();
+            let switch = tools::ModelSwitchTool::new(security.clone(), config.clone())
+                .with_catalog_resolver(move |family| {
+                    resolved.lock().unwrap().push(family.clone());
+                    async move { Ok(vec![format!("{family}-live-only")]) }
+                });
+            let assembled = ScopedToolRegistry::assemble(ScopedAssembly {
+                config: &config,
+                agent_alias: "default",
+                security: &security,
+                built: built_with(vec![Box::new(switch)]),
+                skills: &[],
+                runtime: Arc::new(crate::platform::NativeRuntime::new()),
+                caller_allowed: None,
+                connect_mcp: false,
+                exclude_memory: false,
+                list_deferred_mcp_specs: false,
+                emit_assembly_logs: false,
+                mcp_registry: None,
+            })
+            .await;
+            assert_eq!(node_calls.load(Ordering::SeqCst), usize::from(enabled));
+            assert_eq!(
+                assembled
+                    .registry
+                    .iter()
+                    .any(|tool| tool.name() == "node:fixture:system.info"),
+                enabled
+            );
+            let switch = assembled
+                .registry
+                .iter()
+                .find(|tool| tool.name() == "model_switch")
+                .unwrap();
+            for (profile, family) in [
+                ("openai.default", "openai"),
+                ("anthropic.review", "anthropic"),
+            ] {
+                let result = switch
+                    .execute(serde_json::json!({"action":"list_models", "model_provider":profile}))
+                    .await
+                    .unwrap();
+                assert!(result.success, "{:?}", result.error);
+                let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+                assert_eq!(output["model_provider"], profile);
+                assert_eq!(
+                    output["models"],
+                    serde_json::json!([format!("{family}-live-only")])
+                );
+            }
+            assert_eq!(*families.lock().unwrap(), ["openai", "anthropic"]);
+        }
     }
 
     #[tokio::test]
