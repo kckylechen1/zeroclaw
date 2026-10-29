@@ -3707,3 +3707,508 @@ async fn scoped_get_does_not_fall_back_to_sibling_after_own_decode_error() {
         "sibling payload"
     );
 }
+
+// #505: exercise the public memory boundary with the host's canonical session.
+#[tokio::test]
+async fn conversation_scope_505_does_not_overwrite_other_session() {
+    let (_tmp, mem) = temp_sqlite();
+    mem.store(
+        "same-key",
+        "session A",
+        MemoryCategory::Conversation,
+        Some("A"),
+    )
+    .await
+    .unwrap();
+    mem.store(
+        "same-key",
+        "session B",
+        MemoryCategory::Conversation,
+        Some("B"),
+    )
+    .await
+    .unwrap();
+    let rows = mem
+        .list(Some(&MemoryCategory::Conversation), Some("A"))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "session B must not overwrite session A");
+    assert_eq!(rows[0].content, "session A");
+}
+
+#[tokio::test]
+async fn conversation_scope_505_does_not_read_other_session() {
+    let (_tmp, mem) = temp_sqlite();
+    mem.store(
+        "same-key",
+        "session A",
+        MemoryCategory::Conversation,
+        Some("A"),
+    )
+    .await
+    .unwrap();
+    let found = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+        .scope(vec!["B".into()], mem.get("same-key"))
+        .await
+        .unwrap();
+    assert!(found.is_none(), "session B must not read session A");
+}
+
+#[tokio::test]
+async fn conversation_scope_505_does_not_delete_other_session() {
+    let (_tmp, mem) = temp_sqlite();
+    mem.store(
+        "same-key",
+        "session A",
+        MemoryCategory::Conversation,
+        Some("A"),
+    )
+    .await
+    .unwrap();
+    let removed = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+        .scope(vec!["B".into()], mem.forget("same-key"))
+        .await
+        .unwrap();
+    assert!(!removed, "session B must not delete session A");
+    assert_eq!(mem.list(None, Some("A")).await.unwrap().len(), 1);
+}
+
+async fn scoped_get_505(mem: &dyn Memory, session: &str, key: &str) -> Option<MemoryEntry> {
+    zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+        .scope(vec![session.into()], mem.get(key))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn conversation_scope_505_same_key_roundtrip_and_global_rules() {
+    let (_tmp, mem) = temp_sqlite();
+    for session in ["A", "B"] {
+        mem.store(
+            "shared",
+            session,
+            MemoryCategory::Conversation,
+            Some(session),
+        )
+        .await
+        .unwrap();
+    }
+    mem.store("shared", "global", MemoryCategory::Core, None)
+        .await
+        .unwrap();
+    mem.store("shared", "global updated", MemoryCategory::Daily, None)
+        .await
+        .unwrap();
+    mem.store(
+        "shared",
+        "A updated",
+        MemoryCategory::Conversation,
+        Some("A"),
+    )
+    .await
+    .unwrap();
+    for (session, expected) in [("A", "A updated"), ("B", "B"), ("C", "global updated")] {
+        let row = scoped_get_505(&mem, session, "shared").await.unwrap();
+        assert_eq!(row.key, "shared");
+        assert_eq!(row.content, expected);
+    }
+    assert_eq!(mem.count().await.unwrap(), 3);
+    assert!(
+        zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], mem.forget("shared"))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        scoped_get_505(&mem, "A", "shared").await.unwrap().content,
+        "global updated"
+    );
+    assert_eq!(
+        scoped_get_505(&mem, "B", "shared").await.unwrap().content,
+        "B"
+    );
+    // Global facts retain their agent identity and upsert rules.
+    let other = mem.ensure_agent_uuid("other").await.unwrap();
+    mem.store_with_agent(
+        "shared",
+        "other fact",
+        MemoryCategory::Core,
+        None,
+        None,
+        None,
+        Some(&other),
+    )
+    .await
+    .unwrap();
+    let row = zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+        .scope(vec!["A".into()], mem.get_for_agent("shared", &other))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.content, "other fact");
+    assert_eq!(mem.count().await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn conversation_scope_505_native_codec_shaped_keys_are_not_decoded() {
+    let (tmp, mem) = temp_sqlite();
+    let (_encoded_id, shaped) = key_scope::encode("plain", Some("A")).unwrap();
+    // The legacy writer generates a normal UUID id, regardless of key shape.
+    mem.conn
+        .lock()
+        .execute(
+            "INSERT INTO memories (id,key,content,category,created_at,updated_at,agent_id)
+         VALUES (?1,?2,'legacy native','core',?3,?3,(SELECT id FROM agents WHERE alias='default'))",
+            params![
+                Uuid::new_v4().to_string(),
+                shaped,
+                Local::now().to_rfc3339()
+            ],
+        )
+        .unwrap();
+    drop(mem);
+    let mem = SqliteMemory::new("test", tmp.path()).unwrap();
+    mem.store("plain", "private", MemoryCategory::Conversation, Some("A"))
+        .await
+        .unwrap();
+    assert_eq!(
+        scoped_get_505(&mem, "A", &shaped).await.unwrap().content,
+        "legacy native"
+    );
+    assert_eq!(
+        scoped_get_505(&mem, "A", "plain").await.unwrap().content,
+        "private"
+    );
+    mem.store(&shaped, "native updated", MemoryCategory::Core, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scoped_get_505(&mem, "A", &shaped).await.unwrap().key,
+        shaped
+    );
+    assert_eq!(
+        scoped_get_505(&mem, "A", "plain").await.unwrap().content,
+        "private"
+    );
+    assert!(
+        zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], mem.forget(&shaped))
+            .await
+            .unwrap()
+    );
+    assert!(scoped_get_505(&mem, "A", "plain").await.is_some());
+}
+
+#[tokio::test]
+async fn conversation_scope_505_native_key_equal_to_live_physical_key_is_independent() {
+    let (_tmp, mem) = temp_sqlite();
+    mem.store("plain", "private", MemoryCategory::Conversation, Some("A"))
+        .await
+        .unwrap();
+    let physical: String = mem
+        .conn
+        .lock()
+        .query_row(
+            "SELECT key FROM memories WHERE content = 'private'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // Reading/deleting a physical key must not alias the logical Conversation key.
+    assert!(scoped_get_505(&mem, "A", &physical).await.is_none());
+    assert!(
+        !zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], mem.forget(&physical))
+            .await
+            .unwrap()
+    );
+    mem.store(&physical, "new native", MemoryCategory::Core, None)
+        .await
+        .unwrap();
+    mem.store(&physical, "new native updated", MemoryCategory::Daily, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        scoped_get_505(&mem, "A", &physical).await.unwrap().content,
+        "new native updated"
+    );
+    assert_eq!(
+        scoped_get_505(&mem, "A", "plain").await.unwrap().content,
+        "private"
+    );
+    assert!(
+        zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], mem.forget(&physical))
+            .await
+            .unwrap()
+    );
+    assert_eq!(mem.count().await.unwrap(), 1);
+    assert!(scoped_get_505(&mem, "A", "plain").await.is_some());
+}
+
+#[tokio::test]
+async fn conversation_scope_505_empty_missing_and_unicode_inputs() {
+    let (_tmp, mem) = temp_sqlite();
+    for key in ["", "0", "a:*?[]\\\"雪\u{0}"] {
+        mem.store(key, "A", MemoryCategory::Conversation, Some("A"))
+            .await
+            .unwrap();
+        mem.store(key, "B", MemoryCategory::Conversation, Some("B"))
+            .await
+            .unwrap();
+        assert_eq!(scoped_get_505(&mem, "A", key).await.unwrap().content, "A");
+        assert_eq!(scoped_get_505(&mem, "B", key).await.unwrap().content, "B");
+        for sessions in [
+            vec![],
+            vec![String::new()],
+            vec![" ".into()],
+            vec!["C".into(), "A".into()],
+        ] {
+            assert!(
+                zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                    .scope(sessions.clone(), mem.get(key))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                !zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+                    .scope(sessions, mem.forget(key))
+                    .await
+                    .unwrap()
+            );
+        }
+    }
+    // Administrative calls with no host context retain access; missing-session
+    // historical rows remain hidden from an installed session context.
+    mem.store(
+        "legacy missing",
+        "unbound",
+        MemoryCategory::Conversation,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(mem.get("legacy missing").await.unwrap().is_some());
+    assert!(scoped_get_505(&mem, "A", "legacy missing").await.is_none());
+}
+
+#[tokio::test]
+async fn conversation_scope_505_seeded_store_failure_and_rollback_retain_rows() {
+    let (tmp, mem) = temp_sqlite();
+    mem.store("legacy", "legacy private", MemoryCategory::Core, None)
+        .await
+        .unwrap();
+    // Seed exactly the base writer's plain-key/UUID representation.
+    mem.conn
+        .lock()
+        .execute(
+            "UPDATE memories SET category='conversation', session_id='A' WHERE key='legacy'",
+            [],
+        )
+        .unwrap();
+    mem.store("fact", "legacy global", MemoryCategory::Core, None)
+        .await
+        .unwrap();
+    let snapshot = |conn: &Connection| -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = conn
+            .prepare("SELECT * FROM memories WHERE key IN ('legacy','fact') ORDER BY key")
+            .unwrap();
+        let columns = stmt.column_count();
+        stmt.query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let old_rows = snapshot(&mem.conn.lock());
+    let schema: Vec<(String, String)> = mem
+        .conn
+        .lock()
+        .prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    drop(mem);
+    let mem = SqliteMemory::new("test", tmp.path()).unwrap();
+    assert_eq!(snapshot(&mem.conn.lock()), old_rows);
+    mem.store("legacy", "new B", MemoryCategory::Conversation, Some("B"))
+        .await
+        .unwrap();
+    mem.store("new only", "new A", MemoryCategory::Conversation, Some("A"))
+        .await
+        .unwrap();
+    assert_eq!(snapshot(&mem.conn.lock()), old_rows);
+    mem.conn.lock().execute_batch("CREATE TEMP TRIGGER reject_505 BEFORE INSERT ON memories WHEN new.content='reject' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+    assert!(
+        mem.store("legacy", "reject", MemoryCategory::Conversation, Some("C"))
+            .await
+            .is_err()
+    );
+    assert_eq!(snapshot(&mem.conn.lock()), old_rows);
+    assert_eq!(mem.count().await.unwrap(), 4);
+    drop(mem);
+    // Base binary point-read semantics: raw-key lookup sees old rows, misses
+    // new logical keys; listing still sees every physical key and content.
+    let old = Connection::open(tmp.path().join("memory/brain.db")).unwrap();
+    assert_eq!(snapshot(&old), old_rows);
+    assert_eq!(
+        old.query_row("SELECT content FROM memories WHERE key='legacy'", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "legacy private"
+    );
+    assert_eq!(
+        old.query_row(
+            "SELECT COUNT(*) FROM memories WHERE key='new only'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let physical: String = old
+        .query_row("SELECT key FROM memories WHERE content='new A'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_ne!(physical, "new only");
+    assert_eq!(
+        old.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+    let reopened_schema: Vec<(String, String)> = old
+        .prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        reopened_schema, schema,
+        "no schema migration on upgrade or rollback"
+    );
+    old.execute(
+        "UPDATE memories SET content='old binary global update' WHERE key='fact'",
+        [],
+    )
+    .unwrap();
+    drop(old);
+    let mem = SqliteMemory::new("test", tmp.path()).unwrap();
+    assert_eq!(
+        scoped_get_505(&mem, "A", "legacy").await.unwrap().content,
+        "legacy private"
+    );
+    assert_eq!(
+        scoped_get_505(&mem, "B", "legacy").await.unwrap().content,
+        "new B"
+    );
+    assert_eq!(
+        scoped_get_505(&mem, "A", "new only").await.unwrap().content,
+        "new A"
+    );
+    assert_eq!(
+        scoped_get_505(&mem, "B", "fact").await.unwrap().content,
+        "old binary global update"
+    );
+    for row in mem.export(&ExportFilter::default()).await.unwrap() {
+        assert!(!row.key.starts_with("zc-key-v1:"));
+    }
+    for query in ["", "new"] {
+        let rows = mem.recall(query, 10, Some("A"), None, None).await.unwrap();
+        assert!(rows.iter().any(|row| row.key == "new only"));
+        assert!(rows.iter().all(|row| !row.key.starts_with("zc-key-v1:")));
+    }
+}
+
+#[tokio::test]
+async fn conversation_scope_505_agent_wrapper_keeps_session_and_agent_boundaries() {
+    let (_tmp, mem) = temp_sqlite();
+    let alpha = mem.ensure_agent_uuid("alpha").await.unwrap();
+    let beta = mem.ensure_agent_uuid("beta").await.unwrap();
+    let inner: Arc<dyn Memory> = Arc::new(mem);
+    let scoped = crate::AgentScopedMemory::new(inner.clone(), &alpha, vec![]);
+    inner
+        .store_with_agent(
+            "same",
+            "beta A",
+            MemoryCategory::Conversation,
+            Some("A"),
+            None,
+            None,
+            Some(&beta),
+        )
+        .await
+        .unwrap();
+    scoped
+        .store("same", "alpha A", MemoryCategory::Conversation, Some("A"))
+        .await
+        .unwrap();
+    scoped
+        .store("same", "alpha B", MemoryCategory::Conversation, Some("B"))
+        .await
+        .unwrap();
+    assert_eq!(
+        scoped_get_505(&scoped, "A", "same").await.unwrap().content,
+        "alpha A"
+    );
+    assert!(
+        zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], scoped.forget("same"))
+            .await
+            .unwrap()
+    );
+    assert!(scoped_get_505(&scoped, "A", "same").await.is_none());
+    assert_eq!(
+        scoped_get_505(&scoped, "B", "same").await.unwrap().content,
+        "alpha B"
+    );
+    assert_eq!(
+        inner
+            .get_for_agent("same", &beta)
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "beta A"
+    );
+}
+
+#[tokio::test]
+async fn conversation_scope_505_separate_connections_resolve_upserts_atomically() {
+    let (tmp, a) = temp_sqlite();
+    let b = SqliteMemory::new("test", tmp.path()).unwrap();
+    let (first, second) = tokio::join!(
+        a.store("same", "A", MemoryCategory::Conversation, Some("A")),
+        b.store("same", "B", MemoryCategory::Conversation, Some("B")),
+    );
+    first.unwrap();
+    second.unwrap();
+    let (first, second) = tokio::join!(
+        a.store(
+            "same",
+            "updated A1",
+            MemoryCategory::Conversation,
+            Some("A")
+        ),
+        b.store(
+            "same",
+            "updated A2",
+            MemoryCategory::Conversation,
+            Some("A")
+        ),
+    );
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(a.count().await.unwrap(), 2);
+    assert_eq!(scoped_get_505(&a, "B", "same").await.unwrap().content, "B");
+    assert!(
+        scoped_get_505(&a, "A", "same")
+            .await
+            .unwrap()
+            .content
+            .starts_with("updated A")
+    );
+}

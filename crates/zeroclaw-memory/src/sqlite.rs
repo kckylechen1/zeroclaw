@@ -1,3 +1,5 @@
+mod key_scope;
+
 use super::embeddings::EmbeddingProvider;
 use super::traits::{
     ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryStats, StoreOptions,
@@ -30,6 +32,14 @@ fn acquire_sqlite_startup_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// SQLite memory with agent/key identity for global rows and agent/session/key
+/// identity for session-bound Conversation rows. New scoped rows use reversible
+/// physical keys; public entries expose logical keys. Legacy rows stay in place.
+///
+/// Point get/forget calls inside `TOOL_LOOP_MEMORY_SESSIONS` resolve only the
+/// first canonical session (or global facts when no session row matches).
+/// Empty installed context hides Conversation rows. Calls outside that host
+/// context retain the historical administrative, session-unfiltered behavior.
 #[derive(Clone)]
 pub struct SqliteMemory {
     alias: String,
@@ -448,10 +458,50 @@ impl SqliteMemory {
         let aid = agent_id.map(String::from);
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let conn = conn.lock();
+            let mut guard = conn.lock();
+            let conn = guard.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let now = Local::now().to_rfc3339();
             let cat = Self::category_to_str(&category);
-            let id = Uuid::new_v4().to_string();
+            let agent: String = match aid {
+                Some(agent) => agent,
+                None => conn.query_row(
+                    "SELECT id FROM agents WHERE alias = 'default' LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )?,
+            };
+            let conversation_session = if cat == "conversation" {
+                sid.as_deref()
+            } else {
+                None
+            };
+            let existing = key_scope::rows(&conn, &key, Some(&agent))?
+                .into_iter()
+                .find(|row| row.conversation_session() == conversation_session);
+            let (id, physical_key) = if let Some(row) = existing {
+                (row.id, row.physical)
+            } else {
+                let occupied: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM memories WHERE agent_id=?1 AND key=?2)",
+                    params![agent, key],
+                    |row| row.get(0),
+                )?;
+                if conversation_session.is_some() || occupied {
+                    loop {
+                        let encoded = key_scope::encode(&key, conversation_session)?;
+                        let occupied: bool = conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM memories WHERE agent_id=?1 AND key=?2)",
+                            params![agent, encoded.1],
+                            |row| row.get(0),
+                        )?;
+                        if !occupied {
+                            break encoded;
+                        }
+                    }
+                } else {
+                    (Uuid::new_v4().to_string(), key.clone())
+                }
+            };
 
             conn.execute(
                 "INSERT INTO memories (
@@ -476,7 +526,7 @@ impl SqliteMemory {
                     tenant_id = excluded.tenant_id",
                 params![
                     id,
-                    key,
+                    physical_key,
                     content,
                     cat,
                     embedding_bytes,
@@ -485,13 +535,36 @@ impl SqliteMemory {
                     sid,
                     ns,
                     imp,
-                    aid,
+                    agent,
                     kind,
                     pinned,
                     tenant_id
                 ],
             )?;
+            conn.commit()?;
             Ok(())
+        })
+        .await?
+    }
+
+    async fn forget_key(&self, key: &str, agent: Option<&str>) -> anyhow::Result<bool> {
+        let scope = key_scope::PointScope::current();
+        let conn = self.conn.clone();
+        let key = key.to_string();
+        let agent = agent.map(str::to_string);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let mut guard = conn.lock();
+            let conn = guard.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let rows = scope.select(
+                key_scope::rows(&conn, &key, agent.as_deref())?,
+                agent.is_some(),
+            );
+            let mut affected = 0;
+            for row in rows {
+                affected += conn.execute("DELETE FROM memories WHERE id = ?1", params![row.id])?;
+            }
+            conn.commit()?;
+            Ok(affected > 0)
         })
         .await?
     }
@@ -1086,7 +1159,7 @@ impl SqliteMemory {
             let rows = stmt.query_map(params_ref.as_slice(), |row| {
                 Ok(MemoryEntry {
                     id: row.get(0)?,
-                    key: row.get(1)?,
+                    key: key_scope::row_key(row)?,
                     content: row.get(2)?,
                     category: Self::str_to_category(&row.get::<_, String>(3)?),
                     timestamp: row.get(4)?,
@@ -1404,7 +1477,7 @@ impl SqliteMemory {
                             }
                         let entry = MemoryEntry {
                             id: scored.id.clone(),
-                            key,
+                            key: key_scope::decode(&scored.id, key),
                             content,
                             category: Self::str_to_category(&cat),
                             timestamp: ts,
@@ -1543,7 +1616,7 @@ impl SqliteMemory {
                     let rows = stmt.query_map(params_ref.as_slice(), |row| {
                         Ok(MemoryEntry {
                             id: row.get(0)?,
-                            key: row.get(1)?,
+                            key: key_scope::row_key(row)?,
                             content: row.get(2)?,
                             category: Self::str_to_category(&row.get::<_, String>(3)?),
                             timestamp: row.get(4)?,
@@ -1672,21 +1745,24 @@ impl Memory for SqliteMemory {
     }
 
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
+        let scope = key_scope::PointScope::current();
         let conn = self.conn.clone();
         let key = key.to_string();
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<MemoryEntry>> {
-            let conn = conn.lock();
+            let mut guard = conn.lock();
+            let conn = guard.transaction()?;
+            let Some(hit) = scope.select(key_scope::rows(&conn, &key, None)?, false).into_iter().next() else { return Ok(None) };
             let mut stmt = conn.prepare(
                 "SELECT m.id, m.key, m.content, m.category, m.created_at, m.session_id, m.namespace, m.importance, m.superseded_by, m.kind, m.pinned, a.alias, m.agent_id, m.tenant_id \
                  FROM memories m LEFT JOIN agents a ON a.id = m.agent_id \
-                 WHERE m.key = ?1 AND (m.namespace IS NULL OR m.namespace != ?2)",
+                 WHERE m.id = ?1 AND (m.namespace IS NULL OR m.namespace != ?2)",
             )?;
 
-            let mut rows = stmt.query_map(params![key, crate::SOUL_NAMESPACE], |row| {
+            let mut rows = stmt.query_map(params![hit.id, crate::SOUL_NAMESPACE], |row| {
                 Ok(MemoryEntry {
                     id: row.get(0)?,
-                    key: row.get(1)?,
+                    key: key_scope::row_key(row)?,
                     content: row.get(2)?,
                     category: Self::str_to_category(&row.get::<_, String>(3)?),
                     timestamp: row.get(4)?,
@@ -1717,22 +1793,25 @@ impl Memory for SqliteMemory {
         key: &str,
         agent_id: &str,
     ) -> anyhow::Result<Option<MemoryEntry>> {
+        let scope = key_scope::PointScope::current();
         let conn = self.conn.clone();
         let key = key.to_string();
         let agent_id = agent_id.to_string();
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<MemoryEntry>> {
-            let conn = conn.lock();
+            let mut guard = conn.lock();
+            let conn = guard.transaction()?;
+            let Some(hit) = scope.select(key_scope::rows(&conn, &key, Some(&agent_id))?, true).into_iter().next() else { return Ok(None) };
             let mut stmt = conn.prepare(
                 "SELECT m.id, m.key, m.content, m.category, m.created_at, m.session_id, m.namespace, m.importance, m.superseded_by, m.kind, m.pinned, a.alias, m.agent_id, m.tenant_id \
                  FROM memories m LEFT JOIN agents a ON a.id = m.agent_id \
-                 WHERE m.key = ?1 AND m.agent_id = ?2",
+                 WHERE m.id = ?1 AND m.agent_id = ?2",
             )?;
 
-            let mut rows = stmt.query_map(params![key, agent_id], |row| {
+            let mut rows = stmt.query_map(params![hit.id, agent_id], |row| {
                 Ok(MemoryEntry {
                     id: row.get(0)?,
-                    key: row.get(1)?,
+                    key: key_scope::row_key(row)?,
                     content: row.get(2)?,
                     category: Self::str_to_category(&row.get::<_, String>(3)?),
                     timestamp: row.get(4)?,
@@ -1777,7 +1856,7 @@ impl Memory for SqliteMemory {
             let row_mapper = |row: &rusqlite::Row| -> rusqlite::Result<MemoryEntry> {
                 Ok(MemoryEntry {
                     id: row.get(0)?,
-                    key: row.get(1)?,
+                    key: key_scope::row_key(row)?,
                     content: row.get(2)?,
                     category: Self::str_to_category(&row.get::<_, String>(3)?),
                     timestamp: row.get(4)?,
@@ -1833,37 +1912,11 @@ impl Memory for SqliteMemory {
     }
 
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
-        let conn = self.conn.clone();
-        let key = key.to_string();
-
-        tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let conn = conn.lock();
-            // The unscoped delete never reaches the reserved Soul
-            // namespace; Soul rows are forgotten only through their typed
-            // service (`forget_for_agent` with the admitted identity).
-            let affected = conn.execute(
-                "DELETE FROM memories WHERE key = ?1 AND (namespace IS NULL OR namespace != ?2)",
-                params![key, crate::SOUL_NAMESPACE],
-            )?;
-            Ok(affected > 0)
-        })
-        .await?
+        self.forget_key(key, None).await
     }
 
     async fn forget_for_agent(&self, key: &str, agent_id: &str) -> anyhow::Result<bool> {
-        let conn = self.conn.clone();
-        let key = key.to_string();
-        let agent_id = agent_id.to_string();
-
-        tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let conn = conn.lock();
-            let affected = conn.execute(
-                "DELETE FROM memories WHERE key = ?1 AND agent_id = ?2",
-                params![key, agent_id],
-            )?;
-            Ok(affected > 0)
-        })
-        .await?
+        self.forget_key(key, Some(agent_id)).await
     }
 
     async fn purge_namespace(&self, namespace: &str) -> anyhow::Result<usize> {
@@ -2118,7 +2171,7 @@ impl Memory for SqliteMemory {
             let rows = stmt.query_map(params_ref.as_slice(), |row| {
                 Ok(MemoryEntry {
                     id: row.get(0)?,
-                    key: row.get(1)?,
+                    key: key_scope::row_key(row)?,
                     content: row.get(2)?,
                     category: Self::str_to_category(&row.get::<_, String>(3)?),
                     timestamp: row.get(4)?,
@@ -2159,7 +2212,7 @@ impl Memory for SqliteMemory {
             let rows = stmt.query_map(params![agent_alias], |row| {
                 Ok(MemoryEntry {
                     id: row.get(0)?,
-                    key: row.get(1)?,
+                    key: key_scope::row_key(row)?,
                     content: row.get(2)?,
                     category: Self::str_to_category(&row.get::<_, String>(3)?),
                     timestamp: row.get(4)?,
