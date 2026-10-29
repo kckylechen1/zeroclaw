@@ -916,3 +916,19 @@ async fn acp_desktop_gateway_fixture() {
     }
     std::fs::write(directory.join("provider-requests.json"), serde_json::to_vec_pretty(&*fixture.seen.lock()).unwrap()).unwrap();
 }
+
+#[tokio::test]
+async fn owner_bridge_handshake_reports_cancel_only_when_granted() {
+    for granted in [false, true] {
+        let fixture = DeviceFixture::new(&["chat"]).await;
+        let operations = if granted { vec!["chat", "approval_response", "cancel"] } else { vec!["chat", "approval_response"] };
+        owner_bridge(&fixture, &operations);
+        let (status, mut client) = DeviceWire::upgrade(fixture.address, &format!("agent=device-agent&session_id={SESSION}"), DEVICE_TOKEN).await;
+        assert_eq!(status, 101);
+        client.until("session_start").await;
+        client.send(json!({"type":"connect"})).await;
+        let ack = client.until("connected").await;
+        assert_eq!(ack["owner_bridge_approval_once"], true);
+        assert_eq!(ack["owner_bridge_cancel"], granted);
+    }
+}

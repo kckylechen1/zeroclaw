@@ -462,6 +462,8 @@ async fn handle_socket(
                         }
                         let ack = serde_json::json!({
                             "type": "connected",
+                            "owner_bridge_cancel": bridge_scope.as_ref().is_some_and(|binding|
+                                binding.initial.owner.is_some() && binding.allows(&state.config.read(), &agent_alias, &session_id, "cancel")),
                             "owner_bridge_approval_once": bridge_scope.as_ref().is_some_and(|binding|
                                 binding.initial.owner.is_some() && binding.allows(&state.config.read(), &agent_alias, &session_id, "approval_response")),
                             "message": "Connection established",

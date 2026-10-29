@@ -1,6 +1,7 @@
 use super::{Result, Value, json};
 
 pub(super) struct Turn {
+    generation: u64,
     pub epoch: String,
     pub request: String,
     pub turn: Option<String>,
@@ -11,8 +12,9 @@ pub(super) struct Turn {
     bytes: usize,
 }
 impl Turn {
-    pub fn new(epoch: String) -> Self {
+    pub fn new(epoch: String, generation: u64) -> Self {
         Self {
+            generation,
             epoch,
             request: uuid::Uuid::new_v4().to_string(),
             turn: None,
@@ -22,6 +24,13 @@ impl Turn {
             terminal: false,
             bytes: 0,
         }
+    }
+    pub fn cancel(&mut self, generation: u64) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.cancelled = true;
+        true
     }
     pub fn control(&self, op: &str, extra: Value) -> Value {
         let mut frame = json!({"type":"turn_control","version":1,"epoch":self.epoch,"request_id":self.request,"op":op});

@@ -495,6 +495,7 @@ Existing paired owner clients and legacy channel bridges keep their contract.
 Changing the class or removing a restriction does not elevate an attached socket.
 Attach a new socket after explicitly widening policy. The `connected` frame's
 `owner_bridge_approval_once` is true only for this explicit owner grant.
+`owner_bridge_cancel` separately reports its effective cancel grant.
 Neither scoped class can use attachments, source intake or `/ws/bridge` outbox.
 
 This credential belongs to the local owner trust domain. Use a new dedicated
@@ -519,7 +520,7 @@ credential_file = "/absolute/owner-bridge-token"
 ```
 
 Only numeric loopback addresses are accepted. The adapter requires the owner
-once capability and S2 version 1 before accepting a session. Client cwd is
+once and cancel capabilities and S2 version 1 before accepting a session. Client cwd is
 ignored in favor of the server workspace. ACP protocol version is integer 1;
 stdout contains newline-delimited JSON-RPC and diagnostics use stderr.
 

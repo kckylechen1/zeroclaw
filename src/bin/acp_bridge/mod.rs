@@ -1,7 +1,15 @@
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::{Mutex, mpsc},
@@ -213,7 +221,9 @@ async fn connect(cfg: &Config, session: &str) -> Result<(Socket, String)> {
         for _ in 0..16 {
             let frame = receive(&mut socket).await?;
             if frame["type"] == "connected" {
-                if frame["owner_bridge_approval_once"] != true {
+                if frame["owner_bridge_approval_once"] != true
+                    || frame["owner_bridge_cancel"] != true
+                {
                     return Err("OWNER_BRIDGE_REQUIRED");
                 }
                 connected = true;
@@ -252,13 +262,68 @@ async fn connect(cfg: &Config, session: &str) -> Result<(Socket, String)> {
 
 // A bounded actor owns each socket and pending turn. There is no execution store.
 enum Command {
-    Prompt(Value, String),
-    Cancel,
+    Prompt(Value, String, u64),
+    Cancel(u64),
     Permission(Value),
 }
+#[derive(Default)]
+struct Admission {
+    current: AtomicU64,
+    next: AtomicU64,
+}
+impl Admission {
+    fn claim(&self) -> Result<u64> {
+        let generation = self
+            .next
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                n.checked_add(1).filter(|n| *n < u64::MAX)
+            })
+            .map_err(|_| "ACP_SESSION_LIMIT")?
+            + 1;
+        self.current
+            .compare_exchange(0, generation, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|active| {
+                if active == u64::MAX {
+                    "ACP_SESSION_INCOMPLETE"
+                } else {
+                    "ACP_SESSION_BUSY"
+                }
+            })?;
+        Ok(generation)
+    }
+    fn cancellation(&self) -> Option<Command> {
+        match self.current.load(Ordering::Acquire) {
+            0 | u64::MAX => None,
+            generation => Some(Command::Cancel(generation)),
+        }
+    }
+    fn finish(&self, generation: u64) {
+        let _ = self
+            .current
+            .compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+    fn poison(&self) {
+        self.current.store(u64::MAX, Ordering::Release);
+    }
+}
 struct Session {
+    admission: Arc<Admission>,
     tx: mpsc::Sender<Command>,
     task: tokio::task::JoinHandle<()>,
+}
+impl Session {
+    fn prompt(&self, id: Value, text: String) -> Result<()> {
+        let generation = self.admission.claim()?;
+        if self
+            .tx
+            .try_send(Command::Prompt(id, text, generation))
+            .is_err()
+        {
+            self.admission.poison();
+            return Err("ACP_SESSION_CLOSED");
+        }
+        Ok(())
+    }
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -356,10 +421,12 @@ pub(super) async fn run() -> Result<()> {
         if method == "session/cancel" && id.is_none() {
             if let Some(session) = params["sessionId"].as_str().and_then(|s| sessions.get(s)) {
                 // Backpressure rather than dropping an exact cancellation.
-                timeout(IO, session.tx.send(Command::Cancel))
-                    .await
-                    .map_err(|_| "ACP_SESSION_BLOCKED")?
-                    .map_err(|_| "ACP_SESSION_CLOSED")?;
+                if let Some(cancel) = session.admission.cancellation() {
+                    timeout(IO, session.tx.send(cancel))
+                        .await
+                        .map_err(|_| "ACP_SESSION_BLOCKED")?
+                        .map_err(|_| "ACP_SESSION_CLOSED")?;
+                }
             }
             continue;
         }
@@ -400,10 +467,20 @@ pub(super) async fn run() -> Result<()> {
                     Ok((socket, epoch)) => {
                         let (tx, rx) = mpsc::channel(8);
                         let (config, out, session) = (cfg.clone(), output.clone(), name.clone());
+                        let admission = Arc::new(Admission::default());
+                        let actor_admission = admission.clone();
                         let task = zeroclaw_spawn::spawn!(async move {
-                            session_loop(config, out, session, socket, epoch, rx).await;
+                            session_loop(config, out, session, socket, epoch, rx, actor_admission)
+                                .await;
                         });
-                        sessions.insert(name.clone(), Session { tx, task });
+                        sessions.insert(
+                            name.clone(),
+                            Session {
+                                tx,
+                                task,
+                                admission,
+                            },
+                        );
                         output.reply(id, json!({"sessionId":name})).await?;
                     }
                     Err(code) => output.error(id, -32603, code).await?,
@@ -417,14 +494,8 @@ pub(super) async fn run() -> Result<()> {
                 };
                 match prompt(params) {
                     Ok(text) => {
-                        if session
-                            .tx
-                            .try_send(Command::Prompt(id.clone(), text))
-                            .is_err()
-                        {
-                            output
-                                .error(id, -32603, "ACP_SESSION_BUSY_OR_CLOSED")
-                                .await?;
+                        if let Err(code) = session.prompt(id.clone(), text) {
+                            output.error(id, -32603, code).await?;
                         }
                     }
                     Err(code) => output.error(id, -32602, code).await?,
@@ -442,10 +513,11 @@ async fn session_loop(
     mut socket: Socket,
     mut epoch: String,
     mut commands: mpsc::Receiver<Command>,
+    admission: Arc<Admission>,
 ) {
     while let Some(command) = commands.recv().await {
-        if let Command::Prompt(id, text) = command {
-            let mut turn = Turn::new(epoch.clone());
+        if let Command::Prompt(id, text, generation) = command {
+            let mut turn = Turn::new(epoch.clone(), generation);
             let result = execute(
                 &cfg,
                 &out,
@@ -463,17 +535,19 @@ async fn session_loop(
                     }
                 }
                 Err(code) => {
+                    admission.poison();
                     let _ = out.error(id, -32603, code).await;
                     // Failed or unknown-effect sessions are poisoned. A fresh session
                     // is explicit; no later prompt silently resets this binding.
                     while let Some(command) = commands.recv().await {
-                        if let Command::Prompt(id, _) = command {
+                        if let Command::Prompt(id, _, _) = command {
                             let _ = out.error(id, -32603, "ACP_SESSION_INCOMPLETE").await;
                         }
                     }
                     return;
                 }
             }
+            admission.finish(generation);
             epoch = turn.epoch;
         }
     }
@@ -552,10 +626,12 @@ async fn execute(
             _ = tokio::time::sleep_until(deadline) => return Err("ACP_TURN_TIMEOUT"),
             command = commands.recv() => match command {
                 None => return Err("ACP_INPUT_CLOSED"),
-                Some(Command::Prompt(id, _)) => out.error(id, -32603, "ACP_SESSION_BUSY").await?,
-                Some(Command::Cancel) => {
-                    turn.cancelled = true; permissions.clear();
-                    if turn.turn.is_some() { send(socket, turn.control("cancel", json!({"turn_id":turn.turn}))).await?; }
+                Some(Command::Prompt(id, _, _)) => out.error(id, -32603, "ACP_SESSION_BUSY").await?,
+                Some(Command::Cancel(generation)) => {
+                    if turn.cancel(generation) {
+                        permissions.clear();
+                        if turn.turn.is_some() { send(socket, turn.control("cancel", json!({"turn_id":turn.turn}))).await?; }
+                    }
                 }
                 Some(Command::Permission(response)) => {
                     if let Some(permission) = response["id"].as_str().and_then(|id| permissions.remove(id))
