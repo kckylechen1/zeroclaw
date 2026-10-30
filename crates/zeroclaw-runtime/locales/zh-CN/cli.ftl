@@ -905,3 +905,6 @@ tool-runtime-command-docker-workspace-path = 构建运行时命令失败：无�
 turn-max-iterations-reached = *回合已停止：达到工具迭代上限（{ $max_iterations }）。*
 
 voice-html-omitted = 本条回复包含标记内容，已跳过朗读。
+
+cli-paircode-local-only = 配对码请求只能发往本机回环地址。请在网关主机上使用 --host 127.0.0.1 执行。
+cli-paircode-admin-token-missing = { $path } 中没有网关管理令牌。请在网关运行时，以运行网关的用户在网关主机上执行。

@@ -248,8 +248,8 @@ export async function getAdminPairCode(): Promise<{
   pairing_code: string | null;
   pairing_required: boolean;
 }> {
-  // Use the public /pair/code endpoint which works in Docker and remote environments
-  // (no localhost restriction). Falls back to the admin endpoint for backward compat.
+  // This endpoint reports pairing status; the code is always null.
+  // Operators read codes on the gateway host and enter them manually.
   const publicResp = await fetch(`${basePath}/pair/code`);
   if (publicResp.ok) {
     return publicResp.json() as Promise<{
@@ -266,46 +266,6 @@ export async function getAdminPairCode(): Promise<{
     pairing_code: string | null;
     pairing_required: boolean;
   }>;
-}
-
-/** Thrown when the localhost-only mint endpoint rejects a non-loopback caller. */
-export class PairCodeForbiddenError extends Error {
-  constructor() {
-    super('forbidden');
-    this.name = 'PairCodeForbiddenError';
-  }
-}
-
-/**
- * Mint a fresh pairing code on demand against the localhost-only
- * `POST /admin/paircode/new` endpoint (the "add another client" path — it does
- * not revoke existing tokens). This is the in-band recovery for #5266: an
- * already-paired gateway never mints a code on restart, so a new browser/device
- * (e.g. on an alternate port) would otherwise face the pairing prompt with no
- * code anywhere.
- *
- * The endpoint is restricted to loopback peers, so a remote/Docker dashboard
- * gets a 403 — surfaced as {@link PairCodeForbiddenError} so the caller can fall
- * back to showing the equivalent CLI command instead of a raw error.
- */
-export async function generatePairCode(): Promise<{
-  pairing_code: string | null;
-  pairing_required: boolean;
-  message?: string;
-}> {
-  const response = await fetch(`${basePath}/admin/paircode/new`, { method: 'POST' });
-  if (response.status === 403) {
-    throw new PairCodeForbiddenError();
-  }
-  const data = (await response.json().catch(() => null)) as {
-    pairing_code: string | null;
-    pairing_required: boolean;
-    message?: string;
-  } | null;
-  if (!response.ok || !data) {
-    throw new Error(data?.message || `Failed to generate pairing code (${response.status})`);
-  }
-  return data;
 }
 
 // ---------------------------------------------------------------------------

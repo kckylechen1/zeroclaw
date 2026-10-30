@@ -168,45 +168,52 @@ pub async fn fetch_paircode(
     data_dir: &std::path::Path,
     action: &PaircodeAction,
 ) -> Result<PaircodeResult> {
-    // The pairing-code admin routes accept only this run's admin token, which
-    // the gateway writes owner-only into its data directory at startup.
-    let admin_token = zeroclaw_runtime::security::pairing::read_gateway_admin_token(data_dir)
-        .ok_or_else(|| {
-            anyhow::Error::msg(format!(
-                "No gateway admin token at {}. Run this on the gateway host, as the user that \
-             runs the gateway, while the gateway is running.",
-                zeroclaw_runtime::security::pairing::gateway_admin_token_path(data_dir).display()
+    // Confine the owner credential to an explicit loopback IP. In particular,
+    // do not resolve arbitrary hostnames or let proxy/redirect settings relay it.
+    let host = match host {
+        "localhost" | "0.0.0.0" => "127.0.0.1",
+        "::" | "[::]" => "::1",
+        other => other.trim_start_matches('[').trim_end_matches(']'),
+    };
+    let ip = host.parse::<std::net::IpAddr>().ok().filter(|ip| ip.is_loopback())
+        .ok_or_else(|| anyhow::anyhow!(t("cli-paircode-local-only", "Pairing-code requests must target loopback. Run this on the gateway host with --host 127.0.0.1.")))?;
+    let address = std::net::SocketAddr::new(ip, port);
+    let mut url = reqwest::Url::parse(&format!("http://{address}"))?;
+    let route = if action.mints_code() {
+        "/admin/paircode/new"
+    } else {
+        "/admin/paircode"
+    };
+    // Set the path separately so even a malformed prefix cannot change authority.
+    url.set_path(&format!("{}{route}", path_prefix.unwrap_or("")));
+    if let Some(rotate) = action.rotate_query() {
+        url.query_pairs_mut().append_pair("rotate", &rotate);
+    }
+    let admin_token =
+        zeroclaw_runtime::security::pairing::read_gateway_admin_token(data_dir).ok_or_else(|| {
+            anyhow::anyhow!(ta(
+                "cli-paircode-admin-token-missing",
+                &[("path", &zeroclaw_runtime::security::pairing::gateway_admin_token_path(data_dir).display().to_string())],
+                "No gateway admin token. Run this on the gateway host, as the user running it, while the gateway is running."
             ))
         })?;
-    let client = reqwest::Client::new();
-
-    let response = if action.mints_code() {
-        let mut url = gateway_admin_url(host, port, path_prefix, "/admin/paircode/new");
-        if let Some(rotate) = action.rotate_query() {
-            url.push_str("?rotate=");
-            url.push_str(&urlencoding::encode(&rotate));
-        }
-        client
-            .post(&url)
-            .header(
-                zeroclaw_runtime::security::pairing::GATEWAY_ADMIN_TOKEN_HEADER,
-                &admin_token,
-            )
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let request = if action.mints_code() {
+        client.post(url)
     } else {
-        let url = gateway_admin_url(host, port, path_prefix, "/admin/paircode");
-        client
-            .get(&url)
-            .header(
-                zeroclaw_runtime::security::pairing::GATEWAY_ADMIN_TOKEN_HEADER,
-                &admin_token,
-            )
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await
+        client.get(url)
     };
+    let response = request
+        .header(
+            zeroclaw_runtime::security::pairing::GATEWAY_ADMIN_TOKEN_HEADER,
+            &admin_token,
+        )
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
 
     let response = response.map_err(|e| {
         ::zeroclaw_log::record!(

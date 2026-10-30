@@ -3223,7 +3223,7 @@ async fn proxied_loopback_caller_cannot_reach_operator_access_through_any_code_r
         assert_eq!(mint_status, StatusCode::FORBIDDEN);
 
         // With no code in hand, a guess cannot pair.
-        let (pair_status, _) = pair_with(&state, "000000").await;
+        let (pair_status, _) = pair_with(&state, "not-a-six-digit-code").await;
         assert_ne!(pair_status, StatusCode::OK);
         assert!(!state.pairing.is_paired(), "no token may have been minted");
         assert!(

@@ -1594,3 +1594,141 @@ fn interactive_agent_rejects_flags_that_only_apply_with_message() {
         vec!["--temperature"]
     );
 }
+
+#[tokio::test]
+#[cfg(feature = "agent-runtime")]
+async fn paircode_owner_secret_never_follows_redirects() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tmp = tempfile::tempdir().unwrap();
+    let guard = zeroclaw_runtime::security::pairing::PairingGuard::new(true, &[]);
+    let secret = guard.rotate_admin_token(tmp.path()).unwrap();
+    let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let destination_port = destination.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = vec![0; 8192];
+        let count = socket.read(&mut bytes).await.unwrap();
+        let request = String::from_utf8_lossy(&bytes[..count]);
+        assert!(
+            request
+                .to_lowercase()
+                .contains(&format!("x-zeroclaw-admin-token: {secret}"))
+        );
+        socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{destination_port}/collect\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
+    });
+    // If followed, this destination replies promptly so the test cannot hang.
+    let receiver = tokio::spawn(async move {
+        if let Ok(Ok((mut socket, _))) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), destination.accept()).await
+        {
+            let mut bytes = vec![0; 8192];
+            let _ = socket.read(&mut bytes).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+            true
+        } else {
+            false
+        }
+    });
+    let _result = fetch_paircode("127.0.0.1", port, None, tmp.path(), &PaircodeAction::Show).await;
+    server.await.unwrap();
+    assert!(
+        !receiver.await.unwrap(),
+        "admin-token request must not follow a redirect"
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "agent-runtime")]
+async fn paircode_owner_secret_rejects_nonlocal_authority_before_reading_token() {
+    let tmp = tempfile::tempdir().unwrap();
+    for host in [
+        "192.0.2.1",
+        "gateway.example",
+        "127.0.0.1@evil.example",
+        "127.0.0.1/evil",
+        "",
+    ] {
+        let err = fetch_paircode(host, 3000, None, tmp.path(), &PaircodeAction::Show)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.to_string(),
+            gateway_helpers::t("cli-paircode-local-only", "")
+        );
+    }
+    assert!(
+        fetch_paircode("127.0.0.1", 3000, None, tmp.path(), &PaircodeAction::Show)
+            .await
+            .is_err(),
+        "missing owner token fails closed"
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "agent-runtime")]
+async fn paircode_owner_cli_sends_token_for_show_mint_and_rotation() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tmp = tempfile::tempdir().unwrap();
+    let guard = zeroclaw_runtime::security::pairing::PairingGuard::new(true, &[]);
+    let secret = guard.rotate_admin_token(tmp.path()).unwrap();
+    for (host, action, expected) in [
+        (
+            "localhost",
+            PaircodeAction::Show,
+            "GET /gw/admin/paircode HTTP/1.1",
+        ),
+        (
+            "0.0.0.0",
+            PaircodeAction::AddClient,
+            "POST /gw/admin/paircode/new HTTP/1.1",
+        ),
+        (
+            "127.0.0.1",
+            PaircodeAction::RotateDevice("dev&name".into()),
+            "POST /gw/admin/paircode/new?rotate=dev%26name HTTP/1.1",
+        ),
+        (
+            "127.0.0.1",
+            PaircodeAction::RotateAll,
+            "POST /gw/admin/paircode/new?rotate=all HTTP/1.1",
+        ),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let secret = secret.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = vec![0; 8192];
+            let count = socket.read(&mut bytes).await.unwrap();
+            let request = String::from_utf8_lossy(&bytes[..count]);
+            assert!(request.starts_with(expected));
+            assert!(
+                request
+                    .to_lowercase()
+                    .contains(&format!("x-zeroclaw-admin-token: {secret}"))
+            );
+            let body = r#"{"success":true,"pairing_code":"123456"}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let result = fetch_paircode(host, port, Some("/gw"), tmp.path(), &action)
+            .await
+            .unwrap();
+        assert!(matches!(result, PaircodeResult::Code { code, .. } if code == "123456"));
+        server.await.unwrap();
+    }
+}
