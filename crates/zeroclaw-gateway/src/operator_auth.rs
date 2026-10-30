@@ -4,6 +4,8 @@
 //! User Model review API) enforce the identical contract: operator bearer
 //! mandatory regardless of `require_pairing`, strict rate limiting on
 //! presented-but-wrong tokens, and the pairing-rate ceiling after success.
+//! A configured operator hash list is authoritative; only an empty list
+//! retains legacy paired-token operator access during explicit migration.
 
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json};
@@ -11,6 +13,18 @@ use std::net::SocketAddr;
 use zeroclaw_runtime::security::pairing::{PairingGuard, constant_time_eq};
 
 use crate::AppState;
+
+/// Called at startup and when configuration deliberately restores legacy mode.
+pub(crate) fn warn_legacy_operator(config: &zeroclaw_config::schema::GatewayOperatorConfig) {
+    if !config.is_configured() {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+            "No gateway.operator.token_hashes configured: paired tokens retain legacy operator authority. Configure independent operator token hashes to restrict management access."
+        );
+    }
+}
 
 pub(crate) fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -26,6 +40,23 @@ pub(crate) fn require_operator(
     let token = extract_bearer(headers).unwrap_or("");
     if token.is_empty() {
         return Err((StatusCode::UNAUTHORIZED, "Unauthorized"));
+    }
+    let config = state.config.read();
+    if config.gateway.operator.is_configured() {
+        if config.gateway.operator.authenticates(token) {
+            return Ok(());
+        }
+        let hashed = PairingGuard::token_hash(token);
+        return if state
+            .pairing
+            .tokens()
+            .iter()
+            .any(|stored| constant_time_eq(stored, &hashed))
+        {
+            Err((StatusCode::FORBIDDEN, "Forbidden"))
+        } else {
+            Err((StatusCode::UNAUTHORIZED, "Unauthorized"))
+        };
     }
     let hashed = PairingGuard::token_hash(token);
     let known = state.pairing.tokens();
@@ -72,3 +103,7 @@ pub(crate) fn gate_operator_identity(
     }
     None
 }
+
+#[cfg(test)]
+#[path = "operator_auth_tests.rs"]
+mod tests;

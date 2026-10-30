@@ -3984,6 +3984,7 @@ async fn checklist_gateway_cli_default_host_is_localhost() {
 #[test]
 async fn checklist_gateway_serde_roundtrip() {
     let g = GatewayConfig {
+        operator: GatewayOperatorConfig::default(),
         attention: None,
         port: 42617,
         host: "127.0.0.1".into(),
