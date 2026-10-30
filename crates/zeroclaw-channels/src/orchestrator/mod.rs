@@ -596,8 +596,10 @@ fn channel_scope(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
     }
 }
 
-pub fn conversation_history_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
-    let channel_scope = channel_scope(msg);
+fn conversation_history_key_in_scope(
+    msg: &zeroclaw_api::channel::ChannelMessage,
+    channel_scope: &str,
+) -> String {
     let thread_scope = match msg.thread_ts.as_deref() {
         // Matrix thread_ts is a delivery anchor, not a topic boundary: root
         // and follow-ups must share one sender+room session.
@@ -616,6 +618,25 @@ pub fn conversation_history_key(msg: &zeroclaw_api::channel::ChannelMessage) -> 
         }
     };
     sanitize_session_key(&raw)
+}
+
+pub fn conversation_history_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
+    conversation_history_key_in_scope(msg, &channel_scope(msg))
+}
+
+/// Preserve the legacy history namespace for a sole active webhook. The live
+/// registry has a bare webhook entry only for a singleton; multiple listeners
+/// retain their configured aliases for separate histories. Owner routing always
+/// uses the alias on the message, independently of this history compatibility.
+fn runtime_conversation_history_key(
+    ctx: &ChannelRuntimeContext,
+    msg: &zeroclaw_api::channel::ChannelMessage,
+) -> String {
+    if msg.channel == "webhook" && ctx.channels_by_name.contains_key("webhook") {
+        conversation_history_key_in_scope(msg, &msg.channel)
+    } else {
+        conversation_history_key(msg)
+    }
 }
 
 fn scope_override_key(
@@ -1729,7 +1750,7 @@ fn build_scope_override_summary(
             scope_line(OverrideScope::Agent),
         )
     };
-    let sender_key = conversation_history_key(msg);
+    let sender_key = runtime_conversation_history_key(ctx, msg);
     let session = ctx
         .route_overrides
         .lock()
@@ -1766,7 +1787,7 @@ async fn handle_runtime_command_if_needed(
         return true;
     };
 
-    let sender_key = conversation_history_key(msg);
+    let sender_key = runtime_conversation_history_key(ctx, msg);
     let defaults_snapshot = runtime_defaults_snapshot(ctx);
     let mut current = get_route_selection(ctx, msg, &sender_key, &defaults_snapshot);
 
@@ -3237,7 +3258,7 @@ async fn run_message_dispatch_loop(
         // ── Debounce: accumulate rapid messages per sender ──────────
         // CLI messages bypass debouncing so the interactive loop stays responsive.
         let (msg, inbox_receipts) = if msg.channel != "cli" {
-            let debounce_key = conversation_history_key(&msg);
+            let debounce_key = runtime_conversation_history_key(ctx.as_ref(), &msg);
 
             // Resolve effective debounce window: per-channel override wins,
             // otherwise falls back to the global default from ChannelsConfig.

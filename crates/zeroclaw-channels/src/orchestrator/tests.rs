@@ -17816,3 +17816,111 @@ async fn reflection_uses_raw_ingress_before_hooks_and_multiline_link_previews() 
         Some("rewritten-sender")
     );
 }
+
+#[cfg(feature = "channel-webhook")]
+#[tokio::test]
+async fn webhook_alias_http_routes_to_owning_agent() {
+    use crate::webhook::alias_tests::{post_signed, receive, spawn_webhook};
+    let alpha_ctx = router_test_ctx();
+    let beta_ctx = router_test_ctx();
+    let router = AgentRouter::multi(
+        HashMap::from([
+            ("agent-alpha".into(), Arc::clone(&alpha_ctx)),
+            ("agent-beta".into(), Arc::clone(&beta_ctx)),
+        ]),
+        HashMap::from([
+            ("webhook.alpha".into(), "agent-alpha".into()),
+            ("webhook.beta".into(), "agent-beta".into()),
+            // Legacy bare fallback must not steal beta's authenticated message.
+            ("webhook".into(), "agent-alpha".into()),
+        ]),
+    );
+    let mut alpha = spawn_webhook("alpha", "alpha-secret").await;
+    let mut beta = spawn_webhook("beta", "beta-secret").await;
+    let payload = serde_json::json!({"sender": "same-sender", "content": "hello", "thread_id": "same-thread"});
+    assert_eq!(
+        post_signed(&alpha, "alpha-secret", payload.clone()).await,
+        200
+    );
+    assert_eq!(post_signed(&beta, "beta-secret", payload).await, 200);
+    let alpha_msg = receive(&mut alpha).await;
+    let beta_msg = receive(&mut beta).await;
+    let resolved_alpha = router.resolve(&alpha_msg).expect("alpha owner");
+    let resolved_beta = router.resolve(&beta_msg).expect("beta owner");
+    assert!(Arc::ptr_eq(&resolved_alpha, &alpha_ctx));
+    assert!(
+        Arc::ptr_eq(&resolved_beta, &beta_ctx),
+        "beta must not collapse into the bare webhook owner"
+    );
+}
+
+#[cfg(feature = "channel-webhook")]
+#[tokio::test]
+async fn webhook_alias_http_preserves_singleton_history_and_isolates_multi_history() {
+    use crate::webhook::alias_tests::{post_signed, receive, spawn_webhook};
+    for aliases in [vec!["primary"], vec!["alpha", "beta"]] {
+        let mut servers = Vec::new();
+        for alias in &aliases {
+            servers.push(spawn_webhook(alias, "fixture-secret").await);
+        }
+        let configured: Vec<_> = servers
+            .iter()
+            .zip(&aliases)
+            .map(|(server, alias)| ConfiguredChannel {
+                display_name: "Webhook",
+                alias: Some((*alias).into()),
+                channel: server.channel.clone(),
+            })
+            .collect();
+        let registry = Arc::new(configured_channel_map(&configured));
+        assert_eq!(registry.contains_key("webhook"), aliases.len() == 1);
+        let dir = tempfile::TempDir::new().unwrap();
+        let store: Arc<dyn SessionBackend> =
+            Arc::new(SqliteSessionBackend::new(dir.path()).unwrap());
+        let ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: registry,
+            session_store: Some(Arc::clone(&store)),
+            ..(*router_test_ctx()).clone()
+        });
+        let mut expected_keys = Vec::new();
+        for server in &mut servers {
+            assert_eq!(post_signed(server, "fixture-secret", serde_json::json!({
+                "sender": "same-sender", "content": "passive fixture", "thread_id": "same-thread"
+            })).await, 200);
+            let mut msg = receive(server).await;
+            let mut legacy_msg = msg.clone();
+            legacy_msg.channel_alias = None;
+            let legacy_key = conversation_history_key(&legacy_msg);
+            let aliased_key = conversation_history_key(&msg);
+            let expected = if aliases.len() == 1 {
+                legacy_key.clone()
+            } else {
+                aliased_key.clone()
+            };
+            msg.passive_context = true;
+            process_channel_message(Arc::clone(&ctx), msg, CancellationToken::new()).await;
+            assert_eq!(
+                store.load(&expected).len(),
+                1,
+                "history must use the compatible instance namespace"
+            );
+            if aliases.len() == 1 {
+                assert!(
+                    store.load(&aliased_key).is_empty(),
+                    "singleton history must not be stranded under a new alias key"
+                );
+            } else {
+                assert!(
+                    store.load(&legacy_key).is_empty(),
+                    "multiple listeners must not write bare webhook history"
+                );
+            }
+            expected_keys.push(expected);
+        }
+        if aliases.len() == 2 {
+            assert_ne!(expected_keys[0], expected_keys[1]);
+            assert_eq!(store.load(&expected_keys[0]).len(), 1);
+            assert_eq!(store.load(&expected_keys[1]).len(), 1);
+        }
+    }
+}
