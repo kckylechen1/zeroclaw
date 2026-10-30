@@ -176,7 +176,10 @@ pub async fn fetch_paircode(
         other => other.trim_start_matches('[').trim_end_matches(']'),
     };
     let ip = host.parse::<std::net::IpAddr>().ok().filter(|ip| ip.is_loopback())
-        .ok_or_else(|| anyhow::anyhow!(t("cli-paircode-local-only", "Pairing-code requests must target loopback. Run this on the gateway host with --host 127.0.0.1.")))?;
+        .ok_or_else(|| {
+            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail), "pairing-code request rejected: non-loopback destination");
+            anyhow::Error::msg(t("cli-paircode-local-only", "Pairing-code requests must target loopback. Run this on the gateway host with --host 127.0.0.1."))
+        })?;
     let address = std::net::SocketAddr::new(ip, port);
     let mut url = reqwest::Url::parse(&format!("http://{address}"))?;
     let route = if action.mints_code() {
@@ -191,7 +194,8 @@ pub async fn fetch_paircode(
     }
     let admin_token =
         zeroclaw_runtime::security::pairing::read_gateway_admin_token(data_dir).ok_or_else(|| {
-            anyhow::anyhow!(ta(
+            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail), "pairing-code request rejected: owner token unavailable");
+            anyhow::Error::msg(ta(
                 "cli-paircode-admin-token-missing",
                 &[("path", &zeroclaw_runtime::security::pairing::gateway_admin_token_path(data_dir).display().to_string())],
                 "No gateway admin token. Run this on the gateway host, as the user running it, while the gateway is running."

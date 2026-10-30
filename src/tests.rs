@@ -1606,7 +1606,7 @@ async fn paircode_owner_secret_never_follows_redirects() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let destination_port = destination.local_addr().unwrap().port();
-    let server = tokio::spawn(async move {
+    let server = ::zeroclaw_spawn::spawn!(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut bytes = vec![0; 8192];
         let count = socket.read(&mut bytes).await.unwrap();
@@ -1619,7 +1619,7 @@ async fn paircode_owner_secret_never_follows_redirects() {
         socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{destination_port}/collect\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
     });
     // If followed, this destination replies promptly so the test cannot hang.
-    let receiver = tokio::spawn(async move {
+    let receiver = ::zeroclaw_spawn::spawn!(async move {
         if let Ok(Ok((mut socket, _))) =
             tokio::time::timeout(std::time::Duration::from_secs(2), destination.accept()).await
         {
@@ -1702,7 +1702,7 @@ async fn paircode_owner_cli_sends_token_for_show_mint_and_rotation() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let secret = secret.clone();
-        let server = tokio::spawn(async move {
+        let server = ::zeroclaw_spawn::spawn!(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut bytes = vec![0; 8192];
             let count = socket.read(&mut bytes).await.unwrap();
