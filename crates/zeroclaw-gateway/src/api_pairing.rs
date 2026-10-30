@@ -2,7 +2,7 @@
 
 use super::AppState;
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Json},
 };
@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 /// Metadata about a paired device.
@@ -372,6 +373,7 @@ pub async fn initiate_pairing(
 /// POST /api/pair — submit pairing code (for new device pairing)
 pub async fn submit_pairing_enhanced(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -379,11 +381,33 @@ pub async fn submit_pairing_enhanced(
     let device_name = body["device_name"].as_str().map(String::from);
     let device_type = body["device_type"].as_str().map(String::from);
 
-    let client_id = headers
-        .get("X-Forwarded-For")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
+    // Match /pair: forwarding headers are authoritative only in configured
+    // trusted-proxy mode. Otherwise every attempt is keyed by the socket peer IP.
+    let client_id =
+        super::client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
+
+    if !state.rate_limiter.allow_pair(&client_id) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "paired": false,
+                "error": zeroclaw_runtime::i18n::get_required_cli_string("gateway-pair-request-limit"),
+                "retry_after": super::RATE_LIMIT_WINDOW_SECS,
+            })),
+        )
+            .into_response();
+    }
+    if let Err(e) = state.auth_limiter.check_rate_limit(&client_id) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "paired": false,
+                "error": zeroclaw_runtime::i18n::get_required_cli_string("gateway-pair-auth-limit"),
+                "retry_after": e.retry_after_secs,
+            })),
+        )
+            .into_response();
+    }
 
     match state.pairing.try_pair(code, &client_id).await {
         Ok(Some(token)) => {
@@ -456,7 +480,10 @@ pub async fn submit_pairing_enhanced(
             }))
             .into_response()
         }
-        Ok(None) => (StatusCode::BAD_REQUEST, "Invalid or expired pairing code").into_response(),
+        Ok(None) => {
+            state.auth_limiter.record_attempt(&client_id);
+            (StatusCode::BAD_REQUEST, "Invalid or expired pairing code").into_response()
+        }
         Err(lockout_secs) => (
             StatusCode::TOO_MANY_REQUESTS,
             format!("Too many attempts. Locked out for {lockout_secs}s"),
@@ -723,6 +750,7 @@ mod tests {
         let (status, body) = response_json(
             submit_pairing_enhanced(
                 State(state.clone()),
+                ConnectInfo("127.0.0.1:40000".parse().unwrap()),
                 HeaderMap::new(),
                 Json(serde_json::json!({"code": code, "device_name": "test"})),
             )
@@ -770,6 +798,7 @@ mod tests {
         let (status, body) = response_json(
             submit_pairing_enhanced(
                 State(state.clone()),
+                ConnectInfo("127.0.0.1:40000".parse().unwrap()),
                 HeaderMap::new(),
                 Json(serde_json::json!({"code": code})),
             )
@@ -848,3 +877,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "api_pairing_peer_tests.rs"]
+mod peer_key_tests;

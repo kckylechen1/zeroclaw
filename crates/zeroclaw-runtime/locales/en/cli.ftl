@@ -1052,6 +1052,8 @@ gateway-attachment-unauthorized = Attachments require current device or bridge a
 gateway-attachment-unavailable = Attachment is expired, unavailable or outside this session
 
 gateway-intake-unavailable = The input could not be safely resumed. Reconnect to check its durable receipt before sending it again.
+gateway-pair-request-limit = Too many pairing requests. Please retry later.
+gateway-pair-auth-limit = Too many authentication attempts. Please retry later.
 gateway-cwd-workspace-unavailable = Agent workspace is not a usable directory
 gateway-cwd-not-directory = cwd is not a usable directory
 gateway-cwd-outside-workspace = cwd must be within the configured agent workspace
