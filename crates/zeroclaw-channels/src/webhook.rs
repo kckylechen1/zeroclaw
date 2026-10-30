@@ -367,12 +367,14 @@ impl Channel for WebhookChannel {
         let counter = Arc::new(AtomicU64::new(0));
 
         struct WebhookState {
+            alias: String,
             tx: tokio::sync::mpsc::Sender<ChannelMessage>,
             secret: Option<String>,
             counter: Arc<AtomicU64>,
         }
 
         let state = Arc::new(WebhookState {
+            alias: self.alias.clone(),
             tx: tx.clone(),
             secret: self.secret.clone(),
             counter: counter.clone(),
@@ -456,7 +458,7 @@ impl Channel for WebhookChannel {
                 reply_target,
                 content: payload.content,
                 channel: "webhook".to_string(),
-                channel_alias: None,
+                channel_alias: Some(state.alias.clone()),
                 timestamp,
                 thread_ts: payload.thread_id,
                 interruption_scope_id: None,
@@ -1102,3 +1104,7 @@ mod tests {
         assert!(ch.send(&test_message()).await.is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "webhook_alias_tests.rs"]
+pub(crate) mod alias_tests;
