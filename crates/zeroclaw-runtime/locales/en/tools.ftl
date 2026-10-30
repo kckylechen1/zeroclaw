@@ -194,3 +194,11 @@ soul-tone-step-limit = Tone proposals may move a dial by at most one level.
 soul-tone-challenge-up-only = The challenge dial may only be proposed upward; only your owner can lower it.
 soul-tone-dial-cooldown = The { $dial } dial was changed by an approved proposal less than { $days } days ago, so it cannot be proposed again yet.
 memory-store-conversation-scope-required = Conversation memory requires a current session and a backend that preserves its scope.
+
+# Pinned web-fetch transport
+tool-web-fetch-error-proxy = web_fetch cannot use a configured proxy while enforcing validated destination addresses. Disable the proxy for tool.web_fetch to use this tool.
+tool-web-fetch-error-cross-host = Cross-host redirects are blocked so DNS validation remains pinned.
+tool-web-fetch-error-resolution = Unable to resolve and validate the web_fetch destination.
+tool-web-fetch-pinned-description = Fetch a web page and return its content as clean plain text. HTML pages are converted to readable text; JSON and plain text are returned as-is. Only GET requests; follows same-host redirects using the validated destination addresses and blocks cross-host redirects. Falls back to Firecrawl for JS-heavy/bot-blocked sites if enabled, except after redirect policy rejection. Subject to configured domain and private-host policy.
+tool-text-browser-pinned-description = Select a text-based browser (lynx, links, or w3m) using an explicit request, configured preference, or auto-detection. Execution is currently refused because these external backends cannot pin validated destination addresses. Use web_fetch for pinned retrieval and plain-text rendering.
+tool-text-browser-error-unpinned = External text browser backend { $backend } cannot pin validated destination addresses: independent DNS resolution leaves a validation-to-connection mismatch window. Execution is refused. Use the address-pinned web_fetch tool instead.
