@@ -8,6 +8,7 @@ relates-to:
   - ADR-013
   - ADR-016
   - ADR-017
+  - ADR-018
   - ADR-019
   - crates/zeroclaw-gateway/src/nodes.rs
   - crates/zeroclaw-tools/src/tachi_delegation.rs
@@ -20,7 +21,7 @@ relates-to:
 
 Proposed on 2026-10-30. Not accepted until the owner approves it.
 
-This record keeps ADR-017 and ADR-019 unchanged. It names a small set of durability and attention rules for the body, taken as design references from Pi Durable, and records which Pi Durable ideas are deliberately not adopted.
+This record keeps ADR-017 and ADR-019 unchanged. It names a small set of durability and attention rules for the body, taken as design references from Pi Durable, adds an owner rule for acknowledging and confirming before acting (§8), and records which Pi Durable ideas are deliberately not adopted.
 
 ## Context
 
@@ -35,6 +36,7 @@ This record keeps ADR-017 and ADR-019 unchanged. It names a small set of durabil
   - compaction runs in the background before the context is full, never deletes older messages, and a handoff starts a new context while older messages stay searchable;
   - application state lives in typed documents committed atomically with the transcript, and clients subscribe to a current view and then receive only changes.
 - Community Pi packages add ideas that fit a companion agent: observation and reflection memory prepared in the background so compaction is a cheap render step (`pi-observational-memory`); model memory proposals that stay provisional until the user confirms them (`pi-compact`); and subagents that publish a live count of running, waiting-for-you, and queued work, interrupting the user only when a decision is needed (`pi-durable-subagents`).
+- On voice there is no screen. When the owner asks for something that takes time, silence is indistinguishable from "did not hear me", and a misheard request may be delegated to Tachi before anyone notices. The owner wants the agent to say something first, either confirming what it understood or saying what it is about to do, so the owner always knows what state it is in.
 - Pi Durable cannot be used directly: it is TypeScript, its API is marked experimental, ADR-009 retired the plugin host, and third-party Pi packages execute code. Its runtime registry replacement ("malleable" extensions) conflicts with ADR-019 §1, which keeps the body's authority non-replaceable.
 
 ## Decision
@@ -85,7 +87,31 @@ The body publishes one committed attention projection per conversation: idle, li
 - A question to the owner is structured: what must be decided, the options, the recommended option, and the evidence. Surfaces without buttons render it as numbered replies (ADR-019 §6).
 - Body language and the attention state never carry anything that needs trust. Approval still happens only on an authenticated surface.
 
-### 8. Not adopted
+### 8. Say something before acting
+
+When the owner will have to wait, the body first tells the owner what it understood and what it is about to do. This matters most on voice, where the owner cannot see the attention state.
+
+There are two forms:
+
+| Form | When | Does the work wait? | Example |
+| --- | --- | --- | --- |
+| Acknowledge | the intent is clear and the next step takes noticeable time (a slow tool call, a search, a delegation that is already confirmed) | no: the work starts right after | "好的，我去查一下。" |
+| Confirm | the intent is ambiguous, or the next step is costly, slow, or hard to undo | yes: nothing starts until the owner answers | "你是想让 Codex 把登录页的 bug 修掉，对吗？" |
+
+Rules:
+
+- **Confirm is required by default** before starting a Tachi job (L2) and before any tool that acts for the owner (ADR-019 §5). For other requests, the model confirms when the intent is unclear. The owner may relax the default per surface.
+- **No filler for quick answers.** An instant answer gets no acknowledgement first.
+- **Spoken first, committed first.** The acknowledgement or confirmation is sent to the surface as soon as it is produced, before any tool call runs, so on voice it plays while the work starts. It is committed to the transcript before the tool call, so after a restart the body knows what it told the owner.
+- **The words come from the Soul.** The model writes the acknowledgement in the Soul's Tone. If the model gives none and the first step turns out slow, the surface shows the attention state instead (the robot's pose, a short earcon, a typing indicator), or uses a short phrase from the owner-made Tone exemplars (ADR-018). The body never makes up other words on the agent's behalf.
+- **Confirming intent is not approval.** A spoken "yes" settles what the owner meant. It never approves an action that needs approval, which still happens on an authenticated surface (ADR-019 §6). A delegation may therefore have a voice confirmation followed by an approval card on the phone.
+- **Short and closed.** A confirmation restates the task in one sentence and asks one yes-or-no question. If two readings are plausible, it offers at most those two.
+- **Silence is never yes.** On voice, an unanswered confirmation is asked once more; then the conversation waits in needs-you and nothing starts.
+- **Interrupting after an acknowledgement** ("不是，我是说……") cancels the foreground work it started (§5). Background work that already started, such as a Tachi run, keeps going until it is cancelled explicitly. That is why delegation is confirmed before it starts, rather than cancelled after.
+- **What is said matches the state.** An acknowledgement goes with thinking or working, a confirmation with needs-you, the result with done. What the owner hears and what the robot shows never disagree.
+- **Delegation says who and when.** The acknowledgement after a confirmed delegation names who does the work and that the result comes back later: "好的，我交给 Codex，做完告诉你。"
+
+### 9. Not adopted
 
 - **Runtime replacement of extensions or tools inside the body.** It conflicts with ADR-019 §1. Code changes reach the body by a normal restart.
 - **Switching models when a provider's quota runs out** for delegated work. That belongs to Tachi profiles, not to the body.
@@ -100,6 +126,7 @@ Positive:
 - Restarts no longer risk a second approval prompt or a second effect from an interrupted call.
 - Completion delivery, reminders, and the duck's body language share one background-work model and one attention state.
 - Memory preparation moves off the critical path of compaction.
+- On voice the owner always knows whether the agent heard, is working, or is waiting for an answer, and a misheard request is caught before it becomes a Tachi job.
 
 Negative:
 
@@ -107,6 +134,7 @@ Negative:
 - Request identities on `/ws/chat` and the CLI may need a contract change, which touches a protected area (`AGENTS.md`).
 - Background work adds scheduler state that must be inspected, expired, and cancelled explicitly.
 - Observation capture costs a background model call per turn unless batched.
+- Confirmations add a round trip before delegation and acting for the owner; a poorly tuned "noticeable time" makes the agent either chatty or silent.
 
 ## Implementation slices
 
@@ -118,6 +146,7 @@ Each slice is one PR:
 4. **Background work.** Foreground versus background ownership; Tachi completion watching as the first background work (#381), then proactive delivery (#63).
 5. **Attention projection.** Publish the projection; wire the Yonbo pet-state mapping to it in S8; structured questions with numbered fallback.
 6. **Memory pipeline.** Observations at turn end, pre-compaction save from observations, background compaction, history search tool, event-triggered reminders as background work.
+7. **Acknowledge and confirm.** Send text produced before tool calls to surfaces immediately (voice first) and commit it before the call; require confirmation before Tachi `start` and acting-for-owner tools; silence starts nothing; interrupting cancels foreground work; Tone-exemplar or non-verbal fallback when the first step is slow. On the Yonbo adapter this lands with S5.
 
 Before each slice, check upstream and Pi Durable for equivalent work and record the result, per `AGENTS.md`.
 
@@ -130,7 +159,8 @@ This ADR is implemented when:
 3. a restart between an approval decision and execution neither asks again nor runs twice;
 4. cancelling a turn leaves background work running; a background Tachi watch and a reminder each survive a restart and fire once;
 5. a client that attaches late receives the current attention state, and the robot shows the mapped pose for done and needs-you during an acceptance run;
-6. compaction deletes no stored messages, and a message from before a handoff can be found through the history tool.
+6. compaction deletes no stored messages, and a message from before a handoff can be found through the history tool;
+7. on voice, a request that needs a slow step is heard acknowledged before any tool result while an instant answer gets no filler; no Tachi job or acting-for-owner call starts without a confirmed intent; an unanswered confirmation starts nothing; a spoken "yes" never satisfies an approval; and interrupting after an acknowledgement cancels the foreground work, with tests.
 
 ## Open questions
 
@@ -139,6 +169,8 @@ This ADR is implemented when:
 - Should observation capture run every turn, or batch at idle to limit cost?
 - Which attention states should notify the owner on the phone, and which only change the robot's pose?
 - What expiry and fire limit should reminders default to?
+- What counts as "noticeable time" on voice before an acknowledgement is needed (for example, about one second)?
+- May the owner skip confirmation for delegations phrased precisely, or for a trusted surface such as the CLI?
 
 ## References
 
@@ -148,5 +180,6 @@ This ADR is implemented when:
 - [ADR-010: Memory authority boundaries](./ADR-010-memory-authority-boundaries.md)
 - [ADR-016: Growth proposed by the agent, approved by the owner](./ADR-016-growth-proposed-by-agent-approved-by-owner.md)
 - [ADR-017: One personal agent body, edge devices, and delegation through Tachi](./ADR-017-personal-agent-body-edges-and-delegation.md)
+- [ADR-018: Soul character model](./ADR-018-soul-character-model.md)
 - [ADR-019: One body, many hands](./ADR-019-one-body-many-hands.md)
 - Issues #63, #376, #377, #381, #438, #514, #535; [kckylechen1/Tachi#2003](https://github.com/kckylechen1/Tachi/issues/2003)
