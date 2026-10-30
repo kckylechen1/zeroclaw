@@ -41,8 +41,8 @@ It is built around three ideas:
    identity you talk to.
 2. **Edge devices join through the gateway.** A speaker, a phone, a watch, or a
    small robot connects as a **Client** (carries conversation) and/or a
-   **Node** (offers bounded, typed capabilities such as "play audio" or "turn on
-   the light"). Device safety such as emergency stop and speed limits stays on
+   **Node** (offers bounded, typed capabilities such as "play audio" or "show a
+   face"). Device safety such as emergency stop and speed limits stays on
    the device. The body never drives serial ports or GPIO itself.
 3. **Heavy work is delegated, never hidden.** Coding jobs and long
    investigations go to CLI agents such as Codex or Claude Code, started and
@@ -70,9 +70,9 @@ Most requests end at L0. A spoken "what's the weather" never waits on Tachi.
   Nothing is quietly run locally instead.
 - **Voice never blocks on delegation.** The body acknowledges ("I've asked Codex
   to do it; I'll tell you when it's done") and ends the turn.
-- **New external surfaces default closed.** `[tachi]` is disabled by default,
-  only loopback endpoints are accepted, and no harness is available until you
-  map one in `[tachi.harnesses]`.
+- **New external surfaces default closed.** `[tachi]` and `[nodes]` are disabled
+  by default, Tachi accepts only loopback endpoints, and no harness or Node
+  capability is available until you grant it explicitly.
 
 Full details: [ADR-013](docs/book/src/architecture/decisions/ADR-013-channels-as-gateway-clients.md)
 (channels as gateway clients) and
@@ -90,7 +90,11 @@ whole-package acceptance is tracked in #374.
 | Delegation with Tachi stopped returns a typed "unavailable" and runs nothing locally | ✅ Covered by tests |
 | One real Codex or Claude Code job runs end to end: started, tracked, reported in the body's voice | ⏳ Open (#381) |
 | Retire ZeroClaw's own ACP driver (`execution_subagent`) | ✅ Done (#526) |
-| One headless Node pairs, advertises, is invoked, disconnects, reconnects, is revoked | ⏳ Open (#61, #62) |
+| One headless Node pairs, advertises, is invoked, disconnects, reconnects, is revoked | ✅ Real-process loopback proof with safe `system.info` / `test.echo` (#514) |
+
+**First physical body:** the Yonbo X1 companion robot (#535). Its dialogue
+still runs through an interim adapter; switching that brain to ZeroClaw (S5)
+and enabling its face capability as a Node (S8) are pending.
 
 Also still in progress: moving channels out of process into gateway bridges
 (ADR-013), so `crates/zeroclaw-channels` remains in the workspace for now.
@@ -155,16 +159,23 @@ To enable delegation, run a Tachi daemon on the same machine, enable `[tachi]`
 with a loopback endpoint, and map at least one harness in `[tachi.harnesses]`.
 See [Delegation and SubAgents](docs/book/src/agents/delegation.md#external-work-through-tachi).
 
+To try a local read-only Node, build with the `nodes` feature and follow
+[Local read-only Node host](docs/book/src/gateway/api.md#local-read-only-node-host).
+
 ## Capabilities
 
 - **Gateway-first** — the local CLI and the gateway (REST plus the `/ws/chat`
   event stream) are the only doors to the agent. Messaging platforms become
-  bridges that talk to `/ws/chat` (ADR-013).
+  bridges that talk to the gateway (ADR-013).
 - **Soul and User Model** — a lasting identity and owner model with protected
-  authority (ADR-014/015/016).
+  authority (ADR-014/015/016/018).
 - **Provider-agnostic** — [model providers](docs/book/src/providers/overview.md) are pluggable: Anthropic, OpenAI, local Ollama, or any OpenAI-compatible endpoint, with [fallback chains and routing](docs/book/src/providers/routing.md).
 - **Security-first** — default autonomy is `supervised`: medium-risk ops require approval, high-risk blocked. Workspace boundaries, command policy, OS-level sandboxes (Landlock / Bubblewrap / Seatbelt / Docker), and [tool receipts](docs/book/src/security/tool-receipts.md). This fork keeps several deliberately stricter defaults than upstream; see [fork notes](docs/book/src/contributing/fork-notes.md#deliberate-behavioral-divergences).
-- **Edge devices as Nodes** — signed device identity and the v2 handshake live in the gateway; Node invocation is being rebuilt (#62).
+- **Edge devices as Nodes** — signed Ed25519 device identity, the v2 handshake,
+  owner-set capability ceilings, and bounded invocation of safe capabilities
+  through the opt-in `zeroclaw-node-host` (#514). Each call is bound to the
+  device, connection and capability revision; unknown outcomes are never
+  replayed. High-risk capabilities stay unavailable.
 - **Delegation through Tachi** — L2 work goes over MCP to Tachi's `tachi_staff` (start / status / result / cancel), with typed errors and no local fallback.
 - **SOP definitions** — event-trigger-format [Standard Operating Procedures](docs/book/src/sop/index.md), authored and validated in ZeroClaw; SOP runs live Tachi-side.
 - **ACP** — IDE / editor integration via [Agent Client Protocol](docs/book/src/channels/acp.md) (JSON-RPC 2.0 over stdio).
@@ -209,7 +220,7 @@ Notes:
 ## Architecture
 
 ```
-  Clients: CLI · phone · speaker · messaging bridges
+  Clients: CLI · phone · speaker · robot dialogue · messaging bridges
                        │  REST + /ws/chat
                        ▼
 ┌──────────────────────────────────────────────────────────┐
@@ -222,9 +233,9 @@ Notes:
 │   L0 tools / MCP    L1 reasoning      L2 delegation ─────┼──► Tachi (MCP, loopback)
 │                                                          │       └─► Codex / Claude Code / …
 └──────────────────────────┬───────────────────────────────┘
-                           │ gateway (v2 handshake, signed identity)
+                           │ /ws/nodes (v2 handshake, signed identity)
                            ▼
-          Nodes: speaker · lights · robot (local safety)
+          Nodes: node host · robot adapter · speaker (local safety)
 ```
 
 More detail: [ADR-013](docs/book/src/architecture/decisions/ADR-013-channels-as-gateway-clients.md) · [ADR-017](docs/book/src/architecture/decisions/ADR-017-personal-agent-body-edges-and-delegation.md) · [Architecture overview](docs/book/src/architecture/overview.md) · [Crates](docs/book/src/architecture/crates.md). Some upstream architecture pages still describe the multi-channel layout.
@@ -239,7 +250,7 @@ Read [AGENTS.md](AGENTS.md) first. The short version:
 
 Good places to start:
 
-- New messaging bridge → `bridges/` (a client of `/ws/chat`, ADR-013)
+- New messaging bridge → `bridges/` (a client of the gateway, ADR-013)
 - New provider → `crates/zeroclaw-providers/`
 - New tool → `crates/zeroclaw-tools/`
 - Docs → `docs/book/src/`
