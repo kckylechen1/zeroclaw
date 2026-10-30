@@ -13881,3 +13881,37 @@ async fn gateway_unauthenticated_public_exemption_is_explicit_and_roundtrips() {
     let roundtrip: GatewayConfig = toml::from_str(&toml::to_string(&opted_in).unwrap()).unwrap();
     assert!(roundtrip.dangerously_allow_unauthenticated_public_bind);
 }
+
+#[::core::prelude::v1::test]
+fn http_auth_secret_policy_preserves_missing_empty_and_scoped_hosts() {
+    for (policy, expected) in [
+        ("", None),
+        ("allowed_hosts = []", Some(Vec::<String>::new())),
+        (
+            "allowed_hosts = [\"api.example.com\"]",
+            Some(vec!["api.example.com".to_owned()]),
+        ),
+    ] {
+        let text = format!("[http_request.auth_secret_policies.api_token]\n{policy}\n");
+        let config: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            config.http_request.auth_secret_policies["api_token"].allowed_hosts,
+            expected
+        );
+        let serialized = toml::to_string(&config).unwrap();
+        let roundtrip: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            roundtrip.http_request.auth_secret_policies["api_token"].allowed_hosts,
+            expected
+        );
+    }
+    let legacy: Config =
+        toml::from_str("[http_request.secrets]\napi_token = \"Bearer fixture\"\n").unwrap();
+    assert!(legacy.http_request.auth_secret_policies.is_empty());
+    assert!(
+        toml::from_str::<Config>(
+            "[http_request.auth_secret_policies.api_token]\nallowed_host = [\"api.example.com\"]\n"
+        )
+        .is_err()
+    );
+}

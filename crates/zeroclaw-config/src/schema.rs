@@ -7057,6 +7057,18 @@ impl Default for BrowserConfig {
     }
 }
 
+/// Optional destination binding for one named HTTP authorization secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+#[prefix = "http_auth_secret_policy"]
+pub struct HttpAuthSecretPolicy {
+    /// Exact canonical hosts (case-insensitive), without ports or wildcards.
+    /// Missing preserves legacy behavior; an empty list denies all destinations.
+    #[serde(default)]
+    pub allowed_hosts: Option<Vec<String>>,
+}
+
 // ── HTTP request tool ───────────────────────────────────────────
 
 /// HTTP request tool configuration (`[http_request]` section).
@@ -7094,6 +7106,11 @@ pub struct HttpRequestConfig {
     #[credential_class = "encrypted_secret"]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     pub secrets: HashMap<String, String>,
+    /// Optional destination policies keyed by the corresponding secret name.
+    /// Kept separate from secret values to preserve encryption and redaction.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub auth_secret_policies: HashMap<String, HttpAuthSecretPolicy>,
 }
 
 impl Default for HttpRequestConfig {
@@ -7106,6 +7123,7 @@ impl Default for HttpRequestConfig {
             allow_private_hosts: false,
             allowed_private_hosts: vec![],
             secrets: HashMap::new(),
+            auth_secret_policies: HashMap::new(),
         }
     }
 }
