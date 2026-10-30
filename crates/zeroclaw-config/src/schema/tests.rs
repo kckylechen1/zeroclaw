@@ -3720,6 +3720,30 @@ async fn webhook_config_retry_fields_default_to_none() {
     assert!(parsed.retry_max_delay_ms.is_none());
 }
 
+#[test]
+async fn webhook_replay_config_defaults_and_roundtrip() {
+    for config in [
+        WebhookConfig::default(),
+        serde_json::from_str::<WebhookConfig>("{}").unwrap(),
+    ] {
+        assert!(!config.dangerously_disable_replay_protection);
+        assert_eq!(config.replay_window_secs, None);
+        assert_eq!(config.replay_cache_capacity, None);
+    }
+    let config: WebhookConfig = toml::from_str(
+        r#"
+        dangerously_disable_replay_protection = true
+        replay_window_secs = 60
+        replay_cache_capacity = 128
+    "#,
+    )
+    .unwrap();
+    let restored: WebhookConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert!(restored.dangerously_disable_replay_protection);
+    assert_eq!(restored.replay_window_secs, Some(60));
+    assert_eq!(restored.replay_cache_capacity, Some(128));
+}
+
 // ── WhatsApp config ──────────────────────────────────────
 
 #[test]

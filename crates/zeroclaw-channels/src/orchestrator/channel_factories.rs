@@ -1541,18 +1541,25 @@ pub(crate) fn collect_configured_channels(
             display_name: "Webhook",
             alias: Some(alias.clone()),
             channel: crate::paced_channel::PacedChannel::wrap(
-                Arc::new(WebhookChannel::new(
-                    alias.clone(),
-                    wh.port,
-                    wh.listen_path.clone(),
-                    wh.send_url.clone(),
-                    wh.send_method.clone(),
-                    wh.auth_header.clone(),
-                    wh.secret.clone(),
-                    wh.max_retries,
-                    wh.retry_base_delay_ms,
-                    wh.retry_max_delay_ms,
-                )),
+                Arc::new(
+                    WebhookChannel::new(
+                        alias.clone(),
+                        wh.port,
+                        wh.listen_path.clone(),
+                        wh.send_url.clone(),
+                        wh.send_method.clone(),
+                        wh.auth_header.clone(),
+                        wh.secret.clone(),
+                        wh.max_retries,
+                        wh.retry_base_delay_ms,
+                        wh.retry_max_delay_ms,
+                    )
+                    .with_replay_protection(
+                        wh.dangerously_disable_replay_protection,
+                        wh.replay_window_secs,
+                        wh.replay_cache_capacity,
+                    ),
+                ),
                 wh,
             ),
         });

@@ -11898,6 +11898,21 @@ pub struct WebhookConfig {
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     pub secret: Option<String>,
 
+    /// DANGEROUS: accept legacy body-only signatures without timestamp or nonce checks.
+    /// Default: false (replay protection enabled).
+    #[tab(Advanced)]
+    #[serde(default)]
+    pub dangerously_disable_replay_protection: bool,
+    /// Allowed timestamp skew in seconds, 1..=86400. Default: 300 (five minutes).
+    #[tab(Advanced)]
+    #[serde(default)]
+    pub replay_window_secs: Option<u64>,
+    /// Maximum remembered event IDs per listener, 1..=65536. Default: 4096.
+    /// A full cache rejects new events until records expire; live entries are never evicted.
+    #[tab(Advanced)]
+    #[serde(default)]
+    pub replay_cache_capacity: Option<usize>,
+
     /// Tools excluded from this channel's tool spec. When set, these tools
     /// are not exposed to the model when responding via this channel.
     #[tab(Behavior)]
