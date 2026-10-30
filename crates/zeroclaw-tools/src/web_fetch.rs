@@ -2,10 +2,12 @@ use crate::helpers::domain_guard;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::json;
-use std::sync::Arc;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
-use zeroclaw_config::schema::FirecrawlConfig;
+use zeroclaw_config::schema::{FirecrawlConfig, ProxyConfig, ProxyScope};
 use zeroclaw_policy::SecurityPolicy;
 
 /// Minimum body length to consider a standard fetch successful.
@@ -52,6 +54,7 @@ impl WebFetchTool {
         })
     }
 
+    #[cfg(test)]
     fn validate_url(&self, raw_url: &str) -> anyhow::Result<String> {
         validate_target_url(
             raw_url,
@@ -60,6 +63,94 @@ impl WebFetchTool {
             &self.allowed_private_hosts,
             "web_fetch",
         )
+    }
+
+    async fn resolve_target(&self, raw_url: &str) -> anyhow::Result<ResolvedWebFetchTarget> {
+        let raw_url = raw_url.to_string();
+        let allowed_domains = self.allowed_domains.clone();
+        let blocked_domains = self.blocked_domains.clone();
+        let allowed_private_hosts = self.allowed_private_hosts.clone();
+        tokio::task::spawn_blocking(move || {
+            resolve_target_url_with_resolver(
+                &raw_url,
+                &allowed_domains,
+                &blocked_domains,
+                &allowed_private_hosts,
+                |host| Ok((host, 0).to_socket_addrs()?.collect()),
+            )
+        })
+        .await
+        .map_err(|error| {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_attrs(json!({"error": error.to_string()})),
+                "web_fetch: DNS validation task failed"
+            );
+            pinning_error("tool-web-fetch-error-resolution")
+        })?
+    }
+
+    fn client_for_target(
+        &self,
+        builder: reqwest::ClientBuilder,
+        target: &ResolvedWebFetchTarget,
+    ) -> anyhow::Result<(reqwest::Client, Arc<AtomicBool>)> {
+        // Build client: follow redirects, set timeout, set User-Agent
+        let timeout_secs = if self.timeout_secs == 0 {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                "web_fetch: timeout_secs is 0, using safe default of 30s"
+            );
+            30
+        } else {
+            self.timeout_secs
+        };
+
+        let allowed_domains = self.allowed_domains.clone();
+        let blocked_domains = self.blocked_domains.clone();
+        let allowed_private_hosts = self.allowed_private_hosts.clone();
+        let pinned_host = target.host.clone();
+        let rejected = Arc::new(AtomicBool::new(false));
+        let rejected_by_policy = Arc::clone(&rejected);
+        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                rejected_by_policy.store(true, Ordering::Relaxed);
+                return attempt.error(std::io::Error::other("Too many redirects (max 10)"));
+            }
+
+            if attempt.url().host_str() != Some(pinned_host.as_str()) {
+                rejected_by_policy.store(true, Ordering::Relaxed);
+                return attempt.error(pinning_error("tool-web-fetch-error-cross-host"));
+            }
+            if let Err(err) = validate_target_url_with_dns_check(
+                attempt.url().as_str(),
+                &allowed_domains,
+                &blocked_domains,
+                &allowed_private_hosts,
+                "web_fetch",
+                |_| Ok(()),
+            ) {
+                rejected_by_policy.store(true, Ordering::Relaxed);
+                return attempt.error(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("Blocked redirect target: {err}"),
+                ));
+            }
+
+            attempt.follow()
+        });
+
+        let builder = builder
+            .no_proxy()
+            .timeout(Duration::from_secs(timeout_secs))
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(redirect_policy)
+            .user_agent("ZeroClaw/0.1 (web_fetch)");
+        let builder = pin_resolved_host(builder, target);
+        Ok((builder.build()?, rejected))
     }
 
     fn truncate_response(&self, text: &str) -> String {
@@ -313,12 +404,10 @@ impl Tool for WebFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch a web page and return its content as clean plain text. \
-         HTML pages are automatically converted to readable text. \
-         JSON and plain text responses are returned as-is. \
-         Only GET requests; follows redirects. \
-         Falls back to Firecrawl for JS-heavy/bot-blocked sites (if enabled). \
-         Security: allowlist-only domains, no local/private hosts."
+        static DESCRIPTION: OnceLock<String> = OnceLock::new();
+        DESCRIPTION.get_or_init(|| {
+            crate::i18n::get_required_tool_string("tool-web-fetch-pinned-description")
+        })
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -357,7 +446,33 @@ impl Tool for WebFetchTool {
         // Rate limiting is applied by the RateLimitedTool wrapper at
         // registration time (see zeroclaw-runtime::tools::mod).
 
-        let url = match self.validate_url(url) {
+        if proxy_conflicts_with_dns_pinning(&zeroclaw_http::runtime_proxy_config()) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(pinning_error("tool-web-fetch-error-proxy").to_string()),
+            });
+        }
+        // Ambient proxies must not perform an independent target resolution.
+        // Never log proxy values: they may contain credentials.
+        if [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+        {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                "web_fetch: ambient proxies ignored to preserve the validated DNS pin"
+            );
+        }
+        let target = match self.resolve_target(url).await {
             Ok(v) => v,
             Err(e) => {
                 return Ok(ToolResult {
@@ -368,65 +483,26 @@ impl Tool for WebFetchTool {
             }
         };
 
-        // Build client: follow redirects, set timeout, set User-Agent
-        let timeout_secs = if self.timeout_secs == 0 {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "web_fetch: timeout_secs is 0, using safe default of 30s"
-            );
-            30
-        } else {
-            self.timeout_secs
-        };
-
-        let allowed_domains = self.allowed_domains.clone();
-        let blocked_domains = self.blocked_domains.clone();
-        let allowed_private_hosts = self.allowed_private_hosts.clone();
-        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= 10 {
-                return attempt.error(std::io::Error::other("Too many redirects (max 10)"));
-            }
-
-            if let Err(err) = validate_target_url(
-                attempt.url().as_str(),
-                &allowed_domains,
-                &blocked_domains,
-                &allowed_private_hosts,
-                "web_fetch",
-            ) {
-                return attempt.error(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!("Blocked redirect target: {err}"),
-                ));
-            }
-
-            attempt.follow()
-        });
-
-        let builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(10))
-            .redirect(redirect_policy)
-            .user_agent("ZeroClaw/0.1 (web_fetch)");
-        let builder = zeroclaw_http::apply_runtime_proxy_to_builder(builder, "tool.web_fetch");
-        let client = match builder.build() {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: ToolOutput::default(),
-                    error: Some(format!("Failed to build HTTP client: {e}")),
-                });
-            }
-        };
+        let url = target.url.clone();
+        let (client, redirect_policy_rejected) =
+            match self.client_for_target(reqwest::Client::builder(), &target) {
+                Ok(client) => client,
+                Err(error) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: ToolOutput::default(),
+                        error: Some(error.to_string()),
+                    });
+                }
+            };
 
         let standard_result = self.standard_fetch(&client, &url).await;
 
         // If standard fetch succeeded well enough, return it directly.
         // Otherwise, try Firecrawl fallback if enabled.
-        if self.should_fallback_to_firecrawl(&standard_result) {
+        if !redirect_policy_rejected.load(Ordering::Relaxed)
+            && self.should_fallback_to_firecrawl(&standard_result)
+        {
             ::zeroclaw_log::record!(
                 INFO,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -465,8 +541,87 @@ impl Tool for WebFetchTool {
     }
 }
 
+// Adapted from zeroclaw-labs/zeroclaw cbf88733605e2827ee491758d29eaa4486b2940c.
+// One resolution supplies both the policy check and reqwest's connection override.
+struct ResolvedWebFetchTarget {
+    url: String,
+    host: String,
+    resolved_addrs: Vec<SocketAddr>,
+}
+
+fn pinning_error(key: &str) -> anyhow::Error {
+    ::zeroclaw_log::record!(
+        WARN,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+            .with_attrs(json!({"error_key": key})),
+        "web_fetch: pinned transport rejected"
+    );
+    anyhow::Error::msg(crate::i18n::get_required_tool_string(key))
+}
+
+fn pin_resolved_host(
+    builder: reqwest::ClientBuilder,
+    target: &ResolvedWebFetchTarget,
+) -> reqwest::ClientBuilder {
+    if target.host.parse::<std::net::IpAddr>().is_ok() {
+        builder
+    } else {
+        builder.resolve_to_addrs(&target.host, &target.resolved_addrs)
+    }
+}
+
+fn proxy_conflicts_with_dns_pinning(config: &ProxyConfig) -> bool {
+    (config.enabled && config.scope == ProxyScope::Environment)
+        || (config.has_any_proxy_url() && config.should_apply_to_service("tool.web_fetch"))
+}
+
+fn resolve_target_url_with_resolver(
+    raw_url: &str,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+    allowed_private_hosts: &[String],
+    resolve: impl FnOnce(&str) -> anyhow::Result<Vec<SocketAddr>>,
+) -> anyhow::Result<ResolvedWebFetchTarget> {
+    // This stage checks URL and host policy only; DNS is resolved below, once.
+    let url = validate_target_url_with_dns_check(
+        raw_url,
+        allowed_domains,
+        blocked_domains,
+        allowed_private_hosts,
+        "web_fetch",
+        |_| Ok(()),
+    )?;
+    let host = extract_host(&url)?;
+    let resolved_addrs = resolve(&host)?;
+    if resolved_addrs.is_empty() {
+        return Err(pinning_error("tool-web-fetch-error-resolution"));
+    }
+    if matches!(
+        private_allowlist_match(&host, allowed_private_hosts),
+        PrivateAllow::None
+    ) {
+        validate_resolved_ips_are_public(
+            &host,
+            &resolved_addrs
+                .iter()
+                .map(SocketAddr::ip)
+                .collect::<Vec<_>>(),
+        )?;
+    }
+    let mut canonical_url = reqwest::Url::parse(&url)?;
+    canonical_url
+        .set_host(Some(&host))
+        .map_err(|_| pinning_error("tool-web-fetch-error-resolution"))?;
+    Ok(ResolvedWebFetchTarget {
+        url: canonical_url.to_string(),
+        host,
+        resolved_addrs,
+    })
+}
+
 // ── Helper functions (independent from http_request.rs per DRY rule-of-three) ──
 
+#[cfg(test)]
 fn validate_target_url(
     raw_url: &str,
     allowed_domains: &[String],
@@ -617,11 +772,10 @@ fn extract_host(url: &str) -> anyhow::Result<String> {
         anyhow::bail!("IPv6 hosts are not supported in web_fetch");
     }
 
-    let host = authority
-        .split(':')
-        .next()
+    let parsed = reqwest::Url::parse(url)?;
+    let host = parsed
+        .host_str()
         .unwrap_or_default()
-        .trim()
         .trim_end_matches('.')
         .to_lowercase();
 
@@ -658,31 +812,6 @@ fn private_allowlist_match(host: &str, allowed_private_hosts: &[String]) -> Priv
     } else {
         PrivateAllow::None
     }
-}
-
-#[cfg(not(test))]
-fn validate_resolved_host_is_public(host: &str) -> anyhow::Result<()> {
-    use std::net::ToSocketAddrs;
-
-    let ips = (host, 0)
-        .to_socket_addrs()
-        .map_err(|e| {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
-                        "host": host,
-                        "error": format!("{}", e),
-                    })),
-                "web_fetch: failed to resolve host"
-            );
-            anyhow::Error::msg(format!("Failed to resolve host '{host}': {e}"))
-        })?
-        .map(|addr| addr.ip())
-        .collect::<Vec<_>>();
-
-    validate_resolved_ips_are_public(host, &ips)
 }
 
 #[cfg(test)]
@@ -1791,3 +1920,7 @@ mod tests {
         assert!(tool.validate_url("https://192.168.1.5:8080/api").is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "web_fetch_pin_tests.rs"]
+mod pin_contract;

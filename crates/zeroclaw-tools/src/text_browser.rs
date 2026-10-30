@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use serde_json::json;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_policy::SecurityPolicy;
 
@@ -14,7 +13,6 @@ pub struct TextBrowserTool {
     security: Arc<SecurityPolicy>,
     preferred_browser: Option<String>,
     timeout_secs: u64,
-    max_response_size: usize,
     allowed_private_hosts: Vec<String>,
 }
 
@@ -44,7 +42,6 @@ impl TextBrowserTool {
             security,
             preferred_browser,
             timeout_secs,
-            max_response_size: 500_000, // 500KB, consistent with web_fetch
             allowed_private_hosts: domain_guard::normalize_allowed_domains(
                 allowed_private_hosts,
                 "text_browser.allowed_private_hosts",
@@ -113,19 +110,6 @@ impl TextBrowserTool {
         }
 
         Ok(url.to_string())
-    }
-
-    fn truncate_response(&self, text: &str) -> String {
-        if text.len() > self.max_response_size {
-            let mut truncated = text
-                .chars()
-                .take(self.max_response_size)
-                .collect::<String>();
-            truncated.push_str("\n\n... [Response truncated due to size limit] ...");
-            truncated
-        } else {
-            text.to_string()
-        }
     }
 
     /// Detect which text browser is available on the system.
@@ -205,12 +189,6 @@ impl TextBrowserTool {
             ))
         })
     }
-
-    /// Build the command arguments for the selected browser with `-dump` flag.
-    fn build_dump_args(_browser: &str, url: &str) -> Vec<String> {
-        // All supported browsers (lynx, links, w3m) use the same `-dump` flag
-        vec!["-dump".to_string(), url.to_string()]
-    }
 }
 
 #[async_trait]
@@ -220,9 +198,10 @@ impl Tool for TextBrowserTool {
     }
 
     fn description(&self) -> &str {
-        "Render a web page as plain text using a text-based browser (lynx, links, or w3m). \
-         Ideal for headless/SSH environments without a graphical browser. \
-         Auto-detects available browser or uses a configured preference."
+        static DESCRIPTION: OnceLock<String> = OnceLock::new();
+        DESCRIPTION.get_or_init(|| {
+            crate::i18n::get_required_tool_string("tool-text-browser-pinned-description")
+        })
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -271,7 +250,7 @@ impl Tool for TextBrowserTool {
             });
         }
 
-        let url = match self.validate_url(url) {
+        let _validated_url = match self.validate_url(url) {
             Ok(v) => v,
             Err(e) => {
                 return Ok(ToolResult {
@@ -284,76 +263,31 @@ impl Tool for TextBrowserTool {
 
         let requested_browser = args.get("browser").and_then(|v| v.as_str());
 
-        let browser = match self.resolve_browser(requested_browser).await {
-            Ok(b) => b,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: ToolOutput::default(),
-                    error: Some(e.to_string()),
-                });
-            }
+        // Preserve requested/configured/auto-detected selection, but none of
+        // the supported CLI backends can consume the validated address set.
+        // No built-in pinned rendering path exists in this tool.
+        let selection = self.resolve_browser(requested_browser).await;
+        let backend = selection.as_deref().unwrap_or("lynx/links/w3m");
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(json!({"backend": backend, "timeout_secs": self.timeout_secs})),
+            "text_browser: external backend cannot pin the validated destination"
+        );
+        let reason = crate::i18n::get_required_tool_string_with_args(
+            "tool-text-browser-error-unpinned",
+            &[("backend", backend)],
+        );
+        let error = match selection {
+            Ok(_) => reason,
+            Err(error) => format!("{error}. {reason}"),
         };
-
-        let dump_args = Self::build_dump_args(&browser, &url);
-
-        let timeout = Duration::from_secs(if self.timeout_secs == 0 {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "text_browser: timeout_secs is 0, using safe default of 30s"
-            );
-            30
-        } else {
-            self.timeout_secs
-        });
-
-        let result = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new(&browser)
-                .args(&dump_args)
-                .output(),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(output)) => {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout).into_owned();
-                    let text = self.truncate_response(&text);
-                    Ok(ToolResult {
-                        success: true,
-                        output: text.into(),
-                        error: None,
-                    })
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    Ok(ToolResult {
-                        success: false,
-                        output: ToolOutput::default(),
-                        error: Some(format!(
-                            "{browser} exited with status {}: {}",
-                            output.status,
-                            stderr.trim()
-                        )),
-                    })
-                }
-            }
-            Ok(Err(e)) => Ok(ToolResult {
-                success: false,
-                output: ToolOutput::default(),
-                error: Some(format!("Failed to execute {browser}: {e}")),
-            }),
-            Err(_) => Ok(ToolResult {
-                success: false,
-                output: ToolOutput::default(),
-                error: Some(format!(
-                    "{browser} timed out after {} seconds",
-                    timeout.as_secs()
-                )),
-            }),
-        }
+        Ok(ToolResult {
+            success: false,
+            output: ToolOutput::default(),
+            error: Some(error),
+        })
     }
 }
 
@@ -402,6 +336,78 @@ mod tests {
             ..SecurityPolicy::default()
         });
         TextBrowserTool::new(security, None, 30).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unpinned_cli_backends_fail_closed_with_web_fetch_guidance() {
+        // Child-local PATH supplies fake CLI executables without mutating the
+        // test process environment or depending on host browser installation.
+        #[cfg(unix)]
+        if std::env::var_os("ZEROCLAW_CLI_PIN_TEST_MARKER").is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("invoked");
+            for name in ["which", "lynx", "links", "w3m"] {
+                let script = if name == "which" {
+                    "#!/bin/sh\nprintf '%s/%s\\n' \"$PATH\" \"$1\"\n"
+                } else {
+                    "#!/bin/sh\nprintf invoked > \"$ZEROCLAW_CLI_PIN_TEST_MARKER\"\nprintf 'CLI executed'\n"
+                };
+                let path = directory.path().join(name);
+                std::fs::write(&path, script).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "text_browser::tests::unpinned_cli_backends_fail_closed_with_web_fetch_guidance", "--nocapture"])
+                .env("PATH", directory.path())
+                .env("ZEROCLAW_CLI_PIN_TEST_MARKER", &marker)
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "child contract failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!marker.exists(), "external backend must not be executed");
+            return;
+        }
+        let server = wiremock::MockServer::start().await;
+        for preferred in [None, Some("lynx"), Some("links"), Some("w3m")] {
+            for requested in [None, Some("lynx"), Some("links"), Some("w3m")] {
+                let tool = TextBrowserTool::new_with_private_hosts(
+                    Arc::new(SecurityPolicy {
+                        autonomy: AutonomyLevel::Supervised,
+                        ..Default::default()
+                    }),
+                    preferred.map(str::to_string),
+                    2,
+                    vec!["127.0.0.1".into()],
+                )
+                .unwrap();
+                let mut args = json!({"url": server.uri()});
+                if let Some(browser) = requested {
+                    args["browser"] = json!(browser);
+                }
+                let result = tool.execute(args).await.unwrap();
+                assert!(
+                    !result.success,
+                    "unpinned backend must never run: {result:?}"
+                );
+                let error = result.error.unwrap();
+                assert!(
+                    error.contains("web_fetch"),
+                    "must identify pinned alternative: {error}"
+                );
+                assert!(
+                    error.contains("validation") && error.contains("connection"),
+                    "must explain address mismatch window: {error}"
+                );
+            }
+        }
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "CLI backend must not open a connection"
+        );
     }
 
     #[test]
@@ -595,41 +601,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(got, "http://example.com/page");
-    }
-
-    #[test]
-    fn truncate_within_limit() {
-        let tool = test_tool();
-        let text = "hello world";
-        assert_eq!(tool.truncate_response(text), "hello world");
-    }
-
-    #[test]
-    fn truncate_over_limit() {
-        let security = Arc::new(SecurityPolicy::default());
-        let mut tool = TextBrowserTool::new(security, None, 30).unwrap();
-        tool.max_response_size = 10;
-        let text = "hello world this is long";
-        let truncated = tool.truncate_response(text);
-        assert!(truncated.contains("[Response truncated"));
-    }
-
-    #[test]
-    fn build_dump_args_lynx() {
-        let args = TextBrowserTool::build_dump_args("lynx", "https://example.com");
-        assert_eq!(args, vec!["-dump", "https://example.com"]);
-    }
-
-    #[test]
-    fn build_dump_args_links() {
-        let args = TextBrowserTool::build_dump_args("links", "https://example.com");
-        assert_eq!(args, vec!["-dump", "https://example.com"]);
-    }
-
-    #[test]
-    fn build_dump_args_w3m() {
-        let args = TextBrowserTool::build_dump_args("w3m", "https://example.com");
-        assert_eq!(args, vec!["-dump", "https://example.com"]);
     }
 
     #[tokio::test]
