@@ -1673,7 +1673,7 @@ fn resolve_session_cwd(
     let cwd = requested_cwd
         .map(PathBuf::from)
         .unwrap_or_else(|| default_workspace.to_path_buf());
-    std::fs::canonicalize(&cwd).map_err(|e| {
+    let resolved = std::fs::canonicalize(&cwd).map_err(|e| {
         ::zeroclaw_log::record!(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
@@ -1688,7 +1688,26 @@ fn resolve_session_cwd(
             "cwd is not a usable directory ({}): {e}",
             cwd.display()
         ))
-    })
+    })?;
+    let workspace = std::fs::canonicalize(default_workspace).map_err(|e| {
+        anyhow::anyhow!(
+            "{}: {e}",
+            zeroclaw_runtime::i18n::get_required_cli_string("gateway-cwd-workspace-unavailable")
+        )
+    })?;
+    anyhow::ensure!(
+        resolved.is_dir() && workspace.is_dir(),
+        "{}",
+        zeroclaw_runtime::i18n::get_required_cli_string("gateway-cwd-not-directory")
+    );
+    // Compare canonical path components, not string prefixes: a remote cwd
+    // becomes the Agent policy root and must never widen its configured scope.
+    anyhow::ensure!(
+        resolved.starts_with(&workspace),
+        "{}",
+        zeroclaw_runtime::i18n::get_required_cli_string("gateway-cwd-outside-workspace")
+    );
+    Ok(resolved)
 }
 
 fn resolve_ws_session_cwd(
@@ -2815,13 +2834,14 @@ mod tests {
 
     #[test]
     fn resolve_session_cwd_uses_requested_cwd() {
-        let requested = tempfile::tempdir().unwrap();
         let fallback = tempfile::tempdir().unwrap();
+        let requested = fallback.path().join("project");
+        std::fs::create_dir(&requested).unwrap();
 
         let resolved =
-            resolve_session_cwd(Some(requested.path().to_str().unwrap()), fallback.path()).unwrap();
+            resolve_session_cwd(Some(requested.to_str().unwrap()), fallback.path()).unwrap();
 
-        assert_eq!(resolved, requested.path().canonicalize().unwrap());
+        assert_eq!(resolved, requested.canonicalize().unwrap());
     }
 
     #[test]
@@ -2891,6 +2911,68 @@ mod tests {
             .expect_err("missing cwd should be rejected");
 
         assert!(err.to_string().contains("cwd is not a usable directory"));
+    }
+
+    #[test]
+    fn resolve_session_cwd_rejects_outside_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tmp.path().join("install");
+        let workspace = install.join("agent/workspace");
+        let sibling = install.join("agent/workspace-other");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        for outside in [
+            workspace.ancestors().last().unwrap().to_path_buf(),
+            install,
+            workspace.parent().unwrap().to_path_buf(),
+            workspace.join(".."),
+            sibling,
+        ] {
+            let error = resolve_session_cwd(Some(outside.to_str().unwrap()), &workspace)
+                .expect_err("outside cwd must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("within the configured agent workspace")
+            );
+        }
+        assert_eq!(
+            resolve_session_cwd(Some(workspace.to_str().unwrap()), &workspace).unwrap(),
+            workspace.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_session_cwd_rejects_empty_and_file_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file");
+        std::fs::write(&file, "fixture").unwrap();
+        for requested in ["", file.to_str().unwrap()] {
+            assert!(resolve_session_cwd(Some(requested), tmp.path()).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_session_cwd_checks_canonical_symlink_targets() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let child = workspace.join("child");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let escape = workspace.join("escape");
+        let inside_link = workspace.join("inside");
+        let workspace_link = tmp.path().join("workspace-link");
+        symlink(&outside, &escape).unwrap();
+        symlink(&child, &inside_link).unwrap();
+        symlink(&workspace, &workspace_link).unwrap();
+        assert!(resolve_session_cwd(Some(escape.to_str().unwrap()), &workspace).is_err());
+        assert_eq!(
+            resolve_session_cwd(Some(inside_link.to_str().unwrap()), &workspace_link).unwrap(),
+            child.canonicalize().unwrap()
+        );
     }
 
     #[test]

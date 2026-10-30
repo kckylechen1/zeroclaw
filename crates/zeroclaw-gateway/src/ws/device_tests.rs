@@ -813,3 +813,36 @@ async fn device_wire_live_policy_activation_closes_an_existing_anonymous_socket(
 mod turn_control_tests {
     include!("turn_control_tests.rs");
 }
+
+
+/// Paired clients must retain the configured agent workspace boundary.
+#[tokio::test]
+async fn paired_session_cwd_rejects_outside_workspace() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let (status, mut client) = DeviceWire::upgrade(
+        fixture.address,
+        "agent=device-agent&session_id=device-session&cwd=%2F",
+        OWNER_TOKEN,
+    )
+    .await;
+    assert_eq!(status, 101);
+    client.connected(json!({"type":"connect"})).await;
+    client.send(json!({"type":"message", "id":"cwd-check", "content":"hello"})).await;
+    let frame = client.next().await.unwrap();
+    assert_eq!(frame["code"], "INVALID_CWD", "{frame}");
+    assert!(fixture.seen.lock().is_empty());
+}
+
+#[tokio::test]
+async fn paired_session_cwd_accepts_workspace_descendant() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let workspace = fixture.state.config.read().agent_workspace_dir("device-agent");
+    let child = workspace.join("project");
+    std::fs::create_dir(&child).unwrap();
+    let encoded_cwd: String = child.to_str().unwrap().bytes().map(|byte| format!("%{byte:02X}")).collect();
+    let query = format!("agent=device-agent&session_id={SESSION}&cwd={encoded_cwd}");
+    let (status, mut client) = DeviceWire::upgrade(fixture.address, &query, OWNER_TOKEN).await;
+    assert_eq!(status, 101);
+    client.connected(json!({"type":"connect"})).await;
+    fixture.send_turn(&mut client, "cwd-child", "hello").await;
+}
