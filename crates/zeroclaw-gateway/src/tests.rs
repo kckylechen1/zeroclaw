@@ -164,7 +164,7 @@ fn paircode_recovery_command_uses_loopback_for_nonloopback_host() {
     );
     assert_eq!(
         curl,
-        "curl -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/admin/paircode/new",
+        "curl --noproxy '*' -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/admin/paircode/new",
         "curl fallback must target loopback, not the non-loopback bound host"
     );
     assert!(
@@ -180,7 +180,7 @@ fn paircode_recovery_command_uses_loopback_for_nonloopback_host() {
             "/gw",
             std::path::Path::new("/zc/data/gateway-admin.token")
         ),
-        "curl -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/gw/admin/paircode/new"
+        "curl --noproxy '*' -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/gw/admin/paircode/new"
     );
 }
 
@@ -193,7 +193,7 @@ fn paircode_recovery_curl_targets_running_instance() {
             "",
             std::path::Path::new("/zc/data/gateway-admin.token")
         ),
-        "curl -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/admin/paircode/new"
+        "curl --noproxy '*' -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/admin/paircode/new"
     );
 }
 
@@ -261,7 +261,7 @@ fn paircode_recovery_curl_normalizes_unspecified_bind_hosts() {
             "",
             std::path::Path::new("/zc/data/gateway-admin.token")
         ),
-        "curl -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/admin/paircode/new"
+        "curl --noproxy '*' -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/admin/paircode/new"
     );
     assert_eq!(
         format_paircode_recovery_curl(
@@ -270,7 +270,7 @@ fn paircode_recovery_curl_normalizes_unspecified_bind_hosts() {
             "",
             std::path::Path::new("/zc/data/gateway-admin.token")
         ),
-        "curl -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/admin/paircode/new"
+        "curl --noproxy '*' -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/admin/paircode/new"
     );
 }
 
@@ -283,7 +283,7 @@ fn paircode_recovery_curl_preserves_actual_loopback_hosts() {
             "",
             std::path::Path::new("/zc/data/gateway-admin.token")
         ),
-        "curl -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://localhost:42617/admin/paircode/new"
+        "curl --noproxy '*' -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://localhost:42617/admin/paircode/new"
     );
     assert_eq!(
         format_paircode_recovery_curl(
@@ -292,7 +292,7 @@ fn paircode_recovery_curl_preserves_actual_loopback_hosts() {
             "",
             std::path::Path::new("/zc/data/gateway-admin.token")
         ),
-        "curl -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://[::1]:42617/admin/paircode/new"
+        "curl --noproxy '*' -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://[::1]:42617/admin/paircode/new"
     );
 }
 
@@ -321,6 +321,83 @@ fn paircode_recovery_curl_quotes_admin_token_path() {
     assert!(!tmp.path().join("escaped").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn paircode_recovery_curl_bypasses_proxy_with_actual_command() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let token_path = tmp.path().join("mock-owner.token");
+    std::fs::write(&token_path, "local-mock-owner-token").unwrap();
+    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = origin.local_addr().unwrap().port();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    origin.set_nonblocking(true).unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let command = format_paircode_recovery_curl("127.0.0.1", port, "/gw", &token_path);
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            for (is_proxy, listener) in [(false, &origin), (true, &proxy)] {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        socket
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = Vec::new();
+                        let mut chunk = [0; 1024];
+                        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                            let count = socket.read(&mut chunk).unwrap();
+                            assert!(count > 0, "request ended before headers");
+                            request.extend_from_slice(&chunk[..count]);
+                        }
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+                        return (is_proxy, String::from_utf8(request).unwrap());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("mock accept failed: {error}"),
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "generated curl reached neither local mock"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    // Execute the production-generated shell command unchanged. Every proxy
+    // setting points to a local mock; no real credentials or external peers.
+    let output = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .env("CURL_HOME", tmp.path())
+        .env("http_proxy", &proxy_url)
+        .env("HTTP_PROXY", &proxy_url)
+        .env("https_proxy", &proxy_url)
+        .env("HTTPS_PROXY", &proxy_url)
+        .env("all_proxy", &proxy_url)
+        .env("ALL_PROXY", &proxy_url)
+        .env("no_proxy", "")
+        .env("NO_PROXY", "")
+        .output()
+        .unwrap();
+    let (reached_proxy, request) = server.join().unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(
+        !reached_proxy,
+        "generated curl forwarded the owner header to the proxy"
+    );
+    assert!(request.starts_with("POST /gw/admin/paircode/new HTTP/1.1\r\n"));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("\r\nx-zeroclaw-admin-token: local-mock-owner-token\r\n")
+    );
+}
+
 #[test]
 fn paircode_recovery_curl_preserves_path_prefix() {
     assert_eq!(
@@ -330,7 +407,7 @@ fn paircode_recovery_curl_preserves_path_prefix() {
             "/gw",
             std::path::Path::new("/zc/data/gateway-admin.token")
         ),
-        "curl -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/gw/admin/paircode/new"
+        "curl --noproxy '*' -s -X POST -H \"x-zeroclaw-admin-token: $(cat '/zc/data/gateway-admin.token')\" http://127.0.0.1:42617/gw/admin/paircode/new"
     );
 }
 

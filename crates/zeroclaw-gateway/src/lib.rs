@@ -1855,9 +1855,10 @@ fn format_paircode_recovery_curl(
     // at loopback. Bind-only hosts and non-loopback advertised hosts are
     // normalized to `127.0.0.1`; explicit loopback hosts are preserved. They
     // also require this run's admin secret, read from its owner-only file.
+    // Never send that secret through a proxy configured in the owner's shell.
     let recovery_host = paircode_recovery_curl_host(host);
     format!(
-        "curl -s -X POST -H \"{GATEWAY_ADMIN_TOKEN_HEADER}: $(cat '{}')\" \
+        "curl --noproxy '*' -s -X POST -H \"{GATEWAY_ADMIN_TOKEN_HEADER}: $(cat '{}')\" \
          http://{recovery_host}:{port}{path_prefix}/admin/paircode/new",
         admin_token_path
             .display()
