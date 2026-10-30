@@ -29,7 +29,6 @@ pub mod review;
 pub mod runtime_status;
 pub mod runtime_traits;
 pub mod schema;
-pub mod session_exec;
 pub mod session_keys;
 pub mod subagent_v1;
 pub mod tachi_staff;
