@@ -4156,7 +4156,9 @@ fn stdin_interpreter_contract_explicit_opt_in_requires_approval() {
         "python3 <<-EOF\n\tprint(1)\n\tEOF",
         "cat <<EOF\nx\nEOF\necho x | python3",
         "echo x | python3 script.py",
+        #[cfg(not(windows))]
         "cat <<EOF # <<HIDDEN\nx\nEOF\necho x | python3",
+        #[cfg(not(windows))]
         "echo x | # comment\npython3",
         "echo x | python3\\\n",
     ] {
@@ -4184,4 +4186,60 @@ fn stdin_interpreter_prefix_redirect_cannot_hide_executable() {
     ] {
         assert!(!p.is_command_allowed(command), "{command}");
     }
+}
+
+#[test]
+fn stdin_interpreter_comment_and_heredoc_boundaries() {
+    let commands = [
+        "echo \\ #; echo x | python3",
+        "echo \u{a0}#; echo x | python3",
+        "cat <<EOF\nE\\\nOF\necho x | python3",
+        "cat <<-EOF\n\tE\\\nOF\necho x | python3",
+        "cat <<EOF\nE\\\\\nOF\nEOF\necho x | python3",
+    ];
+    for command in commands {
+        let mut p = default_policy();
+        assert!(
+            p.validate_command_execution(command, false).is_err(),
+            "{command}"
+        );
+        p.allowed_commands.push("python3".into());
+        p.require_approval_for_medium_risk = false;
+        assert!(
+            p.validate_command_execution(command, false)
+                .unwrap_err()
+                .contains("explicit approval"),
+            "{command}"
+        );
+        assert!(
+            p.validate_command_execution(command, true).is_ok(),
+            "{command}"
+        );
+    }
+    for command in [
+        "cat <<'EOF'\nE\\\nOF\necho x | python3\nEOF",
+        "cat <<\\EOF\nE\\\nOF\necho x | python3\nEOF",
+        "cat <<-EOF\nE\\\n\tOF\necho x | python3\nEOF",
+    ] {
+        assert!(
+            default_policy()
+                .validate_command_execution(command, false)
+                .is_ok(),
+            "{command}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn stdin_interpreter_windows_hash_is_not_a_comment() {
+    let mut p = default_policy();
+    let command = "echo # && echo x | python3";
+    assert!(p.validate_command_execution(command, false).is_err());
+    p.allowed_commands.push("python3".into());
+    assert!(
+        p.validate_command_execution(command, false)
+            .unwrap_err()
+            .contains("explicit approval")
+    );
 }

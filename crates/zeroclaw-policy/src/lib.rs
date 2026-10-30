@@ -650,7 +650,8 @@ fn command_segments(command: &str) -> Vec<CommandSegment> {
     let mut receives_input = false;
     let mut quote = QuoteState::None;
     let mut escaped = false;
-    let mut heredocs = std::collections::VecDeque::<(String, bool)>::new();
+    let mut heredocs = std::collections::VecDeque::<(String, bool, bool)>::new();
+    let mut word_boundary = true;
     let mut chars = command.chars().peekable();
 
     let push = |segments: &mut Vec<CommandSegment>, current: &mut String, input: &mut bool| {
@@ -670,6 +671,7 @@ fn command_segments(command: &str) -> Vec<CommandSegment> {
             // Shell line continuation is not part of the executable name.
             if ch != '\n' {
                 current.push(ch);
+                word_boundary = false;
             }
             continue;
         }
@@ -683,6 +685,7 @@ fn command_segments(command: &str) -> Vec<CommandSegment> {
         if ch == '\\' {
             if chars.peek() != Some(&'\n') {
                 current.push(ch);
+                word_boundary = false;
             }
             escaped = true;
             continue;
@@ -694,6 +697,8 @@ fn command_segments(command: &str) -> Vec<CommandSegment> {
             }
             continue;
         }
+        let starts_word = word_boundary;
+        word_boundary = matches!(ch, ' ' | '\t' | '\n' | ';' | '|' | '&');
         match ch {
             '\'' => {
                 quote = QuoteState::Single;
@@ -703,7 +708,7 @@ fn command_segments(command: &str) -> Vec<CommandSegment> {
                 quote = QuoteState::Double;
                 current.push(ch);
             }
-            '#' if current.is_empty() || current.ends_with(char::is_whitespace) => {
+            '#' if !cfg!(windows) && starts_word => {
                 // Comment text must not introduce phantom heredocs that hide
                 // commands following the real body.
                 while chars.peek().is_some_and(|c| *c != '\n') {
@@ -717,7 +722,7 @@ fn command_segments(command: &str) -> Vec<CommandSegment> {
                 }
                 // Bodies are data, not shell command segments. Delimiters are
                 // queued because a single header may contain multiple heredocs.
-                while let Some((delimiter, strip_tabs)) = heredocs.pop_front() {
+                while let Some((delimiter, strip_tabs, quoted)) = heredocs.pop_front() {
                     let mut line = String::new();
                     loop {
                         match chars.next() {
@@ -731,6 +736,21 @@ fn command_segments(command: &str) -> Vec<CommandSegment> {
                                     break;
                                 }
                                 line.clear();
+                            }
+                            Some('\\') if !quoted => {
+                                // Unquoted heredocs join escaped physical lines
+                                // before delimiter comparison. Consume escaped
+                                // backslashes together so parity is preserved.
+                                match chars.peek() {
+                                    Some('\n') => {
+                                        chars.next();
+                                    }
+                                    Some('\\') => {
+                                        line.push('\\');
+                                        line.push(chars.next().unwrap());
+                                    }
+                                    _ => line.push('\\'),
+                                }
                             }
                             Some(c) => line.push(c),
                         }
@@ -763,14 +783,18 @@ fn command_segments(command: &str) -> Vec<CommandSegment> {
                     }
                     let mut delimiter = String::new();
                     let mut delimiter_quote = QuoteState::None;
+                    let mut delimiter_quoted = false;
                     while let Some(&c) = chars.peek() {
                         if delimiter_quote == QuoteState::None
-                            && (c.is_whitespace() || ";|&<>".contains(c))
+                            && (matches!(c, ' ' | '\t' | '\n') || ";|&<>".contains(c))
                         {
                             break;
                         }
                         chars.next();
                         current.push(c);
+                        if matches!(c, '\'' | '"') || (c == '\\' && chars.peek() != Some(&'\n')) {
+                            delimiter_quoted = true;
+                        }
                         match (delimiter_quote, c) {
                             (QuoteState::None, '\'') => delimiter_quote = QuoteState::Single,
                             (QuoteState::None, '"') => delimiter_quote = QuoteState::Double,
@@ -793,7 +817,7 @@ fn command_segments(command: &str) -> Vec<CommandSegment> {
                             _ => delimiter.push(c),
                         }
                     }
-                    heredocs.push_back((delimiter, strip_tabs));
+                    heredocs.push_back((delimiter, strip_tabs, delimiter_quoted));
                 }
             }
             _ => current.push(ch),
