@@ -12,16 +12,10 @@ zeroclaw-api.workspace = true
 zeroclaw-macros.workspace = true
 anyhow = "1.0"
 clap = { version = "4.5", optional = true, default-features = false, features = ["std", "derive"] }
-# OnboardUi needs dyn-compat; native AFIT isn't dyn-safe. Already built for api/channels/runtime.
-async-trait = "0.1"
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 directories = "6.0"
 hex = "0.4"
-hostname = "0.4.2"
-parking_lot = "0.12"
-rand = "0.10"
-regex = "1.10"
 schemars = { version = "1.2", optional = true }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
@@ -29,7 +23,6 @@ sha2 = "0.10"
 shellexpand = "3.1"
 thiserror = "2.0"
 tokio = { version = "1.50", default-features = false, features = ["fs", "io-util", "sync"] }
-tokio-stream = { version = "0.1.19", default-features = false }
 toml = "1.0"
 toml_edit = "0.25"
 url = "2.5"

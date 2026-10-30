@@ -46,6 +46,9 @@
     ],
     "app": [
       "zeroclawlabs/nodes"
+    ],
+    "tail": [
+      "zeroclaw-memory/tachi"
     ]
   },
   "extra_runs": {
