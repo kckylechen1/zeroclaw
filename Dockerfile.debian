@@ -150,6 +150,7 @@ RUN mkdir -p /zeroclaw-data/.zeroclaw /zeroclaw-data/data && \
         'port = 42617' \
         'host = "[::]"' \
         'allow_public_bind = true' \
+        'require_pairing = true' \
         'web_dist_dir = "/usr/share/zeroclawlabs/web/dist"' \
         '' \
         '[risk_profiles.default]' \

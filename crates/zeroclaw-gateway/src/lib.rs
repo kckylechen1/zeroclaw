@@ -496,7 +496,7 @@ enum PublicBindPosture {
     Local,
     /// Network-facing with pairing on but no tunnel or opt-in: warn.
     ExposedWithoutOptIn,
-    /// Network-facing, pairing off, `allow_public_bind` set: allowed, warned loudly.
+    /// Network-facing, pairing off, explicit dangerous exemption set: allowed, warned loudly.
     UnauthenticatedOptedIn,
     /// Network-facing, pairing off, no opt-in: refuse to start. Without pairing
     /// every client is anonymous, so any of them could attach to any shared
@@ -509,15 +509,25 @@ fn public_bind_posture(
     require_pairing: bool,
     allow_public_bind: bool,
     no_tunnel: bool,
+    dangerously_allow_unauthenticated_public_bind: bool,
 ) -> PublicBindPosture {
-    if !is_public_bind(host) {
+    if !is_public_bind(host)
+        || zeroclaw_infra::parse_gateway_bind_socket_addr(host, 0)
+            .is_ok_and(|addr| addr.ip().is_loopback())
+    {
         return PublicBindPosture::Local;
     }
-    match (require_pairing, allow_public_bind) {
-        (false, false) => PublicBindPosture::RefuseUnauthenticated,
-        (false, true) => PublicBindPosture::UnauthenticatedOptedIn,
-        (true, false) if no_tunnel => PublicBindPosture::ExposedWithoutOptIn,
-        (true, _) => PublicBindPosture::Local,
+    if !require_pairing {
+        return if dangerously_allow_unauthenticated_public_bind {
+            PublicBindPosture::UnauthenticatedOptedIn
+        } else {
+            PublicBindPosture::RefuseUnauthenticated
+        };
+    }
+    if !allow_public_bind && no_tunnel {
+        PublicBindPosture::ExposedWithoutOptIn
+    } else {
+        PublicBindPosture::Local
     }
 }
 
@@ -543,6 +553,7 @@ pub async fn run_gateway(
         config.gateway.require_pairing,
         config.gateway.allow_public_bind,
         config.tunnel.tunnel_provider == "none",
+        config.gateway.dangerously_allow_unauthenticated_public_bind,
     ) {
         PublicBindPosture::Local => {}
         PublicBindPosture::ExposedWithoutOptIn => {
@@ -579,7 +590,7 @@ pub async fn run_gateway(
             anyhow::bail!(
                 "Refusing to bind the gateway to {host} with [gateway] require_pairing = false: \
                  every client on the network could drive the agent and attach to its sessions. \
-                 Enable require_pairing, bind 127.0.0.1, or set [gateway] allow_public_bind = true \
+                 Enable require_pairing, bind 127.0.0.1, or explicitly set [gateway] dangerously_allow_unauthenticated_public_bind = true \
                  to accept an unauthenticated network-facing gateway."
             );
         }

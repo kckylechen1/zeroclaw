@@ -6502,6 +6502,10 @@ pub struct GatewayConfig {
     /// Allow binding to non-localhost without a tunnel (default: false)
     #[serde(default)]
     pub allow_public_bind: bool,
+    /// Dangerously allow network-facing access without pairing (default: false).
+    /// Independent of allow_public_bind; reachable clients can control the agent.
+    #[serde(default)]
+    pub dangerously_allow_unauthenticated_public_bind: bool,
     /// Allow authenticated remote callers to use admin endpoints that are
     /// otherwise localhost-only. Currently this gates `POST /admin/reload`.
     /// When false (default), those endpoints reject any non-loopback peer.
@@ -6728,6 +6732,7 @@ impl Default for GatewayConfig {
             host: default_gateway_host(),
             require_pairing: true,
             allow_public_bind: false,
+            dangerously_allow_unauthenticated_public_bind: false,
             allow_remote_admin: false,
             paired_tokens: Vec::new(),
             pair_rate_limit_per_minute: default_pair_rate_limit(),
