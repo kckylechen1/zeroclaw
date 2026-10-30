@@ -3999,7 +3999,6 @@ name = "memcore"
 version = "1.9.2"
 source = "git+https://github.com/kckylechen1/memcore.git?rev=eba0c48617e8820831bfd22f91d269c6d70f409f#eba0c48617e8820831bfd22f91d269c6d70f409f"
 dependencies = [
- "blake2",
  "chrono",
  "libc",
  "libsimple",

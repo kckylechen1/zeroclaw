@@ -496,8 +496,13 @@ mod tests {
             stale.recall_count = 0;
             stale.query_diversity = 0;
             store.upsert(&stale).unwrap();
-            store
-                .connection()
+            // Backdate only this disposable fixture; governance keeps the live handle.
+            let fixture = rusqlite::Connection::open_with_flags(
+                tmp.path().join("memory").join("tachi.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+            )
+            .expect("open existing fixture database");
+            fixture
                 .execute(
                     "UPDATE memories SET created_at = '2020-01-01T00:00:00Z' WHERE id = 'stale'",
                     [],
@@ -555,8 +560,13 @@ mod tests {
                 })
                 .expect("pinned row");
             assert_eq!(row.retention_policy.as_deref(), Some("pinned"));
-            store
-                .connection()
+            // Backdate only this disposable fixture; governance keeps the live handle.
+            let fixture = rusqlite::Connection::open_with_flags(
+                tmp.path().join("memory").join("tachi.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+            )
+            .expect("open existing fixture database");
+            fixture
                 .execute(
                     "UPDATE memories SET created_at = '2020-01-01T00:00:00Z', importance = 0.1, access_count = 0 WHERE id = ?1",
                     rusqlite::params![row.id],
