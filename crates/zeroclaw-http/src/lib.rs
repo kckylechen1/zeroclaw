@@ -373,5 +373,35 @@ fn apply_explicit_proxy_to_builder(
     builder
 }
 
+/// Read a response without retaining more than the configured byte budget.
+/// Adapted from upstream a6bd19174bb028c7f3236ea9a389a2305e40c880.
+/// `None` preserves the explicit unlimited setting. Known oversize bodies fail
+/// before polling; unknown-length bodies stop at the cap without waiting for EOF.
+pub async fn read_bounded_body(
+    mut response: reqwest::Response,
+    limit: Option<usize>,
+) -> Result<(Vec<u8>, bool), Box<dyn std::error::Error + Send + Sync>> {
+    let content_length = response.content_length();
+    if let Some(cap) = limit
+        && response
+            .content_length()
+            .is_some_and(|length| length > cap as u64)
+    {
+        return Err(std::io::Error::other("Response Content-Length exceeds size limit").into());
+    }
+    let mut bytes = Vec::new();
+    loop {
+        if limit.is_some_and(|cap| bytes.len() >= cap) {
+            let complete = content_length.is_some_and(|length| length == bytes.len() as u64);
+            return Ok((bytes, !complete));
+        }
+        let Some(chunk) = response.chunk().await? else {
+            return Ok((bytes, false));
+        };
+        let take = limit.map_or(chunk.len(), |cap| chunk.len().min(cap - bytes.len()));
+        bytes.extend_from_slice(&chunk[..take]);
+    }
+}
+
 #[cfg(test)]
 mod tests;

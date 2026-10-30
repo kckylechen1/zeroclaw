@@ -154,12 +154,10 @@ async fn fetch_link_summary(client: &reqwest::Client, url: &str) -> Option<LinkS
 
     // Read up to 256KB to extract title and snippet
     let max_bytes: usize = 256 * 1024;
-    let bytes = response.bytes().await.ok()?;
-    let body = if bytes.len() > max_bytes {
-        String::from_utf8_lossy(&bytes[..max_bytes]).into_owned()
-    } else {
-        String::from_utf8_lossy(&bytes).into_owned()
-    };
+    let (bytes, _) = zeroclaw_http::read_bounded_body(response, Some(max_bytes))
+        .await
+        .ok()?;
+    let body = String::from_utf8_lossy(&bytes);
 
     let title = extract_title(&body).unwrap_or_else(|| "Untitled".to_string());
     let snippet = extract_body_text(&body, 200);
@@ -222,6 +220,56 @@ mod tests {
     use super::*;
 
     // ── URL extraction ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn summary_bounds_response_before_eof() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for oversized_length in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = zeroclaw_spawn::spawn!(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let mut headers = Vec::new();
+                while !headers.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let count = socket.read(&mut request).await.unwrap();
+                    assert!(count > 0, "request ended before headers");
+                    headers.extend_from_slice(&request[..count]);
+                }
+                if oversized_length {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+                        .await
+                        .unwrap();
+                } else {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n40000\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    let mut body = b"<title>bounded</title>".to_vec();
+                    body.resize(256 * 1024, b' ');
+                    socket.write_all(&body).await.unwrap();
+                    socket.write_all(b"\r\n").await.unwrap();
+                }
+                std::future::pending::<()>().await;
+            });
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                fetch_link_summary(&client, &format!("http://{address}")),
+            )
+            .await;
+            server.abort();
+            let result = result.expect("must stop without EOF");
+            if oversized_length {
+                assert!(result.is_none());
+            } else {
+                assert_eq!(result.unwrap().title, "bounded");
+            }
+        }
+    }
 
     #[test]
     fn extract_urls_finds_http_and_https() {
