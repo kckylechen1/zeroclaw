@@ -10,8 +10,8 @@ relates-to:
   - ADR-016
   - crates/zeroclaw-gateway/src/nodes.rs
   - crates/zeroclaw-runtime/src/tachi_bridge/
-  - crates/zeroclaw-runtime/src/execution_subagent/
-  - crates/zeroclaw-api/src/session_exec.rs
+  - crates/zeroclaw-tools/src/tachi_delegation.rs
+  - crates/zeroclaw-api/src/tachi_staff.rs
   - crates/zeroclaw-config/src/tachi.rs
 ---
 
@@ -44,7 +44,7 @@ The 2026-09-23 reset went too far on the second and third points:
 The code also shows a duplication:
 
 - Tachi already drives CLI agents. Its `tachi_staff` facade (`start` / `status` / `cancel`) resolves a dispatch profile to a worker and backend, issues an execution grant, and launches the worker (`claude`, `codex`, `grok`, `kimi`, and others) as a CLI process, or through `opencode` for opencode profiles. It persists the run receipt and reaps the environment. Tachi also has `acpx` and native ACP backends, but the Staff route does not reach them: its profile resolution yields only the `cli`, `opencode_cli`, and `opencode_serve` transports.
-- ZeroClaw has its own ACP driver for Codex (`execution_subagent`, about 10.8k lines).
+- At adoption, ZeroClaw also had its own ACP driver for Codex (`execution_subagent`, about 10.8k lines).
 - ZeroClaw also has a `tachi_bridge` port (about 4.6k lines) whose only implementations are in-memory and test ones. Nothing connects it to a real Tachi.
 
 ## Decision
@@ -104,7 +104,7 @@ An admitted harness may use its own native subagents inside its grant. Those sub
 ### 4. Rules that do not change
 
 - **The owner talks only to the body.** A delegated agent's output is evidence. The body reads it and answers in its own voice. Delegated agents have no Soul.
-- **Fail closed, never fall back.** If Tachi is not configured or not reachable, L0 and L1 keep working. A delegation request returns a typed "Tachi unavailable" answer and is never run locally instead. This keeps the existing routing law in `session_exec.rs` and `execution_subagent/router.rs`.
+- **Fail closed, never fall back.** If Tachi is not configured or not reachable, L0 and L1 keep working. A delegation request returns a typed "Tachi unavailable" answer and is never run locally instead. The production path is in `crates/zeroclaw-tools/src/tachi_delegation.rs` and `tachi_staff.rs`; `crates/zeroclaw-runtime/src/tachi_bridge/staff_tests.rs` covers the unavailable refusal.
 - **Tachi owns delegated run truth.** The body keeps references to Tachi runs and projections of their state, not a second execution ledger. Upstream `control_plane` is not restored beside Tachi.
 - **Approvals.** Approvals inside the body are local (ADR-013). Delegated work runs under Tachi's execution grant and permission profile, and its approval requests surface in the same owner inbox. Needing an approval is no longer, by itself, a reason to choose durable execution.
 - **The voice path never blocks on delegation.** The body acknowledges ("I've asked Codex to do it; I'll tell you when it's done") and ends the turn.
@@ -119,6 +119,8 @@ An admitted harness may use its own native subagents inside its grant. Those sub
 | `gateway/src/nodes.rs` | **Keep** the v2 handshake, signed device identity, and capability admission. The v1 invocation path (`NodeTool`, `NodeInfo`, `register`) was never reached in production and is removed. The invocation lifecycle is rebuilt on the v2 socket in #62. |
 | `gateway/src/voice_duplex` | **Keep** until the speaker Client is designed. |
 | Channels, extra providers, config surface, hardware crates, vendor webhooks, admin surfaces | Removed in #374 slices, each only after its consumers are gone, its behavior is explicitly retired, or a replacement is proven (§7). |
+
+Implementation status (2026-10-30): the consumerless `execution_subagent` and `session_exec` retirement is prepared for review under #381/#382. The required real-harness, cancellation/recovery, and completion-delivery acceptance remains open. The table above and the Acceptance section retain their existing gates.
 
 ### 6. Licensing note
 
