@@ -52,7 +52,6 @@ categories = ["command-line-utilities", "api-bindings"]
 rust-version.workspace = true
 include = [
   "/src/**/*",
-  "/build.rs",
   "/Cargo.toml",
   "/Cargo.lock",
   "/LICENSE*",
