@@ -40,6 +40,51 @@ safe to expose unauthenticated regardless of TLS posture.
 See [durable bridge intake](durable-bridge-intake.md) for the opt-in source receipt
 and recovery extension used by the Telegram bridge.
 
+### Operator credentials and migration
+
+The existing Soul, User Model, review inbox, attention, backup/data-retention,
+and Node identity management gates can use a separate operator credential class:
+
+```toml
+[gateway.operator]
+token_hashes = ["<64-character SHA-256 hex of an independently generated bearer token>"]
+```
+
+Generate a fresh high-entropy token outside ordinary pairing and store only its
+SHA-256 hash, following the bridge credential convention. Send the original token
+as `Authorization: Bearer <token>` to operator routes. Hashes are case-insensitive;
+plaintext tokens and malformed hashes are rejected by configuration validation.
+Do not reuse a client or bridge token: anyone holding an explicitly listed token
+has operator authority, even if that token also appears in another class.
+
+- Missing section or an empty list preserves existing paired-token operator
+  access. The gateway logs a WARN with the migration key; an upgrade alone does
+  not lock out the current owner. This compatibility mode retains the old broad
+  authority until the owner configures credentials.
+- A nonempty list immediately makes it authoritative. Ordinary paired tokens
+  receive `403` on operator routes; missing or unknown credentials receive `401`.
+  `require_pairing = false` does not disable the operator gate.
+- Operator tokens are not issued by pairing and are not added to the paired-token
+  set. This change does not grant them general API or `/ws/chat` access and does
+  not alter chat approvals, bridge permissions, or Node runtime credentials.
+- Changes to the operator list through configuration persistence require the
+  current operator authority, including parent replacements and clearing the
+  list. Schema migration preserves the active operator list and its credential
+  source metadata. General config API authentication still applies as well.
+
+For migration, retain local access to the configuration file, generate and keep
+an independent operator token, add its hash locally, then restart the gateway.
+Verify an operator read with the new bearer before moving owner workflows to it.
+Existing paired clients keep their ordinary access but cannot use the protected
+operator routes. The dashboard does not gain a separate credential-entry flow
+in this change. Rotate or recover through the local configuration file and a
+restart; clearing the list deliberately restores broad legacy operator access.
+Never send the operator token to an ordinary device merely to restore its UI.
+
+This is a minimal tightening of the ADR-governed protection surface, not the
+full principal/capability architecture tracked by upstream #8289 and its principal
+series. Config files and the local machine remain trusted owner authorities.
+
 ## WebSocket chat sessions
 
 `GET /ws/chat?agent=<alias>&session_id=<id>` opens a chat socket. All sockets
@@ -546,7 +591,7 @@ Each UTC instant is evaluated against local wall time, so both occurrences of
 an autumn repeated hour are quiet and spring skipped times need no guessed
 boundary. Policy is resolved from live gateway config immediately before the
 outbox claim. Config API changes, including removing the section, always need
-a paired operator bearer even when generic pairing is disabled, with the shared
+an operator bearer even when generic pairing is disabled, with the shared
 operator authentication and rate limits. Direct local
 config edits use the existing reload path.
 
@@ -1024,7 +1069,7 @@ recipient = "<owner-chat-id>"
 
 Without this section no review notices are created. Creating, changing or
 removing it, or changing/removing its selected bridge credential, through any
-config API operation requires a paired operator, even
+config API operation requires operator authority, even
 when generic gateway pairing is disabled; replacing a parent or the root object
 does not bypass that check. The recipient is never inferred from owner identity
 metadata, the last conversation or model output.

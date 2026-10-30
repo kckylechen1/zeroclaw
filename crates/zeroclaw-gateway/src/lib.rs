@@ -1050,6 +1050,8 @@ pub async fn run_gateway(
         None
     };
 
+    operator_auth::warn_legacy_operator(&config.gateway.operator);
+
     // ── Pairing guard ──────────────────────────────────────
     let pairing = Arc::new(PairingGuard::new(
         config.gateway.require_pairing,

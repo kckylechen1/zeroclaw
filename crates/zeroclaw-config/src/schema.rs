@@ -7,6 +7,7 @@ pub mod v2;
 use crate::autonomy::AutonomyLevel;
 pub use crate::bridge_access::GatewayDeviceBridgeConfig;
 use crate::domain_matcher::DomainMatcher;
+pub use crate::operator_access::GatewayOperatorConfig;
 use crate::traits::{ChannelConfig, HasPropKind, PropKind};
 use crate::validation_bail;
 use anyhow::{Context, Result};
@@ -6609,6 +6610,12 @@ pub struct GatewayConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub bridges: HashMap<String, GatewayBridgeConfig>,
+
+    /// Explicit management credentials (`[gateway.operator]`). Empty preserves
+    /// legacy paired-token operator access; nonempty requires these hashes.
+    #[serde(default)]
+    #[nested]
+    pub operator: GatewayOperatorConfig,
 }
 
 /// One channel bridge (`[gateway.bridges.<name>]`).
@@ -6751,6 +6758,7 @@ impl Default for GatewayConfig {
             check_updates: true,
             allow_self_upgrade: false,
             bridges: HashMap::new(),
+            operator: GatewayOperatorConfig::default(),
         }
     }
 }
@@ -16951,6 +16959,16 @@ impl Config {
                          only unreserved and sub-delim URI characters are allowed"
                     );
                 }
+            }
+        }
+
+        for hash in &self.gateway.operator.token_hashes {
+            if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
+                validation_bail!(
+                    InvalidFormat,
+                    "gateway.operator.token_hashes",
+                    "operator credentials must be 64-character hex SHA-256 hashes of independent bearer tokens"
+                );
             }
         }
 

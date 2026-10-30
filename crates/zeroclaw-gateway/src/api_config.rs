@@ -403,11 +403,11 @@ async fn persist_and_swap(
         state.config_write_lock.try_lock().is_err(),
         "persist_and_swap caller must hold state.config_write_lock"
     );
-    // Attention policy, review destinations and their bridge credentials are
+    // Operator credentials, attention policy, review destinations and their bridge credentials are
     // owner-authored even on an unpaired gateway.
     // Compare canonical typed values so parent replacement and nested edits
     // cannot bypass a string-prefix path check.
-    let (attention_changed, review_target_changed) = {
+    let (attention_changed, review_target_changed, operator_changed) = {
         let current = state.config.read();
         (
             current.gateway.attention != new_config.gateway.attention,
@@ -431,11 +431,14 @@ async fn persist_and_swap(
                     };
                     credential(&current) != credential(&new_config)
                 }),
+            current.gateway.operator != new_config.gateway.operator,
         )
     };
-    if attention_changed || review_target_changed {
+    if attention_changed || review_target_changed || operator_changed {
         let Some((peer, headers)) = operator_request else {
-            let code = if review_target_changed {
+            let code = if operator_changed {
+                "operator_credentials_operator_required"
+            } else if review_target_changed {
                 "review_notification_operator_required"
             } else {
                 "attention_operator_required"
@@ -470,6 +473,9 @@ async fn persist_and_swap(
         )));
     }
 
+    if operator_changed {
+        crate::operator_auth::warn_legacy_operator(&new_config.gateway.operator);
+    }
     *state.config.write() = new_config;
     state
         .pending_reload
@@ -2373,6 +2379,46 @@ pub async fn handle_migrate(State(state): State<AppState>, headers: HeaderMap) -
 
     match migrated {
         Some(new_content) => {
+            // Parse before writing, then retain the active operator authority.
+            // Schema migration is not an operator-credential edit: raw disk
+            // values omit env overlays and may still contain encrypted secrets.
+            let mut new_cfg: zeroclaw_config::schema::Config = match toml::from_str(&new_content) {
+                Ok(c) => c,
+                Err(e) => {
+                    return error_response(ConfigApiError::new(
+                        ConfigApiCode::ReloadFailed,
+                        format!("re-parse after migration failed: {e}"),
+                    ));
+                }
+            };
+            {
+                let current = state.config.read();
+                new_cfg.gateway.operator = current.gateway.operator.clone();
+                // Keep only this policy's source metadata so later saves do not
+                // persist env-injected hashes or discard external references.
+                let operator_path = |path: &str| path.starts_with("gateway.operator.");
+                new_cfg.env_overridden_paths.extend(
+                    current
+                        .env_overridden_paths
+                        .iter()
+                        .filter(|path| operator_path(path))
+                        .cloned(),
+                );
+                new_cfg.pre_override_snapshots.extend(
+                    current
+                        .pre_override_snapshots
+                        .iter()
+                        .filter(|(path, _)| operator_path(path))
+                        .map(|(path, value)| (path.clone(), value.clone())),
+                );
+                new_cfg.onepassword_reference_snapshots.extend(
+                    current
+                        .onepassword_reference_snapshots
+                        .iter()
+                        .filter(|(path, _)| operator_path(path))
+                        .map(|(path, value)| (path.clone(), value.clone())),
+                );
+            }
             let backup_path = config_path.with_extension("toml.bak");
             let parent = match config_path.parent() {
                 Some(p) => p.to_path_buf(),
@@ -2459,16 +2505,6 @@ pub async fn handle_migrate(State(state): State<AppState>, headers: HeaderMap) -
                 let _ = dir.sync_all().await;
             }
 
-            // Re-read into memory so subsequent requests see the migrated state.
-            let mut new_cfg: zeroclaw_config::schema::Config = match toml::from_str(&new_content) {
-                Ok(c) => c,
-                Err(e) => {
-                    return error_response(ConfigApiError::new(
-                        ConfigApiCode::ReloadFailed,
-                        format!("re-parse after migration failed: {e}"),
-                    ));
-                }
-            };
             // Retired-section tombstones for whatever the migrated content
             // still carries: same structured warning + detection-time log as
             // the other live config load paths, attached so later
@@ -2739,6 +2775,160 @@ mod tests {
             ws_conversations: Default::default(),
             bridge_sockets: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn operator_credentials_cannot_be_replaced_or_cleared_by_paired_clients() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = temp_config(&tmp);
+        config.gateway.operator.token_hashes = vec![PairingGuard::token_hash("operator-fixture")];
+        config.save().await.unwrap();
+        let before = std::fs::read(&config.config_path).unwrap();
+        let mut state = test_state(config);
+        state.pairing = Arc::new(PairingGuard::new(
+            true,
+            &[PairingGuard::token_hash("paired-fixture")],
+        ));
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let mut paired = HeaderMap::new();
+        paired.insert("authorization", "Bearer paired-fixture".parse().unwrap());
+        // Exercise the public property-write caller, not only the shared helper.
+        let response = handle_prop_put(
+            ConnectInfo(peer),
+            State(state.clone()),
+            paired.clone(),
+            axum::Json(PropPutBody {
+                path: "gateway.operator.token_hashes".into(),
+                value: serde_json::json!([]),
+                comment: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let guard = Arc::clone(&state.config_write_lock).lock_owned().await;
+        for hashes in [vec![], vec![PairingGuard::token_hash("paired-fixture")]] {
+            let mut working = state.config.read().clone();
+            working.gateway.operator.token_hashes = hashes;
+            // A parent/root replacement must be compared by value too.
+            working.mark_dirty("gateway");
+            let response = persist_and_swap(&state, working.clone(), &guard, Some((peer, &paired)))
+                .await
+                .unwrap_err();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(
+                persist_and_swap(&state, working, &guard, None)
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            std::fs::read(&state.config.read().config_path).unwrap(),
+            before
+        );
+        let mut operator = HeaderMap::new();
+        operator.insert("authorization", "Bearer operator-fixture".parse().unwrap());
+        let mut rotated = state.config.read().clone();
+        rotated.gateway.operator.token_hashes = vec![PairingGuard::token_hash("rotated-fixture")];
+        rotated.mark_dirty("gateway.operator.token_hashes");
+        persist_and_swap(&state, rotated, &guard, Some((peer, &operator)))
+            .await
+            .unwrap();
+        assert!(crate::operator_auth::require_operator(&state, &operator).is_err());
+        assert_eq!(
+            state.config.read().gateway.operator.token_hashes,
+            vec![PairingGuard::token_hash("rotated-fixture")]
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_migration_preserves_effective_operator_credentials() {
+        for configured in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut config = temp_config(&tmp);
+            std::fs::write(&config.config_path, "schema_version = 2\n").unwrap();
+            let path = "gateway.operator.token_hashes";
+            if configured {
+                // Equivalent to the supported env overlay after startup migrated
+                // the older disk schema in memory. Do not mutate process env.
+                config.gateway.operator.token_hashes =
+                    vec![PairingGuard::token_hash("env-operator")];
+                config.env_overridden_paths.insert(path.into());
+                config
+                    .pre_override_snapshots
+                    .insert(path.into(), "[]".into());
+            }
+            let expected = config.gateway.operator.clone();
+            let mut state = test_state(config);
+            state.pairing = Arc::new(PairingGuard::new(
+                true,
+                &[PairingGuard::token_hash("paired-fixture")],
+            ));
+            let mut paired = HeaderMap::new();
+            paired.insert("authorization", "Bearer paired-fixture".parse().unwrap());
+            let before = crate::operator_auth::require_operator(&state, &paired);
+            let response = handle_migrate(State(state.clone()), paired.clone()).await;
+            let (status, body) = response_json(response).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["migrated"], true);
+            assert_eq!(state.config.read().gateway.operator, expected);
+            assert_eq!(
+                crate::operator_auth::require_operator(&state, &paired),
+                before
+            );
+            if configured {
+                assert_eq!(before, Err((StatusCode::FORBIDDEN, "Forbidden")));
+                let mut operator = HeaderMap::new();
+                operator.insert("authorization", "Bearer env-operator".parse().unwrap());
+                assert!(crate::operator_auth::require_operator(&state, &operator).is_ok());
+                let live = state.config.read();
+                assert!(live.env_overridden_paths.contains(path));
+                assert_eq!(
+                    live.pre_override_snapshots.get(path).map(String::as_str),
+                    Some("[]")
+                );
+                assert!(
+                    !std::fs::read_to_string(&live.config_path)
+                        .unwrap()
+                        .contains(&PairingGuard::token_hash("env-operator"))
+                );
+            } else {
+                assert!(before.is_ok());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_owner_can_explicitly_enable_operator_credentials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(temp_config(&tmp));
+        state.pairing = Arc::new(PairingGuard::new(
+            false,
+            &[PairingGuard::token_hash("legacy-owner")],
+        ));
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let guard = Arc::clone(&state.config_write_lock).lock_owned().await;
+        let mut working = state.config.read().clone();
+        working.gateway.operator.token_hashes = vec![PairingGuard::token_hash("new-operator")];
+        working.mark_dirty("gateway.operator.token_hashes");
+        let anonymous = HeaderMap::new();
+        assert_eq!(
+            persist_and_swap(&state, working.clone(), &guard, Some((peer, &anonymous)))
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let mut owner = HeaderMap::new();
+        owner.insert("authorization", "Bearer legacy-owner".parse().unwrap());
+        persist_and_swap(&state, working, &guard, Some((peer, &owner)))
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::operator_auth::require_operator(&state, &owner),
+            Err((StatusCode::FORBIDDEN, "Forbidden"))
+        );
+        owner.insert("authorization", "Bearer new-operator".parse().unwrap());
+        assert!(crate::operator_auth::require_operator(&state, &owner).is_ok());
     }
 
     #[tokio::test]
@@ -4212,7 +4402,7 @@ mod tests {
 
     #[test]
     fn every_gateway_secret_is_classified() {
-        const OPERATOR_EDITED_GATEWAY_SECRETS: &[&str] = &[];
+        const OPERATOR_EDITED_GATEWAY_SECRETS: &[&str] = &["gateway.operator.token_hashes"];
 
         let cfg = zeroclaw_config::schema::Config::default();
         let unclassified: Vec<String> = cfg
