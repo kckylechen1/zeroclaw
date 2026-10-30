@@ -91,11 +91,12 @@ COPY xtask/Cargo.toml xtask/Cargo.toml
 # Bridges are workspace members outside crates/; manifests only, stubbed below.
 COPY bridges/telegram/Cargo.toml bridges/telegram/Cargo.toml
 # Create dummy targets for all workspace members so manifest parsing succeeds.
-RUN mkdir -p src benches tools/fill-translations/src xtask/src/bin bridges/telegram/src \
+RUN mkdir -p src benches tests tools/fill-translations/src xtask/src/bin bridges/telegram/src \
     && echo "" > bridges/telegram/src/lib.rs \
     && echo "fn main() {}" > bridges/telegram/src/main.rs \
     && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
+    && printf '' > tests/node_v2_process.rs \
     && echo "fn main() {}" > benches/agent_benchmarks.rs \
     && echo "fn main() {}" > tools/fill-translations/src/main.rs \
     && echo "" > xtask/src/lib.rs \
