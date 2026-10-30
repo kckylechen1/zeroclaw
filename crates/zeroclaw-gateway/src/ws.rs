@@ -1690,10 +1690,20 @@ fn resolve_session_cwd(
         ))
     })?;
     let workspace = std::fs::canonicalize(default_workspace).map_err(|e| {
-        anyhow::anyhow!(
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "workspace": default_workspace.display().to_string(),
+                    "error": format!("{}", e),
+                })),
+            "ws session workspace rejected"
+        );
+        anyhow::Error::msg(format!(
             "{}: {e}",
             zeroclaw_runtime::i18n::get_required_cli_string("gateway-cwd-workspace-unavailable")
-        )
+        ))
     })?;
     anyhow::ensure!(
         resolved.is_dir() && workspace.is_dir(),
