@@ -2892,30 +2892,59 @@ async fn legacy_pair_rolls_back_in_process_token_when_persist_fails() {
 fn public_bind_without_pairing_needs_an_explicit_opt_in() {
     use PublicBindPosture::*;
     // Loopback is always fine, pairing or not.
-    assert_eq!(public_bind_posture("127.0.0.1", false, false, true), Local);
-    assert_eq!(public_bind_posture("::1", false, false, false), Local);
+    assert_eq!(
+        public_bind_posture("127.0.0.1", false, false, true, false),
+        Local
+    );
+    assert_eq!(
+        public_bind_posture("::1", false, false, false, false),
+        Local
+    );
+    for host in ["127.0.0.2", "[0:0:0:0:0:0:0:1]"] {
+        assert_eq!(public_bind_posture(host, false, true, true, false), Local);
+    }
+    for host in ["0.0.0.0", "[::]", "192.168.1.10"] {
+        for allow_public_bind in [false, true] {
+            for no_tunnel in [false, true] {
+                assert_eq!(
+                    public_bind_posture(host, false, allow_public_bind, no_tunnel, false),
+                    RefuseUnauthenticated
+                );
+                assert_eq!(
+                    public_bind_posture(host, false, allow_public_bind, no_tunnel, true),
+                    UnauthenticatedOptedIn
+                );
+            }
+        }
+    }
     // Network-facing without pairing: every client is anonymous, so any of
     // them could attach to any shared session. Refused unless opted in; a
     // tunnel is not an opt-in.
     assert_eq!(
-        public_bind_posture("0.0.0.0", false, false, true),
+        public_bind_posture("0.0.0.0", false, false, true, false),
         RefuseUnauthenticated
     );
     assert_eq!(
-        public_bind_posture("192.168.1.10", false, false, false),
+        public_bind_posture("192.168.1.10", false, false, false, false),
         RefuseUnauthenticated
     );
     assert_eq!(
-        public_bind_posture("0.0.0.0", false, true, true),
-        UnauthenticatedOptedIn
+        public_bind_posture("0.0.0.0", false, true, true, false),
+        RefuseUnauthenticated
     );
     // With pairing, the pre-existing warning is unchanged.
     assert_eq!(
-        public_bind_posture("0.0.0.0", true, false, true),
+        public_bind_posture("0.0.0.0", true, false, true, false),
         ExposedWithoutOptIn
     );
-    assert_eq!(public_bind_posture("0.0.0.0", true, false, false), Local);
-    assert_eq!(public_bind_posture("0.0.0.0", true, true, true), Local);
+    assert_eq!(
+        public_bind_posture("0.0.0.0", true, false, false, false),
+        Local
+    );
+    assert_eq!(
+        public_bind_posture("0.0.0.0", true, true, true, false),
+        Local
+    );
 }
 
 /// Send a WebSocket upgrade for `/ws/chat` to a live server and return the
@@ -3334,4 +3363,101 @@ async fn proxied_loopback_caller_cannot_reach_operator_access_through_any_code_r
         HeaderValue::from_str(&format!("Bearer {bearer}")).unwrap(),
     );
     assert!(api::require_auth(&state, &auth).is_ok());
+}
+
+#[tokio::test]
+async fn container_public_bind_without_pairing_refuses_startup() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut config = Config {
+        data_dir: tmp.path().join("workspace"),
+        config_path: tmp.path().join("config.toml"),
+        ..Config::default()
+    };
+    config.gateway.allow_public_bind = true;
+    config.gateway.require_pairing = false;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        run_gateway("0.0.0.0", 0, config, None, None, None),
+    )
+    .await
+    .expect("unsafe gateway must refuse startup instead of serving");
+    let error = result.expect_err("container network opt-in must not disable authentication");
+    assert!(
+        error
+            .to_string()
+            .contains("dangerously_allow_unauthenticated_public_bind"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn container_bind_startup_allowed_matrix_serves_health() {
+    for (host, dangerous_exemption, require_pairing) in [
+        ("0.0.0.0", true, false),
+        ("127.0.0.1", false, false),
+        ("[0:0:0:0:0:0:0:1]", false, false),
+        ("0.0.0.0", false, true),
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let mut config = Config {
+            data_dir: tmp.path().join("workspace"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        };
+        config.gateway.allow_public_bind = true;
+        config.gateway.require_pairing = require_pairing;
+        config.gateway.dangerously_allow_unauthenticated_public_bind = dangerous_exemption;
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let (reload_tx, _) = tokio::sync::watch::channel(false);
+        let controls = zeroclaw_runtime::daemon::GatewayReloadControls {
+            shutdown_tx: shutdown_tx.clone(),
+            reload_tx,
+        };
+        let handle = zeroclaw_spawn::spawn!(async move {
+            run_gateway(host, port, config, None, Some(controls), None).await
+        });
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                if let Ok(mut stream) = tokio::net::TcpStream::connect(
+                    zeroclaw_infra::parse_gateway_bind_socket_addr(
+                        if host == "0.0.0.0" { "127.0.0.1" } else { host },
+                        port,
+                    )
+                    .unwrap(),
+                )
+                .await
+                {
+                    stream
+                        .write_all(
+                            b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    let mut response = String::new();
+                    stream.read_to_string(&mut response).await.unwrap();
+                    break response;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        if response.is_err() {
+            handle.abort();
+        }
+        assert!(
+            response
+                .expect("allowed gateway must serve HTTP")
+                .starts_with("HTTP/1.1 200")
+        );
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 }

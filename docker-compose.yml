@@ -45,8 +45,9 @@ services:
       - zeroclaw-data:/zeroclaw-data
       
     ports:
-      # Gateway API port (override HOST_PORT if 42617 is taken)
-      - "${HOST_PORT:-42617}:${ZEROCLAW_GATEWAY_PORT:-42617}"
+      # Host-local by default (override HOST_PORT if 42617 is taken).
+      # To expose externally, explicitly change 127.0.0.1; keep pairing enabled.
+      - "127.0.0.1:${HOST_PORT:-42617}:${ZEROCLAW_GATEWAY_PORT:-42617}"
     
     # Resource limits
     deploy:

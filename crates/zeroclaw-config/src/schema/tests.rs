@@ -3965,6 +3965,7 @@ async fn checklist_gateway_serde_roundtrip() {
         host: "127.0.0.1".into(),
         require_pairing: true,
         allow_public_bind: false,
+        dangerously_allow_unauthenticated_public_bind: false,
         allow_remote_admin: false,
         paired_tokens: vec!["zc_test_token".into()],
         pair_rate_limit_per_minute: 12,
@@ -13840,4 +13841,18 @@ async fn restricted_device_bridge_cannot_coexist_with_anonymous_owner_chat() {
     );
     let err = config.validate().unwrap_err().to_string();
     assert!(err.contains("gateway.require_pairing"), "{err}");
+}
+
+#[test]
+async fn gateway_unauthenticated_public_exemption_is_explicit_and_roundtrips() {
+    let defaults: GatewayConfig = toml::from_str("").unwrap();
+    assert!(!defaults.dangerously_allow_unauthenticated_public_bind);
+    let container: GatewayConfig =
+        toml::from_str("host = '[::]'\nallow_public_bind = true\nrequire_pairing = false").unwrap();
+    assert!(!container.dangerously_allow_unauthenticated_public_bind);
+    let opted_in: GatewayConfig =
+        toml::from_str("dangerously_allow_unauthenticated_public_bind = true").unwrap();
+    assert!(opted_in.dangerously_allow_unauthenticated_public_bind);
+    let roundtrip: GatewayConfig = toml::from_str(&toml::to_string(&opted_in).unwrap()).unwrap();
+    assert!(roundtrip.dangerously_allow_unauthenticated_public_bind);
 }
