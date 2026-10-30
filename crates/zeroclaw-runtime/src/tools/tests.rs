@@ -842,14 +842,16 @@ fn registry_binds_the_agents_advisor_into_reasoning_subagent() {
     let security = Arc::new(SecurityPolicy::default());
     let mut cfg = lineage_registry_config();
 
-    let plain = reasoning_spawn_tool_for_registry(&cfg, "parent-agent", &security, None);
+    let plain =
+        reasoning_spawn_tool_for_registry(&Arc::new(cfg.clone()), "parent-agent", &security, None);
     assert_eq!(plain.advisor_ref(), None);
 
     let agent = cfg.agents.get_mut("parent-agent").unwrap();
     agent.advisor = Some(zeroclaw_config::advisor::AdvisorTarget::Model(
         "anthropic.opus".into(),
     ));
-    let advised = reasoning_spawn_tool_for_registry(&cfg, "parent-agent", &security, None);
+    let advised =
+        reasoning_spawn_tool_for_registry(&Arc::new(cfg.clone()), "parent-agent", &security, None);
     assert_eq!(advised.advisor_ref(), Some("anthropic.opus"));
     assert!(advised.description().contains("advisor model"));
 
@@ -858,8 +860,91 @@ fn registry_binds_the_agents_advisor_into_reasoning_subagent() {
     cfg.agents.get_mut("parent-agent").unwrap().advisor = Some(
         zeroclaw_config::advisor::AdvisorTarget::Harness("codex".into()),
     );
-    let harness = reasoning_spawn_tool_for_registry(&cfg, "parent-agent", &security, None);
+    let harness =
+        reasoning_spawn_tool_for_registry(&Arc::new(cfg.clone()), "parent-agent", &security, None);
     assert_eq!(harness.advisor_ref(), None);
+}
+
+#[test]
+fn registry_keeps_root_advisor_and_bridge_snapshot_separate_from_runtime_config() {
+    for bridge_enabled in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let mut root_config = test_config(&tmp);
+        root_config.composition = Some(zeroclaw_config::composition::Composition::Full);
+        root_config.knowledge.enabled = false;
+        root_config.agents.insert(
+            "test-agent".into(),
+            AliasedAgentConfig {
+                advisor: Some(zeroclaw_config::advisor::AdvisorTarget::Model(
+                    "anthropic.root-only".into(),
+                )),
+                ..Default::default()
+            },
+        );
+        if bridge_enabled {
+            root_config.gateway.bridges.insert(
+                "root-only".into(),
+                zeroclaw_config::schema::GatewayBridgeConfig::default(),
+            );
+        }
+
+        // The runtime snapshot deliberately has another bridge and no advisor.
+        // Sharing its Arc would silently change the retained root consumers.
+        let mut runtime_config = root_config.clone();
+        runtime_config.agents.get_mut("test-agent").unwrap().advisor = None;
+        runtime_config.gateway.bridges.clear();
+        runtime_config.gateway.bridges.insert(
+            "runtime-only".into(),
+            zeroclaw_config::schema::GatewayBridgeConfig::default(),
+        );
+        let security = Arc::new(SecurityPolicy {
+            workspace_dir: tmp.path().to_path_buf(),
+            ..SecurityPolicy::default()
+        });
+        let memory_config = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let memory: Arc<dyn Memory> =
+            Arc::from(zeroclaw_memory::create_memory(&memory_config, tmp.path(), None).unwrap());
+        let risk = zeroclaw_config::schema::RiskProfileConfig {
+            sandbox_enabled: Some(false),
+            ..Default::default()
+        };
+        let tools = all_tools(
+            Arc::new(runtime_config),
+            &security,
+            &risk,
+            "test-agent",
+            memory,
+            None,
+            None,
+            &BrowserConfig::default(),
+            &zeroclaw_config::schema::HttpRequestConfig::default(),
+            &zeroclaw_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &root_config,
+            false,
+            None,
+        )
+        .tools;
+
+        let reasoning = tools
+            .iter()
+            .find(|tool| tool.name() == "reasoning_subagent")
+            .unwrap();
+        assert!(reasoning.description().contains("advisor model"));
+        let notify = tools.iter().find(|tool| tool.name() == "notify");
+        assert_eq!(notify.is_some(), bridge_enabled);
+        if let Some(notify) = notify {
+            assert_eq!(
+                notify.parameters_schema()["properties"]["bridge"]["enum"],
+                serde_json::json!(["root-only"])
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -895,7 +980,7 @@ async fn registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth() {
     // (a lineage-None reasoning tool inside a child registry would
     // admit D1-forbidden spawns from depth > 0 contexts).
     let probe = reasoning_spawn_tool_for_registry(
-        &build_cfg,
+        &Arc::new(build_cfg.clone()),
         "parent-agent",
         &security,
         Some(at_cap.clone()),

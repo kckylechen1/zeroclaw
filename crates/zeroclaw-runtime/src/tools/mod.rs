@@ -418,13 +418,13 @@ pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
 /// tool, so `registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth`
 /// can discriminate a dropped thread-through.
 fn reasoning_spawn_tool_for_registry(
-    root_config: &zeroclaw_config::schema::Config,
+    root_config: &Arc<zeroclaw_config::schema::Config>,
     agent_alias: &str,
     security: &Arc<SecurityPolicy>,
     spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 ) -> crate::subagent_v1::ReasoningSubagentTool {
     let tool = crate::subagent_v1::ReasoningSubagentTool::new(
-        Arc::new(root_config.clone()),
+        Arc::clone(root_config),
         agent_alias,
         security.clone(),
     )
@@ -611,6 +611,9 @@ pub fn all_tools_with_runtime(
     // root) and legacy test callers.
     spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 ) -> AllToolsResult {
+    // These tools retain the same immutable root snapshot. `config` may be
+    // agent-specific, so share one copy of `root_config` rather than that Arc.
+    let shared_root_config = Arc::new(root_config.clone());
     let persistent_writes = runtime.has_filesystem_access();
     // Composio credentials are only consumed when the SaaS family is compiled
     // in; the parameters stay part of the stable signature for both builds.
@@ -714,13 +717,13 @@ pub fn all_tools_with_runtime(
                 }),
         ),
         Arc::new(reasoning_spawn_tool_for_registry(
-            root_config,
+            &shared_root_config,
             agent_alias,
             security,
             spawn_lineage.clone(),
         )),
         Arc::new(SendMessageToPeerTool::new(
-            Arc::new(root_config.clone()),
+            Arc::clone(&shared_root_config),
             agent_alias,
         )),
         // Operator/admin tools are deliberately absent from this registry:
@@ -742,7 +745,7 @@ pub fn all_tools_with_runtime(
     // `[gateway.bridges.<name>]` exists to deliver them.
     if !root_config.gateway.bridges.is_empty() {
         tool_arcs.push(Arc::new(NotifyTool::new(
-            Arc::new(root_config.clone()),
+            Arc::clone(&shared_root_config),
             security.clone(),
         )));
     }
