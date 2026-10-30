@@ -58,7 +58,7 @@ The splits follow ADR-019 §2: AEC must run next to the speaker and microphone (
 
 - The voice surface streams spoken text in sentence-sized chunks instead of only the final reply, rendered with the #512 renderer.
 - The #512 markup rule applies per chunk: once markup is detected, the voice surface stops speaking that reply and says the localized notice instead.
-- Text produced before a tool call (ADR-020 ¨) is flushed immediately, so the acknowledgement is spoken while the tool runs.
+- Text produced before a tool call (ADR-020 §8) is flushed immediately, so the acknowledgement is spoken while the tool runs.
 - This is a change to the voice surface contract, a protected area (`AGENTS.md`). It is versioned and stays behind the default-off `voice-surface` feature.
 
 ### 5. Interruption in two steps
