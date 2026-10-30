@@ -4347,6 +4347,7 @@ pub(crate) mod tests {
 
         let response = submit_pairing_enhanced(
             State(state.clone()),
+            axum::extract::ConnectInfo("127.0.0.1:40000".parse().unwrap()),
             HeaderMap::new(),
             Json(serde_json::json!({ "code": code, "device_name": "repaired" })),
         )
