@@ -95,7 +95,10 @@ use zeroclaw_runtime::agent::memory_strategy::DefaultMemoryStrategy;
 use zeroclaw_runtime::cost::CostTracker;
 use zeroclaw_runtime::i18n;
 use zeroclaw_runtime::platform;
-use zeroclaw_runtime::security::pairing::{PairingGuard, constant_time_eq, is_public_bind};
+use zeroclaw_runtime::security::pairing::{
+    GATEWAY_ADMIN_TOKEN_HEADER, PairingGuard, constant_time_eq, gateway_admin_token_path,
+    is_public_bind,
+};
 
 use zeroclaw_runtime::tools;
 use zeroclaw_runtime::tools::scoped;
@@ -1183,6 +1186,24 @@ pub async fn run_gateway(
              (`./install.sh --source` on Linux/macOS, `setup.bat` on Windows) to build it"
         );
     }
+    // Start this run's admin-token generation. The pairing-code admin routes
+    // accept only the token the guard holds in memory. If the file cannot be
+    // written the guard holds none, so they refuse everyone (fail closed) and
+    // no file left by an earlier run is honoured; the banner below stays the
+    // way to read the first-run code.
+    let admin_token_path = gateway_admin_token_path(&config.data_dir);
+    if let Err(e) = pairing.rotate_admin_token(&config.data_dir) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "path": admin_token_path.display().to_string(),
+                    "error": e.to_string(),
+                })),
+            "gateway admin token could not be written; pairing-code admin routes will refuse all callers"
+        );
+    }
     if let Some(code) = pairing.pairing_code() {
         println!();
         println!("  🔐 PAIRING REQUIRED — use this one-time code:");
@@ -1191,7 +1212,7 @@ pub async fn run_gateway(
         println!("     └──────────────┘");
         println!("     Send: POST {pfx}/pair with header X-Pairing-Code: {code}");
     } else if pairing.require_pairing() {
-        for line in already_paired_pairing_notice(host, actual_port, pfx) {
+        for line in already_paired_pairing_notice(host, actual_port, pfx, &admin_token_path) {
             println!("{line}");
         }
         println!();
@@ -1803,7 +1824,12 @@ fn format_paircode_recovery_command(_host: &str, port: u16) -> String {
     format!("zeroclaw gateway get-paircode --new --port {port}")
 }
 
-fn already_paired_pairing_notice(host: &str, port: u16, path_prefix: &str) -> Vec<String> {
+fn already_paired_pairing_notice(
+    host: &str,
+    port: u16,
+    path_prefix: &str,
+    admin_token_path: &std::path::Path,
+) -> Vec<String> {
     vec![
         "  🔒 Pairing: ACTIVE — this gateway is already paired, so no new \
          one-time code was generated on this start."
@@ -1813,18 +1839,32 @@ fn already_paired_pairing_notice(host: &str, port: u16, path_prefix: &str) -> Ve
             format_paircode_recovery_command(host, port)
         ),
         format!(
-            "     Fallback (localhost only): {}",
-            format_paircode_recovery_curl(host, port, path_prefix)
+            "     Fallback (on this host, as this user): {}",
+            format_paircode_recovery_curl(host, port, path_prefix, admin_token_path)
         ),
     ]
 }
 
-fn format_paircode_recovery_curl(host: &str, port: u16, path_prefix: &str) -> String {
+fn format_paircode_recovery_curl(
+    host: &str,
+    port: u16,
+    path_prefix: &str,
+    admin_token_path: &std::path::Path,
+) -> String {
     // Admin paircode routes are localhost-only, so the curl fallback must point
     // at loopback. Bind-only hosts and non-loopback advertised hosts are
-    // normalized to `127.0.0.1`; explicit loopback hosts are preserved.
+    // normalized to `127.0.0.1`; explicit loopback hosts are preserved. They
+    // also require this run's admin secret, read from its owner-only file.
+    // Never send that secret through a proxy configured in the owner's shell.
     let recovery_host = paircode_recovery_curl_host(host);
-    format!("curl -s -X POST http://{recovery_host}:{port}{path_prefix}/admin/paircode/new")
+    format!(
+        "curl --noproxy '*' -s -X POST -H \"{GATEWAY_ADMIN_TOKEN_HEADER}: $(cat '{}')\" \
+         http://{recovery_host}:{port}{path_prefix}/admin/paircode/new",
+        admin_token_path
+            .display()
+            .to_string()
+            .replace('\'', "'\\''")
+    )
 }
 
 fn paircode_recovery_curl_host(host: &str) -> &str {
@@ -2511,6 +2551,36 @@ fn require_localhost(peer: &SocketAddr) -> Result<(), (StatusCode, Json<serde_js
     }
 }
 
+/// Reject a pairing-code admin request that does not present this run's admin
+/// secret. [`require_localhost`] alone is not enough for these routes: a reverse
+/// proxy or tunnel on the same host relays remote callers from loopback, and
+/// a code read or minted here is exchanged at `/pair` for a shared-operator
+/// bearer. The secret reaches local clients through an owner-only file, so
+/// presenting it proves the caller runs as the gateway's user on its host.
+/// Admission compares against the token the pairing guard holds for this
+/// run, never the file, so a stale file or a failed rotation matches nothing.
+fn require_gateway_admin_token(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let presented = headers
+        .get(GATEWAY_ADMIN_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if state.pairing.admin_token_matches(presented) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "Pairing-code admin requests need this gateway's admin token. \
+                          Run `zeroclaw gateway get-paircode` on the gateway host, as the \
+                          user that runs the gateway."
+            })),
+        ))
+    }
+}
+
 /// POST /admin/shutdown — graceful shutdown from CLI (localhost only)
 async fn handle_admin_shutdown(
     State(state): State<AppState>,
@@ -2650,12 +2720,14 @@ async fn handle_admin_reload(
     ))
 }
 
-/// GET /admin/paircode — fetch current pairing code (localhost only)
+/// GET /admin/paircode — fetch current pairing code (localhost and owner token only)
 async fn handle_admin_paircode(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     require_localhost(&peer)?;
+    require_gateway_admin_token(&state, &headers)?;
     let code = state.pairing.pairing_code();
 
     let body = if let Some(c) = code {
@@ -2690,9 +2762,11 @@ pub struct AdminPaircodeQuery {
 async fn handle_admin_paircode_new(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Query(params): Query<AdminPaircodeQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     require_localhost(&peer)?;
+    require_gateway_admin_token(&state, &headers)?;
 
     if !state.pairing.require_pairing() {
         let body = serde_json::json!({
@@ -2836,21 +2910,20 @@ async fn handle_admin_paircode_new(
     Ok((StatusCode::OK, Json(body)))
 }
 
+/// GET /pair/code — whether pairing is required. It never returns the code.
+///
+/// No HTTP caller can prove it is on this host: a reverse proxy or tunnel on
+/// the same host relays remote callers from loopback, with or without
+/// forwarding headers, and whoever reads a first-run code can pair as the
+/// shared operator. The code reaches operators only through the startup
+/// banner in the gateway log and `zeroclaw gateway get-paircode`, which
+/// presents the owner-only admin token. `pairing_code` stays in the response,
+/// always `null`, so existing dashboard clients fall back to manual entry.
 async fn handle_pair_code(State(state): State<AppState>) -> impl IntoResponse {
-    let require = state.pairing.require_pairing();
-    let is_paired = state.pairing.is_paired();
-
-    // Only expose the code during initial setup (before first pairing)
-    let code = if require && !is_paired {
-        state.pairing.pairing_code()
-    } else {
-        None
-    };
-
     let body = serde_json::json!({
         "success": true,
-        "pairing_required": require,
-        "pairing_code": code,
+        "pairing_required": state.pairing.require_pairing(),
+        "pairing_code": serde_json::Value::Null,
     });
 
     (StatusCode::OK, Json(body))
