@@ -49,6 +49,7 @@
     - [ADR-017: Personal agent body, edge devices, and delegation](./architecture/decisions/ADR-017-personal-agent-body-edges-and-delegation.md)
     - [ADR-018: Soul character model](./architecture/decisions/ADR-018-soul-character-model.md)
     - [ADR-019: One body, many hands](./architecture/decisions/ADR-019-one-body-many-hands.md)
+    - [ADR-020: Durable turns, replay classes, and attention](./architecture/decisions/ADR-020-durable-turns-replay-and-attention.md)
   - [Logging](./architecture/logging.md)
   - [Runtime state and persistence](./architecture/runtime-state-and-persistence.md)
   - [Memory and payload lifecycle](./architecture/memory-payload-lifecycle.md)

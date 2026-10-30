@@ -35,6 +35,7 @@ Accepted ADRs are immutable. If the architecture changes, write a new ADR and ma
 | [ADR-017](./ADR-017-personal-agent-body-edges-and-delegation.md) | accepted | One always-on body on the owner's computer; speakers, phones, and other devices are gateway Clients and Nodes; the body answers directly or reasons itself, and hands work to CLI agents only through Tachi. |
 | [ADR-018](./ADR-018-soul-character-model.md) | accepted | Each Soul layer answers one question; the Voice and Growth layers are renamed Tone and Story, and Growth names the proposal-and-approval process; Tone gains owner-made exemplars; proposals cannot lower `challenge` and each dial cools down for 28 days; drift is reported against an owner-set anchor; a Soul check compares behavior across models; prompt-injected files are governed by role. |
 | [ADR-019](./ADR-019-one-body-many-hands.md) | proposed | The body stays one process and its authority (Soul, approvals, safety) cannot be replaced by extensions; edges split into crates or processes only for a named reason (permissions, place to run, failure isolation, heavy dependencies); every edge uses one gateway contract, in any language; talking to the owner is a bridge, acting for the owner is an approved tool; WeChat, iMessage, and Slack attach as bridges; the Yonbo X1 robot attaches as a Client plus a body-language Node whose motion risk is derived from action frame content and gated on a proven MCU safety floor. |
+| [ADR-020](./ADR-020-durable-turns-replay-and-attention.md) | proposed | Pi Durable is a design reference, not a dependency; every submission carries a caller request identity; every tool and Node capability declares a replay class (`safe`, or `never` by default); approval decisions are stored with the call, first write wins; foreground and background work are separate; memory observations are prepared in the background and history is never deleted; one attention state drives every surface and the robot's pet-state, and the body interrupts the owner only when needed; before slow or costly work the body acknowledges or confirms first, a spoken yes confirms intent but never approves, and silence starts nothing. |
 
 ADR-006 and ADR-007 were implementation-gated roadmap decisions from [FND-002](../../foundations/fnd-002-documentation-standards.md). Neither acceptance boundary shipped; both are superseded by ADR-013 for this fork.
 
@@ -46,3 +47,5 @@ ADR-014 records the accepted owner-selected minimum Slice A contract after
 independent documentation review and grants no #189/#190 activation.
 
 ADR-019 remains proposed until the owner accepts it.
+
+ADR-020 remains proposed until the owner accepts it.
