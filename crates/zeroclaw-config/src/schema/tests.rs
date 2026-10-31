@@ -3720,6 +3720,30 @@ async fn webhook_config_retry_fields_default_to_none() {
     assert!(parsed.retry_max_delay_ms.is_none());
 }
 
+#[test]
+async fn webhook_replay_config_defaults_and_roundtrip() {
+    for config in [
+        WebhookConfig::default(),
+        serde_json::from_str::<WebhookConfig>("{}").unwrap(),
+    ] {
+        assert!(!config.dangerously_disable_replay_protection);
+        assert_eq!(config.replay_window_secs, None);
+        assert_eq!(config.replay_cache_capacity, None);
+    }
+    let config: WebhookConfig = toml::from_str(
+        r#"
+        dangerously_disable_replay_protection = true
+        replay_window_secs = 60
+        replay_cache_capacity = 128
+    "#,
+    )
+    .unwrap();
+    let restored: WebhookConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert!(restored.dangerously_disable_replay_protection);
+    assert_eq!(restored.replay_window_secs, Some(60));
+    assert_eq!(restored.replay_cache_capacity, Some(128));
+}
+
 // ── WhatsApp config ──────────────────────────────────────
 
 #[test]
@@ -3960,11 +3984,13 @@ async fn checklist_gateway_cli_default_host_is_localhost() {
 #[test]
 async fn checklist_gateway_serde_roundtrip() {
     let g = GatewayConfig {
+        operator: GatewayOperatorConfig::default(),
         attention: None,
         port: 42617,
         host: "127.0.0.1".into(),
         require_pairing: true,
         allow_public_bind: false,
+        dangerously_allow_unauthenticated_public_bind: false,
         allow_remote_admin: false,
         paired_tokens: vec!["zc_test_token".into()],
         pair_rate_limit_per_minute: 12,
@@ -13843,4 +13869,52 @@ async fn restricted_device_bridge_cannot_coexist_with_anonymous_owner_chat() {
     );
     let err = config.validate().unwrap_err().to_string();
     assert!(err.contains("gateway.require_pairing"), "{err}");
+}
+
+#[test]
+async fn gateway_unauthenticated_public_exemption_is_explicit_and_roundtrips() {
+    let defaults: GatewayConfig = toml::from_str("").unwrap();
+    assert!(!defaults.dangerously_allow_unauthenticated_public_bind);
+    let container: GatewayConfig =
+        toml::from_str("host = '[::]'\nallow_public_bind = true\nrequire_pairing = false").unwrap();
+    assert!(!container.dangerously_allow_unauthenticated_public_bind);
+    let opted_in: GatewayConfig =
+        toml::from_str("dangerously_allow_unauthenticated_public_bind = true").unwrap();
+    assert!(opted_in.dangerously_allow_unauthenticated_public_bind);
+    let roundtrip: GatewayConfig = toml::from_str(&toml::to_string(&opted_in).unwrap()).unwrap();
+    assert!(roundtrip.dangerously_allow_unauthenticated_public_bind);
+}
+
+#[::core::prelude::v1::test]
+fn http_auth_secret_policy_preserves_missing_empty_and_scoped_hosts() {
+    for (policy, expected) in [
+        ("", None),
+        ("allowed_hosts = []", Some(Vec::<String>::new())),
+        (
+            "allowed_hosts = [\"api.example.com\"]",
+            Some(vec!["api.example.com".to_owned()]),
+        ),
+    ] {
+        let text = format!("[http_request.auth_secret_policies.api_token]\n{policy}\n");
+        let config: Config = toml::from_str(&text).unwrap();
+        assert_eq!(
+            config.http_request.auth_secret_policies["api_token"].allowed_hosts,
+            expected
+        );
+        let serialized = toml::to_string(&config).unwrap();
+        let roundtrip: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            roundtrip.http_request.auth_secret_policies["api_token"].allowed_hosts,
+            expected
+        );
+    }
+    let legacy: Config =
+        toml::from_str("[http_request.secrets]\napi_token = \"Bearer fixture\"\n").unwrap();
+    assert!(legacy.http_request.auth_secret_policies.is_empty());
+    assert!(
+        toml::from_str::<Config>(
+            "[http_request.auth_secret_policies.api_token]\nallowed_host = [\"api.example.com\"]\n"
+        )
+        .is_err()
+    );
 }

@@ -23,10 +23,6 @@ pub fn default_allowed_commands() -> Vec<String> {
         "uname".into(),
         "uptime".into(),
         "hostname".into(),
-        "python".into(),
-        "python3".into(),
-        "pip".into(),
-        "node".into(),
     ];
     // `free` is Linux-only; it does not exist on macOS or other BSDs.
     #[cfg(target_os = "linux")]
@@ -66,10 +62,6 @@ pub fn default_allowed_commands() -> Vec<String> {
         "uname".into(),
         "uptime".into(),
         "hostname".into(),
-        "python".into(),
-        "python3".into(),
-        "pip".into(),
-        "node".into(),
     ]
 }
 

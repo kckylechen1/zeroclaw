@@ -1052,6 +1052,11 @@ gateway-attachment-unauthorized = Attachments require current device or bridge a
 gateway-attachment-unavailable = Attachment is expired, unavailable or outside this session
 
 gateway-intake-unavailable = The input could not be safely resumed. Reconnect to check its durable receipt before sending it again.
+gateway-pair-request-limit = Too many pairing requests. Please retry later.
+gateway-pair-auth-limit = Too many authentication attempts. Please retry later.
+gateway-cwd-workspace-unavailable = Agent workspace is not a usable directory
+gateway-cwd-not-directory = cwd is not a usable directory
+gateway-cwd-outside-workspace = cwd must be within the configured agent workspace
 gateway-invalid-surface = Invalid chat surface. Use web, telegram or cli; query and connect values must agree.
 
 # Generic review notice. Never interpolate Soul or owner evidence content.
@@ -1105,3 +1110,5 @@ voice-html-omitted = This reply contains markup and has been skipped for speech.
 
 acp-bridge-allow-once = Allow once
 acp-bridge-reject-once = Reject once
+cli-paircode-local-only = Pairing-code requests must target loopback. Run this on the gateway host with --host 127.0.0.1.
+cli-paircode-admin-token-missing = No gateway admin token at { $path }. Run this on the gateway host, as the user running it, while the gateway is running.

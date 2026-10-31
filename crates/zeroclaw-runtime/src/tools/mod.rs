@@ -418,13 +418,13 @@ pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
 /// tool, so `registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth`
 /// can discriminate a dropped thread-through.
 fn reasoning_spawn_tool_for_registry(
-    root_config: &zeroclaw_config::schema::Config,
+    root_config: &Arc<zeroclaw_config::schema::Config>,
     agent_alias: &str,
     security: &Arc<SecurityPolicy>,
     spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 ) -> crate::subagent_v1::ReasoningSubagentTool {
     let tool = crate::subagent_v1::ReasoningSubagentTool::new(
-        Arc::new(root_config.clone()),
+        Arc::clone(root_config),
         agent_alias,
         security.clone(),
     )
@@ -611,6 +611,9 @@ pub fn all_tools_with_runtime(
     // root) and legacy test callers.
     spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 ) -> AllToolsResult {
+    // These tools retain the same immutable root snapshot. `config` may be
+    // agent-specific, so share one copy of `root_config` rather than that Arc.
+    let shared_root_config = Arc::new(root_config.clone());
     let persistent_writes = runtime.has_filesystem_access();
     // Composio credentials are only consumed when the SaaS family is compiled
     // in; the parameters stay part of the stable signature for both builds.
@@ -714,13 +717,13 @@ pub fn all_tools_with_runtime(
                 }),
         ),
         Arc::new(reasoning_spawn_tool_for_registry(
-            root_config,
+            &shared_root_config,
             agent_alias,
             security,
             spawn_lineage.clone(),
         )),
         Arc::new(SendMessageToPeerTool::new(
-            Arc::new(root_config.clone()),
+            Arc::clone(&shared_root_config),
             agent_alias,
         )),
         // Operator/admin tools are deliberately absent from this registry:
@@ -742,53 +745,59 @@ pub fn all_tools_with_runtime(
     // `[gateway.bridges.<name>]` exists to deliver them.
     if !root_config.gateway.bridges.is_empty() {
         tool_arcs.push(Arc::new(NotifyTool::new(
-            Arc::new(root_config.clone()),
+            Arc::clone(&shared_root_config),
             security.clone(),
         )));
     }
 
-    // L2 has one transport owner. Resolve live routing and agent/card
-    // permissions for every operation; do not capture a policy snapshot.
-    let delegation_agent = agent_alias.to_string();
-    let delegation_config = config.clone();
-    let delegation_security = security.clone();
-    let delegation_live = live_config.clone();
-    tool_arcs.extend(zeroclaw_tools::tachi_delegation::tools(
-        agent_alias,
-        move |name, operation| {
-            let resolve = |current: &Config| {
-                // The runtime-selected storage context also owns session and
-                // approval stores. Live policy must not switch this registry
-                // to an empty request ledger and lose an unresolved claim.
-                if current.data_dir != delegation_config.data_dir {
-                    return Err(zeroclaw_tools::tachi_delegation::STORAGE_ROOT_CHANGED.to_string());
-                }
-                if current.tachi.enabled {
-                    let mut policy = SecurityPolicy::for_agent(current, &delegation_agent)
-                        .map_err(|error| error.to_string())?;
-                    if !policy.is_tool_allowed(name)
-                        || (matches!(operation, zeroclaw_policy::ToolOperation::Act)
-                            && !policy.can_act())
-                    {
-                        return Err("delegation denied by current agent policy".to_string());
-                    }
-                    policy.tracker = delegation_security.tracker.clone();
-                    policy.enforce_tool_operation(operation, name)?;
-                    if current.channels.session_backend != "sqlite" {
+    // Disabled delegation must be absent from the model-visible registry.
+    // Existing tools still recheck live configuration on every invocation.
+    if root_config.tachi.enabled {
+        // L2 has one transport owner. Resolve live routing and agent/card
+        // permissions for every operation; do not capture a policy snapshot.
+        let delegation_agent = agent_alias.to_string();
+        let delegation_config = config.clone();
+        let delegation_security = security.clone();
+        let delegation_live = live_config.clone();
+        tool_arcs.extend(zeroclaw_tools::tachi_delegation::tools(
+            agent_alias,
+            move |name, operation| {
+                let resolve = |current: &Config| {
+                    // The runtime-selected storage context also owns session and
+                    // approval stores. Live policy must not switch this registry
+                    // to an empty request ledger and lose an unresolved claim.
+                    if current.data_dir != delegation_config.data_dir {
                         return Err(
-                            "durable delegation bindings require the SQLite session backend"
-                                .to_string(),
+                            zeroclaw_tools::tachi_delegation::STORAGE_ROOT_CHANGED.to_string()
                         );
                     }
+                    if current.tachi.enabled {
+                        let mut policy = SecurityPolicy::for_agent(current, &delegation_agent)
+                            .map_err(|error| error.to_string())?;
+                        if !policy.is_tool_allowed(name)
+                            || (matches!(operation, zeroclaw_policy::ToolOperation::Act)
+                                && !policy.can_act())
+                        {
+                            return Err("delegation denied by current agent policy".to_string());
+                        }
+                        policy.tracker = delegation_security.tracker.clone();
+                        policy.enforce_tool_operation(operation, name)?;
+                        if current.channels.session_backend != "sqlite" {
+                            return Err(
+                                "durable delegation bindings require the SQLite session backend"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    Ok((current.tachi.clone(), delegation_config.data_dir.clone()))
+                };
+                match &delegation_live {
+                    Some(live) => resolve(&live.read()),
+                    None => resolve(&delegation_config),
                 }
-                Ok((current.tachi.clone(), delegation_config.data_dir.clone()))
-            };
-            match &delegation_live {
-                Some(live) => resolve(&live.read()),
-                None => resolve(&delegation_config),
-            }
-        },
-    ));
+            },
+        ));
+    }
     // Corrections require live policy. Unsupported snapshot-only entry points
     // fail closed rather than caching owner authority in a long-lived tool.
     let correction_live = live_config.clone();

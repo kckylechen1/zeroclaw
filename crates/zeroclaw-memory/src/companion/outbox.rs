@@ -257,15 +257,7 @@ mod tests {
             assert!(age < 10, "fresh capture should be seconds old, not {age}s");
 
             let event_id = receipt.event_id.expect("outbox id");
-            store
-                .store_handle()
-                .lock()
-                .connection()
-                .execute(
-                    "UPDATE memory_outbox_events SET created_at = ?2 WHERE event_id = ?1",
-                    rusqlite::params![event_id, "2020-01-01T00:00:00.000Z"],
-                )
-                .expect("backdate");
+            backdate_event(store.as_ref(), &event_id);
 
             let aged = store.outbox_health();
             assert_eq!(aged.pending_count, 1);
@@ -313,15 +305,7 @@ mod tests {
             let store = open_store(&tmp);
             let receipt = seed_legacy_capture(&store, "turn-health-stale");
             let event_id = receipt.event_id.expect("outbox id");
-            store
-                .store_handle()
-                .lock()
-                .connection()
-                .execute(
-                    "UPDATE memory_outbox_events SET created_at = ?2 WHERE event_id = ?1",
-                    rusqlite::params![event_id, "2020-01-01T00:00:00.000Z"],
-                )
-                .expect("backdate");
+            backdate_event(store.as_ref(), &event_id);
 
             let health = store.observe_local_outbox();
             assert!(health.oldest_pending_age_secs.expect("age") >= OUTBOX_PENDING_AGE_WARN_SECS);
@@ -351,18 +335,30 @@ mod tests {
             }
         }
 
+        fn backdate_event(store: &crate::companion::CompanionStore, event_id: &str) {
+            // Fixture-only SQL keeps the optional backend's test build portable.
+            // Health reads still use the original live MemoryStore handle.
+            let _store = store.store_handle().lock();
+            let fixture = rusqlite::Connection::open_with_flags(
+                store.path(),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+            )
+            .expect("open existing fixture database");
+            assert_eq!(
+                fixture
+                    .execute(
+                        "UPDATE memory_outbox_events SET created_at = ?2 WHERE event_id = ?1",
+                        rusqlite::params![event_id, "2020-01-01T00:00:00.000Z"],
+                    )
+                    .expect("backdate"),
+                1,
+            );
+        }
+
         fn backdate_pending(store: &crate::companion::CompanionStore, turn_id: &str) {
             let receipt = seed_legacy_capture(store, turn_id);
             let event_id = receipt.event_id.expect("outbox id");
-            store
-                .store_handle()
-                .lock()
-                .connection()
-                .execute(
-                    "UPDATE memory_outbox_events SET created_at = ?2 WHERE event_id = ?1",
-                    rusqlite::params![event_id, "2020-01-01T00:00:00.000Z"],
-                )
-                .expect("backdate");
+            backdate_event(store, &event_id);
         }
 
         #[test]

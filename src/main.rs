@@ -2319,6 +2319,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                         &host,
                         port,
                         config.gateway.path_prefix.as_deref(),
+                        &config.data_dir,
                         &action,
                     )
                     .await

@@ -13,6 +13,16 @@ use zeroclaw_config::policy_defaults::{default_allowed_commands, default_forbidd
 
 pub use zeroclaw_api::policy::{CommandRiskLevel, ToolOperation};
 
+/// Classify the model-facing Tachi delegation operations for approval.
+/// Unknown names retain the caller's existing fail-closed policy.
+pub fn tachi_tool_operation(name: &str) -> Option<ToolOperation> {
+    match name {
+        "tachi_status" | "tachi_result" | "tachi_watch" => Some(ToolOperation::Read),
+        "tachi_start" | "tachi_cancel" => Some(ToolOperation::Act),
+        _ => None,
+    }
+}
+
 /// Sliding-window action tracker for rate limiting.
 #[derive(Debug)]
 pub struct ActionTracker {
@@ -631,158 +641,214 @@ enum QuoteState {
     Double,
 }
 
+/// A shell command and whether a pipeline or input redirect feeds its stdin.
+struct CommandSegment {
+    text: String,
+    receives_input: bool,
+}
+
 fn split_unquoted_segments(command: &str) -> Vec<String> {
+    command_segments(command)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+
+fn command_segments(command: &str) -> Vec<CommandSegment> {
     let mut segments = Vec::new();
     let mut current = String::new();
+    let mut receives_input = false;
     let mut quote = QuoteState::None;
     let mut escaped = false;
-    // Heredoc state: Some(delim) while inside a heredoc body.
-    let mut heredoc_delimiter: Option<String> = None;
-    // Accumulates the current line while inside a heredoc body, for terminator detection.
-    let mut heredoc_line_buf = String::new();
-    // True while reading the delimiter word that follows `<<`.
-    let mut reading_heredoc_word = false;
-    let mut heredoc_word_buf = String::new();
+    let mut heredocs = std::collections::VecDeque::<(String, bool, bool)>::new();
+    let mut word_boundary = true;
     let mut chars = command.chars().peekable();
 
-    let push_segment = |segments: &mut Vec<String>, current: &mut String| {
-        let trimmed = current.trim();
-        if !trimmed.is_empty() {
-            segments.push(trimmed.to_string());
+    let push = |segments: &mut Vec<CommandSegment>, current: &mut String, input: &mut bool| {
+        if !current.trim().is_empty() {
+            segments.push(CommandSegment {
+                text: current.trim().to_string(),
+                receives_input: *input,
+            });
         }
         current.clear();
+        *input = false;
     };
 
     while let Some(ch) = chars.next() {
-        match quote {
-            QuoteState::Single => {
-                if ch == '\'' {
-                    quote = QuoteState::None;
-                }
+        if escaped {
+            escaped = false;
+            // Shell line continuation is not part of the executable name.
+            if ch != '\n' {
+                current.push(ch);
+                word_boundary = false;
+            }
+            continue;
+        }
+        if quote == QuoteState::Single {
+            current.push(ch);
+            if ch == '\'' {
+                quote = QuoteState::None;
+            }
+            continue;
+        }
+        if ch == '\\' {
+            if chars.peek() != Some(&'\n') {
+                current.push(ch);
+                word_boundary = false;
+            }
+            escaped = true;
+            continue;
+        }
+        if quote == QuoteState::Double {
+            current.push(ch);
+            if ch == '"' {
+                quote = QuoteState::None;
+            }
+            continue;
+        }
+        let starts_word = word_boundary;
+        word_boundary = matches!(ch, ' ' | '\t' | '\n' | ';' | '|' | '&');
+        match ch {
+            '\'' => {
+                quote = QuoteState::Single;
                 current.push(ch);
             }
-            QuoteState::Double => {
-                if escaped {
-                    escaped = false;
-                    current.push(ch);
-                    continue;
-                }
-                if ch == '\\' {
-                    escaped = true;
-                    current.push(ch);
-                    continue;
-                }
-                if ch == '"' {
-                    quote = QuoteState::None;
-                }
+            '"' => {
+                quote = QuoteState::Double;
                 current.push(ch);
             }
-            QuoteState::None => {
-                if escaped {
-                    escaped = false;
-                    if heredoc_delimiter.is_some() {
-                        heredoc_line_buf.push(ch);
-                    } else {
-                        current.push(ch);
-                    }
-                    continue;
+            '#' if !cfg!(windows) && starts_word => {
+                // Comment text must not introduce phantom heredocs that hide
+                // commands following the real body.
+                while chars.peek().is_some_and(|c| *c != '\n') {
+                    chars.next();
                 }
-                if ch == '\\' {
-                    escaped = true;
-                    if heredoc_delimiter.is_some() {
-                        heredoc_line_buf.push(ch);
-                    } else {
-                        current.push(ch);
-                    }
-                    continue;
+            }
+            ';' => push(&mut segments, &mut current, &mut receives_input),
+            '\n' => {
+                if !current.trim().is_empty() {
+                    push(&mut segments, &mut current, &mut receives_input);
                 }
-
-                // Reading the delimiter word that follows `<<`.
-                if reading_heredoc_word {
-                    if ch == '\n' {
-                        // Finalise the delimiter and enter the heredoc body.
-                        let raw = heredoc_word_buf.trim().trim_start_matches('-');
-                        let delim = raw
-                            .trim_matches(|c| c == '\'' || c == '"' || c == '\\')
-                            .to_string();
-                        if !delim.is_empty() {
-                            heredoc_delimiter = Some(delim);
-                        }
-                        heredoc_word_buf.clear();
-                        reading_heredoc_word = false;
-                        // The newline after `<<WORD` belongs to the same segment.
-                        current.push(ch);
-                    } else {
-                        heredoc_word_buf.push(ch);
-                        current.push(ch);
-                    }
-                    continue;
-                }
-
-                if let Some(delim) = heredoc_delimiter.as_deref() {
-                    if ch == '\n' {
-                        if heredoc_line_buf.trim() == delim {
-                            // Terminator line reached — end of heredoc body.
-                            heredoc_delimiter = None;
-                            heredoc_line_buf.clear();
-                            push_segment(&mut segments, &mut current);
-                        } else {
-                            heredoc_line_buf.clear();
-                        }
-                    } else {
-                        heredoc_line_buf.push(ch);
-                    }
-                    continue;
-                }
-
-                match ch {
-                    '\'' => {
-                        quote = QuoteState::Single;
-                        current.push(ch);
-                    }
-                    '"' => {
-                        quote = QuoteState::Double;
-                        current.push(ch);
-                    }
-                    ';' | '\n' => push_segment(&mut segments, &mut current),
-                    '|' => {
-                        if chars.next_if_eq(&'|').is_some() {
-                            // Consume full `||`; both characters are separators.
-                        }
-                        push_segment(&mut segments, &mut current);
-                    }
-                    '&' => {
-                        if chars.next_if_eq(&'&').is_some() {
-                            // `&&` is a separator; single `&` is handled separately.
-                            push_segment(&mut segments, &mut current);
-                        } else {
-                            current.push(ch);
-                        }
-                    }
-                    '<' => {
-                        current.push(ch);
-                        // Detect `<<` (heredoc) but not `<<<` (here-string).
-                        if chars.peek() == Some(&'<') {
-                            let second = chars.next().unwrap();
-                            current.push(second);
-                            if chars.peek() != Some(&'<') {
-                                reading_heredoc_word = true;
+                // Bodies are data, not shell command segments. Delimiters are
+                // queued because a single header may contain multiple heredocs.
+                while let Some((delimiter, strip_tabs, quoted)) = heredocs.pop_front() {
+                    let mut line = String::new();
+                    loop {
+                        match chars.next() {
+                            Some('\n') | None => {
+                                let candidate = if strip_tabs {
+                                    line.trim_start_matches('\t')
+                                } else {
+                                    &line
+                                };
+                                if candidate == delimiter || chars.peek().is_none() {
+                                    break;
+                                }
+                                line.clear();
                             }
-                            // `<<<` falls through with no heredoc tracking.
+                            Some('\\') if !quoted => {
+                                // Unquoted heredocs join escaped physical lines
+                                // before delimiter comparison. Consume escaped
+                                // backslashes together so parity is preserved.
+                                match chars.peek() {
+                                    Some('\n') => {
+                                        chars.next();
+                                    }
+                                    Some('\\') => {
+                                        line.push('\\');
+                                        line.push(chars.next().unwrap());
+                                    }
+                                    _ => line.push('\\'),
+                                }
+                            }
+                            Some(c) => line.push(c),
                         }
                     }
-                    _ => current.push(ch),
                 }
             }
+            '|' => {
+                let pipeline = chars.next_if_eq(&'|').is_none();
+                push(&mut segments, &mut current, &mut receives_input);
+                receives_input = pipeline;
+            }
+            '&' if chars.next_if_eq(&'&').is_some() => {
+                push(&mut segments, &mut current, &mut receives_input);
+            }
+            '<' => {
+                receives_input = true;
+                current.push(ch);
+                if chars.next_if_eq(&'<').is_some() {
+                    current.push('<');
+                    if chars.next_if_eq(&'<').is_some() {
+                        current.push('<');
+                        continue;
+                    }
+                    let strip_tabs = chars.next_if_eq(&'-').is_some();
+                    if strip_tabs {
+                        current.push('-');
+                    }
+                    while chars.peek().is_some_and(|c| *c == ' ' || *c == '\t') {
+                        current.push(chars.next().unwrap());
+                    }
+                    let mut delimiter = String::new();
+                    let mut delimiter_quote = QuoteState::None;
+                    let mut delimiter_quoted = false;
+                    while let Some(&c) = chars.peek() {
+                        if delimiter_quote == QuoteState::None
+                            && (matches!(c, ' ' | '\t' | '\n') || ";|&<>".contains(c))
+                        {
+                            break;
+                        }
+                        chars.next();
+                        current.push(c);
+                        if matches!(c, '\'' | '"') || (c == '\\' && chars.peek() != Some(&'\n')) {
+                            delimiter_quoted = true;
+                        }
+                        match (delimiter_quote, c) {
+                            (QuoteState::None, '\'') => delimiter_quote = QuoteState::Single,
+                            (QuoteState::None, '"') => delimiter_quote = QuoteState::Double,
+                            (QuoteState::Single, '\'') | (QuoteState::Double, '"') => {
+                                delimiter_quote = QuoteState::None
+                            }
+                            (QuoteState::None | QuoteState::Double, '\\') => {
+                                if let Some(c) = chars.next() {
+                                    current.push(c);
+                                    if delimiter_quote == QuoteState::Double
+                                        && !"$`\"\\\n".contains(c)
+                                    {
+                                        delimiter.push('\\');
+                                    }
+                                    if c != '\n' {
+                                        delimiter.push(c);
+                                    }
+                                }
+                            }
+                            _ => delimiter.push(c),
+                        }
+                    }
+                    heredocs.push_back((delimiter, strip_tabs, delimiter_quoted));
+                }
+            }
+            _ => current.push(ch),
         }
     }
-
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        segments.push(trimmed.to_string());
-    }
-
+    push(&mut segments, &mut current, &mut receives_input);
     segments
+}
+
+fn stdin_interpreter(segment: &CommandSegment) -> bool {
+    if !segment.receives_input {
+        return false;
+    }
+    let command = skip_env_assignments(&segment.text);
+    let raw = command.split_whitespace().next().unwrap_or("");
+    let executable = strip_wrapping_quotes(raw.split(['<', '>']).next().unwrap_or(""));
+    let base = command_basename(executable).to_ascii_lowercase();
+    matches!(
+        strip_windows_exe_suffix(&base),
+        "python" | "python3" | "node"
+    )
 }
 
 /// Detect a single unquoted `&` operator (background/chain). `&&` is allowed.
@@ -1196,6 +1262,9 @@ impl SecurityPolicy {
 
     /// Classify command risk. Any high-risk segment marks the whole command high.
     pub fn command_risk_level(&self, command: &str) -> CommandRiskLevel {
+        if command_segments(command).iter().any(stdin_interpreter) {
+            return CommandRiskLevel::High;
+        }
         let mut saw_medium = false;
 
         for segment in split_unquoted_segments(command) {
@@ -1370,7 +1439,7 @@ impl SecurityPolicy {
             let base_cmd = strip_windows_exe_suffix(&base_cmd_owned);
 
             if base_cmd.is_empty() {
-                continue;
+                return false;
             }
 
             let explicitly_listed = self.allowed_commands.iter().any(|allowed| {
@@ -1470,7 +1539,7 @@ impl SecurityPolicy {
             let base_cmd = strip_windows_exe_suffix(&base_cmd_owned);
 
             if base_cmd.is_empty() {
-                continue;
+                return false;
             }
 
             if !self

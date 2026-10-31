@@ -34,20 +34,21 @@ use super::{
     build_channel_turn_context_preamble, channel_message_timeout_budget_secs_with_cap,
     channel_runtime_cli_string, channel_runtime_cli_string_with_args, channel_user_ingress,
     classify_channel_reply_intent, clear_sender_history, collapse_inline_image_payloads,
-    compact_sender_history, compose_outgoing_user_turn_with_context, conversation_history_key,
-    conversation_memory_key, ensure_nonempty_channel_reply, extract_current_turn_tool_messages,
-    find_channel_for_message, followup_thread_id, get_or_create_provider, get_route_selection,
+    compact_sender_history, compose_outgoing_user_turn_with_context, conversation_memory_key,
+    ensure_nonempty_channel_reply, extract_current_turn_tool_messages, find_channel_for_message,
+    followup_thread_id, get_or_create_provider, get_route_selection,
     handle_runtime_command_if_needed, is_context_window_overflow_error,
     maybe_apply_runtime_config_update, normalize_cached_channel_turns,
     outbound_content_format_for_channel, peer_prompt_channel_ref, provider_cache_key,
     reconcile_early_ack, record_passive_context, refreshed_new_session_system_prompt,
     resolve_channel_ack_reactions, resolve_channel_thinking, resolve_classifier_route,
     resolve_provider_ref_for_runtime_switch, rollback_orphan_user_turn, run_draft_updater,
-    runtime_defaults_snapshot, sanitize_channel_response_for_format_with_leak_detection,
-    send_message_to_peer_tool_available, sender_memory_session_ids, set_route_selection,
-    should_bypass_reply_intent_precheck, should_rollback_failed_user_turn,
-    stamp_session_routing_context, strip_inline_data_image_markers, strip_tool_result_content,
-    strip_tool_summary_prefix, take_pending_new_session, timestamped_channel_user_history_content,
+    runtime_conversation_history_key, runtime_defaults_snapshot,
+    sanitize_channel_response_for_format_with_leak_detection, send_message_to_peer_tool_available,
+    sender_memory_session_ids, set_route_selection, should_bypass_reply_intent_precheck,
+    should_rollback_failed_user_turn, stamp_session_routing_context,
+    strip_inline_data_image_markers, strip_tool_result_content, strip_tool_summary_prefix,
+    take_pending_new_session, timestamped_channel_user_history_content,
 };
 
 /// Merge the durable owner-profile section and the session task-scoped
@@ -168,7 +169,7 @@ async fn process_channel_message_body(
         }
     }
 
-    let history_key = conversation_history_key(&msg);
+    let history_key = runtime_conversation_history_key(ctx.as_ref(), &msg);
     stamp_session_routing_context(ctx.as_ref(), &msg, &history_key);
     if msg.passive_context {
         record_passive_context(ctx.as_ref(), &msg, &history_key, &ingress);

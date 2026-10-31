@@ -908,3 +908,5 @@ voice-html-omitted = 本条回复包含标记内容，已跳过朗读。
 
 acp-bridge-allow-once = 允许一次
 acp-bridge-reject-once = 拒绝一次
+cli-paircode-local-only = 配对码请求只能发往本机回环地址。请在网关主机上使用 --host 127.0.0.1 执行。
+cli-paircode-admin-token-missing = { $path } 中没有网关管理令牌。请在网关运行时，以运行网关的用户在网关主机上执行。

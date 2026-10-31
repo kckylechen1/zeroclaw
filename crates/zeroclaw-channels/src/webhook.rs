@@ -1,9 +1,16 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
+use lru::LruCache;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
+
+const DEFAULT_REPLAY_WINDOW_SECS: u64 = 300;
+const DEFAULT_REPLAY_CACHE_CAPACITY: usize = 4096;
 
 const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 500;
@@ -20,6 +27,11 @@ pub struct WebhookChannel {
     send_method: String,
     auth_header: Option<String>,
     secret: Option<String>,
+    dangerously_disable_replay_protection: bool,
+    replay_window_secs: u64,
+    replay_cache_capacity: usize,
+    // Retained across listen() restarts on this channel instance, never persisted.
+    replay_cache: Arc<Mutex<LruCache<String, i64>>>,
     max_retries: u32,
     retry_base_delay_ms: u64,
     retry_max_delay_ms: u64,
@@ -76,6 +88,11 @@ impl WebhookChannel {
                 .to_uppercase(),
             auth_header,
             secret,
+            dangerously_disable_replay_protection: false,
+            replay_window_secs: DEFAULT_REPLAY_WINDOW_SECS,
+            replay_cache_capacity: DEFAULT_REPLAY_CACHE_CAPACITY,
+            // Sized to the validated configuration before the listener starts.
+            replay_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::MIN))),
             max_retries: max_retries.unwrap_or(DEFAULT_MAX_RETRIES),
             // Clamp delays to >=1ms so a misconfigured `0` does not busy-retry without yielding.
             retry_base_delay_ms: retry_base_delay_ms
@@ -85,6 +102,19 @@ impl WebhookChannel {
                 .unwrap_or(DEFAULT_RETRY_MAX_DELAY_MS)
                 .max(1),
         }
+    }
+
+    /// Configure inbound replay protection; invalid limits fail at listen startup.
+    pub fn with_replay_protection(
+        mut self,
+        dangerously_disable: bool,
+        window_secs: Option<u64>,
+        cache_capacity: Option<usize>,
+    ) -> Self {
+        self.dangerously_disable_replay_protection = dangerously_disable;
+        self.replay_window_secs = window_secs.unwrap_or(DEFAULT_REPLAY_WINDOW_SECS);
+        self.replay_cache_capacity = cache_capacity.unwrap_or(DEFAULT_REPLAY_CACHE_CAPACITY);
+        self
     }
 
     fn http_client(&self) -> reqwest::Client {
@@ -253,6 +283,104 @@ fn parse_retry_after_http_date(value: &str) -> Option<DateTime<Utc>> {
         .map(|date| DateTime::from_naive_utc_and_offset(date, Utc))
 }
 
+/// Authenticate the protocol envelope before allocating a replay-cache entry.
+/// Header values are signed verbatim with unambiguous newline separators.
+fn authenticate_webhook(
+    secret: &str,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    disable_replay: bool,
+    window_secs: u64,
+    now: i64,
+) -> std::result::Result<Option<(String, i64)>, &'static str> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let header = |name: &str| {
+        let mut values = headers.get_all(name).iter();
+        let value = values.next()?.to_str().ok()?;
+        if values.next().is_some() {
+            return None;
+        }
+        Some(value)
+    };
+    let envelope = if disable_replay {
+        None
+    } else {
+        let timestamp = header("x-webhook-timestamp").ok_or("webhook_replay_migration_required")?;
+        let event_id = header("x-webhook-id").ok_or("webhook_replay_migration_required")?;
+        if timestamp.is_empty()
+            || timestamp.len() > 19
+            || !timestamp.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err("invalid_webhook_timestamp");
+        }
+        let seconds = timestamp
+            .parse::<i64>()
+            .map_err(|_| "invalid_webhook_timestamp")?;
+        if now.abs_diff(seconds) > window_secs {
+            return Err("webhook_timestamp_outside_window");
+        }
+        if event_id.is_empty()
+            || event_id.len() > 128
+            || !event_id.bytes().all(|b| b.is_ascii_graphic())
+        {
+            return Err("invalid_webhook_id");
+        }
+        Some((timestamp, event_id, seconds))
+    };
+    let signature = header("x-webhook-signature").ok_or("invalid_webhook_signature")?;
+    let signature = signature.strip_prefix("sha256=").unwrap_or(signature);
+    if signature.len() != 64 {
+        return Err("invalid_webhook_signature");
+    }
+    let expected = hex::decode(signature).map_err(|_| "invalid_webhook_signature")?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|_| "invalid_webhook_signature")?;
+    if let Some((timestamp, event_id, _)) = envelope {
+        mac.update(b"v1\n");
+        mac.update(timestamp.as_bytes());
+        mac.update(b"\n");
+        mac.update(event_id.as_bytes());
+        mac.update(b"\n");
+    }
+    mac.update(body);
+    mac.verify_slice(&expected)
+        .map_err(|_| "invalid_webhook_signature")?;
+    // Keep future-dated events until timestamp + window, not arrival + window.
+    Ok(envelope.map(|(_, id, seconds)| {
+        (
+            id.to_owned(),
+            seconds.saturating_add(i64::try_from(window_secs).unwrap_or(i64::MAX)),
+        )
+    }))
+}
+
+fn reserve_webhook_event(
+    cache: &Mutex<LruCache<String, i64>>,
+    id: String,
+    expires_at: i64,
+    clock: impl FnOnce() -> i64,
+) -> std::result::Result<(), &'static str> {
+    let mut cache = cache.lock();
+    // Authentication may have run before another request expired this marker.
+    // Read the clock inside the lock and recheck before pruning or inserting.
+    let now = clock();
+    if expires_at < now {
+        return Err("webhook_timestamp_outside_window");
+    }
+    cache.retain(|_, expiry| *expiry >= now);
+    if cache.get(&id).is_some() {
+        return Err("webhook_replay_detected");
+    }
+    // Evicting an unexpired LRU entry would permit a captured request to replay.
+    if cache.len() == cache.cap().get() {
+        return Err("webhook_replay_cache_full");
+    }
+    cache.put(id, expires_at);
+    Ok(())
+}
+
 /// Outcome of a single send attempt.
 enum AttemptOutcome {
     Success,
@@ -354,11 +482,30 @@ impl Channel for WebhookChannel {
             );
         }
 
+        if !(1..=86_400).contains(&self.replay_window_secs)
+            || !(1..=65_536).contains(&self.replay_cache_capacity)
+        {
+            bail!(
+                "webhook replay_window_secs must be 1..=86400 and replay_cache_capacity must be 1..=65536"
+            );
+        }
+        let capacity = NonZeroUsize::new(self.replay_cache_capacity)
+            .ok_or_else(|| anyhow::Error::msg("webhook replay cache capacity must be nonzero"))?;
+        self.replay_cache.lock().resize(capacity);
+        if self.dangerously_disable_replay_protection {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                "Webhook replay protection explicitly disabled; captured signed requests can be replayed"
+            );
+        }
+
         use axum::{
-            Router,
+            Json, Router,
             body::Bytes,
             extract::State,
             http::{HeaderMap, StatusCode},
+            response::{IntoResponse, Response},
             routing::post,
         };
         use portable_atomic::{AtomicU64, Ordering};
@@ -367,15 +514,23 @@ impl Channel for WebhookChannel {
         let counter = Arc::new(AtomicU64::new(0));
 
         struct WebhookState {
+            alias: String,
             tx: tokio::sync::mpsc::Sender<ChannelMessage>,
             secret: Option<String>,
             counter: Arc<AtomicU64>,
+            disable_replay: bool,
+            window_secs: u64,
+            replay_cache: Arc<Mutex<LruCache<String, i64>>>,
         }
 
         let state = Arc::new(WebhookState {
+            alias: self.alias.clone(),
             tx: tx.clone(),
             secret: self.secret.clone(),
             counter: counter.clone(),
+            disable_replay: self.dangerously_disable_replay_protection,
+            window_secs: self.replay_window_secs,
+            replay_cache: Arc::clone(&self.replay_cache),
         });
 
         let listen_path = self.listen_path.clone();
@@ -384,40 +539,31 @@ impl Channel for WebhookChannel {
             State(state): State<Arc<WebhookState>>,
             headers: HeaderMap,
             body: Bytes,
-        ) -> StatusCode {
-            // Verify signature if secret is configured
-            if let Some(ref secret) = state.secret {
-                use hmac::{Hmac, Mac};
-                use sha2::Sha256;
-                type HmacSha256 = Hmac<Sha256>;
-
-                let signature = headers
-                    .get("x-webhook-signature")
-                    .and_then(|v| v.to_str().ok());
-
-                let valid = if let Some(sig) = signature {
-                    if let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) {
-                        mac.update(&body);
-                        let expected =
-                            hex::decode(sig.trim_start_matches("sha256=")).unwrap_or_default();
-                        mac.verify_slice(&expected).is_ok()
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !valid {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "invalid signature, rejecting request"
-                    );
-                    return StatusCode::UNAUTHORIZED;
-                }
-            }
+        ) -> Response {
+            // JSON protocol errors expose migration data, never secrets or payloads.
+            let reject = |status, code| {
+                (status, Json(serde_json::json!({
+                "error": code,
+                "required_headers": ["X-Webhook-Timestamp", "X-Webhook-Id", "X-Webhook-Signature"],
+                "signature_format": "HMAC-SHA256(secret, v1\\n + timestamp + \\n + id + \\n + raw_body)",
+                "timestamp_format": "Unix seconds",
+            }))).into_response()
+            };
+            let Some(secret) = state.secret.as_deref() else {
+                return reject(StatusCode::UNAUTHORIZED, "webhook_secret_required");
+            };
+            let now = Utc::now().timestamp();
+            let event = match authenticate_webhook(
+                secret,
+                &headers,
+                &body,
+                state.disable_replay,
+                state.window_secs,
+                now,
+            ) {
+                Ok(event) => event,
+                Err(code) => return reject(StatusCode::UNAUTHORIZED, code),
+            };
 
             let payload: IncomingWebhook = match serde_json::from_slice(&body) {
                 Ok(p) => p,
@@ -429,12 +575,26 @@ impl Channel for WebhookChannel {
                             .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                         "invalid JSON payload"
                     );
-                    return StatusCode::BAD_REQUEST;
+                    return StatusCode::BAD_REQUEST.into_response();
                 }
             };
 
             if payload.content.is_empty() {
-                return StatusCode::BAD_REQUEST;
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+
+            if let Some((id, expires_at)) = event
+                && let Err(code) =
+                    reserve_webhook_event(&state.replay_cache, id, expires_at, || {
+                        Utc::now().timestamp()
+                    })
+            {
+                let status = match code {
+                    "webhook_replay_detected" => StatusCode::CONFLICT,
+                    "webhook_timestamp_outside_window" => StatusCode::UNAUTHORIZED,
+                    _ => StatusCode::SERVICE_UNAVAILABLE,
+                };
+                return reject(status, code);
             }
 
             let seq = state.counter.fetch_add(1, Ordering::Relaxed);
@@ -456,7 +616,7 @@ impl Channel for WebhookChannel {
                 reply_target,
                 content: payload.content,
                 channel: "webhook".to_string(),
-                channel_alias: None,
+                channel_alias: Some(state.alias.clone()),
                 timestamp,
                 thread_ts: payload.thread_id,
                 interruption_scope_id: None,
@@ -467,10 +627,10 @@ impl Channel for WebhookChannel {
             };
 
             if state.tx.send(msg).await.is_err() {
-                return StatusCode::SERVICE_UNAVAILABLE;
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
 
-            StatusCode::OK
+            StatusCode::OK.into_response()
         }
 
         let app = Router::new()
@@ -566,6 +726,93 @@ mod tests {
             Some(10),
             Some(100),
         )
+    }
+
+    #[tokio::test]
+    async fn replay_invalid_limits_refuse_startup() {
+        for (window, capacity) in [(0, 1), (86_401, 1), (300, 0), (300, 65_537)] {
+            let ch = make_channel_with_secret().with_replay_protection(
+                false,
+                Some(window),
+                Some(capacity),
+            );
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            assert!(
+                ch.listen(tx)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("replay_window_secs")
+            );
+        }
+    }
+
+    #[test]
+    fn replay_expiry_includes_future_timestamp_window_and_boundary() {
+        let cache = Mutex::new(LruCache::new(NonZeroUsize::new(1).unwrap()));
+        // Event dated at 1300 received at 1000 with a 300-second window.
+        assert_eq!(
+            reserve_webhook_event(&cache, "event".into(), 1600, || 1000),
+            Ok(())
+        );
+        assert_eq!(
+            reserve_webhook_event(&cache, "event".into(), 1600, || 1301),
+            Err("webhook_replay_detected")
+        );
+        assert_eq!(
+            reserve_webhook_event(&cache, "event".into(), 1600, || 1600),
+            Err("webhook_replay_detected")
+        );
+        assert_eq!(
+            reserve_webhook_event(&cache, "new".into(), 1901, || 1601),
+            Ok(())
+        );
+        assert_eq!(cache.lock().len(), 1);
+        assert!(!cache.lock().contains("event"));
+    }
+
+    #[test]
+    fn replay_authenticated_request_expiring_before_reservation_is_rejected() {
+        let cache = Mutex::new(LruCache::new(NonZeroUsize::new(1).unwrap()));
+        assert_eq!(
+            reserve_webhook_event(&cache, "captured".into(), 1600, || 1000),
+            Ok(())
+        );
+        // A duplicate authenticated at 1600 is suspended before taking the lock.
+        // Another request at 1601 expires its marker and occupies the only slot.
+        assert_eq!(
+            reserve_webhook_event(&cache, "new".into(), 1901, || 1601),
+            Ok(())
+        );
+        // When the suspended request resumes, its original timestamp is stale.
+        assert_eq!(
+            reserve_webhook_event(&cache, "captured".into(), 1600, || 1601),
+            Err("webhook_timestamp_outside_window")
+        );
+        assert!(!cache.lock().contains("captured"));
+        assert!(cache.lock().contains("new"));
+    }
+
+    #[test]
+    fn replay_timestamp_boundaries_are_inclusive() {
+        use hmac::{Hmac, Mac};
+        for (timestamp, expected) in [(700, true), (1300, true), (699, false), (1301, false)] {
+            let ts = timestamp.to_string();
+            let mut mac = Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
+            mac.update(format!("v1\n{ts}\nevent\nbody").as_bytes());
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert("x-webhook-timestamp", ts.parse().unwrap());
+            headers.insert("x-webhook-id", "event".parse().unwrap());
+            headers.insert(
+                "x-webhook-signature",
+                hex::encode(mac.finalize().into_bytes()).parse().unwrap(),
+            );
+            let result = authenticate_webhook("secret", &headers, b"body", false, 300, 1000);
+            assert_eq!(result.is_ok(), expected, "timestamp={timestamp}");
+            if expected {
+                assert_eq!(result.unwrap(), Some(("event".into(), timestamp + 300)));
+            }
+        }
     }
 
     #[test]
@@ -1102,3 +1349,7 @@ mod tests {
         assert!(ch.send(&test_message()).await.is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "webhook_alias_tests.rs"]
+pub(crate) mod alias_tests;
