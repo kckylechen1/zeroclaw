@@ -464,7 +464,7 @@ The existing bridge configuration owns the credential and session scope. The
 optional `device` table binds one agent and explicitly permits operations.
 An omitted or empty `operations` list permits nothing, including attachment.
 Unknown operations or an unconfigured agent reject configuration validation.
-Omitting the entire `device` table preserves legacy owner-bridge behavior; it
+Omitting both `device` and `owner` preserves legacy owner-bridge behavior; it
 is **not** a safe way to disable a device credential.
 
 Device policies require `gateway.require_pairing = true`. The chat route also
@@ -515,6 +515,84 @@ Binding conflicts return HTTP 403 or `BRIDGE_BINDING_REJECTED`; denied operation
 return `BRIDGE_OPERATION_DENIED` or close an already revoked socket. Existing
 owner clients and legacy channel bridges retain their protocol. No additional
 session store, endpoint or transport version is introduced.
+
+### Bounded owner bridges and ACP
+
+An owner-operated ACP panel can opt into a separate, bounded owner class:
+
+```toml
+[gateway.bridges.acp]
+token_hash = "<sha256-of-a-new-dedicated-owner-bridge-token>"
+session_prefix = "acp-"
+
+[gateway.bridges.acp.owner]
+agent = "owner-agent"
+operations = ["chat", "cancel", "approval_response"]
+```
+
+`owner` and `device` are mutually exclusive. The owner class is absent by
+default and an empty operation list grants nothing. It requires pairing,
+a configured enabled agent and the same session, workspace and live revocation
+restrictions as the device class. Its only additional operation is
+`approval_response`: `approve` and `deny` decide one pending request once;
+`always` is rejected. Device bridges still reject all approval responses.
+Existing paired owner clients and legacy channel bridges keep their contract.
+Changing the class or removing a restriction does not elevate an attached socket.
+Attach a new socket after explicitly widening policy. The `connected` frame's
+`owner_bridge_approval_once` is true only for this explicit owner grant.
+`owner_bridge_cancel` separately reports its effective cancel grant.
+Neither scoped class can use attachments, source intake or `/ws/bridge` outbox.
+
+This credential belongs to the local owner trust domain. Use a new dedicated
+token, never a Web session, vendor or device token. Keep its file owned by the
+invoking user with mode `0600`. Revoke the entry and disconnect clients before
+downgrading to a binary that does not understand `owner`; an old binary may
+otherwise interpret it as an unrestricted legacy channel bridge.
+
+Build the separate `zeroclaw-acp-bridge` binary with the existing
+`agent-runtime` feature. Its execution path uses only JSON-RPC and gateway
+transport; it never constructs an Agent or ACP database. Point Zed's custom
+`agent_servers` entry at the binary with `args = ["--config", "/absolute/adapter.toml"]`.
+The standalone file contains:
+
+```toml
+[acp_bridge]
+enabled = true # absent/false disables entry before any connection
+endpoint = "ws://127.0.0.1:42617/ws/chat"
+agent = "owner-agent"
+session_prefix = "acp-"
+credential_file = "/absolute/owner-bridge-token"
+```
+
+Only numeric loopback addresses are accepted. The adapter requires the owner
+once and cancel capabilities and S2 version 1 before accepting a session. Client cwd is
+ignored in favor of the server workspace. ACP protocol version is integer 1;
+stdout contains newline-delimited JSON-RPC and diagnostics use stderr.
+
+This is a restricted text profile, not full general ACP conformance. Non-text
+blocks and nonempty client MCP lists fail explicitly. No client MCP commands,
+filesystem or terminal operations execute. No load, resume, media or config
+capability is announced. New session bindings live only in process memory.
+
+Text updates are buffered until the authoritative `done.full_response` and a
+contiguous complete terminal, then emitted exactly once before `end_turn`.
+This avoids duplicate withheld tails and may delay visible text. Cancellation
+targets the exact request/turn/epoch; only an aborted terminal becomes
+`cancelled`. A completed-turn race retains `end_turn`. Permission options are
+allow_once/reject_once only. Timeout, cancelled responses and disconnected
+clients never become synthetic human choices.
+
+Recovery attempts at most two reconnects and only S2 resume after any uncertain
+submission. An epoch change, gap or unknown result fails the prompt and poisons
+that session; no effects are resubmitted. S2's global 256 requests/epoch and
+bounded replay limits above still apply. Each process allows 16 sessions,
+128 KiB stdio frames and a 180-second turn deadline.
+
+The old `zeroclaw acp` command remains unchanged. Its CLI constructs the legacy
+AcpServer, which owns Agent execution and `acp-sessions.db`; those sessions are
+not gateway sessions. Migrate new panels explicitly to the separate binary.
+Inventory retained clients and data ownership before a later retirement; do
+not silently import old IDs or delete the old database.
 
 Before downgrading to a gateway without this policy, revoke/remove the dedicated
 bridge entry and disconnect it. An old binary ignores the new table and would

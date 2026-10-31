@@ -1108,5 +1108,7 @@ spoken-task-pending = Pending:
 spoken-deleted = Deleted text:
 voice-html-omitted = This reply contains markup and has been skipped for speech.
 
+acp-bridge-allow-once = Allow once
+acp-bridge-reject-once = Reject once
 cli-paircode-local-only = Pairing-code requests must target loopback. Run this on the gateway host with --host 127.0.0.1.
 cli-paircode-admin-token-missing = No gateway admin token at { $path }. Run this on the gateway host, as the user running it, while the gateway is running.

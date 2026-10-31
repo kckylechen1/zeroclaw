@@ -4014,6 +4014,7 @@ async fn checklist_gateway_serde_roundtrip() {
                 token_hash: "ab".repeat(32),
                 session_prefix: Some("tg:".into()),
                 sessions: vec!["main".into()],
+                owner: None,
                 device: None,
             },
         )]),
@@ -4050,6 +4051,7 @@ async fn bridge_tokens_resolve_by_hash_and_scope_sessions() {
             token_hash: crate::tokens::hash_token(token),
             session_prefix: Some("tg:".into()),
             sessions: vec!["main".into()],
+            owner: None,
             device: None,
         },
     );
@@ -13860,6 +13862,7 @@ async fn restricted_device_bridge_cannot_coexist_with_anonymous_owner_chat() {
         "device".into(),
         GatewayBridgeConfig {
             token_hash: "0f".repeat(32),
+            owner: None,
             device: Some(GatewayDeviceBridgeConfig::default()),
             ..Default::default()
         },
