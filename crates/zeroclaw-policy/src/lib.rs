@@ -13,6 +13,16 @@ use zeroclaw_config::policy_defaults::{default_allowed_commands, default_forbidd
 
 pub use zeroclaw_api::policy::{CommandRiskLevel, ToolOperation};
 
+/// Classify the model-facing Tachi delegation operations for approval.
+/// Unknown names retain the caller's existing fail-closed policy.
+pub fn tachi_tool_operation(name: &str) -> Option<ToolOperation> {
+    match name {
+        "tachi_status" | "tachi_result" | "tachi_watch" => Some(ToolOperation::Read),
+        "tachi_start" | "tachi_cancel" => Some(ToolOperation::Act),
+        _ => None,
+    }
+}
+
 /// Sliding-window action tracker for rate limiting.
 #[derive(Debug)]
 pub struct ActionTracker {

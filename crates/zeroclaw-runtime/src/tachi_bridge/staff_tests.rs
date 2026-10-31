@@ -1475,6 +1475,33 @@ fn start_args(id: &str) -> Value {
     json!({"request_id":id,"harness":"codex","task":"Review the Codex adapter on GitHub; compare these together", "staffing_reason":"explicit_user_request"})
 }
 
+#[test]
+fn production_registry_omits_disabled_tachi_tools() {
+    for enabled in [None, Some(false), Some(true)] {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut cfg = production_config(&temp, "http://127.0.0.1:6919/mcp");
+        cfg.tachi = Default::default();
+        if let Some(enabled) = enabled {
+            cfg.tachi.enabled = enabled;
+        }
+        let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+        let tools = production_tools(&cfg, live);
+        for name in [
+            "tachi_start",
+            "tachi_status",
+            "tachi_result",
+            "tachi_cancel",
+            "tachi_watch",
+        ] {
+            assert_eq!(
+                tools.iter().any(|tool| tool.name() == name),
+                enabled == Some(true),
+                "{name}: enabled={enabled:?}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn production_content_block_diagnostics_preserve_start_status_result_and_watch() {
     let status_reads = Arc::new(AtomicUsize::new(0));

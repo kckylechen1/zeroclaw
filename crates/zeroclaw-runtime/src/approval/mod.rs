@@ -224,6 +224,19 @@ impl ApprovalManager {
             return ApprovalRequirement::NotRequired;
         }
 
+        // Supervised delegation reads need no prompt unless the owner explicitly
+        // requires one above. Starts and cancellations always need a fresh
+        // approval, including with wildcard auto-approval or a session grant.
+        match zeroclaw_policy::tachi_tool_operation(tool_name) {
+            Some(zeroclaw_policy::ToolOperation::Read) => {
+                return ApprovalRequirement::NotRequired;
+            }
+            Some(zeroclaw_policy::ToolOperation::Act) => {
+                return ApprovalRequirement::Prompt;
+            }
+            None => {}
+        }
+
         // auto_approve skips the prompt.
         if self.auto_approve.contains("*") || self.auto_approve.contains(tool_name) {
             return ApprovalRequirement::Approved;
@@ -519,6 +532,34 @@ mod approval_precedence_tests {
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
             store: None,
+        }
+    }
+
+    #[test]
+    fn supervised_tachi_reads_and_side_effects_follow_policy() {
+        for auto_approve in [vec![], vec!["*"]] {
+            let mgr = manager(AutonomyLevel::Supervised, &[], &auto_approve);
+            for name in ["tachi_status", "tachi_result", "tachi_watch"] {
+                assert_eq!(
+                    mgr.approval_requirement(name),
+                    ApprovalRequirement::NotRequired
+                );
+            }
+            for name in ["tachi_start", "tachi_cancel"] {
+                mgr.session_allowlist.lock().insert(name.into());
+                assert_eq!(mgr.approval_requirement(name), ApprovalRequirement::Prompt);
+            }
+        }
+        for rule in ["tachi_status", "*"] {
+            let mgr = manager(AutonomyLevel::Supervised, &[rule], &["*"]);
+            assert_eq!(
+                mgr.approval_requirement("tachi_status"),
+                ApprovalRequirement::Prompt
+            );
+        }
+        let mgr = manager(AutonomyLevel::Supervised, &[], &[]);
+        for name in ["", "tachi_staff", "tachi_start_extra"] {
+            assert_eq!(mgr.approval_requirement(name), ApprovalRequirement::Prompt);
         }
     }
 
