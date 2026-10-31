@@ -931,6 +931,7 @@ async fn owner_bridge_handshake_reports_cancel_only_when_granted() {
         assert_eq!(ack["owner_bridge_approval_once"], true);
         assert_eq!(ack["owner_bridge_cancel"], granted);
     }
+}
 
 
 /// Paired clients must retain the configured agent workspace boundary.
