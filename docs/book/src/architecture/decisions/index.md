@@ -36,6 +36,7 @@ Accepted ADRs are immutable. If the architecture changes, write a new ADR and ma
 | [ADR-018](./ADR-018-soul-character-model.md) | accepted | Each Soul layer answers one question; the Voice and Growth layers are renamed Tone and Story, and Growth names the proposal-and-approval process; Tone gains owner-made exemplars; proposals cannot lower `challenge` and each dial cools down for 28 days; drift is reported against an owner-set anchor; a Soul check compares behavior across models; prompt-injected files are governed by role. |
 | [ADR-019](./ADR-019-one-body-many-hands.md) | proposed | One body retains Soul, approval and safety authority; edges split only for a named reason. Clients use scoped chat/intake contracts, channel outbox uses its separate contract, Nodes use v2, and body-initiated MCP stays distinct. Shared host code is extracted with its second consumer; new platforms and robot capabilities remain subject to #374 dispatch and their existing acceptance gates. |
 | [ADR-020](./ADR-020-durable-turns-replay-and-attention.md) | proposed | Pi Durable supplies design references for scoped request identities and conservative replay. Approval evidence preserves boot-bound grants; cancellation does not imply external rollback. Existing owners provide background work and policy-gated delivery. Observations preserve provenance and compaction preserves retained history subject to privacy deletion. Clear authorized work is acknowledged without redundant intent confirmation. |
+| [ADR-021](./ADR-021-full-duplex-voice-at-the-edge.md) | proposed | Full-duplex voice keeps audio at the edge and personal authority in the body; a versioned stateful spoken-text projection preserves security checks, while scoped playback evidence never rewrites canonical history or proves human hearing; listening is bounded and its privacy indicator overrides attention; an optional front harness has one model tool, approved presentation phrases without raw Soul export, isolated conversation context, and measured fallback behavior. |
 
 ADR-006 and ADR-007 were implementation-gated roadmap decisions from [FND-002](../../foundations/fnd-002-documentation-standards.md). Neither acceptance boundary shipped; both are superseded by ADR-013 for this fork.
 
@@ -49,3 +50,5 @@ independent documentation review and grants no #189/#190 activation.
 ADR-019 remains proposed until the owner accepts it.
 
 ADR-020 remains proposed until the owner accepts it.
+
+ADR-021 remains proposed until the owner accepts it.
