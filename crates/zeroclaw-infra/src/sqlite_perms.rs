@@ -36,18 +36,16 @@ fn harden_if_exists(path: &Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use rusqlite::Connection;
 
-    #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    #[cfg(unix)]
     #[test]
     fn harden_resets_wal_and_shm_sidecars_to_owner_only() {
         use std::os::unix::fs::PermissionsExt;
