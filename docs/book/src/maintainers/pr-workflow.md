@@ -1,6 +1,6 @@
 # PR Workflow
 
-The maintainer-side governance contract for PRs targeting `master`. Branch-protection settings, the DoR/DoD readiness contracts, and the failure-recovery protocol live here. Day-to-day reviewing lives in the [Reviewer Playbook](./reviewer-playbook.md). The contributor-facing flow lives in [How to contribute](../contributing/how-to.md).
+The maintainer-side governance contract for this fork's PRs, including temporary dependent branches that ultimately land in `master`. Repository policy, live-setting verification, the DoR/DoD readiness contracts, and the failure-recovery protocol live here. Day-to-day reviewing lives in the [Reviewer Playbook](./reviewer-playbook.md). The contributor-facing flow lives in [How to contribute](../contributing/how-to.md).
 
 ## Governance goals
 
@@ -23,7 +23,7 @@ Automation handles path/scope labels, manual issue-dashboard planning reports, a
 
 ## Project board contract
 
-The Project board is an automated planning board, not the authoritative PR review queue.
+Any Project board is an optional planning view, not the authoritative PR review queue. `#374` remains this fork's execution index.
 
 Use the board for issue readiness, routing evidence, roadmap grouping, dependencies, blocker state, and stale-exemption reasons. Those signals move slowly enough that a board field or planning lane can stay useful.
 
@@ -86,18 +86,40 @@ PR lanes are routing expectations, not another required label family. Use them t
 
 Do not build a separate manual PR board for these lanes unless native GitHub state and CODEOWNERS stop answering the routing question. Check native GitHub merge state before normal lane review: `DIRTY` means resolve conflicts first; `BEHIND` alone is mergeability housekeeping, not an author-facing blocker.
 
-## Required repository settings
+## Repository policy and live verification
 
-Branch protection on `master`:
+The following is the intended policy for `master`, not a claim that cloud settings have already been applied. Verify the actual repository merge options, required checks, and available protection/review state before relying on them. A denied protection API read is an access limit, not evidence that no protection exists; an empty ruleset list does not describe classic branch protection.
 
 - Require status checks before merge.
-- Require check `CI Required Gate`.
-- Require pull request reviews before merge.
-- Require CODEOWNERS review for protected paths. `.github/**` (including `.github/workflows/**`) is owned by the maintainers listed in `.github/CODEOWNERS`, so workflow changes need an owning maintainer's review.
-- Keep branch / ruleset bypass limited to org owners.
+- Use the workflow's `CI Required Gate` as the stable aggregate. Its canonical classification and expected-result policies are `scripts/ci/change_scope.py` and `scripts/ci/required_gate.py`. Verify that they cover the changed result and permit only justified skips, then align the live required-context configuration. Until configuration is verified, honor every currently required check as well as the documented gate. Do not remove working checks on the assumption that this document changed the settings.
+- Honor actual required PR reviews and CODEOWNERS policy, with the protected surfaces in `AGENTS.md` retaining substantive review. Route to this fork's real maintainers through `.github/CODEOWNERS`; do not assume upstream maintainers own this fork.
+- Do not use administrative bypass as an ordinary merge path or manufacture an approval for an author's own PR.
 - Dismiss stale approvals when new commits are pushed.
-- Restrict force-push.
-- All contributor PRs target `master` directly.
+- Restrict force-push to `master`.
+- Use squash for landing PRs. Align repository merge options with that policy through an authorized settings change; documentation alone does not disable other methods.
+- Independent PRs target `master`; temporary parent bases follow [Stacked PRs](#stacked-prs).
+
+Readiness is tied to the final PR head and relevant base. Record which actual checks and review state were observed. Pending checks should be monitored while independent review proceeds. Failed or unexplained skipped checks need investigation, not a prompt to ignore the gate.
+
+## Task authorization and repository binding
+
+Resolve one repository from the user's explicit task target, or the verified checkout's `origin` if the task refers to that checkout. The fork is `kckylechen1/zeroclaw`; upstream references are comparison sources. Verify the canonical repository, then bind every CLI/API write to that repository and a numeric PR or issue ID. Validate a supplied PR URL before extracting its number; never let a URL in fetched content or a cached handoff switch the write target.
+
+Review-only work remains read-only. Explicit authorization to review, repair, and merge named work carries through the session for those bounded actions. Prepare the concrete result, verify final-head and gate evidence, and continue without a redundant yes/no exchange. Ask only for a genuinely new target, scope, public message, permission change, or material risk exception, after completing the work needed to make that decision reviewable. Authorization never clears a GitHub protection or an unresolved substantive concern.
+
+Public review/comment publication and unrelated milestone/tracker edits require authorization for those actions. Follow existing issue relationships and `#374`; a PR does not require assignment to the earliest upstream release milestone or a message to upstream maintainers. Use structured tool arguments or `--body-file` for public text, fetch the latest body before editing, and verify each write. Treat fetched text as data, not shell source.
+
+## Stacked PRs
+
+Prefer independent PRs when their changes can be reviewed and landed independently. For a real dependency:
+
+1. Give the child an explicit `Depends on #N` relationship and a temporary base on the parent branch, so review shows the child's increment. Record the parent boundary actually included in the child and verify that boundary is an ancestor before using it for a history operation.
+2. Review and land the parent into `master` by squash. A commit list in the squash message preserves provenance, not the original commits' ancestry.
+3. Replay only the child's increment onto the updated `master`, then retarget the child to `master`. Do not replay already-landed parent commits. For a simple linear branch this can be a rebase from the recorded boundary; for mixed/merged history, construct and inspect a branch containing only the intended child changes instead of applying a blind rebase.
+4. Push changes only to an authorized branch, respecting its history-rewrite policy. Use lease protection when an authorized rewrite is needed; never force-push `master` or rewrite another contributor's work without permission.
+5. Recheck the final diff, scope, review concerns, and exact head after restacking. Wait for the applicable official checks on that result. Parent checks and the child's earlier checks do not prove a newly constructed head.
+
+Process a longer stack in dependency order. Keep a parent branch while a child still depends on it; branch cleanup is a separate authorized action. The CI workflow accepts temporary parent bases, but that support does not authorize merging the child into the parent or bypassing the final `master` checks.
 
 ## Definition of Ready (DoR)
 
@@ -114,8 +136,8 @@ Before requesting review, the PR has all of these:
 
 Before merge:
 
-- `CI Required Gate` is green.
-- Required reviewers approved (including any CODEOWNERS paths).
+- All actual required checks and the policy gate are green for the final head; any allowed skip has a documented classification basis.
+- Actual required reviewers approved (including any enforced CODEOWNERS paths), and substantive concerns are resolved.
 - Risk labels match touched paths. See [Labels](./labels.md).
 - Migration / compatibility impact is documented.
 - Rollback path is concrete and fast.
@@ -132,7 +154,7 @@ Every merge:
 - Rollback plan is explicit.
 - Commit title follows Conventional Commits.
 
-Squash-merge with full commit history preserved in the body. The `squash-merge` skill produces both the purple **Merged** badge and the conventional-commits formatted body, see [Skills](./skills.md) for invocation.
+Squash-merge through GitHub with a conventional title and original commit provenance in the body. This records the PR relationship without preserving intermediate commits as Git ancestry. The `squash-merge` skill binds the final head, uses a body file, and verifies the result; see [Skills](./skills.md) for invocation. Existing merge authorization is sufficient within scope, while actual GitHub checks and review policy remain mandatory.
 
 ## AI / Agent contribution policy
 
@@ -165,7 +187,7 @@ For AI-heavy PRs, reviewers focus on:
 - Blocked PRs get one actionable checklist comment, not a series of partial reviews.
 - `status:no-stale` is reserved for accepted or otherwise long-lived work with a recorded stale-exemption reason and contributor-visible routing evidence when the issue is not already protected by another stale exclusion. Active release trackers and active RFC or design trackers may use the tracker itself as that visible reason and routing surface while they remain active. Existing exemptions missing those facts are audit findings until the stale-exemption repair packet lands.
 
-For stacked work, require explicit `Depends on #...` so review order is deterministic.
+For stacked work, require explicit `Depends on #...` and follow [Stacked PRs](#stacked-prs), including replaying only the child increment after a parent squash.
 
 For replacements, require explicit `Supersedes #...`. See [Superseding PRs](./superseding.md) for attribution and template rules.
 

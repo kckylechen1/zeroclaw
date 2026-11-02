@@ -1,27 +1,50 @@
 # CI & Actions
 
-Every workflow lives in `.github/workflows/`. The sections below group them by trigger: automatic on git events, or maintainer-invoked/advisory workflows via `workflow_dispatch` and schedules.
+Workflow entrypoints live in `.github/workflows/`. This page describes the fork's source policy and how to verify its coverage. GitHub branch protection, rulesets, Actions permissions, and environment approvals are separate cloud settings; editing this page or a workflow does not save those settings. CI policy and cloud alignment are tracked in [#552](https://github.com/kckylechen1/zeroclaw/issues/552).
 
 ## Automatic workflows
 
 ### Quality Gate (`ci.yml`)
 
-Fires on PRs targeting any branch, trusted pushes to `master`, and merge-queue groups.
-Composite job with multiple matrix legs:
+The workflow starts on PRs targeting any branch, pushes to `master`, and `merge_group`. It stays unconditional at the workflow level so a required check is always reported. Supporting the merge-group event does not enable or imply a configured merge queue.
 
-- **fmt**: `cargo fmt --all -- --check`
-- **lint**: `cargo clippy --workspace --all-targets --locked --features ci-all -- -D warnings`, plus the provider dispatch gate (`scripts/ci/provider_dispatch_gate.sh`). It type-checks every target, benches included, with the curated `ci-all` feature set.
-- **build**: matrix: `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`
-- **check**: `cargo check --locked` across the no-default-features, minimal-companion, and slim-control graphs; slim-control includes `--all-targets`. The separate **check-32bit** job checks `i686-unknown-linux-gnu` with no default features.
-- **test**: `cargo nextest run --locked` per package partition leg on Linux. `dev/ci/test-partition.json` is the single source for each leg's packages, its features, and its extra filtered runs (the runtime leg adds a `sandbox-landlock` run filtered to `landlock` tests); a guard step fails the leg if a workspace member is missing from, or duplicated in, the partition. The architecture guards (config-write isolation, Fluent coverage) are tests in the root `architecture` target and run in the `app` leg. Run a leg locally with `scripts/dev/leg.sh <leg>` (same packages and features as CI).
-- **security**: `cargo deny check`
-- **nix-eval**: evaluates the NixOS module assertions (`nixos-module-eval` flake check)
-- **docs-style**: markdown lint, em-dash prose check, and changed-line link gate via `scripts/ci/docs_quality_gate.sh` and `scripts/ci/docs_links_gate.sh`
-- **installer-drift**: `cargo generate installers --check`. On PRs it runs only when a Cargo manifest, `Cargo.lock`, `xtask/`, `dev/ci/`, `dist/`, or a generated install surface changes.
+`Change Scope` runs first. `scripts/ci/change_scope.py` compares the checked-out result against the event's actual base:
 
-The 32-bit and minimal-companion checks are part of the required PR gate. Cross-Platform Clippy provides separate advisory lint coverage on macOS and Windows.
+| Event | Comparison base |
+|---|---|
+| Pull request | `pull_request.base.sha`, including a stacked PR's parent branch |
+| Master push | The push's `before` SHA |
+| Merge group | `merge_group.base_sha` |
 
-`fmt` runs first as the cheap serial gate. Every other job declares `needs: [fmt]` and fans out after formatting passes; `CI Required Gate` aggregates every result (a skipped job counts as passing). Branch protection pins the composite gate job. A PR cannot merge until this is green. The `master` push run keeps the same quality signal while seeding trusted Rust caches for later PR runs; jobs that write no cache and only re-prove the PR result (repository structure, docs style, Nix eval, Nix hash drift) are skipped on push.
+Only ordinary, non-executable files in a narrow prose allowlist can skip the runtime matrix: root `README.md` and Markdown or MDX under `docs/book/src/`. Renames are evaluated as deletion plus addition. Mixed changes, paths outside that allowlist, symlinks, submodules, and executable-mode changes retain the full runtime lane. Runtime prompts, personality templates, fixtures, agent instructions, CI files, and build configuration do not become prose merely because their filename ends in `.md`.
+
+An unavailable, invalid, empty, or unresolvable comparison retains full runtime validation and the real docs build. It never becomes an empty successful docs-only result.
+
+| Selected work | Coverage |
+|---|---|
+| Every run | Scope-policy checks, workflow validation, `Docs Style`, and `CI Required Gate` |
+| Full runtime lane | Rust formatting; workspace Clippy with `ci-all` and `-D warnings`; provider-dispatch guard; Linux build and macOS/Windows checks; no-default, minimal-companion, slim-control and i686 checks; four nextest partitions; dependency security; Web regressions/build; applicable repository, Nix, installer and targeted Windows checks |
+| Docs Build | Real references, rustdoc, preprocessors, translation checks and all locales through `cargo mdbook build`, without publishing |
+
+The four test partitions and their feature-specific runs come from `dev/ci/test-partition.json`. Formatting precedes the runtime fan-out; documentation checks depend on scope classification and run independently of Rust formatting.
+
+Master pushes use the same classifier. A prose merge therefore skips the runtime matrix again instead of rebuilding it to warm caches. Full runtime pushes retain their selected build and cache-writing jobs; the repository-structure and Nix jobs remain PR/merge-group checks. Quality Gate and Code Analysis key push concurrency by commit so a later prose push cannot cancel or replace an earlier code push's work. Updated PR heads still cancel obsolete runs for that PR.
+
+### Documentation coverage
+
+`Docs Style` installs the pinned parser from `scripts/ci/docs-requirements.txt` and runs the document-gate regressions. `docs_quality_gate.sh` checks changed book/README lines for Markdown style and prose punctuation when a valid base is available. A missing or invalid base checks the full supported style scope and may expose existing issues.
+
+`docs_links_gate.sh` checks the complete published book navigation, included sources, and local target paths, plus tracked repository Markdown outside the book. This catches old incoming links after a page or asset is renamed or deleted, including an unchanged README that links to it. Book-relative links must resolve within the published book; links to repository source outside that boundary need an explicit source URL.
+
+The source gate reports the exact known generated pages and snippets it defers. It does not prove custom preprocessor output, rendered anchors, HTTP availability, or a successful publication build. HTTP links are collected without network requests.
+
+`Docs Build` runs when navigation, book configuration, themes, translations, generator dependencies, or documentation CI/build inputs change. Changes to a book source containing preprocessor input in either the base or head also select the real build. The exact input list belongs to `change_scope.py`. Ordinary prose without those inputs uses the source checks and avoids workspace rustdoc.
+
+### Aggregate and cloud protection
+
+`CI Required Gate` uses `if: always()` and `scripts/ci/required_gate.py` to verify the complete dependency set, classifier outputs, and every expected job result. Failures, cancellations, missing results, and unexpected skips fail the gate. A skip is accepted only when the event and selected scope explicitly expect it.
+
+The intended branch rule requires this stable aggregate. Cloud protection alignment remains a separate step under #552: confirm the actual effective required checks before treating the source policy as enforced. If protection still requires individual legacy jobs, a red aggregate alone does not make it a required merge barrier. Add and verify the aggregate on the current PR head before retiring obsolete required-check names; preserve the applicable review and bypass rules. See [Allowed actions and cloud verification](#allowed-actions) for read-only inspection.
 
 Fresh required CI is normally the shared evidence for the Cargo surfaces it actually runs. A local rerun of the same Cargo command on the same head, target, and feature set is duplicate confidence, not a stronger proof. Before asking for extra Cargo or Clippy, compare the changed surface with the current workflow files and the actual checks on the PR. Extra validation belongs where the required gate does not prove the thing under review:
 
@@ -33,15 +56,27 @@ Fresh required CI is normally the shared evidence for the Cargo surfaces it actu
 
 ### Local pre-push checks
 
-The optional `.githooks/pre-push` hook runs the Rust quality helper and `cargo test --locked --workspace`. Its default lint graph uses default features plus the channels and runtime `heavy-tests` suites and denies `clippy::correctness`. With `ZEROCLAW_STRICT_LINT=1`, it calls the helper with `--both`: correctness Clippy, provider-dispatch, then strict Clippy with `ci-all` and `-D warnings`. Toolchain, formatting, and provider-dispatch checks each run once. Standalone `--strict` still runs only the strict lint graph.
+Follow the affected-surface commands in `AGENTS.md`: use `scripts/dev/cargo-local.sh` and the owning `scripts/dev/leg.sh <leg>` for Rust changes. Fresh hosted CI supplies the wider workspace evidence. Pure prose uses the docs gates without a local Cargo build.
 
-Both lint graphs are retained because enabling more features can change conditional compilation. The hook's default workspace test run is distinct from CI's package partitions and feature-specific runs above. `ZEROCLAW_DOCS_LINT=1` and `ZEROCLAW_DOCS_LINKS=1` enable their respective docs gates before tests.
+For committed documentation changes, set `PR_BASE_SHA` from the verified PR metadata's `.base.sha`, including the parent branch of a stacked PR. Before opening a PR, use an explicitly chosen target commit. Refresh this value after restacking or retargeting, then pass it explicitly:
+
+```bash
+export BASE_SHA="${PR_BASE_SHA:?resolve the actual PR base SHA}"
+git cat-file -e "${BASE_SHA}^{commit}"
+python3 -m pip install -r scripts/ci/docs-requirements.txt
+bash scripts/ci/docs_quality_gate.sh
+bash scripts/ci/docs_links_gate.sh
+```
+
+The changed-line comparison uses committed `HEAD`. For uncommitted text, run Markdownlint directly on the edited files; do not present an empty committed diff as validation of those edits. The local-target pass reads the working tree. Omitting `BASE_SHA` requests the documented full-scan fallback.
+
+The optional `.githooks/pre-push` entrypoint still contains a workspace test run and does not implement CI's classifier. Inspect its commands before enabling it; it is not the default validation prescription for a prose change. Its `ZEROCLAW_DOCS_LINT` and `ZEROCLAW_DOCS_LINKS` opt-ins inherit the explicitly exported base above.
 
 ### Dependency policy coverage
 
-The required security job runs `cargo deny check` from the root package with its default features. The root manifest is also a workspace manifest, but this command does not select every workspace member as a graph root or enable every optional feature. Its passing result covers the selected graph, not every package version recorded in `Cargo.lock`. The exact-version skips in `deny.toml` apply within that graph; they do not identify a canonical newest version.
+The full lane's security job runs `cargo deny check` from the root package with its default features and also runs `cargo audit`. The root manifest is a workspace manifest, but cargo-deny's command does not select every member as a graph root or enable every optional feature. Cargo Audit checks the lockfile advisory inventory; the two commands have different coverage. The exact-version skips in `deny.toml` apply within its selected graph; they do not identify a canonical newest version.
 
-This root/default coverage is the accepted required gate. To diagnose the broader duplicate and wildcard policy without changing the lockfile, run:
+To diagnose the broader duplicate and wildcard policy without changing the lockfile, run:
 
 ```bash
 cargo deny --locked --workspace --all-features check bans
@@ -50,6 +85,12 @@ cargo deny --locked --workspace --all-features check bans
 The broader graph has known duplicate and wildcard failures and is not a passing required gate. Expanding enforcement requires a separate reviewed policy change; do not add exceptions merely to turn that diagnostic green. Daily `cargo deny check advisories` checks advisory policy on its selected graph, not duplicate-version bans. Neither its success nor a lockfile advisory audit proves that all-workspace bans pass.
 
 Dependency-refresh PRs must disclose downgrades (or explicitly state none), newly added duplicate versions, and any deny exception changes with their reasons in the PR template. Compare package and source identities as well as versions: adding a parallel major is a new duplicate, not by itself a downgrade. Record unknown resolver causes as unknown.
+
+### Code Analysis (`ci-code-analysis.yml`)
+
+Uses the same diff classifier for static analysis. Semgrep runs on code/configuration PRs and master pushes; ordinary prose skips it. Semgrep remains report-only while findings are triaged. Rust CodeQL runs on full-scope master pushes and daily at 05:37 UTC, with scheduled scans retaining full coverage. The fork no longer skips CodeQL through an upstream-only repository condition.
+
+CodeQL builds the workspace with `ci-all` and uploads successful analysis to GitHub's Security tab. It is separate from the required PR aggregate and does not add the deep build to every PR. Inspect the actual run when diagnosing analysis or upload failures; a source condition alone does not prove that analysis completed.
 
 ### Daily Advisory Scan (`daily-audit.yml`)
 
@@ -77,7 +118,7 @@ Runs on every PR open/edit/synchronize. Runs the validator unit tests (`scripts/
 
 ### Deploy mdBook docs to Pages (`docs-deploy.yml`)
 
-Triggered on tag push, on `master` pushes that touch `docs/book/`, `xtask/`, or `locales.toml`, nightly (to refresh code-derived pages such as rustdoc), and on `workflow_dispatch`; builds and publishes versioned docs to the `gh-pages` branch. See [Release Runbook → Versioned documentation deployment](./release-runbook.md#step-7-versioned-documentation-deployment) for the version-floor and bootstrap rules.
+Triggered on tag push, on `master` pushes that touch `docs/book/`, `xtask/`, `locales.toml`, or the deploy workflow itself, nightly (to refresh code-derived pages such as rustdoc), and on `workflow_dispatch`; builds and publishes versioned docs to the `gh-pages` branch. The PR's read-only `Docs Build` job is separate from this publisher. See [Release Runbook → Versioned documentation deployment](./release-runbook.md#step-7-versioned-documentation-deployment) for the version-floor and bootstrap rules.
 
 ### Docker Image PR Check (`docker-image-pr.yml`)
 
@@ -107,11 +148,13 @@ Manual trigger for building release binaries across the full target matrix: Linu
 
 ### Cross-Platform Clippy (`cross-platform-clippy.yml`)
 
-Manual and weekly scheduled advisory lint coverage on macOS aarch64 and Windows x86_64 targets. It uses the required lint job's `ci-all` feature set and `-D warnings`, with `--target` set for each platform. It does not run on PRs and is not part of `CI Required Gate`. The Linux 32-bit and minimal-companion checks run in `ci.yml`.
+Runs on PRs changing `crates/zeroclaw-runtime/`, `crates/zeroclaw-infra/`, or this workflow, as well as manual dispatch and the weekly schedule. Each selected run checks the workspace's targets on macOS aarch64 and Windows x86_64 with `ci-all` and `-D warnings`. This catches test-only imports and conditional-compilation errors that a normal platform `cargo check` does not cover.
+
+Ordinary prose PRs do not trigger this workflow. It remains separate advisory coverage outside `CI Required Gate`; inspect its current-head results when the changed surface needs it. The Linux i686 and minimal-companion checks remain in the main workflow.
 
 ### Release Stable (`release-stable-manual.yml`)
 
-Manual trigger for the full release pipeline. Builds all targets, creates the GitHub Release, pushes the prebuilt `latest`, versioned, and `debian` Docker images to GHCR, calls the generated Docker variant matrix at the release tag, and triggers the website redeploy. Homebrew Core detects new releases through its own autobump service. Two environment gates require maintainer approval mid-run: `github-releases` (the `publish` job) and `docker`.
+Manual trigger for the full release pipeline. Builds all targets, creates the GitHub Release, pushes the prebuilt `latest`, versioned, and `debian` Docker images to GHCR, calls the generated Docker variant matrix at the release tag, and triggers the website redeploy. Homebrew Core detects new releases through its own autobump service. The workflow declares `github-releases` and `docker` environments; their required reviewers and other protection settings must be verified in the target repository.
 
 See the [Release Runbook](./release-runbook.md) for the full procedure.
 
@@ -132,10 +175,10 @@ Docker images push to GHCR using the automatic `GITHUB_TOKEN`; there is no separ
 
 ## Build cache behavior
 
-Most Rust-heavy jobs in `ci.yml` use `Swatinem/rust-cache@v2`. The `fmt`, `nix-eval`, and `docs-style` jobs (none of which compile the workspace) do not. These behaviors are worth knowing when triaging cache-related flakes:
+Rust compilation jobs in `ci.yml` use `Swatinem/rust-cache@v2`; scope checks, formatting, Nix and docs source checks do not compile the workspace. Cache behavior follows the jobs that actually run:
 
-- **Cache writes are master-only.** `save-if` is conditioned on `github.ref == 'refs/heads/master'`, so PR runs read the master-seeded cache but never update it. PR branches can't pollute the shared cache with branch-specific artifacts. The `push` trigger on `master` is what gives the workflow a trusted cache-writing run after merges.
-- **Cache saves on failure.** `cache-on-failure: true` is set on every job, so a partial run still seeds the next attempt warm.
+- **Main-gate Rust cache writes are master-only.** `save-if` is conditioned on `github.ref == 'refs/heads/master'`. PRs restore eligible caches without saving them. A prose-only master push skips the Rust jobs and does not refresh their caches.
+- **Partial dependency caches may be saved.** The configured `cache-on-failure: true` preserves eligible artifacts from failed jobs when the action's save step can run; cancellation or timeout is not a promise of a saved cache.
 - **Windows build cache is enabled.** The Windows build leg runs the same pinned Rust cache action as Linux and macOS. If Windows cache behavior flakes or regresses, revert the workflow change and document the failing restore/save evidence in the cache issue.
 - **Incremental compilation is disabled.** `CARGO_INCREMENTAL: 0` at the workflow level. Incremental builds inflate cache size and produce non-reproducible artifacts under partial-stale conditions.
 - **Tool installation downloads prebuilt binaries.** The `security` job downloads the pinned `cargo-deny` 0.19.9 Linux musl archive from its GitHub release; the `test` job downloads `cargo-nextest` from `get.nexte.st/latest/linux`. Both install steps run unconditionally, including after a Rust cache hit.
@@ -144,8 +187,10 @@ Most Rust-heavy jobs in `ci.yml` use `Swatinem/rust-cache@v2`. The `fmt`, `nix-e
 
 | Symptom | First thing to check |
 |---|---|
-| `Release Stable` dies at `startup_failure` with zero jobs after a `uses:` ref changed | Check the run summary and repository Actions policy. If GitHub reports a selected-actions rejection, compare the changed ref with the [allowlist](#allowed-actions), add only the rejected pattern, wait for settings propagation, then dispatch a fresh run. Otherwise, investigate the workflow definition or other repository policy; `startup_failure` alone does not identify the cause |
-| `CI Required Gate` red | Start with `fmt`, then `lint`, then `test`, then `build` |
+| `Release Stable` dies at `startup_failure` with zero jobs after a `uses:` ref changed | Check the run summary and the target repository's [Actions policy](#allowed-actions). A selected-actions rejection names a policy mismatch; a generic startup failure does not establish its cause |
+| `CI Required Gate` red | Read `Change Scope` and the aggregate's expected-versus-actual result first, then the failing or unexpectedly skipped job |
+| Prose change starts a Rust or docs build | Check both sides of the diff, file modes, actual event base, and whether the page contains preprocessor input |
+| Docs source gate fails after a deletion or rename | Check unchanged incoming links, SUMMARY membership, include hosts, and repository README links |
 | Release `validate` failed | `Cargo.toml` version doesn't match the workflow input, or the tag already exists |
 | Release build leg failed | The specific target's job log. Android is `experimental` and runs with `continue-on-error` |
 | Environment gate timed out | Re-run only the timed-out job from the workflow run page |
@@ -153,7 +198,7 @@ Most Rust-heavy jobs in `ci.yml` use `Swatinem/rust-cache@v2`. The `fmt`, `nix-e
 
 ## Allowed actions
 
-The repository runs Actions in `selected` mode, only the actions in this allowlist may run. The allowlist must stay tight; new third-party actions need explicit maintainer approval before being added.
+The source inventory below is not evidence that the target repository runs in `selected` mode or that these patterns have been saved to its allowlist. Inspect the effective cloud policy before diagnosing an action rejection or proposing a policy change.
 
 All third-party refs are pinned to a full commit SHA with a trailing version comment; the version column below records that comment.
 
@@ -180,7 +225,7 @@ All third-party refs are pinned to a full commit SHA with a trailing version com
 
 The GitHub Release itself is created with `gh release create` inside the `publish` job, not a release action.
 
-Equivalent allowlist patterns (kept narrow on purpose):
+Candidate allowlist patterns for that source inventory, when `selected` mode is the approved policy:
 
 ```
 actions/*
@@ -196,35 +241,29 @@ github/codeql-action/init@*
 github/codeql-action/analyze@*
 ```
 
-Export the current effective policy:
-
-<div class="os-tabs-src">
-
-#### sh
+Bind inspection to the task's verified repository. For this fork, the read-only checks are:
 
 ```sh
-gh api repos/zeroclaw-labs/zeroclaw/actions/permissions
-gh api repos/zeroclaw-labs/zeroclaw/actions/permissions/selected-actions
+TARGET_REPO=kckylechen1/zeroclaw
+test "$(gh repo view "$TARGET_REPO" --json nameWithOwner --jq .nameWithOwner)" = "$TARGET_REPO" || exit 1
+gh api "repos/$TARGET_REPO/branches/master/protection/required_status_checks"
+gh api "repos/$TARGET_REPO/rules/branches/master"
+gh api "repos/$TARGET_REPO/actions/permissions"
+gh api "repos/$TARGET_REPO/actions/permissions/selected-actions"
 ```
 
-</div>
+A permission-denied or unavailable response leaves that setting unverified. It does not prove that a protection rule or allowlist is absent. Complete the readback with authorized repository administration access before changing the policy.
 
-Any PR that adds or changes a `uses:` action source must include an allowlist impact note in its body. Avoid broad wildcard exceptions; expand the allowlist only for verified missing actions.
+Any PR that adds or changes a `uses:` action source should state its allowlist impact. Match any authorized update to the verified missing action and read the setting back afterward. A source PR, a workflow comment, or this page does not constitute a saved cloud-policy receipt.
 
 ## Maintenance rules
 
-- Keep `CI Required Gate` deterministic and small. Adding jobs to the gate needs a clear quality argument.
+- Keep `CI Required Gate` deterministic and small. A new job needs a clear quality argument and a matching expected-result policy.
 - All third-party action refs must be pinned to a full commit SHA (per the allowlist policy above).
-- Keep `ci.yml`, `dev/ci.sh`, and `.githooks/pre-push` aligned. Shared gates must live in `scripts/ci/`; each caller invokes the helper instead of copying its commands.
+- Keep scope decisions and expected job results in `scripts/ci/`. Call shared helpers from workflows and local entrypoints instead of copying their decisions. Review changes to the classifier and aggregate together.
 - Keep `scripts/ci/prepare_docker_context.sh`, `docker-image-pr.yml`, and the Docker job in `release-stable-manual.yml` aligned so PR validation exercises the same context shape the release workflow publishes.
-- The `docs-style` gate job runs `bash scripts/ci/docs_quality_gate.sh` (markdown lint + em-dash prose check) and `bash scripts/ci/docs_links_gate.sh` (changed-line link gate). Run both scripts locally before pushing docs changes.
+- Run both docs gates with an explicit valid base before pushing committed documentation changes. Preserve the source gate's stated coverage limits and use the real docs build for selected rendering inputs.
 
 ## Emergency rollback
 
-If the allowlist locks out a critical action mid-incident:
-
-1. Temporarily set Actions policy back to `all`.
-2. Restore `selected` allowlist after identifying the missing entry.
-3. Record the incident and the final allowlist delta.
-
-This is the only justified path to `all` mode, and it should never outlast the incident.
+If an Actions policy blocks a critical run, identify the rejected action and verify the task repository first. Apply the smallest authorized policy correction or revert the affected workflow change. This page does not authorize switching the repository to unrestricted `all` mode. Record the incident, the exact policy delta, and the readback of the restored setting.

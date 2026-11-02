@@ -1,6 +1,6 @@
 ## Summary
 
-- **Base branch:** `master` (all contributions)
+- **Base branch:** `master` normally; for a dependent PR, name the temporary parent branch and `Depends on #N`. After the parent squash, replay only this PR's increment onto current `master`, retarget, and check the final diff before landing.
 - **What changed and why:** (2 to 5 bullets; the diff shows *what*, you explain *why*)
 - **Scope boundary:** (what this PR explicitly does NOT change)
 - **Blast radius:** (what other subsystems or consumers could be affected)
@@ -38,16 +38,23 @@ When reviewer testing is requested, frame it A/B: the same steps should show the
 
 Explain how the change was checked. Use the evidence that matches the changed surface: required CI, focused local tests, manual smoke, docs/link gates, or full workspace checks when they prove something narrower evidence would miss. Paste relevant output tails for commands you ran, not "all passed".
 
-Fresh required CI is valid evidence when it covers the changed surface. Add extra validation only for a concrete coverage gap, such as platform-specific tests, cross-platform lint, desktop app coverage, release target builds, or stale/unavailable CI.
+Fresh required CI is valid evidence when it covers the changed surface on the same head, target, and feature set. Name that head or link the exact run. Add extra validation only for a concrete coverage gap, such as platform-specific tests, cross-platform lint, desktop app coverage, release target builds, or stale/unavailable CI. For a stack, distinguish parent evidence from this PR's increment and refresh the evidence after its final restack/retarget.
 
 ```sh
-# Rust/code examples; choose the checks that match the changed surface:
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+# Rust/code examples; follow AGENTS.md for the changed surface:
+scripts/dev/cargo-local.sh fmt --all -- --check
+scripts/dev/cargo-local.sh check -p <crate>
+scripts/dev/leg.sh <owning-leg>
 ```
 
-Docs-only changes: replace with markdown lint (`scripts/ci/docs_quality_gate.sh`) and added-link integrity (`scripts/ci/docs_links_gate.sh`). Bootstrap scripts: add `bash -n install.sh`.
+Docs-only changes: replace the Rust examples with the following, using the actual PR base commit as `PR_BASE_SHA` (the temporary parent for a stack), as described in `AGENTS.md`. Run against the committed candidate and record the base; no local Cargo is required for prose alone.
+
+```sh
+BASE_SHA="${PR_BASE_SHA:?resolve the actual PR base SHA}" bash scripts/ci/docs_quality_gate.sh
+BASE_SHA="${PR_BASE_SHA:?resolve the actual PR base SHA}" bash scripts/ci/docs_links_gate.sh
+```
+
+Workflow/policy/configuration changes still need the applicable structural checks and risk review. Bootstrap scripts: add `bash -n install.sh`. Protected code surfaces retain the additional validation in `AGENTS.md`.
 
 - **CI checks relied on and why they cover this change:** (for example, `Docs Style` covers the changed Markdown lines)
 - **Known CI coverage gap, if any:** (for example, `None after the docs and links gates`)
