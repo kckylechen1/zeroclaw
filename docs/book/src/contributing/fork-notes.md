@@ -98,7 +98,7 @@ The companion memcore stores (#49) are a separate, feature-gated, in-process exc
 
 ## Yonbo device host import
 
-The optional [Yonbo host](../../../../crates/zeroclaw-yonbo-node/README.md)
+The optional [Yonbo host](https://github.com/kckylechen1/zeroclaw/blob/master/crates/zeroclaw-yonbo-node/README.md)
 imports the independently exercised thin-device prototype as a pure-std crate.
 It defaults to no listener and no display execution. Its PSK maintenance protocol
 is not Gateway Node v2; it does not replace DeviceIdentity, policy ceilings,

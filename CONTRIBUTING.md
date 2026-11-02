@@ -132,7 +132,7 @@ The book is the source of truth for everything contributor-facing. Quick links:
 | Privacy & PII rules | [Privacy](docs/book/src/contributing/privacy.md) |
 | Testing taxonomy | [Testing](docs/book/src/contributing/testing.md) |
 | PR review protocol | [PR review protocol](docs/book/src/contributing/pr-review-protocol.md) |
-| Trait extension examples | [Extension examples](docs/book/src/developing/extension-examples.md) |
+| Architecture and extension paths | [Architecture and contribution map](docs/book/src/contributing/architecture-map.md) |
 | Contributor License Agreement | [CLA](docs/book/src/contributing/cla.md) |
 | Project foundations (governance, culture, infrastructure) | [Foundations](docs/book/src/foundations/README.md) |
 
