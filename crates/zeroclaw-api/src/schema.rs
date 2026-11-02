@@ -89,6 +89,16 @@ pub const GEMINI_UNSUPPORTED_KEYWORDS: &[&str] = &[
 /// Keywords that should be preserved during cleaning (metadata).
 const SCHEMA_META_KEYS: &[&str] = &["description", "title", "default"];
 
+/// Only schema-valued keywords are traversed. Other values (including object
+/// literals in `default`, `enum`, and `examples`) are instance data.
+#[derive(Clone, Copy)]
+enum SchemaChildren {
+    None,
+    Schema,
+    Map,
+    Dependencies,
+}
+
 /// Schema cleaning strategies for different LLM model_providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CleaningStrategy {
@@ -155,7 +165,7 @@ impl SchemaCleanr {
     /// `clean(s) == s`. The triggers mirror every rewrite path in
     /// `clean_object`: strategy-specific keyword removal, plus the
     /// strategy-independent rewrites (`$ref` resolution, `const` → `enum`,
-    /// `anyOf`/`oneOf` simplification and sibling-`type` skipping, and
+    /// `anyOf`/`oneOf` simplification, and
     /// null-stripping in `type` arrays).
     pub fn needs_cleaning(schema: &Value, strategy: CleaningStrategy) -> bool {
         match schema {
@@ -170,7 +180,23 @@ impl SchemaCleanr {
                         "type" if value.is_array() => return true,
                         _ => {}
                     }
-                    if Self::needs_cleaning(value, strategy) {
+                    let children_need_cleaning = match Self::schema_children(key) {
+                        SchemaChildren::None => false,
+                        SchemaChildren::Schema => Self::needs_cleaning(value, strategy),
+                        SchemaChildren::Map | SchemaChildren::Dependencies => {
+                            value.as_object().is_some_and(|children| {
+                                children.values().any(|child| {
+                                    // Legacy dependency arrays contain property names.
+                                    (!matches!(
+                                        Self::schema_children(key),
+                                        SchemaChildren::Dependencies
+                                    ) || child.is_object())
+                                        && Self::needs_cleaning(child, strategy)
+                                })
+                            })
+                        }
+                    };
+                    if children_need_cleaning {
                         return true;
                     }
                 }
@@ -190,7 +216,14 @@ impl SchemaCleanr {
             HashMap::new()
         };
 
-        Self::clean_with_defs(schema, &defs, strategy, &mut HashSet::new())
+        let ref_siblings_apply = Self::ref_siblings_apply(&schema);
+        Self::clean_with_defs(
+            schema,
+            &defs,
+            strategy,
+            ref_siblings_apply,
+            &mut HashSet::new(),
+        )
     }
 
     /// Validate that a schema is suitable for LLM tool calling.
@@ -221,6 +254,52 @@ impl SchemaCleanr {
     // Internal implementation
     // --------------------------------------------------------------------
 
+    fn schema_children(key: &str) -> SchemaChildren {
+        match key {
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+                SchemaChildren::Map
+            }
+            "dependencies" => SchemaChildren::Dependencies,
+            "items"
+            | "prefixItems"
+            | "additionalItems"
+            | "contains"
+            | "additionalProperties"
+            | "propertyNames"
+            | "unevaluatedItems"
+            | "unevaluatedProperties"
+            | "contentSchema"
+            | "not"
+            | "if"
+            | "then"
+            | "else"
+            | "anyOf"
+            | "oneOf"
+            | "allOf" => SchemaChildren::Schema,
+            _ => SchemaChildren::None,
+        }
+    }
+
+    /// Drafts 4–7 ignore a reference object's sibling assertions.
+    /// Undeclared tool schemas use the modern sibling behavior; this is not a
+    /// general dialect resolver or support for embedded schema resources.
+    fn ref_siblings_apply(schema: &Value) -> bool {
+        !matches!(
+            schema
+                .get("$schema")
+                .and_then(Value::as_str)
+                .map(|uri| uri.trim_end_matches('#')),
+            Some(
+                "http://json-schema.org/draft-04/schema"
+                    | "https://json-schema.org/draft-04/schema"
+                    | "http://json-schema.org/draft-06/schema"
+                    | "https://json-schema.org/draft-06/schema"
+                    | "http://json-schema.org/draft-07/schema"
+                    | "https://json-schema.org/draft-07/schema"
+            )
+        )
+    }
+
     /// Extract $defs and definitions into a flat map for reference resolution.
     fn extract_defs(obj: &Map<String, Value>) -> HashMap<String, Value> {
         let mut defs = HashMap::new();
@@ -247,13 +326,18 @@ impl SchemaCleanr {
         schema: Value,
         defs: &HashMap<String, Value>,
         strategy: CleaningStrategy,
+        ref_siblings_apply: bool,
         ref_stack: &mut HashSet<String>,
     ) -> Value {
         match schema {
-            Value::Object(obj) => Self::clean_object(obj, defs, strategy, ref_stack),
+            Value::Object(obj) => {
+                Self::clean_object(obj, defs, strategy, ref_siblings_apply, ref_stack)
+            }
             Value::Array(arr) => Value::Array(
                 arr.into_iter()
-                    .map(|v| Self::clean_with_defs(v, defs, strategy, ref_stack))
+                    .map(|v| {
+                        Self::clean_with_defs(v, defs, strategy, ref_siblings_apply, ref_stack)
+                    })
                     .collect(),
             ),
             other => other,
@@ -265,16 +349,25 @@ impl SchemaCleanr {
         obj: Map<String, Value>,
         defs: &HashMap<String, Value>,
         strategy: CleaningStrategy,
+        ref_siblings_apply: bool,
         ref_stack: &mut HashSet<String>,
     ) -> Value {
         // Handle $ref resolution
         if let Some(Value::String(ref_value)) = obj.get("$ref") {
-            return Self::resolve_ref(ref_value, &obj, defs, strategy, ref_stack);
+            return Self::resolve_ref(
+                ref_value,
+                &obj,
+                defs,
+                strategy,
+                ref_siblings_apply,
+                ref_stack,
+            );
         }
 
         // Handle anyOf/oneOf simplification
         if (obj.contains_key("anyOf") || obj.contains_key("oneOf"))
-            && let Some(simplified) = Self::try_simplify_union(&obj, defs, strategy, ref_stack)
+            && let Some(simplified) =
+                Self::try_simplify_union(&obj, defs, strategy, ref_siblings_apply, ref_stack)
         {
             return simplified;
         }
@@ -282,8 +375,6 @@ impl SchemaCleanr {
         // Build cleaned object
         let mut cleaned = Map::new();
         let unsupported: HashSet<&str> = strategy.unsupported_keywords().iter().copied().collect();
-        let has_union = obj.contains_key("anyOf") || obj.contains_key("oneOf");
-
         for (key, value) in obj {
             // Skip unsupported keywords
             if unsupported.contains(key.as_str()) {
@@ -296,35 +387,34 @@ impl SchemaCleanr {
                 "const" => {
                     cleaned.insert("enum".to_string(), json!([value]));
                 }
-                // Skip type if we have anyOf/oneOf (they define the type)
-                "type" if has_union => {
-                    // Skip
-                }
                 // Handle type arrays (remove null)
                 "type" if matches!(value, Value::Array(_)) => {
                     let cleaned_value = Self::clean_type_array(value);
                     cleaned.insert(key, cleaned_value);
                 }
-                // Recursively clean nested schemas
-                "properties" => {
-                    let cleaned_value = Self::clean_properties(value, defs, strategy, ref_stack);
-                    cleaned.insert(key, cleaned_value);
-                }
-                "items" => {
-                    let cleaned_value = Self::clean_with_defs(value, defs, strategy, ref_stack);
-                    cleaned.insert(key, cleaned_value);
-                }
-                "anyOf" | "oneOf" | "allOf" => {
-                    let cleaned_value = Self::clean_union(value, defs, strategy, ref_stack);
-                    cleaned.insert(key, cleaned_value);
-                }
-                // Keep all other keys, cleaning nested objects/arrays recursively.
+                // Recurse only where the keyword defines subschemas. Property
+                // and definition names are map keys, never schema keywords.
                 _ => {
-                    let cleaned_value = match value {
-                        Value::Object(_) | Value::Array(_) => {
-                            Self::clean_with_defs(value, defs, strategy, ref_stack)
+                    let children = Self::schema_children(&key);
+                    let cleaned_value = match children {
+                        SchemaChildren::Schema => Self::clean_with_defs(
+                            value,
+                            defs,
+                            strategy,
+                            ref_siblings_apply,
+                            ref_stack,
+                        ),
+                        SchemaChildren::Map | SchemaChildren::Dependencies => {
+                            Self::clean_schema_map(
+                                value,
+                                defs,
+                                strategy,
+                                ref_siblings_apply,
+                                ref_stack,
+                                matches!(children, SchemaChildren::Dependencies),
+                            )
                         }
-                        other => other,
+                        SchemaChildren::None => value,
                     };
                     cleaned.insert(key, cleaned_value);
                 }
@@ -340,27 +430,47 @@ impl SchemaCleanr {
         obj: &Map<String, Value>,
         defs: &HashMap<String, Value>,
         strategy: CleaningStrategy,
+        ref_siblings_apply: bool,
         ref_stack: &mut HashSet<String>,
     ) -> Value {
         // Prevent circular references
-        if ref_stack.contains(ref_value) {
+        let resolved = if ref_stack.contains(ref_value) {
             eprintln!("warn: Circular $ref detected: {}", ref_value);
-            return Self::preserve_meta(obj, Value::Object(Map::new()));
-        }
-
+            Value::Object(Map::new())
         // Try to resolve local ref (#/$defs/Name or #/definitions/Name)
-        if let Some(def_name) = Self::parse_local_ref(ref_value)
+        } else if let Some(def_name) = Self::parse_local_ref(ref_value)
             && let Some(definition) = defs.get(def_name.as_str())
         {
             ref_stack.insert(ref_value.to_string());
-            let cleaned = Self::clean_with_defs(definition.clone(), defs, strategy, ref_stack);
+            let cleaned = Self::clean_with_defs(
+                definition.clone(),
+                defs,
+                strategy,
+                ref_siblings_apply,
+                ref_stack,
+            );
             ref_stack.remove(ref_value);
-            return Self::preserve_meta(obj, cleaned);
-        }
+            cleaned
+        } else {
+            eprintln!("warn: Cannot resolve $ref: {}", ref_value);
+            Value::Object(Map::new())
+        };
 
-        // Can't resolve: return empty object with metadata
-        eprintln!("warn: Cannot resolve $ref: {}", ref_value);
-        Self::preserve_meta(obj, Value::Object(Map::new()))
+        if ref_siblings_apply {
+            Self::preserve_siblings(
+                obj,
+                "$ref",
+                resolved,
+                defs,
+                strategy,
+                ref_siblings_apply,
+                ref_stack,
+            )
+        } else {
+            // Retain the existing metadata override without making ignored
+            // Draft 4–7 sibling assertions active after reference expansion.
+            Self::preserve_meta(obj, resolved)
+        }
     }
 
     /// Parse a local JSON Pointer ref (#/$defs/Name).
@@ -406,6 +516,7 @@ impl SchemaCleanr {
         obj: &Map<String, Value>,
         defs: &HashMap<String, Value>,
         strategy: CleaningStrategy,
+        ref_siblings_apply: bool,
         ref_stack: &mut HashSet<String>,
     ) -> Option<Value> {
         let union_key = if obj.contains_key("anyOf") {
@@ -421,7 +532,9 @@ impl SchemaCleanr {
         // Clean all variants first
         let cleaned_variants: Vec<Value> = variants
             .iter()
-            .map(|v| Self::clean_with_defs(v.clone(), defs, strategy, ref_stack))
+            .map(|v| {
+                Self::clean_with_defs(v.clone(), defs, strategy, ref_siblings_apply, ref_stack)
+            })
             .collect();
 
         // Strip null variants
@@ -430,17 +543,22 @@ impl SchemaCleanr {
             .filter(|v| !Self::is_null_schema(v))
             .collect();
 
-        // If only one variant remains after stripping nulls, return it
-        if non_null.len() == 1 {
-            return Some(Self::preserve_meta(obj, non_null[0].clone()));
-        }
-
-        // Try to flatten to enum if all variants are literals
-        if let Some(enum_value) = Self::try_flatten_literal_union(&non_null) {
-            return Some(Self::preserve_meta(obj, enum_value));
-        }
-
-        None
+        // Only the selected applicator disappears. Its sibling constraints
+        // still apply, including another union keyword on the same object.
+        let simplified = if non_null.len() == 1 {
+            non_null.into_iter().next()?
+        } else {
+            Self::try_flatten_literal_union(&non_null, union_key == "oneOf")?
+        };
+        Some(Self::preserve_siblings(
+            obj,
+            union_key,
+            simplified,
+            defs,
+            strategy,
+            ref_siblings_apply,
+            ref_stack,
+        ))
     }
 
     /// Check if a schema represents null type.
@@ -470,7 +588,7 @@ impl SchemaCleanr {
     /// Try to flatten anyOf/oneOf with only literal values to enum.
     ///
     /// Example: `anyOf: [{const: "a"}, {const: "b"}]` -> `{type: "string", enum: ["a", "b"]}`
-    fn try_flatten_literal_union(variants: &[Value]) -> Option<Value> {
+    fn try_flatten_literal_union(variants: &[Value], exclusive: bool) -> Option<Value> {
         if variants.is_empty() {
             return None;
         }
@@ -480,6 +598,14 @@ impl SchemaCleanr {
 
         for variant in variants {
             let obj = variant.as_object()?;
+
+            // Flattening must not discard assertions attached to a literal.
+            if obj.keys().any(|key| {
+                !matches!(key.as_str(), "type" | "const" | "enum")
+                    && !SCHEMA_META_KEYS.contains(&key.as_str())
+            }) {
+                return None;
+            }
 
             // Extract literal value from const or single-item enum
             let literal_value = if let Some(const_val) = obj.get("const") {
@@ -502,6 +628,16 @@ impl SchemaCleanr {
                 _ => {}
             }
 
+            // Only flatten oneOf when distinctness can be proved with exact
+            // literal equality. JSON numbers such as 1 and 1.0 are equal to a
+            // validator, but not to serde_json; composite values can contain
+            // the same ambiguity. Keep those unions and overlapping literals.
+            if exclusive
+                && ((!literal_value.is_string() && !literal_value.is_boolean())
+                    || all_values.contains(&literal_value))
+            {
+                return None;
+            }
             all_values.push(literal_value);
         }
 
@@ -534,17 +670,27 @@ impl SchemaCleanr {
         }
     }
 
-    /// Clean properties object.
-    fn clean_properties(
+    /// Clean a map of named schemas, keeping the names and dependency arrays
+    /// opaque even when they happen to look like schema keywords.
+    fn clean_schema_map(
         value: Value,
         defs: &HashMap<String, Value>,
         strategy: CleaningStrategy,
+        ref_siblings_apply: bool,
         ref_stack: &mut HashSet<String>,
+        dependencies: bool,
     ) -> Value {
         if let Value::Object(props) = value {
             let cleaned: Map<String, Value> = props
                 .into_iter()
-                .map(|(k, v)| (k, Self::clean_with_defs(v, defs, strategy, ref_stack)))
+                .map(|(key, child)| {
+                    let cleaned = if dependencies && !child.is_object() {
+                        child
+                    } else {
+                        Self::clean_with_defs(child, defs, strategy, ref_siblings_apply, ref_stack)
+                    };
+                    (key, cleaned)
+                })
                 .collect();
             Value::Object(cleaned)
         } else {
@@ -552,22 +698,78 @@ impl SchemaCleanr {
         }
     }
 
-    /// Clean union (anyOf/oneOf/allOf).
-    fn clean_union(
-        value: Value,
+    /// Keep sibling constraints outside the expanded schema's scope. Simply
+    /// merging maps changes applicators such as `additionalProperties` and
+    /// `if`/`then`, even when the two maps have no conflicting keys.
+    fn preserve_siblings(
+        source: &Map<String, Value>,
+        removed_keyword: &str,
+        target: Value,
         defs: &HashMap<String, Value>,
         strategy: CleaningStrategy,
+        ref_siblings_apply: bool,
         ref_stack: &mut HashSet<String>,
     ) -> Value {
-        if let Value::Array(variants) = value {
-            let cleaned: Vec<Value> = variants
-                .into_iter()
-                .map(|v| Self::clean_with_defs(v, defs, strategy, ref_stack))
-                .collect();
-            Value::Array(cleaned)
-        } else {
-            value
+        let mut siblings = source.clone();
+        siblings.remove(removed_keyword);
+        let siblings = Self::clean_object(siblings, defs, strategy, ref_siblings_apply, ref_stack);
+        Self::intersect_schemas(siblings, target)
+    }
+
+    fn intersect_schemas(siblings: Value, mut target: Value) -> Value {
+        let Value::Object(mut siblings) = siblings else {
+            return json!({ "allOf": [siblings, target] });
+        };
+        if siblings.is_empty() {
+            return target;
         }
+        if target == Value::Bool(true) || target.as_object().is_some_and(Map::is_empty) {
+            return Value::Object(siblings);
+        }
+
+        if let Value::Object(target_obj) = &mut target {
+            // Annotations do not constrain the target. An identical type is
+            // also redundant, so these common cases can stay flat.
+            if siblings.iter().all(|(key, value)| {
+                matches!(
+                    key.as_str(),
+                    "$schema"
+                        | "$id"
+                        | "$anchor"
+                        | "$dynamicAnchor"
+                        | "$comment"
+                        | "$defs"
+                        | "definitions"
+                        | "description"
+                        | "title"
+                        | "default"
+                        | "examples"
+                        | "deprecated"
+                        | "readOnly"
+                        | "writeOnly"
+                ) || (key == "type" && target_obj.get(key) == Some(value))
+            }) {
+                target_obj.extend(siblings);
+                return target;
+            }
+
+            // A copied type is an equivalent redundant assertion, and keeps
+            // the explicit outer type expected by tool-schema consumers.
+            if !siblings.contains_key("type")
+                && let Some(schema_type) = target_obj.get("type")
+            {
+                siblings.insert("type".to_string(), schema_type.clone());
+            }
+        }
+
+        let mut all_of = match siblings.remove("allOf") {
+            Some(Value::Array(variants)) => variants,
+            Some(other) => vec![json!({ "allOf": other })],
+            None => Vec::new(),
+        };
+        all_of.push(target);
+        siblings.insert("allOf".to_string(), Value::Array(all_of));
+        Value::Object(siblings)
     }
 
     /// Preserve metadata (description, title, default) from source to target.
@@ -901,7 +1103,7 @@ mod tests {
             json!({ "$ref": "#/$defs/Age", "$defs": { "Age": { "type": "integer" } } }),
             // const → enum conversion.
             json!({ "const": "fixed" }),
-            // anyOf/oneOf simplification and sibling-type skipping.
+            // anyOf/oneOf simplification.
             json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] }),
             json!({ "oneOf": [{ "type": "string" }, { "type": "number" }] }),
             // type-array null stripping.
@@ -1518,7 +1720,7 @@ mod tests {
     }
 
     #[test]
-    fn test_skip_type_when_non_simplifiable_union_exists() {
+    fn test_keep_type_when_non_simplifiable_union_exists() {
         let schema = json!({
             "type": "object",
             "oneOf": [
@@ -1539,7 +1741,7 @@ mod tests {
 
         let cleaned = SchemaCleanr::clean_for_gemini(schema);
 
-        assert!(cleaned.get("type").is_none());
+        assert_eq!(cleaned["type"], "object");
         assert!(cleaned.get("oneOf").is_some());
     }
 
@@ -1561,5 +1763,425 @@ mod tests {
 
         assert_eq!(cleaned["not"]["type"], "integer");
         assert!(cleaned["not"].get("minimum").is_none());
+    }
+
+    #[test]
+    fn simplified_nullable_unions_keep_sibling_bounds_per_strategy() {
+        for union in ["anyOf", "oneOf"] {
+            let mut schema = json!({
+                "type": "integer",
+                "minimum": 10,
+                "maximum": 20,
+                "description": "Between ten and twenty"
+            });
+            schema[union] = json!([{ "type": "integer", "minimum": 0 }, { "type": "null" }]);
+            for strategy in [
+                CleaningStrategy::Gemini,
+                CleaningStrategy::Anthropic,
+                CleaningStrategy::OpenAI,
+                CleaningStrategy::Conservative,
+            ] {
+                let cleaned = SchemaCleanr::clean(schema.clone(), strategy);
+                let expected = if strategy == CleaningStrategy::Gemini {
+                    json!({ "type": "integer", "description": "Between ten and twenty" })
+                } else {
+                    json!({
+                        "type": "integer",
+                        "minimum": 10,
+                        "maximum": 20,
+                        "description": "Between ten and twenty",
+                        "allOf": [{ "type": "integer", "minimum": 0 }]
+                    })
+                };
+                assert_eq!(cleaned, expected, "{union}, {strategy:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn simplified_union_keeps_other_applicators_and_conflicting_types() {
+        let cleaned = SchemaCleanr::clean_for_openai(json!({
+            "anyOf": [{ "type": "string" }, { "type": "null" }],
+            "oneOf": [
+                { "type": "string", "const": "a" },
+                { "type": "string", "const": "b" }
+            ],
+            "allOf": [{ "minLength": 1 }]
+        }));
+        assert_eq!(
+            cleaned,
+            json!({
+                "type": "string",
+                "allOf": [
+                    { "minLength": 1 },
+                    { "type": "string", "enum": ["a", "b"] },
+                    { "type": "string" }
+                ]
+            })
+        );
+
+        // The sibling type remains a conjunction, even when it makes the
+        // simplified schema unsatisfiable.
+        let conflicting = SchemaCleanr::clean_for_openai(json!({
+            "type": "string",
+            "anyOf": [{ "type": "integer" }, { "type": "null" }]
+        }));
+        assert_eq!(
+            conflicting,
+            json!({
+                "type": "string", "allOf": [{ "type": "integer" }]
+            })
+        );
+
+        let unsimplified = json!({
+            "type": "string",
+            "anyOf": [{ "type": "string" }, { "type": "integer" }]
+        });
+        for strategy in [
+            CleaningStrategy::Gemini,
+            CleaningStrategy::Anthropic,
+            CleaningStrategy::OpenAI,
+            CleaningStrategy::Conservative,
+        ] {
+            assert_eq!(
+                SchemaCleanr::clean(unsimplified.clone(), strategy),
+                unsimplified
+            );
+        }
+    }
+
+    #[test]
+    fn modern_local_refs_keep_sibling_bounds_per_strategy() {
+        for dialect in [
+            None,
+            Some("https://json-schema.org/draft/2019-09/schema"),
+            Some("https://json-schema.org/draft/2020-12/schema"),
+        ] {
+            let mut schema = json!({
+                "$defs": { "Count": { "type": "integer", "minimum": 0 } },
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "$ref": "#/$defs/Count",
+                        "minimum": 10,
+                        "maximum": 20,
+                        "title": "Count"
+                    }
+                }
+            });
+            if let Some(dialect) = dialect {
+                schema["$schema"] = json!(dialect);
+            }
+            for strategy in [
+                CleaningStrategy::Gemini,
+                CleaningStrategy::Anthropic,
+                CleaningStrategy::OpenAI,
+                CleaningStrategy::Conservative,
+            ] {
+                let cleaned = SchemaCleanr::clean(schema.clone(), strategy);
+                let expected = if strategy == CleaningStrategy::Gemini {
+                    json!({ "type": "integer", "title": "Count" })
+                } else {
+                    json!({
+                        "type": "integer",
+                        "minimum": 10,
+                        "maximum": 20,
+                        "title": "Count",
+                        "allOf": [{ "type": "integer", "minimum": 0 }]
+                    })
+                };
+                assert_eq!(
+                    cleaned["properties"]["count"], expected,
+                    "{dialect:?}, {strategy:?}"
+                );
+                assert_eq!(
+                    cleaned.get("$defs").is_some(),
+                    strategy == CleaningStrategy::OpenAI
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_local_refs_do_not_activate_ignored_sibling_assertions() {
+        for dialect in [
+            "http://json-schema.org/draft-04/schema#",
+            "http://json-schema.org/draft-06/schema#",
+            "https://json-schema.org/draft-07/schema",
+        ] {
+            let schema = json!({
+                "$schema": dialect,
+                "definitions": { "Count": { "type": "integer", "minimum": 0 } },
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "$ref": "#/definitions/Count",
+                        "minimum": 10,
+                        "description": "Retained metadata"
+                    }
+                }
+            });
+            for strategy in [
+                CleaningStrategy::Gemini,
+                CleaningStrategy::Anthropic,
+                CleaningStrategy::OpenAI,
+                CleaningStrategy::Conservative,
+            ] {
+                let cleaned = SchemaCleanr::clean(schema.clone(), strategy);
+                let mut expected = json!({ "type": "integer", "description": "Retained metadata" });
+                if strategy != CleaningStrategy::Gemini {
+                    expected["minimum"] = json!(0);
+                }
+                assert_eq!(
+                    cleaned["properties"]["count"], expected,
+                    "{dialect}, {strategy:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_schemas_keep_additional_properties_in_its_original_scope() {
+        let referenced = json!({
+            "$defs": { "Object": { "type": "object", "properties": { "x": { "type": "integer" } } } },
+            "$ref": "#/$defs/Object",
+            "additionalProperties": false
+        });
+        let nullable = json!({
+            "anyOf": [
+                { "type": "object", "properties": { "x": { "type": "integer" } } },
+                { "type": "null" }
+            ],
+            "additionalProperties": false
+        });
+        for schema in [referenced, nullable] {
+            for strategy in [
+                CleaningStrategy::Gemini,
+                CleaningStrategy::Anthropic,
+                CleaningStrategy::OpenAI,
+                CleaningStrategy::Conservative,
+            ] {
+                let cleaned = SchemaCleanr::clean(schema.clone(), strategy);
+                if matches!(
+                    strategy,
+                    CleaningStrategy::OpenAI | CleaningStrategy::Anthropic
+                ) {
+                    // The outer restriction accepts only the empty object.
+                    // Flattening the inner properties here would admit {"x": 1}.
+                    assert_eq!(cleaned["additionalProperties"], false);
+                    assert!(cleaned.get("properties").is_none());
+                    assert_eq!(
+                        cleaned["allOf"][0],
+                        json!({
+                            "type": "object", "properties": { "x": { "type": "integer" } }
+                        })
+                    );
+                } else {
+                    // Preserve the established provider removal policy.
+                    assert!(cleaned.get("additionalProperties").is_none());
+                    assert_eq!(cleaned["properties"]["x"]["type"], "integer");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unresolved_and_cyclic_refs_retain_applicable_siblings() {
+        assert_eq!(
+            SchemaCleanr::clean_for_anthropic(json!({
+                "$ref": "#/$defs/Missing", "minimum": 10
+            })),
+            json!({ "minimum": 10 })
+        );
+        assert_eq!(
+            SchemaCleanr::clean_for_anthropic(json!({
+                "$defs": { "Node": { "$ref": "#/$defs/Node", "maximum": 20 } },
+                "$ref": "#/$defs/Node",
+                "minimum": 10
+            })),
+            json!({ "minimum": 10, "allOf": [{ "maximum": 20 }] })
+        );
+    }
+
+    #[test]
+    fn literal_union_flattening_keeps_branch_assertions_and_one_of_exclusivity() {
+        let constrained = json!({ "anyOf": [
+            { "type": "integer", "const": 1, "minimum": 10 },
+            { "type": "integer", "const": 20 }
+        ] });
+        assert_eq!(
+            SchemaCleanr::clean_for_openai(constrained.clone()),
+            json!({ "anyOf": [
+            { "type": "integer", "enum": [1], "minimum": 10 },
+            { "type": "integer", "enum": [20] }
+        ] })
+        );
+        assert_eq!(
+            SchemaCleanr::clean_for_gemini(constrained),
+            json!({
+                "type": "integer", "enum": [1, 20]
+            })
+        );
+
+        let overlapping = SchemaCleanr::clean_for_openai(json!({ "oneOf": [
+            { "type": "string", "const": "same" },
+            { "type": "string", "const": "same" }
+        ] }));
+        assert_eq!(
+            overlapping,
+            json!({ "oneOf": [
+            { "type": "string", "enum": ["same"] },
+            { "type": "string", "enum": ["same"] }
+        ] })
+        );
+
+        for (schema_type, first, second) in [
+            ("number", json!(1), json!(1.0)),
+            ("object", json!({ "n": 1 }), json!({ "n": 1.0 })),
+        ] {
+            let schema = json!({ "oneOf": [
+                { "type": schema_type, "enum": [first] },
+                { "type": schema_type, "enum": [second] }
+            ] });
+            assert_eq!(SchemaCleanr::clean_for_openai(schema.clone()), schema);
+        }
+    }
+
+    #[test]
+    fn schema_looking_literals_are_opaque_and_keep_no_op_arc_identity() {
+        let literal = json!({
+            "const": "literal",
+            "$ref": "#/$defs/Literal",
+            "type": ["string", "null"],
+            "anyOf": [{ "const": "unchanged" }],
+            "minimum": 10,
+            "examples": [{ "const": "nested data" }]
+        });
+        let schema = Arc::new(json!({
+            "type": "object",
+            "default": literal,
+            "enum": [literal],
+            "properties": {
+                "const": { "type": "object", "default": literal, "enum": [literal] },
+                "$ref": { "type": "string" },
+                "anyOf": { "type": "boolean" }
+            }
+        }));
+        for strategy in [
+            CleaningStrategy::Gemini,
+            CleaningStrategy::Anthropic,
+            CleaningStrategy::OpenAI,
+            CleaningStrategy::Conservative,
+        ] {
+            assert!(!SchemaCleanr::needs_cleaning(&schema, strategy));
+            assert_eq!(SchemaCleanr::clean((*schema).clone(), strategy), *schema);
+            assert!(Arc::ptr_eq(
+                &schema,
+                &SchemaCleanr::clean_shared(&schema, strategy)
+            ));
+            let cache = SchemaCleanCache::new();
+            assert!(Arc::ptr_eq(&schema, &cache.clean_shared(&schema, strategy)));
+            assert_eq!(cache.len(), 0);
+        }
+    }
+
+    #[test]
+    fn examples_are_literal_data_where_the_provider_retains_them() {
+        let schema = Arc::new(json!({
+            "type": "object",
+            "examples": [{ "const": "example", "$ref": "#/$defs/Data", "type": ["null"] }]
+        }));
+        assert_eq!(
+            SchemaCleanr::clean_for_gemini((*schema).clone()),
+            json!({ "type": "object" })
+        );
+        for strategy in [
+            CleaningStrategy::Anthropic,
+            CleaningStrategy::OpenAI,
+            CleaningStrategy::Conservative,
+        ] {
+            assert_eq!(SchemaCleanr::clean((*schema).clone(), strategy), *schema);
+            assert!(Arc::ptr_eq(
+                &schema,
+                &SchemaCleanr::clean_shared(&schema, strategy)
+            ));
+        }
+    }
+
+    #[test]
+    fn schema_valued_keywords_are_still_traversed_and_prescanned() {
+        for keyword in [
+            "items",
+            "additionalItems",
+            "contains",
+            "additionalProperties",
+            "propertyNames",
+            "unevaluatedItems",
+            "unevaluatedProperties",
+            "contentSchema",
+            "not",
+            "if",
+            "then",
+            "else",
+        ] {
+            let mut schema = json!({});
+            schema[keyword] = json!({ "const": "value" });
+            assert!(
+                SchemaCleanr::needs_cleaning(&schema, CleaningStrategy::OpenAI),
+                "{keyword}"
+            );
+            let cleaned = SchemaCleanr::clean_for_openai(schema);
+            assert_eq!(cleaned[keyword], json!({ "enum": ["value"] }), "{keyword}");
+        }
+        for keyword in ["prefixItems", "allOf"] {
+            let mut schema = json!({});
+            schema[keyword] = json!([{ "const": "value" }]);
+            assert!(
+                SchemaCleanr::needs_cleaning(&schema, CleaningStrategy::OpenAI),
+                "{keyword}"
+            );
+            let cleaned = SchemaCleanr::clean_for_openai(schema);
+            assert_eq!(
+                cleaned[keyword],
+                json!([{ "enum": ["value"] }]),
+                "{keyword}"
+            );
+        }
+        for keyword in [
+            "properties",
+            "patternProperties",
+            "$defs",
+            "definitions",
+            "dependentSchemas",
+        ] {
+            let mut schema = json!({});
+            schema[keyword] = json!({ "const": { "const": "value" } });
+            assert!(
+                SchemaCleanr::needs_cleaning(&schema, CleaningStrategy::OpenAI),
+                "{keyword}"
+            );
+            let cleaned = SchemaCleanr::clean_for_openai(schema);
+            assert_eq!(
+                cleaned[keyword],
+                json!({ "const": { "enum": ["value"] } }),
+                "{keyword}"
+            );
+        }
+
+        let dependencies = json!({ "dependencies": {
+            "names": ["const", "$ref", "anyOf"],
+            "schema": { "properties": { "const": { "const": "value" } } }
+        } });
+        assert!(SchemaCleanr::needs_cleaning(
+            &dependencies,
+            CleaningStrategy::OpenAI
+        ));
+        assert_eq!(
+            SchemaCleanr::clean_for_openai(dependencies),
+            json!({ "dependencies": {
+            "names": ["const", "$ref", "anyOf"],
+            "schema": { "properties": { "const": { "enum": ["value"] } } }
+        } })
+        );
     }
 }
