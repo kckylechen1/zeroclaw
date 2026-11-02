@@ -37,6 +37,7 @@ Accepted ADRs are immutable. If the architecture changes, write a new ADR and ma
 | [ADR-019](./ADR-019-one-body-many-hands.md) | proposed | One body retains Soul, approval and safety authority; edges split only for a named reason. Clients use scoped chat/intake contracts, channel outbox uses its separate contract, Nodes use v2, and body-initiated MCP stays distinct. Shared host code is extracted with its second consumer; new platforms and robot capabilities remain subject to #374 dispatch and their existing acceptance gates. |
 | [ADR-020](./ADR-020-durable-turns-replay-and-attention.md) | proposed | Pi Durable supplies design references for scoped request identities and conservative replay. Approval evidence preserves boot-bound grants; cancellation does not imply external rollback. Existing owners provide background work and policy-gated delivery. Observations preserve provenance and compaction preserves retained history subject to privacy deletion. Clear authorized work is acknowledged without redundant intent confirmation. |
 | [ADR-021](./ADR-021-full-duplex-voice-at-the-edge.md) | proposed | Full-duplex voice keeps audio at the edge and personal authority in the body; a versioned stateful spoken-text projection preserves security checks, while scoped playback evidence never rewrites canonical history or proves human hearing; listening is bounded and its privacy indicator overrides attention; an optional front harness has one model tool, approved presentation phrases without raw Soul export, isolated conversation context, and measured fallback behavior. |
+| [ADR-022](./ADR-022-one-small-node-many-devices.md) | proposed | Thin devices keep only bounded local audio processing, with separate scoped credentials for Node, voice, and legacy links; one voice adapter isolates sources and conversations; stock ESPHome support requires a pinned trial; shared v2 host code is extracted from #514 and a real Yonbo adapter while N3B1 stays on the robot, with physical-device modules extracted later from two consumers; wake arbitration grants no identity or route authority, proactive delivery uses authorized #63 destinations, and shared-device voice never approves. #374 remains the execution index. |
 
 ADR-006 and ADR-007 were implementation-gated roadmap decisions from [FND-002](../../foundations/fnd-002-documentation-standards.md). Neither acceptance boundary shipped; both are superseded by ADR-013 for this fork.
 
@@ -52,3 +53,5 @@ ADR-019 remains proposed until the owner accepts it.
 ADR-020 remains proposed until the owner accepts it.
 
 ADR-021 remains proposed until the owner accepts it.
+
+ADR-022 remains proposed until the owner accepts it.
