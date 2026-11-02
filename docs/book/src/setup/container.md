@@ -24,13 +24,42 @@ Multi-arch: `linux/amd64`, `linux/arm64`.
 docker run -d \
   --name zeroclaw \
   -v zeroclaw-data:/zeroclaw-data \
-  -p 42617:42617 \
+  -p 127.0.0.1:42617:42617 \
   ghcr.io/zeroclaw-labs/zeroclaw:latest
 ```
 
 </div>
 
-The official image already binds `[::]` with `allow_public_bind = true` and `require_pairing = false` baked into its default config, so the published port is reachable out of the box. The {{#env-var-name gateway.allow_public_bind}} override below only matters if you bind-mount your own config (which replaces the baked one) that defaults to localhost.
+Images built from this revision bind `[::]` with `allow_public_bind = true`
+and `require_pairing = true`. Publish to host loopback as above; external
+exposure requires explicitly changing the host address and keeping pairing on.
+Older published tags may still disable pairing: rebuild this revision or upgrade
+to a release containing it before relying on these defaults.
+
+`allow_public_bind` enables container networking; it does not authorize anonymous
+network access. Existing volumes retain their configuration. If a previous
+container saved `require_pairing = false`, startup now refuses until you enable
+pairing in `[gateway]` or set the environment override
+`ZEROCLAW_gateway__require_pairing=true`.
+
+For a deliberately unauthenticated, isolated deployment, the independent
+explicit exemption is:
+
+```toml
+[gateway]
+host = "[::]"
+allow_public_bind = true
+require_pairing = false
+dangerously_allow_unauthenticated_public_bind = true
+```
+
+The equivalent Compose environment entry is
+`ZEROCLAW_gateway__dangerously_allow_unauthenticated_public_bind=true`.
+This permits anyone who can reach the gateway, including other containers,
+to control the agent and access its sessions. Host loopback publication does
+not isolate it from the container network. The exemption defaults to false
+and is never baked into either image. Loopback listeners may still disable
+pairing without this exemption for local single-user use.
 
 The image expects persistent state at `/zeroclaw-data`. On first run, it bootstraps a default config: you still need to run quickstart before it's useful:
 
@@ -54,7 +83,7 @@ services:
     image: ghcr.io/zeroclaw-labs/zeroclaw:latest
     restart: unless-stopped
     ports:
-      - "42617:42617"      # gateway
+      - "127.0.0.1:42617:42617"      # gateway
     volumes:
       - ./data:/zeroclaw-data
     # The official image already enables public bind; only add an `environment:`
@@ -87,7 +116,7 @@ services:
     container_name: zeroclaw
     restart: unless-stopped
     ports:
-      - "42617:42617"
+      - "127.0.0.1:42617:42617"
     volumes:
       - ./data:/zeroclaw-data
     healthcheck:
@@ -158,7 +187,7 @@ Wants=network-online.target
 # Pin a release in production; :latest is distroless (no shell — use :debian to exec a shell).
 Image=ghcr.io/zeroclaw-labs/zeroclaw:latest
 ContainerName=zeroclaw
-PublishPort=42617:42617
+PublishPort=127.0.0.1:42617:42617
 Volume=zeroclaw-data:/zeroclaw-data
 # The official image already binds publicly; add an `Environment=` line with the
 # allow-public-bind override only if you mount a localhost-default config.
@@ -219,7 +248,7 @@ The image expects config under `/zeroclaw-data/.zeroclaw/`. Mount your local con
 docker run -d --name zeroclaw \
   -v $(pwd)/my-config.toml:/zeroclaw-data/.zeroclaw/config.toml:ro \
   -v zeroclaw-state:/zeroclaw-data/workspace \
-  -p 42617:42617 \
+  -p 127.0.0.1:42617:42617 \
   ghcr.io/zeroclaw-labs/zeroclaw:latest
 ```
 
@@ -239,7 +268,7 @@ Outbound-initiated channels don't need any special container configuration. Tele
 
 Discord, Slack, GitHub, and most webhook channels need inbound HTTP. Two options:
 
-1. **Expose the gateway**: `-p 42617:42617` + reverse proxy with TLS in front, point the webhook URL at the public address
+1. **Expose the gateway**: publish to host loopback with `-p 127.0.0.1:42617:42617` and put a host reverse proxy with TLS in front; retain pairing and point the webhook URL at the proxy
 2. **Use a tunnel**: ngrok, Cloudflare Tunnel, or Tailscale Funnel; set the tunnel URL as the webhook target
 
 Configure a tunnel by setting the top-level `[tunnel]` `tunnel_provider` (override env var: {{#env-var-name tunnel.tunnel_provider}}) to one of the supported providers and filling the matching `tunnel.*` block; the full provider list and per-provider fields are in the [Config reference](../reference/config.md#tunnel). The resulting public URL is what you point your webhook senders at.

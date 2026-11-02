@@ -22,6 +22,7 @@ pub mod helpers;
 pub mod migration;
 pub mod multi_agent;
 pub mod node_allowlist;
+pub mod operator_access;
 pub mod paths;
 pub mod persona;
 pub mod policy_defaults;

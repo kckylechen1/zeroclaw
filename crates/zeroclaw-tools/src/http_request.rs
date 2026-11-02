@@ -242,12 +242,20 @@ impl HttpRequestTool {
         Ok(())
     }
 
-    fn resolve_auth_secret(&self, secret_name: &str) -> anyhow::Result<String> {
+    fn resolve_auth_secret(
+        &self,
+        secret_name: &str,
+        destination_host: &str,
+    ) -> anyhow::Result<String> {
         Self::validate_secret_name(secret_name)?;
-        self.reload_auth_secret(secret_name)
+        self.reload_auth_secret(secret_name, destination_host)
     }
 
-    fn reload_auth_secret(&self, secret_name: &str) -> anyhow::Result<String> {
+    fn reload_auth_secret(
+        &self,
+        secret_name: &str,
+        destination_host: &str,
+    ) -> anyhow::Result<String> {
         let config_path = self.config_path.as_ref().ok_or_else(|| {
             anyhow::Error::msg("auth_secret requires runtime config reload support")
         })?;
@@ -267,6 +275,23 @@ impl HttpRequestTool {
                 config_path.display()
             ))
         })?;
+
+        // Bind policy and value to the same fresh config snapshot. Check before
+        // decrypting/reading an environment-backed secret or constructing a request.
+        if let Some(hosts) = config
+            .http_request
+            .auth_secret_policies
+            .get(secret_name)
+            .and_then(|policy| policy.allowed_hosts.as_ref())
+            && !hosts
+                .iter()
+                .any(|host| host.eq_ignore_ascii_case(destination_host))
+        {
+            anyhow::bail!(crate::i18n::get_required_tool_string_with_args(
+                "tool-http-request-error-secret-host",
+                &[("name", secret_name), ("host", destination_host)]
+            ));
+        }
 
         let raw_secret = config
             .http_request
@@ -299,11 +324,12 @@ impl HttpRequestTool {
         &self,
         headers: &mut HeaderMap,
         auth_secret: Option<&str>,
+        destination_host: &str,
     ) -> anyhow::Result<()> {
         let Some(secret_name) = auth_secret else {
             return Ok(());
         };
-        let secret = self.resolve_auth_secret(secret_name)?;
+        let secret = self.resolve_auth_secret(secret_name, destination_host)?;
         let header_value = HeaderValue::from_str(&secret).map_err(|e| {
             anyhow::Error::msg(format!(
                 "Invalid value for auth_secret '{secret_name}' as Authorization header: {e}"
@@ -372,21 +398,22 @@ impl HttpRequestTool {
         Ok(request.send().await?)
     }
 
-    fn truncate_response(&self, text: &str) -> String {
-        // 0 means unlimited — no truncation.
-        if self.max_response_size == 0 {
-            return text.to_string();
+    async fn read_response_text(&self, response: reqwest::Response) -> anyhow::Result<String> {
+        let limit = (self.max_response_size != 0).then_some(self.max_response_size);
+        let (mut bytes, capped) = zeroclaw_http::read_bounded_body(response, limit)
+            .await
+            .map_err(anyhow::Error::from_boxed)?;
+        if capped
+            && let Err(error) = std::str::from_utf8(&bytes)
+            && error.error_len().is_none()
+        {
+            bytes.truncate(error.valid_up_to());
         }
-        if text.len() > self.max_response_size {
-            let mut truncated = text
-                .chars()
-                .take(self.max_response_size)
-                .collect::<String>();
-            truncated.push_str("\n\n... [Response truncated due to size limit] ...");
-            truncated
-        } else {
-            text.to_string()
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        if capped {
+            text.push_str("\n\n... [Response truncated due to size limit] ...");
         }
+        Ok(text)
     }
 }
 
@@ -463,7 +490,7 @@ impl Tool for HttpRequestTool {
                 },
                 "auth_secret": {
                     "type": "string",
-                    "description": "Name of a secret in [http_request.secrets] to send as the Authorization header. Secret entries may be literal, encrypted, or environment-backed as ${ENV_VAR}. Overrides any literal Authorization header."
+                    "description": "Name of a secret in [http_request.secrets] to send as the Authorization header. Secret entries may be literal, encrypted, or environment-backed as ${ENV_VAR}. Overrides any literal Authorization header. If configured, auth_secret_policies.<name>.allowed_hosts must include the destination host."
                 },
                 "body": {
                     "type": "string",
@@ -559,7 +586,7 @@ impl Tool for HttpRequestTool {
                 });
             }
         };
-        if let Err(e) = self.apply_auth_secret(&mut request_headers, auth_secret) {
+        if let Err(e) = self.apply_auth_secret(&mut request_headers, auth_secret, &target.host) {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
@@ -590,9 +617,15 @@ impl Tool for HttpRequestTool {
                     .join(", ");
 
                 // Get response body with size limit
-                let response_text = match response.text().await {
-                    Ok(text) => self.truncate_response(&text),
-                    Err(e) => format!("[Failed to read response body: {e}]"),
+                let response_text = match self.read_response_text(response).await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: ToolOutput::default(),
+                            error: Some(format!("Failed to read response body: {e}")),
+                        });
+                    }
                 };
 
                 let output = format!(
@@ -776,6 +809,189 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn auth_secret_destination_execute_contract() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // policy, named secret requested, expected admission and Authorization.
+        for (policy, named, admitted, expected_auth) in [
+            ("allowed_hosts = [\"127.0.0.1\"]", true, true, true),
+            ("allowed_hosts = [\"api.example.com\"]", true, false, false),
+            ("allowed_hosts = []", true, false, false),
+            ("allowed_hosts = [\"*\"]", true, false, false),
+            ("allowed_hosts = [\"127.0.0.1:80\"]", true, false, false),
+            ("", true, true, true),
+            ("allowed_hosts = []", false, true, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let tmp = TempDir::new().unwrap();
+            let config_path = tmp.path().join("config.toml");
+            std::fs::write(&config_path, format!("[http_request.secrets]\napi_token = \"Bearer scoped-fixture\"\n[http_request.auth_secret_policies.api_token]\n{policy}\n")).unwrap();
+            let tool = HttpRequestTool::new_with_config(
+                Arc::new(SecurityPolicy {
+                    autonomy: AutonomyLevel::Supervised,
+                    ..SecurityPolicy::default()
+                }),
+                vec!["127.0.0.1".into()],
+                1024,
+                5,
+                true,
+                Vec::new(),
+                config_path,
+                false,
+            )
+            .unwrap();
+            let (sent, seen) = tokio::sync::oneshot::channel();
+            let server = zeroclaw_spawn::spawn!(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let mut buffer = [0; 4096];
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    headers.extend_from_slice(&buffer[..count]);
+                }
+                let _ = sent.send(String::from_utf8(headers).unwrap().to_ascii_lowercase());
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+            });
+            let mut args = json!({"url": format!("http://{address}/")});
+            if named {
+                args["auth_secret"] = json!("api_token");
+            }
+            let result = tokio::time::timeout(Duration::from_secs(2), tool.execute(args)).await;
+            if !admitted {
+                let result = result.unwrap().unwrap();
+                assert!(!result.success);
+                assert!(
+                    result
+                        .error
+                        .unwrap()
+                        .contains("not allowed for destination host")
+                );
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), seen)
+                        .await
+                        .is_err(),
+                    "rejected request must not reach peer"
+                );
+            } else {
+                let result = result.unwrap().unwrap();
+                assert!(result.success, "{:?}", result.error);
+                let headers = seen.await.unwrap();
+                assert_eq!(
+                    headers.contains("authorization: bearer scoped-fixture"),
+                    expected_auth
+                );
+                if !expected_auth {
+                    assert!(!headers.contains("authorization:"));
+                }
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_secret_policy_save_dirty_keeps_empty_denial() {
+        use zeroclaw_config::schema::{Config, HttpAuthSecretPolicy};
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut config = Config {
+            config_path: path.clone(),
+            data_dir: tmp.path().join("workspace"),
+            ..Config::default()
+        };
+        config.secrets.encrypt = false;
+        config
+            .http_request
+            .secrets
+            .insert("api_token".into(), "Bearer save-fixture".into());
+        config.http_request.auth_secret_policies.insert(
+            "api_token".into(),
+            HttpAuthSecretPolicy {
+                allowed_hosts: Some(vec!["api.example.com".into()]),
+            },
+        );
+        config.save().await.unwrap();
+        let tool = HttpRequestTool::new_with_config(
+            Arc::new(SecurityPolicy::default()),
+            vec!["*".into()],
+            1024,
+            5,
+            false,
+            Vec::new(),
+            path.clone(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            tool.resolve_auth_secret("api_token", "api.example.com")
+                .unwrap(),
+            "Bearer save-fixture"
+        );
+        config
+            .set_prop_persistent(
+                "http_request.auth_secret_policies.api_token.allowed_hosts",
+                "[]",
+            )
+            .unwrap();
+        config.save_dirty().await.unwrap();
+        let stored: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            stored.http_request.auth_secret_policies["api_token"].allowed_hosts,
+            Some(Vec::new())
+        );
+        let error = tool
+            .resolve_auth_secret("api_token", "api.example.com")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("not allowed for destination host"),
+            "{error}"
+        );
+        assert!(error.contains("api.example.com"), "{error}");
+    }
+
+    #[test]
+    fn auth_secret_policy_reloads_and_matches_only_exact_hosts() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let tool = HttpRequestTool::new_with_config(
+            Arc::new(SecurityPolicy::default()),
+            vec!["*".into()],
+            1024,
+            5,
+            false,
+            Vec::new(),
+            path.clone(),
+            false,
+        )
+        .unwrap();
+        std::fs::write(&path, "[http_request.secrets]\napi_token = \"Bearer scoped-fixture\"\n[http_request.auth_secret_policies.api_token]\nallowed_hosts = [\"API.EXAMPLE.COM\"]\n").unwrap();
+        assert_eq!(
+            tool.resolve_auth_secret("api_token", "api.example.com")
+                .unwrap(),
+            "Bearer scoped-fixture"
+        );
+        for host in [
+            "",
+            "example.com",
+            "sub.api.example.com",
+            "api.example.com.attacker.test",
+        ] {
+            assert!(tool.resolve_auth_secret("api_token", host).is_err());
+        }
+        std::fs::write(&path, "[http_request.secrets]\napi_token = \"Bearer replaced-fixture\"\n[http_request.auth_secret_policies.api_token]\nallowed_hosts = []\n").unwrap();
+        assert!(
+            tool.resolve_auth_secret("api_token", "api.example.com")
+                .is_err()
+        );
+    }
+
     #[test]
     fn schema_includes_auth_secret_parameter() {
         let tool = test_tool(vec!["example.com"]);
@@ -792,7 +1008,9 @@ mod tests {
     fn resolve_auth_secret_requires_config_reload_support() {
         let tool = test_tool(vec!["example.com"]);
 
-        let err = tool.resolve_auth_secret("api_token").unwrap_err();
+        let err = tool
+            .resolve_auth_secret("api_token", "example.com")
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("auth_secret requires runtime config reload support"),
@@ -817,7 +1035,7 @@ api_token = "Bearer from-secret"
             .parse_headers(&json!({"Authorization": "Bearer literal"}))
             .unwrap();
 
-        tool.apply_auth_secret(&mut headers, Some("api_token"))
+        tool.apply_auth_secret(&mut headers, Some("api_token"), "example.com")
             .unwrap();
 
         assert_eq!(
@@ -857,7 +1075,8 @@ api_token = "Bearer from-disk"
         .unwrap();
 
         assert_eq!(
-            tool.resolve_auth_secret("api_token").unwrap(),
+            tool.resolve_auth_secret("api_token", "example.com")
+                .unwrap(),
             "Bearer from-disk"
         );
     }
@@ -886,7 +1105,8 @@ api_token = "${ZEROCLAW_TEST_HTTP_REQUEST_SECRET}"
         let tool = test_tool_with_auth_config(config_path, false);
 
         assert_eq!(
-            tool.resolve_auth_secret("api_token").unwrap(),
+            tool.resolve_auth_secret("api_token", "example.com")
+                .unwrap(),
             "Bearer from-env"
         );
     }
@@ -909,7 +1129,7 @@ api_token = "${ZEROCLAW_TEST_HTTP_REQUEST_MISSING_SECRET}"
 
         let tool = test_tool_with_auth_config(config_path, false);
         let err = tool
-            .resolve_auth_secret("api_token")
+            .resolve_auth_secret("api_token", "example.com")
             .unwrap_err()
             .to_string();
 
@@ -965,7 +1185,7 @@ api_token = "{encrypted}"
             .parse_headers(&json!({"Authorization": "Bearer literal"}))
             .unwrap();
 
-        tool.apply_auth_secret(&mut headers, Some("api_token"))
+        tool.apply_auth_secret(&mut headers, Some("api_token"), "example.com")
             .unwrap();
 
         assert_eq!(
@@ -1007,7 +1227,8 @@ api_token = "{encrypted}"
         let tool = test_tool_with_auth_config(config_path, true);
 
         assert_eq!(
-            tool.resolve_auth_secret("api_token").unwrap(),
+            tool.resolve_auth_secret("api_token", "example.com")
+                .unwrap(),
             "Bearer encrypted-env"
         );
     }
@@ -1235,15 +1456,140 @@ api_token = "Bearer from-secret"
         assert!(result.error.unwrap().contains("read-only"));
     }
 
-    #[test]
-    fn truncate_response_within_limit() {
-        let tool = test_tool(vec!["example.com"]);
-        let text = "hello world";
-        assert_eq!(tool.truncate_response(text), "hello world");
+    // Exercise execute(), including its success/error contract, against a peer
+    // that withholds EOF. A collect-then-truncate reader times out instead.
+    #[tokio::test]
+    async fn response_budget_execute_contract() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (wire, cap, success, expected) in [
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+                2,
+                true,
+                "{}",
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n",
+                5,
+                false,
+                "Content-Length",
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n",
+                5,
+                true,
+                "hello",
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello",
+                5,
+                true,
+                "hello",
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+                5,
+                true,
+                "Response Body:",
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabcdef",
+                0,
+                true,
+                "abcdef",
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = zeroclaw_spawn::spawn!(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let mut headers = Vec::new();
+                while !headers.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let count = socket.read(&mut request).await.unwrap();
+                    assert!(count > 0, "request ended before headers");
+                    headers.extend_from_slice(&request[..count]);
+                }
+                socket.write_all(wire.as_bytes()).await.unwrap();
+                std::future::pending::<()>().await;
+            });
+            let tool = HttpRequestTool::new(
+                Arc::new(SecurityPolicy {
+                    autonomy: AutonomyLevel::Supervised,
+                    ..SecurityPolicy::default()
+                }),
+                vec!["127.0.0.1".into()],
+                cap,
+                5,
+                true,
+                Vec::new(),
+            )
+            .unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                tool.execute(json!({"url": format!("http://{address}")})),
+            )
+            .await;
+            server.abort();
+            let result = result.expect("must stop without EOF").unwrap();
+            assert_eq!(result.success, success);
+            if success {
+                assert!(result.output.contains(expected), "{}", result.output);
+                if expected == "{}" {
+                    assert!(!result.output.contains("truncated"));
+                }
+            } else {
+                assert!(result.error.unwrap().contains(expected));
+            }
+        }
     }
 
-    #[test]
-    fn truncate_response_over_limit() {
+    async fn chunked_test_response(body: &[u8]) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_vec();
+        zeroclaw_spawn::spawn!(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let mut headers = Vec::new();
+            while !headers.windows(4).any(|part| part == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert!(count > 0, "request ended before headers");
+                headers.extend_from_slice(&buffer[..count]);
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&body).await;
+            let _ = socket.write_all(b"\r\n0\r\n\r\n").await;
+        });
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn truncate_response_within_limit() {
+        let tool = test_tool(vec!["example.com"]);
+        let text = "hello world";
+        assert_eq!(
+            tool.read_response_text(chunked_test_response(text.as_bytes()).await)
+                .await
+                .unwrap(),
+            "hello world"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncate_response_over_limit() {
         let tool = HttpRequestTool::new(
             Arc::new(SecurityPolicy::default()),
             vec!["example.com".into()],
@@ -1254,13 +1600,16 @@ api_token = "Bearer from-secret"
         )
         .unwrap();
         let text = "hello world this is long";
-        let truncated = tool.truncate_response(text);
+        let truncated = tool
+            .read_response_text(chunked_test_response(text.as_bytes()).await)
+            .await
+            .unwrap();
         assert!(truncated.len() <= 10 + 60); // limit + message
         assert!(truncated.contains("[Response truncated"));
     }
 
-    #[test]
-    fn truncate_response_zero_means_unlimited() {
+    #[tokio::test]
+    async fn truncate_response_zero_means_unlimited() {
         let tool = HttpRequestTool::new(
             Arc::new(SecurityPolicy::default()),
             vec!["example.com".into()],
@@ -1271,11 +1620,16 @@ api_token = "Bearer from-secret"
         )
         .unwrap();
         let text = "a".repeat(10_000_000);
-        assert_eq!(tool.truncate_response(&text), text);
+        assert_eq!(
+            tool.read_response_text(chunked_test_response(text.as_bytes()).await)
+                .await
+                .unwrap(),
+            text
+        );
     }
 
-    #[test]
-    fn truncate_response_nonzero_still_truncates() {
+    #[tokio::test]
+    async fn truncate_response_nonzero_still_truncates() {
         let tool = HttpRequestTool::new(
             Arc::new(SecurityPolicy::default()),
             vec!["example.com".into()],
@@ -1286,7 +1640,10 @@ api_token = "Bearer from-secret"
         )
         .unwrap();
         let text = "hello world";
-        let truncated = tool.truncate_response(text);
+        let truncated = tool
+            .read_response_text(chunked_test_response(text.as_bytes()).await)
+            .await
+            .unwrap();
         assert!(truncated.starts_with("hello"));
         assert!(truncated.contains("[Response truncated"));
     }
