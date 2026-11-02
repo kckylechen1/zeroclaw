@@ -1,16 +1,21 @@
 name: Cross-Platform Clippy
 
 on:
-  # Manual plus scheduled only: keep platform-gated lint regressions visible
-  # without adding their latency to the required PR gate. The 32-bit and
-  # minimal-companion Linux check graphs moved back to the per-PR gate
-  # (ci.yml `check` matrix and `check-32bit`).
+  # Validate platform-gated runtime/infra changes on the candidate PR, including
+  # test-only cfg/import errors that a default cargo check cannot see. Ordinary
+  # prose PRs do not trigger this advisory workflow. Schedules retain coverage
+  # for the rest of the workspace.
+  pull_request:
+    paths:
+      - "crates/zeroclaw-runtime/**"
+      - "crates/zeroclaw-infra/**"
+      - ".github/workflows/cross-platform-clippy.yml"
   workflow_dispatch:
   schedule:
     - cron: "17 10 * * 1"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:

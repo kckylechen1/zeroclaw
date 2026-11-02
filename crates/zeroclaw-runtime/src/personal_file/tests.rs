@@ -9,12 +9,15 @@
 
 use std::path::Path;
 
+#[cfg(unix)]
 use super::domain::{
-    ExpectedContentIdentity, MAX_LIST_ENTRIES, MAX_TEXT_BYTES, PersonalFileError,
-    PersonalFileRefusal, PersonalFileResult, PersonalRelativePath, PersonalRootRef,
+    ExpectedContentIdentity, MAX_LIST_ENTRIES, MAX_TEXT_BYTES, PersonalFileResult, PersonalRootRef,
     TRASH_NAMESPACE,
 };
-use super::service::{MoveDestination, MoveSource, PersonalFileService};
+use super::domain::{PersonalFileError, PersonalFileRefusal, PersonalRelativePath};
+use super::service::PersonalFileService;
+#[cfg(unix)]
+use super::service::{MoveDestination, MoveSource};
 
 // ─────────────────────────────────────────────────────────────────────
 // Fixtures (Unix: the safety core's supported platform)
