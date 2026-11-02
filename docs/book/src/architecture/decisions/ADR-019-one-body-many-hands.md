@@ -22,16 +22,20 @@ relates-to:
 
 Proposed on 2026-10-30. Not accepted until the owner approves it.
 
+Merging this proposed record makes it available for review; it does not accept
+the architecture, activate an implementation slice, or change a protected
+contract. #374 remains the sole execution index.
+
 This record keeps ADR-013 and ADR-017 unchanged. It writes down a rule both records already follow, so that new crates, processes, bridges, and device adapters are judged the same way. It also records how the next messaging platforms (WeChat, iMessage, Slack) attach after Telegram, and how the first physical body (the Yonbo X1 robot, #535) attaches.
 
 ## Context
 
-- ADR-017 made the body one always-on process: gateway, agent loop, Soul and memory, approvals, and scheduler. ADR-013 made messaging platforms out-of-process bridges that speak `/ws/chat` or `/ws/bridge`.
-- The workspace has 23 crates under `crates/`. `AGENTS.md` treats line and crate counts as budgets, not goals, but gives no test for when a new crate or process is justified.
+- ADR-017 made the body one always-on process: gateway, agent loop, Soul and memory, approvals, and scheduler. ADR-013 made messaging platforms out-of-process Clients: `/ws/chat` carries conversation and authorized channel intake; `/ws/bridge` carries proactive delivery for authorized channel bridges.
+- The workspace spans multiple crates. `AGENTS.md` treats line and crate counts as budgets, not goals; this proposal names the reasons for a new crate or process.
 - The first bridge, `bridges/telegram`, is partly delivered under #377. Its `bridge.rs` mixes platform-neutral work (durable intake receipts and cursor advance, reconnect and backoff, `/stop` target freezing, approval and question handling, streaming throttle, turn end) with direct calls to the Telegram API. A second platform would copy that file.
 - Upstream now ships messaging platforms as in-process WASM channel plugins (v0.8.6, `zeroclaw-labs/zeroclaw-plugins`). The WeChat plugin there is a thin iLink HTTP translator: `wechat.rs` builds `getupdates` and `sendmessage` bodies and parses replies; it cannot perform QR login inside the sandbox and carries no media. Plugins depend on the channel orchestrator that ADR-013 removes, and this fork has retired the WASM plugin host (ADR-009). The plugins are a reference for platform API details, not an attachment path.
 - Safe Node invocation now works on the production v2 path with a real-process loopback host (#514). The host currently lives in the root package and links the gateway crate.
-- The first physical body is the Yonbo X1 robot (#535): Rockchip RK3568 on a LubanCat-2IO-based board, vendor kernel 4.19 that cannot be reflashed (no rescue path), reachable over Wi-Fi by key-only root SSH. Its vendor dialogue path is redirected to an owner-run adapter, and a minimal device process (`zeroclaw-yonbo-node`, N3B1 protocol) offers only `info`, `capabilities`, and a single-play allowlisted `face`.
+- The first physical body is the Yonbo X1 robot (#535): Rockchip RK3568, as corrected by the later device-tree inspection on #535, on a LubanCat-2IO-based board, vendor kernel 4.19 that cannot be reflashed (no rescue path), reachable over Wi-Fi by key-only root SSH. Its vendor dialogue path is redirected to an owner-run adapter. The deployed `node3b` prototype and its repository successor `zeroclaw-yonbo-node` speak N3B1 and offer only `info`, `capabilities`, and a single-play allowlisted `face`; the repository successor is not yet installed on the robot.
 - Field mapping of the robot's motion chain (#535) found three layers: a separate body MCU on a 115200 UART that owns the motors and power stage, speaks plain ASCII hex frames (4 servos with position and speed, 3 motors with duty and duration, two motorized ears), and reports battery, IMU and pick-up telemetry; a choreography layer of 49 named actions as keyframe timelines in JSON, plus a light table; and the vendor `sports_control` process that plays them. Its only observed upstream link is an anonymous socket pair from the vendor dialogue process.
 - The likely next messaging platforms differ in kind, not only in API:
 
@@ -43,13 +47,16 @@ This record keeps ADR-013 and ADR-017 unchanged. It writes down a rule both reco
 | Missed-message recovery | server-side opaque cursor | local, monotonic row id | no cursor; recovery is an explicit history read |
 | Edit sent message | no | no | yes |
 | Inline buttons | no | no | yes |
-| Who else can read the conversation | owner only | owner only | possibly colleagues |
+| Proposed accepted conversation scope | owner-only direct conversation | owner-only direct conversation | owner-only direct message |
+
+The accepted-sender scope is a bridge policy, not a guarantee about platform,
+account administrator, or device access to the conversation.
 
 ## Decision
 
 ### 1. The core stays one process, and its authority is not replaceable
 
-The body is not split into further processes. Soul, User Model, memory, approvals, the agent loop, the scheduler, and the gateway stay in one process and share state directly. They read each other on every turn, and the one-source-of-truth rule depends on them being together. Proposals to move any of them into a separate process or service need a new ADR.
+The body is not split into further processes. Soul, User Model, memory, approvals, the agent loop, the scheduler, and the gateway stay in one process and share state directly. Co-location keeps their ownership boundaries straightforward; one source of truth remains a requirement independently of process placement. Proposals to move any of them into a separate process or service need a new ADR.
 
 This rule is about processes and authority, not code structure. Inside the body, replaceable implementations behind traits remain normal: memory backends (ADR-005), model providers, and tools (ADR-002). What configuration or an extension can never replace or override is the authority itself: Soul and User Model ownership, approvals, and safety boundaries. An extension, hook, or interceptor may refuse an action or narrow what is allowed. It may never approve an action that needs approval or widen what is allowed.
 
@@ -76,13 +83,13 @@ If none applies, the code stays where it runs.
 
 A new crate should come with a deletion where possible, so the crate count trends down while `zeroclaw-channels` is retired (#378).
 
-Additions to the core are paid for on every model request: each core tool schema, prompt section, and config key is carried into every turn. The bar for adding to the core is therefore higher than the bar for adding at the edge.
+Always-exposed tool schemas and active prompt sections can add per-request context cost. Additional configuration also adds maintenance and validation surface. Optional or scoped capabilities are included only when enabled and authorized; runtime cost must be measured rather than inferred from crate or configuration-key counts.
 
 ### 4. One door, one contract, any language
 
-Every edge process talks to the body only through the gateway. All bridges share one bridge contract (`/ws/bridge` and the durable intake fields from #438), and all Node hosts share the v2 Node contract (`/ws/nodes`). No platform or device gets its own protocol into the body. A change to either contract is a change to a protected area (`AGENTS.md`) and needs the owner's decision.
+Conversation Clients enter through the gateway's existing `/ws/chat` contract. Channel bridges use `/ws/chat` for conversation and the versioned durable intake extension from #438; authorized channel bridges additionally use `/ws/bridge` for proactive delivery and its receipts. Scoped device and owner bridges retain their narrower grants and do not acquire channel intake or outbox authority. Node hosts use the v2 Node contract (`/ws/nodes`). A new platform reuses the contract for its role; changes to a protected contract follow `AGENTS.md` and require a separately reviewed slice.
 
-Edges are language-agnostic. A bridge, Node host, device adapter, or MCP server may be written in whatever language suits its platform, as long as it speaks the shared contract. For example, the Yonbo dialogue adapter is Python, and an iMessage bridge could be Swift.
+Tachi and other MCP services remain body-initiated MCP integrations. They do not become gateway Clients and are not required to speak a bridge protocol. Edges are language-agnostic and use the existing protocol for their role. For example, the Yonbo dialogue adapter is Python, and an iMessage bridge could be Swift.
 
 ### 5. Talking to the owner is not acting for the owner
 
@@ -92,7 +99,7 @@ Each platform has two possible roles, implemented differently:
 | --- | --- | --- |
 | Direction | owner and agent | agent to other people |
 | Example | the owner asks the agent something on WeChat | "send Mum an iMessage saying I'll be late" |
-| Implementation | a bridge on `/ws/bridge`, owner-only | a tool call or MCP server, behind approval |
+| Implementation | a Client on `/ws/chat`, with channel intake and outbox only where authorized | a tool call or MCP server, behind the existing authorization and approval policy |
 
 This gives a home to the platform tools listed in #378 (`send_via`, `reaction`, `channel_room` and similar): conversation behavior moves into a bridge, and acting behavior becomes a tool or MCP integration, or is retired after caller analysis.
 
@@ -118,9 +125,9 @@ Per platform and device:
 
 ### 7. The bridge contract carries an opaque source cursor
 
-Platform cursors differ: Telegram `update_id` (integer), WeChat `get_updates_buf` (opaque string), iMessage row id (integer), Slack none. The durable intake contract should treat the source cursor and source message identity as opaque values chosen by the bridge, with ordering and recovery owned by the platform adapter. The shared code stores, acknowledges, and advances; it does not interpret.
+Platform cursors differ: Telegram `update_id` (integer), WeChat `get_updates_buf` (opaque string), iMessage row id (integer), Slack none. A future platform-neutral contract should distinguish upstream cursor data from the ordering and source identity required for durable intake.
 
-Whether the current gateway-side intake storage already allows this is not yet verified. The first messaging slice below checks the `sessions.db` journal types and changes the contract only if needed, as a bounded, versioned change.
+At baseline `47baee196`, the v1 intake API uses signed 64-bit integer update IDs and cursors; the `sessions.db` journal stores INTEGER values and enforces ordering, watermarks, and replay-prevention checks. This is a known constraint, not an unverified field type. Supporting an opaque upstream cursor requires a separately reviewed, versioned design that preserves source binding, observed-prefix ordering, durable ACKs, deduplication, and replay-prevention tombstones. This proposal does not authorize changing the protected contract or reinterpreting existing Telegram rows.
 
 ### 8. Shared edge code is extracted with the second consumer
 
@@ -130,20 +137,24 @@ The same rule applies to Node hosts. The loopback host from #514 moves into a `z
 
 ### 9. Order
 
+This is the proposed order within edge-adapter work only. The active Web,
+delegation, and delivery priorities in #374 remain unchanged; no new platform
+is activated here.
+
 1. Telegram: finish #377 acceptance, including the real-bot manual end-to-end run.
 2. Yonbo X1: S5 brain switch, then S8 body language (low-risk actions, faces and light first; motor actions only after the safety floor is proven).
-3. WeChat: the owner's daily platform, and the case that tests the opaque cursor.
+3. WeChat: a candidate second messaging bridge that tests the opaque cursor, when selected through #374.
 4. iMessage: when the owner wants it; the first device-local Client.
 5. Slack: only for a concrete need, DM-only.
 
-All other platforms in `zeroclaw-channels` are retired under #378: a legacy section loads with one actionable warning and activates nothing, and safety-relevant settings follow the #378 legacy-configuration policy.
+Other legacy platform implementations remain subject to the retained-consumer census and replacement or explicit-retirement gates in #378. Only after a platform is retired does its legacy section load with an actionable warning and activate nothing; safety-relevant settings follow the #378 migration-or-block policy.
 
 ## Consequences
 
 Positive:
 
 - New crates and processes are judged against one short test instead of taste.
-- A broken or slow platform or device cannot affect the body or other edges.
+- Process boundaries can isolate a failed platform or device; bounded resource use and protocol handling still need validation.
 - Device permissions such as Full Disk Access, and device credentials such as the robot's N3B1 key, stay with the process that needs them.
 - Adding a platform or device becomes a small adapter once the shared edge crates exist.
 - The conversation-versus-acting split gives the #378 platform tools a clear destination.
@@ -162,9 +173,9 @@ Negative:
 
 Each slice is one PR:
 
-1. **Cursor check.** Inspect the gateway intake journal types; if they assume an integer cursor, make cursor and source identity opaque in a versioned contract change. Telegram behavior unchanged.
+1. **Cursor design.** Specify how opaque upstream cursors coexist with the current integer-ordered intake journal. Review source identity, ACK ordering, migration and tombstones before a bounded versioned change; preserve Telegram behavior and existing receipts.
 2. **WeChat bridge with core extraction.** Add `bridges/wechat` and extract `zeroclaw-bridge-core` from it and `bridges/telegram`. If the diff is too large for one review, split into "extract core, Telegram unchanged" and "add WeChat", in that order, with the WeChat adapter written first on a branch to shape the interface.
-3. **Node host crate.** Move the #514 host into `zeroclaw-node-host` without a gateway dependency; add per-capability schemas and deadlines.
+3. **Node host crate with its second consumer.** Extract the #514 root-package host together with the real Yonbo host-side adapter into `zeroclaw-node-host`, depending on shared protocol types rather than the gateway. Preserve existing capability schemas and deadlines; do not create the crate ahead of those two consumers.
 4. **Yonbo action classification and trigger path.** Classify the vendor action list from frame content; settle the trigger path (named vendor interface, or a replacement player that is the only UART writer and parses telemetry).
 5. **Yonbo body-language Node.** Add the action command and telemetry admission to `zeroclaw-yonbo-node`, a Rust N3B1 client, and a v2 adapter exposing low-risk actions, faces and light as enums. Motor actions stay unavailable.
 6. **Yonbo motion gate.** Lifted-robot deadman and frame-duration test with recorded evidence; only then, and only through the validated high-risk grant path, expose motor actions.
@@ -177,7 +188,7 @@ Before each slice, check upstream for equivalent work and record the result, per
 
 This ADR is implemented for a messaging platform when:
 
-1. its bridge runs as its own process, depends only on `zeroclaw-gateway-client` (and `zeroclaw-bridge-core` once it exists) plus its platform SDK, and the dependency check refuses runtime, memory, provider, channel, or tool imports;
+1. its bridge runs as its own process and uses the existing gateway contracts; Rust bridges depend on `zeroclaw-gateway-client` (and `zeroclaw-bridge-core` once it exists) plus their platform SDK, while other languages use equivalent protocol clients; dependency checks refuse body runtime, memory, provider, channel, or tool imports;
 2. it serves the owner only and rejects other senders before processing;
 3. it passes the #377 durable-intake cases against its own cursor type: failure before acceptance, crash after acceptance before ACK, lost ACK, duplicate source message, restart;
 4. missing platform capabilities degrade as described in §6 and §8, with tests;
@@ -194,7 +205,7 @@ It is implemented for an embodied device when:
 
 ## Open questions
 
-- Does the current intake journal store the source cursor as an integer? (Slice 1.)
+- How should opaque upstream cursors map to the current integer-ordered journal without losing source binding, durable ACK, or replay-prevention guarantees? (Slice 1.)
 - Does the robot's body MCU stop motors on its own when frames stop, and does it honor each motor frame's duration? (Slice 6.)
 - Does the vendor action player expose any named interface besides the anonymous socket pair? (Slice 4.)
 - How should Slack Socket Mode recover messages missed during a disconnect? To be confirmed against Slack documentation before slice 8.

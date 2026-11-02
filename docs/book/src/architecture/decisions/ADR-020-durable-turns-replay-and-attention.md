@@ -21,7 +21,10 @@ relates-to:
 
 Proposed on 2026-10-30. Not accepted until the owner approves it.
 
-This record keeps ADR-017 and ADR-019 unchanged. It names a small set of durability and attention rules for the body, taken as design references from Pi Durable, adds an owner rule for acknowledging and confirming before acting (§8), and records which Pi Durable ideas are deliberately not adopted.
+Merging this proposal does not activate its slices or change existing approval,
+replay, privacy, or delivery contracts. #374 remains the execution index.
+
+This record keeps the authority boundaries in ADR-017 and the ADR-019 proposal unchanged. It names durability and attention patterns drawn from Pi Durable, distinguishes acknowledgement from necessary intent clarification (§8), and records which patterns are not adopted. The Decision section describes proposed work, not delivered capabilities.
 
 ## Context
 
@@ -45,9 +48,13 @@ This record keeps ADR-017 and ADR-019 unchanged. It names a small set of durabil
 
 No Pi Durable or Pi package code is linked into the body or shipped with it. Ideas are reimplemented in Rust inside the existing crates. A PR that adopts one of the patterns below names the Pi Durable source (commit or document) it follows, per `AGENTS.md`, the same way upstream ports are recorded.
 
-### 2. Every submission carries a caller request identity
+### 2. Every submission carries a scoped caller request identity
 
-Every way into a conversation (bridge intake, `/ws/chat`, CLI, cron, and scheduled reminders) carries a request identity chosen by the caller. A resubmission with the same identity returns the original turn and its outcome instead of starting a new one. Bridge intake already has a source message identity (#438); this extends the same guarantee to the other surfaces through the one conversation owner (#376). Where a surface has no natural identity, the adapter mints one and persists it before sending.
+Each ingress carries a stable caller request identity scoped to its authenticated principal, agent, and logical conversation or admitted source. The identity is not authorization. Its immutable payload includes admitted attachment references and routing provenance where applicable. Reuse with changed payload is a conflict; a different principal or scope cannot take over the receipt.
+
+A duplicate returns the existing reference and recorded state, with an outcome only when known. An interrupted, redacted, unavailable, or unresolved receipt is not proof that work never started and never permits a fresh identity to bypass reconciliation. Deduplication does not establish exactly-once external effects. Existing authorization and routing checks still apply to reads, continuation, cancellation, and execution.
+
+Reuse the existing conversation/session intake owner and request bindings. Bridge intake already persists source identity, payload and cursor (#438). Negotiated WebSocket turn controls bind request, payload, authenticated subject and process epoch; their bounded `process_epoch` replay is not durable execution recovery after restart. Inventory these contracts and add only the missing guarantee through the one conversation owner (#376). An adapter without a natural identity persists one before first transmission.
 
 ### 3. Every tool and Node capability declares a replay class
 
@@ -60,56 +67,63 @@ Each tool, MCP integration, and Node capability declares one of two replay class
 
 The default is `never`. A capability becomes `safe` only by an explicit declaration that a reviewer checks. This turns the existing `SubmissionUnknown` and unknown-device-outcome rules into one property of every capability rather than special cases. Tachi `start` stays `never` until Tachi offers a start idempotency key (#2003).
 
-### 4. Approval decisions are stored with the call, first write wins
+A replay label alone never overrides a stricter existing admission, approval,
+or unknown-outcome rule. In particular, Node metadata does not authorize
+resending an uncertain device action under a new invocation or sequence.
 
-An approval decision is stored with the tool call it belongs to before the call runs. After a restart the stored decision is read, not asked again, and a denied call is never re-asked automatically. A second write for the same call is refused. This sits inside the existing approval chain and audit trail; it gives no extension a way to approve (ADR-019 §1).
+### 4. Persisted approval evidence does not renew execution authority
+
+Use the existing ApprovalStore and audit path, binding each decision to the authenticated approver, exact run/call, tool and argument digest. A first-write decision record is evidence, not a reusable execution grant. Preserve boot binding, expiry, one-shot consumption, revocation and current-policy checks: a grant from an earlier boot cannot authorize execution after restart.
+
+A denied or uncertain call is not automatically re-prompted or replayed. If the owner explicitly resumes blocked work, obtain any fresh authenticated approval required by the existing gate. Do not create a second approval store or give an extension approval authority. Persisted decisions and replay classes alone do not establish exactly-once effects.
 
 ### 5. Foreground and background work are separate
 
-- **Foreground** work belongs to the current turn. Cancelling the turn stops it and everything it started.
-- **Background** work belongs to the conversation, not to the turn: watching a delegated Tachi run for completion, an event-triggered reminder, a scheduled delivery. Cancelling the turn leaves it alone. It survives restarts through the scheduler and is stopped only by an explicit cancel of that work.
+- **Foreground** work belongs to the current turn. Cancellation stops local generation/waiting and requests cancellation only where supported. It does not retract external effects or prove a Tachi/Node action stopped; unsupported and unknown outcomes remain explicit.
+- **Background** work has a declared owner beyond the current turn: a delegated-completion watch, a reminder, or a scheduled delivery. Cancelling a turn leaves it alone. Restart recovery reuses the existing scheduler and source receipts; cancellation or expiry of a watch does not cancel its worker.
 
-This makes the separation in ADR-017 §7 concrete for #381 completion delivery and #63 proactive delivery. Background work records its owner (the conversation) and an expiry; reminders also carry a fire limit and owner scope, as the PRD requires.
+The existing session store owns request-to-dispatch bindings, Tachi owns run state, the existing scheduler owns scheduled watch/reminder intent, and BridgeOutbox owns delivery. Reuse those owners for #381/#63 rather than creating another task ledger or notifier. Background work records its conversation/owner scope and expiry; reminders also carry a bounded fire limit. These are proposed integration guarantees, not a claim that unattended completion is already implemented.
 
-### 6. Memory is prepared in the background; history is never deleted
+### 6. Memory preserves provenance; compaction preserves retained history
 
-- During a conversation, the body records **observations** (concrete events or decisions in the owner's own messages) as background work at turn end. They are session-scoped and are not long-term memory.
-- Promoting an observation to long-term memory follows ADR-010 and ADR-016 unchanged: only owner- or agent-originated content qualifies, and anything that would change the Soul is a proposal the owner approves. This ADR widens nothing.
-- Pre-compaction saving uses the prepared observations, so compaction does not need an extra model call to decide what to keep.
-- Compaction starts in the background before the context is full and never deletes stored messages. A handoff may start a new context from a note; older messages stay searchable through a read-only history tool with replay class `safe`.
+- Background observations are bounded, session-scoped derivatives of eligible source records. Preserve the original source reference, authenticated attribution, agent/session/principal scope and source revision. A role label, model summary or quoted material does not establish owner authorship. Owner reflection reuses original-ingress and owner-source checks; tool output, retrieved pages, attachments and third-party text do not gain authority when a model repeats them.
+- Observations remain provisional. Curated-memory writes follow the existing bounded lifecycle policy; User Model activation and Soul changes retain their owner-review, provenance, revision and rollback boundaries. Preparing observations grants no new promotion authority or transcript owner.
+- Pre-compaction saving may reuse prepared observations. Preparation and compaction are bounded and reconciled against source revisions before use; a failure leaves authoritative session history intact.
+- Compaction and handoff change working context, not the canonical retained transcript. Read-only history search is scoped to the authorized agent/session/principal. Compaction does not rewrite tool outcomes, approvals or a surface's playback receipts.
+- History preservation does not mean permanent retention. Explicit owner deletion, privacy erasure and existing retention rules apply to canonical content and observation, summary, search and cache derivatives. Deleted or redacted text must not reappear through a handoff. Minimal replay-prevention metadata follows its existing retention contract; erasure never authorizes rerunning uncertain work.
 
 ### 7. One attention state, published to every surface
 
-The body publishes one committed attention projection per conversation: idle, listening, thinking, working (with counts of running delegated jobs), needs-you (with the pending question or approval), done, and error. Clients receive the current value when they attach and then only changes, through the gateway contracts in ADR-019 §4.
+The body derives an attention projection from existing conversation, approval and canonical task records: idle, listening, thinking, working, needs-you, done, and error. It is not another execution ledger. Authorized Clients receive a privacy-appropriate current view and changes through the contracts in ADR-019 §4; shared devices do not receive private question or result content merely to display a state.
 
 - The Yonbo pet-state mapping (ADR-019 §6, S8) is driven by this projection, not by separate event wiring.
-- **Quiet by default.** The body interrupts the owner only for: a decision it needs, a finished job, a stuck job, an unknown outcome, or a budget limit. Everything else is visible in the attention state without a notification.
+- **Quiet by default.** A needed decision, finished/stuck job, unknown outcome or budget limit can create a notification candidate. Delivery still follows #63's explicit timezone, quiet hours, expiry, snooze/mute/dismiss, owner-authorized bypass, recipient and privacy policy. Reuse BridgeOutbox and deduplicate by canonical result or occurrence identity. Execution state stays separate from delivery `accepted` / `sent` / `confirmed` / `unknown`; an unknown send is not blindly replayed.
 - A question to the owner is structured: what must be decided, the options, the recommended option, and the evidence. Surfaces without buttons render it as numbered replies (ADR-019 §6).
 - Body language and the attention state never carry anything that needs trust. Approval still happens only on an authenticated surface.
 
 ### 8. Say something before acting
 
-When the owner will have to wait, the body first tells the owner what it understood and what it is about to do. This matters most on voice, where the owner cannot see the attention state.
+When authorized work takes noticeable time, the body briefly states what it understood and will do. An explicit, sufficiently precise owner request already confirms intent; being slow or delegated does not by itself require another question. This matters most on voice, where the owner cannot see the attention state.
 
 There are two forms:
 
 | Form | When | Does the work wait? | Example |
 | --- | --- | --- | --- |
-| Acknowledge | the intent is clear and the next step takes noticeable time (a slow tool call, a search, a delegation that is already confirmed) | no: the work starts right after | "好的，我去查一下。" |
-| Confirm | the intent is ambiguous, or the next step is costly, slow, or hard to undo | yes: nothing starts until the owner answers | "你是想让 Codex 把登录页的 bug 修掉，对吗？" |
+| Acknowledge | intent and authorization are already sufficiently clear; the next step takes noticeable time | no additional intent-confirmation round; existing action gates still apply | "好的，我去查一下。" |
+| Clarify | meaning, scope, budget or required authority remains unresolved | affected work waits for the missing decision | "要修改登录页，还是只检查问题？" |
 
 Rules:
 
-- **Confirm is required by default** before starting a Tachi job (L2) and before any tool that acts for the owner (ADR-019 §5). For other requests, the model confirms when the intent is unclear. The owner may relax the default per surface.
+- **Reuse established intent and authorization.** A clear authorized L2 or acting-for-owner request gets an acknowledgement, not a repeated confirmation. Ask only for unresolved meaning, scope or required authority. Shared-device speech is still unverified speaker input and never supplies authenticated owner approval.
 - **No filler for quick answers.** An instant answer gets no acknowledgement first.
-- **Spoken first, committed first.** The acknowledgement or confirmation is sent to the surface as soon as it is produced, before any tool call runs, so on voice it plays while the work starts. It is committed to the transcript before the tool call, so after a restart the body knows what it told the owner.
-- **The words come from the Soul.** The model writes the acknowledgement in the Soul's Tone. If the model gives none and the first step turns out slow, the surface shows the attention state instead (the robot's pose, a short earcon, a typing indicator), or uses a short phrase from the owner-made Tone exemplars (ADR-018). The body never makes up other words on the agent's behalf.
+- **Commit before execution.** Record the acknowledgement before the tool call and publish it promptly. A voice adapter can then play it while work proceeds; publication alone proves neither playback nor that a person heard it. A missing playback receipt must not cause replay of the action.
+- **The words come from the Soul.** The body writes its acknowledgement in the Soul's Tone. A surface fallback is a nonverbal state signal or a separately owner-approved neutral phrase. Tone exemplars guide style; their contextual facts and owner lines are not a reusable phrasebook (ADR-018).
 - **Confirming intent is not approval.** A spoken "yes" settles what the owner meant. It never approves an action that needs approval, which still happens on an authenticated surface (ADR-019 §6). A delegation may therefore have a voice confirmation followed by an approval card on the phone.
 - **Short and closed.** A confirmation restates the task in one sentence and asks one yes-or-no question. If two readings are plausible, it offers at most those two.
 - **Silence is never yes.** On voice, an unanswered confirmation is asked once more; then the conversation waits in needs-you and nothing starts.
-- **Interrupting after an acknowledgement** ("不是，我是说……") cancels the foreground work it started (§5). Background work that already started, such as a Tachi run, keeps going until it is cancelled explicitly. That is why delegation is confirmed before it starts, rather than cancelled after.
+- **Interrupting after an acknowledgement** ("不是，我是说……") requests scoped foreground cancellation (§5). Existing external effects and background Tachi runs retain their own supported control rules; the body reports requested, unsupported or unknown truthfully and never promises rollback from an interruption.
 - **What is said matches the state.** An acknowledgement goes with thinking or working, a confirmation with needs-you, the result with done. What the owner hears and what the robot shows never disagree.
-- **Delegation says who and when.** The acknowledgement after a confirmed delegation names who does the work and that the result comes back later: "好的，我交给 Codex，做完告诉你。"
+- **Delegation wording follows receipts.** Before acceptance, say "我准备交给 Codex"; only a canonical accepted dispatch supports "已交给 Codex". Promise later notification only when the background delivery path and authorized destination are actually configured; otherwise explain the available status/result path.
 
 ### 9. Not adopted
 
@@ -123,7 +137,7 @@ Rules:
 Positive:
 
 - One rule, the replay class, replaces several special cases and is checked per capability in review.
-- Restarts no longer risk a second approval prompt or a second effect from an interrupted call.
+- Restarts preserve decision evidence while refusing stale grants and blind replay of uncertain effects.
 - Completion delivery, reminders, and the duck's body language share one background-work model and one attention state.
 - Memory preparation moves off the critical path of compaction.
 - On voice the owner always knows whether the agent heard, is working, or is waiting for an answer, and a misheard request is caught before it becomes a Tachi job.
@@ -134,19 +148,19 @@ Negative:
 - Request identities on `/ws/chat` and the CLI may need a contract change, which touches a protected area (`AGENTS.md`).
 - Background work adds scheduler state that must be inspected, expired, and cancelled explicitly.
 - Observation capture costs a background model call per turn unless batched.
-- Confirmations add a round trip before delegation and acting for the owner; a poorly tuned "noticeable time" makes the agent either chatty or silent.
+- Necessary clarifications add a round trip; a poorly tuned "noticeable time" makes acknowledgements either chatty or late.
 
 ## Implementation slices
 
 Each slice is one PR:
 
 1. **Replay class.** Add the class to tool and Node capability metadata with default `never`; mark the clearly read-only tools and Tachi `status`/`result` as `safe`; interrupted `never` calls are reported to the model as interrupted.
-2. **Request identity.** Check which surfaces already carry a request identity; add one where missing through the conversation owner (#376), as a versioned contract change if needed.
-3. **Approval memo.** Persist the approval decision with the call before execution; refuse a second write; restart tests.
-4. **Background work.** Foreground versus background ownership; Tachi completion watching as the first background work (#381), then proactive delivery (#63).
+2. **Request identity.** Inventory existing scoped identities and recovery limits; add only missing guarantees with payload-conflict, cross-scope and restart tests through the existing conversation owner (#376).
+3. **Approval evidence.** Reuse the existing store; bind immutable decisions to exact calls without renewing grants. Test prior-boot refusal, expiry, one-shot use and explicit resumed-work approval.
+4. **Background work.** Reuse existing scheduler, session bindings, Tachi receipts and outbox for #381/#63. Test independent watch/worker cancellation, occurrence deduplication and unknown delivery.
 5. **Attention projection.** Publish the projection; wire the Yonbo pet-state mapping to it in S8; structured questions with numbered fallback.
-6. **Memory pipeline.** Observations at turn end, pre-compaction save from observations, background compaction, history search tool, event-triggered reminders as background work.
-7. **Acknowledge and confirm.** Send text produced before tool calls to surfaces immediately (voice first) and commit it before the call; require confirmation before Tachi `start` and acting-for-owner tools; silence starts nothing; interrupting cancels foreground work; Tone-exemplar or non-verbal fallback when the first step is slow. On the Yonbo adapter this lands with S5.
+6. **Memory pipeline.** Prepare bounded, provenance-preserving observations; keep promotion with existing owners; reconcile scoped history search and all derivatives with deletion and retention.
+7. **Acknowledge and clarify.** Commit and publish a brief acknowledgement before slow authorized work; ask only for unresolved intent/scope/authority. Silence never satisfies a required decision. Preserve protected approvals, scoped cancellation and truthful playback/delivery state. Use a neutral approved phrase or nonverbal fallback; coordinate the voice change with its separately reviewed surface contract.
 
 Before each slice, check upstream and Pi Durable for equivalent work and record the result, per `AGENTS.md`.
 
@@ -155,22 +169,22 @@ Before each slice, check upstream and Pi Durable for equivalent work and record 
 This ADR is implemented when:
 
 1. every tool and Node capability has a declared replay class, and a test kills the body during a `never` call and shows it is not rerun and is reported as interrupted;
-2. resubmitting a request with the same identity on each surface returns the original turn, with tests;
-3. a restart between an approval decision and execution neither asks again nor runs twice;
-4. cancelling a turn leaves background work running; a background Tachi watch and a reminder each survive a restart and fire once;
+2. an identical authorized resubmission returns the existing reference/state; changed payloads conflict, cross-scope access fails, and unknown/redacted receipts never create replacement work;
+3. a restart preserves approval evidence but refuses prior-boot execution grants, does not automatically re-prompt or replay an uncertain call, and requires any fresh approval when the owner explicitly resumes it;
+4. cancelling local foreground work leaves independent background work alone; restart recovery creates one canonical notification candidate per occurrence, while lost sends stay unknown without blind retry and watch cancellation does not imply worker cancellation;
 5. a client that attaches late receives the current attention state, and the robot shows the mapped pose for done and needs-you during an acceptance run;
-6. compaction deletes no stored messages, and a message from before a handoff can be found through the history tool;
-7. on voice, a request that needs a slow step is heard acknowledged before any tool result while an instant answer gets no filler; no Tachi job or acting-for-owner call starts without a confirmed intent; an unanswered confirmation starts nothing; a spoken "yes" never satisfies an approval; and interrupting after an acknowledgement cancels the foreground work, with tests.
+6. compaction preserves retained canonical messages; authorized history search finds pre-handoff content, while deleted or out-of-scope content and its derivatives remain unavailable;
+7. a controlled voice run records acknowledgement playback before the first slow tool result while instant answers get no filler; a clear authorized request does not trigger redundant intent confirmation; unanswered required clarifications start no affected work; spoken "yes" never grants approval; and cancellation reports supported, requested or unknown outcomes without claiming external rollback.
 
 ## Open questions
 
-- Do `/ws/chat`, the CLI, and cron already carry a request identity that the conversation owner deduplicates? (Slice 2.)
+- Which gaps remain after comparing durable bridge intake, process-epoch WebSocket replay, CLI and cron identities? (Slice 2.)
 - Where do observations live: the existing session store, or memory with a session scope (ADR-010)?
 - Should observation capture run every turn, or batch at idle to limit cost?
 - Which attention states should notify the owner on the phone, and which only change the robot's pose?
 - What expiry and fire limit should reminders default to?
 - What counts as "noticeable time" on voice before an acknowledgement is needed (for example, about one second)?
-- May the owner skip confirmation for delegations phrased precisely, or for a trusted surface such as the CLI?
+- Which ambiguous voice cases need clarification beyond the established intent and authorization, without asking again for an already explicit request?
 
 ## References
 

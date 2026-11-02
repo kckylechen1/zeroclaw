@@ -125,3 +125,32 @@ See [Autonomy levels](../security/autonomy.md) for the full set of per-profile f
 - [ACP](../channels/acp.md)
 - [Browser automation](./browser.md)
 - [Security → Overview](../security/overview.md)
+
+## Named HTTP authorization secrets
+
+Bind a named `auth_secret` to its destination hosts with a policy alongside the
+existing secret entry:
+
+```toml
+[http_request.secrets]
+example_api = "${EXAMPLE_API_TOKEN}"
+
+[http_request.auth_secret_policies.example_api]
+allowed_hosts = ["api.example.com"]
+```
+
+The tool compares the validated request host before injecting Authorization.
+Host matching is exact and case-insensitive: use canonical DNS names (ASCII
+punycode for international names) or IP addresses without brackets, ports,
+schemes, paths or wildcards. Subdomains need their own entries. The binding is
+host-only; it does not restrict the scheme or port. Existing URL/DNS/private-host
+checks still apply, and redirects remain disabled.
+
+An explicit empty `allowed_hosts = []` rejects all destinations for that secret.
+A request without `auth_secret` does not load or inject a named secret. Policies
+and values are reloaded together, so a later policy change applies to the next
+request. Secret encryption and environment references keep their existing format.
+
+**Transition behavior:** secrets without an `allowed_hosts` declaration keep the
+legacy unbound behavior. Existing installations must add policies for each named
+secret to gain destination binding; upgrading alone does not bind old secrets.
