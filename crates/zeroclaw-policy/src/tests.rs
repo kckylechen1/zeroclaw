@@ -1256,7 +1256,9 @@ fn command_injection_redirect_blocked() {
 
 #[test]
 fn interpreter_inline_eval_blocked() {
-    let p = default_policy();
+    let mut p = default_policy();
+    p.allowed_commands
+        .extend(["python", "python3", "node", "pip", "pip3"].map(str::to_owned));
     // python: -c executes code string, -m runs arbitrary module
     assert!(!p.is_command_allowed("python3 -c 'import os; os.system(\"id\")'"));
     assert!(!p.is_command_allowed("python -c '__import__(\"os\").system(\"id\")'"));
@@ -1284,7 +1286,9 @@ fn interpreter_inline_eval_blocked() {
 
 #[test]
 fn package_manager_install_blocked() {
-    let p = default_policy();
+    let mut p = default_policy();
+    p.allowed_commands
+        .extend(["python", "python3", "node", "pip", "pip3"].map(str::to_owned));
     // pip: install/download fetch external packages and run setup.py
     assert!(!p.is_command_allowed("pip install evil-package"));
     assert!(!p.is_command_allowed("pip3 install evil-package"));
@@ -1301,7 +1305,9 @@ fn package_manager_install_blocked() {
 
 #[test]
 fn safe_interpreter_usage_allowed() {
-    let p = default_policy();
+    let mut p = default_policy();
+    p.allowed_commands
+        .extend(["python", "python3", "node", "pip", "pip3"].map(str::to_owned));
     // Running local files is safe — user trusts their workspace
     assert!(p.is_command_allowed("python3 script.py"));
     assert!(p.is_command_allowed("node app.js"));
@@ -4095,4 +4101,145 @@ fn companion_hardlink_identity_overrides_names_and_recursive_roots() {
     assert!(policy.is_resolved_path_readable(&alias));
     assert!(policy.is_resolved_path_allowed(&alias));
     assert!(!policy.requires_guarded_recursive_read(&other));
+}
+
+#[test]
+fn stdin_interpreter_contract_defaults_deny_execution() {
+    let p = default_policy();
+    for command in ["python3 <<'EOF'\nprint(1)\nEOF", "echo x | python3"] {
+        assert!(
+            p.validate_command_execution(command, false).is_err(),
+            "{command}"
+        );
+    }
+    for name in ["python", "python3", "pip", "node"] {
+        assert!(
+            !p.allowed_commands.iter().any(|allowed| allowed == name),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn stdin_interpreter_contract_explicit_opt_in_requires_approval() {
+    let mut p = default_policy();
+    p.allowed_commands
+        .extend(["python".into(), "python3".into(), "node".into()]);
+    // Disabling the optional medium-risk prompt must not waive this boundary.
+    p.require_approval_for_medium_risk = false;
+    for command in [
+        "python3 script.py",
+        "node app.js",
+        "python3 script.py | cat",
+        "echo x || python3 script.py",
+        "python3 script.py '|' '<<EOF'",
+        "cat <<EOF\npython3\nEOF",
+    ] {
+        assert!(
+            p.validate_command_execution(command, false).is_ok(),
+            "{command}"
+        );
+    }
+    for command in [
+        "python3 <<'EOF'\nprint(1)\nEOF",
+        "echo x | python3",
+        "echo x | node",
+        "echo x|python3",
+        "echo x |\npython3",
+        "echo x | FOO=bar python3",
+        "echo x | 'python3'",
+        "echo x | /usr/bin/python3",
+        "python3<<'EOF'\nprint(1)\nEOF",
+        "python3 <<< 'print(1)'",
+        "cat <<'EOF' | python3\nprint(1)\nEOF",
+        "cat <<A <<B | python3\nx\nA\ny\nB",
+        "python3 <<-EOF\n\tprint(1)\n\tEOF",
+        "cat <<EOF\nx\nEOF\necho x | python3",
+        "echo x | python3 script.py",
+        #[cfg(not(windows))]
+        "cat <<EOF # <<HIDDEN\nx\nEOF\necho x | python3",
+        #[cfg(not(windows))]
+        "echo x | # comment\npython3",
+        "echo x | python3\\\n",
+    ] {
+        let denied = p.validate_command_execution(command, false);
+        assert!(denied.is_err(), "{command}");
+        assert!(
+            denied.unwrap_err().contains("explicit approval"),
+            "{command}"
+        );
+        assert!(
+            p.validate_command_execution(command, true).is_ok(),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn stdin_interpreter_prefix_redirect_cannot_hide_executable() {
+    let mut p = default_policy();
+    p.allowed_commands.push("python3".into());
+    for command in [
+        "<<EOF python3\nprint(1)\nEOF",
+        "echo x | <<EOF python3\nprint(1)\nEOF",
+        "cat <<EOF | unlisted\nx\nEOF",
+    ] {
+        assert!(!p.is_command_allowed(command), "{command}");
+    }
+}
+
+#[test]
+fn stdin_interpreter_comment_and_heredoc_boundaries() {
+    let commands = [
+        "echo \\ #; echo x | python3",
+        "echo \u{a0}#; echo x | python3",
+        "cat <<EOF\nE\\\nOF\necho x | python3",
+        "cat <<-EOF\n\tE\\\nOF\necho x | python3",
+        "cat <<EOF\nE\\\\\nOF\nEOF\necho x | python3",
+    ];
+    for command in commands {
+        let mut p = default_policy();
+        assert!(
+            p.validate_command_execution(command, false).is_err(),
+            "{command}"
+        );
+        p.allowed_commands.push("python3".into());
+        p.require_approval_for_medium_risk = false;
+        assert!(
+            p.validate_command_execution(command, false)
+                .unwrap_err()
+                .contains("explicit approval"),
+            "{command}"
+        );
+        assert!(
+            p.validate_command_execution(command, true).is_ok(),
+            "{command}"
+        );
+    }
+    for command in [
+        "cat <<'EOF'\nE\\\nOF\necho x | python3\nEOF",
+        "cat <<\\EOF\nE\\\nOF\necho x | python3\nEOF",
+        "cat <<-EOF\nE\\\n\tOF\necho x | python3\nEOF",
+    ] {
+        assert!(
+            default_policy()
+                .validate_command_execution(command, false)
+                .is_ok(),
+            "{command}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn stdin_interpreter_windows_hash_is_not_a_comment() {
+    let mut p = default_policy();
+    let command = "echo # && echo x | python3";
+    assert!(p.validate_command_execution(command, false).is_err());
+    p.allowed_commands.push("python3".into());
+    assert!(
+        p.validate_command_execution(command, false)
+            .unwrap_err()
+            .contains("explicit approval")
+    );
 }

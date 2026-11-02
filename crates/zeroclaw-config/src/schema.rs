@@ -5,8 +5,9 @@ pub mod v1;
 pub mod v2;
 
 use crate::autonomy::AutonomyLevel;
-pub use crate::bridge_access::GatewayDeviceBridgeConfig;
+pub use crate::bridge_access::{GatewayDeviceBridgeConfig, GatewayOwnerBridgeConfig};
 use crate::domain_matcher::DomainMatcher;
+pub use crate::operator_access::GatewayOperatorConfig;
 use crate::traits::{ChannelConfig, HasPropKind, PropKind};
 use crate::validation_bail;
 use anyhow::{Context, Result};
@@ -6502,6 +6503,10 @@ pub struct GatewayConfig {
     /// Allow binding to non-localhost without a tunnel (default: false)
     #[serde(default)]
     pub allow_public_bind: bool,
+    /// Dangerously allow network-facing access without pairing (default: false).
+    /// Independent of allow_public_bind; reachable clients can control the agent.
+    #[serde(default)]
+    pub dangerously_allow_unauthenticated_public_bind: bool,
     /// Allow authenticated remote callers to use admin endpoints that are
     /// otherwise localhost-only. Currently this gates `POST /admin/reload`.
     /// When false (default), those endpoints reject any non-loopback peer.
@@ -6605,6 +6610,12 @@ pub struct GatewayConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub bridges: HashMap<String, GatewayBridgeConfig>,
+
+    /// Explicit management credentials (`[gateway.operator]`). Empty preserves
+    /// legacy paired-token operator access; nonempty requires these hashes.
+    #[serde(default)]
+    #[nested]
+    pub operator: GatewayOperatorConfig,
 }
 
 /// One channel bridge (`[gateway.bridges.<name>]`).
@@ -6629,13 +6640,21 @@ pub struct GatewayBridgeConfig {
     /// `main`, the owner's shared session). With neither this nor
     /// `session_prefix` set the token opens no chat session.
     pub sessions: Vec<String>,
-    /// Opt-in device access. Missing preserves the legacy owner-bridge contract;
+    /// Opt-in device access. Missing both classes preserves the legacy bridge contract;
     /// present with no operations grants no access. Never permits approvals.
     #[nested]
     pub device: Option<GatewayDeviceBridgeConfig>,
+    /// Explicit bounded owner bridge; mutually exclusive with device.
+    #[nested]
+    pub owner: Option<GatewayOwnerBridgeConfig>,
 }
 
 impl GatewayBridgeConfig {
+    /// Explicit operation-limited bridge, as opposed to a legacy channel bridge.
+    pub fn scoped(&self) -> bool {
+        self.device.is_some() || self.owner.is_some()
+    }
+
     /// Whether the bridge token may open the chat session `session_id`.
     pub fn allows_session(&self, session_id: &str) -> bool {
         if self.sessions.iter().any(|s| s == session_id) {
@@ -6728,6 +6747,7 @@ impl Default for GatewayConfig {
             host: default_gateway_host(),
             require_pairing: true,
             allow_public_bind: false,
+            dangerously_allow_unauthenticated_public_bind: false,
             allow_remote_admin: false,
             paired_tokens: Vec::new(),
             pair_rate_limit_per_minute: default_pair_rate_limit(),
@@ -6746,6 +6766,7 @@ impl Default for GatewayConfig {
             check_updates: true,
             allow_self_upgrade: false,
             bridges: HashMap::new(),
+            operator: GatewayOperatorConfig::default(),
         }
     }
 }
@@ -7044,6 +7065,18 @@ impl Default for BrowserConfig {
     }
 }
 
+/// Optional destination binding for one named HTTP authorization secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+#[prefix = "http_auth_secret_policy"]
+pub struct HttpAuthSecretPolicy {
+    /// Exact canonical hosts (case-insensitive), without ports or wildcards.
+    /// Missing preserves legacy behavior; an empty list denies all destinations.
+    #[serde(default)]
+    pub allowed_hosts: Option<Vec<String>>,
+}
+
 // ── HTTP request tool ───────────────────────────────────────────
 
 /// HTTP request tool configuration (`[http_request]` section).
@@ -7081,6 +7114,11 @@ pub struct HttpRequestConfig {
     #[credential_class = "encrypted_secret"]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     pub secrets: HashMap<String, String>,
+    /// Optional destination policies keyed by the corresponding secret name.
+    /// Kept separate from secret values to preserve encryption and redaction.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub auth_secret_policies: HashMap<String, HttpAuthSecretPolicy>,
 }
 
 impl Default for HttpRequestConfig {
@@ -7093,6 +7131,7 @@ impl Default for HttpRequestConfig {
             allow_private_hosts: false,
             allowed_private_hosts: vec![],
             secrets: HashMap::new(),
+            auth_secret_policies: HashMap::new(),
         }
     }
 }
@@ -11892,6 +11931,21 @@ pub struct WebhookConfig {
     #[tab(Connection)]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     pub secret: Option<String>,
+
+    /// DANGEROUS: accept legacy body-only signatures without timestamp or nonce checks.
+    /// Default: false (replay protection enabled).
+    #[tab(Advanced)]
+    #[serde(default)]
+    pub dangerously_disable_replay_protection: bool,
+    /// Allowed timestamp skew in seconds, 1..=86400. Default: 300 (five minutes).
+    #[tab(Advanced)]
+    #[serde(default)]
+    pub replay_window_secs: Option<u64>,
+    /// Maximum remembered event IDs per listener, 1..=65536. Default: 4096.
+    /// A full cache rejects new events until records expire; live entries are never evicted.
+    #[tab(Advanced)]
+    #[serde(default)]
+    pub replay_cache_capacity: Option<usize>,
 
     /// Tools excluded from this channel's tool spec. When set, these tools
     /// are not exposed to the model when responding via this channel.
@@ -16934,12 +16988,22 @@ impl Config {
             }
         }
 
+        for hash in &self.gateway.operator.token_hashes {
+            if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
+                validation_bail!(
+                    InvalidFormat,
+                    "gateway.operator.token_hashes",
+                    "operator credentials must be 64-character hex SHA-256 hashes of independent bearer tokens"
+                );
+            }
+        }
+
         for (name, bridge) in &self.gateway.bridges {
-            if bridge.device.is_some() && !self.gateway.require_pairing {
+            if bridge.scoped() && !self.gateway.require_pairing {
                 validation_bail!(
                     InvalidFormat,
                     "gateway.require_pairing",
-                    "restricted device bridges require authenticated owner access (require_pairing = true)"
+                    "scoped bridges require authenticated owner access (require_pairing = true)"
                 );
             }
             if let Some(device) = &bridge.device
@@ -16954,6 +17018,21 @@ impl Config {
                     InvalidFormat,
                     &format!("gateway.bridges.{name}.device"),
                     "device bridge requires a configured agent and operations from chat, answer, cancel"
+                );
+            }
+            if bridge.device.is_some() && bridge.owner.is_some() {
+                anyhow::bail!("gateway.bridges.{name}: device and owner are mutually exclusive");
+            }
+            if let Some(owner) = &bridge.owner
+                && (owner.agent.is_empty()
+                    || !self.agents.contains_key(&owner.agent)
+                    || owner
+                        .operations
+                        .iter()
+                        .any(|op| !matches!(op.as_str(), "chat" | "cancel" | "approval_response")))
+            {
+                anyhow::bail!(
+                    "gateway.bridges.{name}.owner requires a configured agent and operations from chat, cancel, approval_response"
                 );
             }
             let hash = bridge.token_hash.trim();

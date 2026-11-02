@@ -155,7 +155,7 @@ pub(crate) fn scope_authorized(state: &AppState, scope: &Scope) -> bool {
     config.agents.get(&scope.agent).is_some_and(|a| a.enabled)
         && (state.pairing.tokens().contains(&scope.subject)
             || config.gateway.bridges.values().any(|b| {
-                b.device.is_none()
+                !b.scoped()
                     && b.allows_session(&scope.session)
                     && zeroclaw_config::tokens::constant_time_eq(
                         &scope.subject,
@@ -181,7 +181,7 @@ fn subject(
     let hash = zeroclaw_config::tokens::hash_token(token);
     let config = state.config.read();
     if let Some((_, bridge)) = config.gateway.bridge_for_token(token) {
-        if bridge.device.is_some() || !bridge.allows_session(&query.session_id) {
+        if bridge.scoped() || !bridge.allows_session(&query.session_id) {
             return Err(StatusCode::FORBIDDEN);
         }
     } else if !state.pairing.tokens().contains(&hash) {

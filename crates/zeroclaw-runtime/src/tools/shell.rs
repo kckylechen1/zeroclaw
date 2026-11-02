@@ -1391,6 +1391,84 @@ mod tests {
             tokio::fs::remove_file(std::env::temp_dir().join("zeroclaw_shell_approval_test")).await;
     }
 
+    #[tokio::test]
+    async fn shell_stdin_interpreter_requires_explicit_approval() {
+        let mut policy = SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            require_approval_for_medium_risk: false,
+            ..SecurityPolicy::default()
+        };
+        policy.allowed_commands.push("python3".into());
+        let tool = ShellTool::new(Arc::new(policy), test_runtime());
+        for command in ["echo x | python3", "python3 <<'EOF'\nprint(1)\nEOF"] {
+            for approved in [None, Some(false)] {
+                let mut args = json!({"command": command});
+                if let Some(approved) = approved {
+                    args["approved"] = json!(approved);
+                }
+                let denied = tool.execute(args).await.unwrap();
+                assert!(!denied.success);
+                assert!(
+                    denied
+                        .error
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("explicit approval")
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_stdin_interpreter_approved_executes_at_real_boundary() {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("python3");
+        // A local stand-in makes execution observable without a Python installation.
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$#\" -gt 0 ]; then printf script-mode; else cat; fi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(workspace.path().join("script.py"), "").unwrap();
+        let security = SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            require_approval_for_medium_risk: false,
+            workspace_dir: workspace.path().to_path_buf(),
+            allowed_commands: vec!["echo".into(), "python3".into()],
+            ..SecurityPolicy::default()
+        };
+        let tool = ShellTool::new(Arc::new(security), test_runtime());
+        let script = tool
+            .execute(json!({"command": format!("'{}' script.py", executable.display())}))
+            .await
+            .unwrap();
+        assert!(script.success, "{:?}", script.error);
+        assert_eq!(script.output.trim(), "script-mode");
+        for command in [
+            format!("echo stdin-marker | '{}'", executable.display()),
+            format!("'{}' <<'EOF'\nstdin-marker\nEOF", executable.display()),
+        ] {
+            let denied = tool.execute(json!({"command": command})).await.unwrap();
+            assert!(!denied.success);
+            assert!(
+                denied
+                    .error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("explicit approval")
+            );
+            let approved = tool
+                .execute(json!({"command": command, "approved": true}))
+                .await
+                .unwrap();
+            assert!(approved.success, "{:?}", approved.error);
+            assert_eq!(approved.output.trim(), "stdin-marker");
+        }
+    }
+
     // ── shell timeout enforcement tests ─────────────────
 
     #[test]
