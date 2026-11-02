@@ -7,18 +7,15 @@ Use with:
 - [`docs/book/src/maintainers/ci-and-actions.md`](../../docs/book/src/maintainers/ci-and-actions.md)
 - [`docs/book/src/maintainers/release-runbook.md`](../../docs/book/src/maintainers/release-runbook.md)
 
-Last updated: **September 2026** (PR gate trimmed of duplicate compiles;
-merge queue disabled on `master`; maintainers merge directly. The `merge_group` CI plumbing is retained, so the queue can be
-re-enabled from branch protection with no code change).
+Last reviewed: **November 2026** for `kckylechen1/zeroclaw`. This page describes fork policy and workflow behavior; verify live GitHub settings separately. The retained `merge_group` trigger is not evidence that this user-owned repository can enable a merge queue.
 
 ---
 
 ## Branching Model
 
-ZeroClaw uses a single default branch: `master`. All contributor PRs target
-`master` directly. There is no `dev` or promotion branch.
+ZeroClaw uses one default branch, `master`, with no permanent `dev` or promotion branch. Independent PRs target `master`. A dependent PR can temporarily target its parent branch; after the parent squash, replay only the child increment, retarget to current `master`, and inspect/validate the final result under [Stacked PRs](../../docs/book/src/maintainers/pr-workflow.md#stacked-prs).
 
-Maintainers with merge authority: `JordanTheJet`, `Audacity88`, `WareWolf-MoonWall`, `Nillth`, and `tidux`.
+This fork is maintained by `kckylechen1`; review routing is in [CODEOWNERS](../CODEOWNERS). Actual GitHub permissions and review requirements determine who can merge. Upstream maintainers are not automatic reviewers or milestone owners for this fork.
 
 ---
 
@@ -26,12 +23,12 @@ Maintainers with merge authority: `JordanTheJet`, `Audacity88`, `WareWolf-MoonWa
 
 | File | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | `pull_request` → `master`; `push` → `master`; `merge_group` (dormant) | Lint + test + build on PRs and trusted post-merge cache-warming runs. The `merge_group` trigger stays wired but never fires while the merge queue is disabled. |
+| `ci.yml` | `pull_request` → any base; `push` → `master`; `merge_group` (reserved) | Scope classification, docs validation, selected Rust/build checks, and the aggregate result; trusted code pushes also warm Rust caches. The reserved trigger does not enable a queue. |
 | `release-stable-manual.yml` | `workflow_dispatch`, tag push `v*` | Stable release (manual, version-gated) |
 | `docker-publish.yml` | `workflow_call`, `workflow_dispatch`, tag push `v*` | Build, sign, and scan the generated Docker variant matrix |
 | `trivy-scheduled.yml` | `workflow_dispatch`; weekly schedule | Re-scan published `dist` and `default-features` images for new CVEs |
 | `cross-platform-build-manual.yml` | `workflow_dispatch` | Full platform build matrix (manual smoke check) |
-| `cross-platform-clippy.yml` | `workflow_dispatch`; weekly schedule | Advisory macOS/Windows Clippy coverage plus the 32-bit and minimal-companion Linux checks, outside the required PR gate |
+| `cross-platform-clippy.yml` | `pull_request` when runtime, infra, or this workflow changes; `workflow_dispatch`; weekly schedule | Advisory full-workspace macOS/Windows Clippy, including test targets; outside the required PR gate |
 | `docs-deploy.yml` | `push` → `master` (book, `xtask/`, `locales.toml` paths); tag push `v*`; nightly schedule; `workflow_dispatch` | Build and publish the versioned mdBook + rustdoc site to `gh-pages` |
 | `pr-path-labeler.yml` | `pull_request` lifecycle | Automatic path-based PR labeling |
 
@@ -41,9 +38,9 @@ Maintainers with merge authority: `JordanTheJet`, `Audacity88`, `WareWolf-MoonWa
 
 | Event | What runs |
 |---|---|
-| PR opened or updated against `master` | `ci.yml` (full lint + test + build) |
-| PR added to the merge queue (`merge_group`) | **Inactive**: the merge queue is currently disabled. If re-enabled, `ci.yml` runs the full gate on a temporary `gh-readonly-queue/master/…` branch stacking the base + earlier queue entries + this PR. |
-| Push to `master` | `ci.yml` (post-merge quality signal + trusted Rust cache warming; cache-free re-checks such as docs style and Nix eval are skipped) and, when the book changes, `docs-deploy.yml` |
+| PR opened or updated against `master` or a temporary parent branch | `ci.yml`; applicable docs/code checks and aggregate policy are described below. Runtime, infra, or cross-platform workflow changes also trigger `cross-platform-clippy.yml`. |
+| `merge_group` | Reserved CI compatibility only. GitHub's merge-queue eligibility does not currently include this user-owned repository. |
+| Push to `master` | `ci.yml` (scope-selected checks and docs style; code changes also warm trusted Rust caches; repository structure and Nix checks remain PR-only) and, when the book changes, `docs-deploy.yml` |
 | Manual dispatch | `cross-platform-build-manual.yml`, `cross-platform-clippy.yml`, `docker-publish.yml`, `trivy-scheduled.yml`, or `release-stable-manual.yml` |
 | Tag push `vX.Y.Z` | `release-stable-manual.yml` (full release pipeline) and `docker-publish.yml` (generated variant matrix) |
 
@@ -58,9 +55,10 @@ tag push.
 
 ### 1) PR → `master`
 
-1. Contributor opens or updates a PR targeting `master`.
-2. `ci.yml` runs:
-   - `fmt`: `cargo fmt --all -- --check` (every other job waits on it).
+1. Contributor opens or updates a PR with an explicit scope and dependency, if any. The final landing target is `master`.
+2. Use `scripts/ci/change_scope.py` as the canonical diff classifier and `scripts/ci/required_gate.py` as the expected-result policy, wired by `ci.yml`. Ordinary README/book prose receives the Markdown, source/navigation, and local-link checks. Code, workflow, policy, build, configuration, executable, and unknown paths retain full coverage; missing or uncertain diff evidence does too. Navigation, renderer, generator, and preprocessor-input changes also run the real docs build. The aggregate always reports and rejects failed, cancelled, or unexpected missing/skipped work.
+3. The code path includes:
+   - `fmt`: `cargo fmt --all -- --check` (the Rust matrix waits on it; docs validation runs independently).
    - `lint`: `cargo clippy --workspace --all-targets --locked --features
      ci-all -- -D warnings`, plus the provider dispatch gate. This is the
      only all-features compile in the gate (benches included).
@@ -74,16 +72,10 @@ tag push.
    - `security`: `cargo deny check`, lockfile integrity, `cargo audit`.
    - `installer-drift`: `cargo generate installers --check` (PRs: only when
      manifests, `xtask/`, or generated install surfaces change).
-   - `CI Required Gate`: composite job; branch protection requires this.
-3. Maintainer reviews. Once the gate is green and review policy is satisfied,
-   the maintainer merges the PR directly (squash).
+   - `CI Required Gate`: stable aggregate for the classified result. Verify the actual required contexts rather than assuming cloud protection already uses this single job.
+4. Review the final diff/head and check actual required CI and review policy. Carry out an already-authorized merge task without another yes/no exchange, keep monitoring pending checks, and squash with a final-head precondition. Verify GitHub's resulting state and merge SHA.
 
-> **Merge queue (currently disabled).** `master` previously *required* a merge
-> queue, which serialized landings and re-tested each PR against the latest base
-> on a temporary `gh-readonly-queue/master/…` branch before it could land. It is
-> disabled for now; maintainers merge directly. The `merge_group` trigger in
-> `ci.yml` is retained, so re-enabling is a one-click branch-protection toggle
-> ("Require merge queue" on the `master` rule) with no code change.
+GitHub currently offers [merge queues](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue) for eligible organization-owned repositories. This fork's owner is a user, so queue enablement is not a one-click recovery option. The retained `merge_group` trigger can be useful if eligibility and configuration change later, but those facts and exact-result checks would need verification first. Do not confuse ordinary auto-merge with a merge queue or silently change repository ownership to obtain the feature.
 
 ### 2) Stable Release (manual)
 
@@ -126,11 +118,11 @@ for the full procedure. In summary:
 
 ## Diagrams
 
-### PR to master
+### Code PR to master
 
 ```mermaid
 flowchart TD
-  A["PR opened or updated → master"] --> B["ci.yml"]
+  A["Code PR opened or updated"] --> B["ci.yml: code checks"]
   B --> L["lint\nfmt · clippy"]
   L --> T["test\nnextest per partition leg"]
   L --> BLD["build\nLinux · macOS · Windows"]
@@ -138,7 +130,7 @@ flowchart TD
   L --> SEC["security\ncargo deny check"]
   T & BLD & CHK & SEC --> G["CI Required Gate"]
   G -->|red| D["PR stays open"]
-  G -->|green| R["Maintainer merges (squash) → master"]
+  G -->|green| R["Final head and review policy → squash to master"]
 ```
 
 ### Stable release
