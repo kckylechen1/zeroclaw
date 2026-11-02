@@ -64,7 +64,7 @@ zeroclaw config set browser.enabled false
 > `["*"]`, the shipped default permits opening **any public host over plaintext HTTP**.
 > To reduce plaintext-HTTP exposure, replace the wildcard allowlist with the specific
 > public hosts you trust. Note this **does not enforce HTTPS** for those hosts: the
-> allowlist gates origins, not schemes; HTTPS-only behavior for an allowed host requires
+> allowlist checks explicit-open hostnames, not schemes; HTTPS-only behavior for an allowed host requires
 > that host to redirect/reject plaintext HTTP itself (HSTS, server-side 308), or a future
 > scheme-aware browser policy.
 
@@ -83,6 +83,38 @@ zeroclaw agent -a assistant -m "Open https://example.com and tell me what it say
 ```
 
 </div>
+
+## Browser network boundary and retained SSRF risk
+
+`browser.allowed_domains` checks the hostname in an explicit open URL. It does
+not constrain the browser's network connections. An allowed hostname can resolve
+to a private IP, redirect to another origin, or load private-network subresources.
+A page can also navigate after a click or script. The computer-use endpoint
+checks control the sidecar connection; they do not enforce the sidecar's
+browser destinations.
+
+This remains an accepted residual risk for the current implementation under
+[security finding F7](https://github.com/kckylechen1/zeroclaw/issues/521), not a
+claim that browser SSRF is fixed. The upstream snapshot
+`1c1cd118ac536a1dd1bc79b9cce69cbdc04e4f29` also has no per-navigation DNS/IP
+binding or browser egress enforcement to port. A check of the final URL after
+navigation would occur after the network request and would not cover subresources
+or subsequent navigation. It cannot supply the missing network boundary.
+
+Before allowing untrusted web content, run the browser and computer-use sidecar
+behind independently enforced network egress restrictions that deny loopback,
+private, link-local and metadata destinations on every connection, including DNS
+changes and redirects. Ensure explicitly authorized private destinations have a
+separate, narrow policy. ZeroClaw does not provision or verify that enforcement.
+If this boundary is unavailable, disable the browser tool with `browser.enabled =
+false`; a smaller hostname allowlist alone does not close F7. Do not use the
+browser to bypass restrictions encountered by `web_fetch`.
+
+Acceptance of a future fix requires backend-level regression evidence for DNS
+rebinding, redirects, click/script navigation and subresource requests, covering
+both `agent_browser` and `computer_use`. URL-parser tests prove only the current
+hostname/scheme contract. No real browser or installed network boundary was
+validated as part of this source review.
 
 ## VNC Setup (GUI Access)
 
@@ -269,27 +301,11 @@ agent-browser snapshot -i  # Now get the actual content
 
 </div>
 
-### Docker sandbox network restrictions
-
-If `web_fetch` fails inside Docker sandbox, use agent-browser instead:
-
-<div class="os-tabs-src">
-
-#### sh
-
-```sh
-# Instead of web_fetch, use:
-agent-browser open https://example.com
-agent-browser get text body
-```
-
-</div>
-
 ## Security Notes
 
 - `agent-browser` runs Chrome in headless mode with sandboxing
 - For sensitive sites, use `--session-name` to persist auth state
-- The `--allowed-domains` config restricts navigation to specific domains
+- `browser.allowed_domains` checks explicit-open hostnames; it does not enforce browser network egress
 - VNC ports (5900, 6080) should be behind a firewall or Tailscale
 
 ## Related

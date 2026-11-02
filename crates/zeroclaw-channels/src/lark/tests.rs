@@ -2781,3 +2781,171 @@ async fn lark_fast_ack_and_generic_path_dedupe_on_cache_hit() {
     drop(post_glance_mock);
     drop(delete_glance_mock);
 }
+
+// Exercise the actual HTTP handler before changing its authentication behavior.
+async fn webhook_contract_request(
+    configured: &str,
+    payload: serde_json::Value,
+    signature: Option<&str>,
+) -> reqwest::Response {
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let app = Router::new()
+        .route("/lark", post(handle_lark_http_event))
+        .with_state(LarkHttpAppState {
+            verification_token: configured.into(),
+            channel: Arc::new(make_channel()),
+            tx,
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = zeroclaw_spawn::spawn!(async move { axum::serve(listener, app).await.unwrap() });
+    let mut request = reqwest::Client::new()
+        .post(format!("http://{address}/lark"))
+        .json(&payload);
+    if let Some(signature) = signature {
+        request = request.header("x-lark-signature", signature);
+    }
+    let response = request.send().await.unwrap();
+    server.abort();
+    response
+}
+
+#[tokio::test]
+async fn webhook_contract_missing_empty_wrong_tokens_rejected() {
+    for token in [
+        None,
+        Some(serde_json::json!("")),
+        Some(serde_json::json!("wrong")),
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!(42)),
+    ] {
+        let mut payload = serde_json::json!({"challenge": "challenge"});
+        if let Some(token) = token {
+            payload["token"] = token;
+        }
+        let response = webhook_contract_request("configured", payload.clone(), None).await;
+        assert!(response.status().is_client_error(), "accepted {payload}");
+    }
+    let response = webhook_contract_request(
+        "",
+        serde_json::json!({"challenge":"challenge", "token":""}),
+        None,
+    )
+    .await;
+    assert!(response.status().is_client_error());
+}
+
+#[tokio::test]
+async fn webhook_contract_signature_mismatch_rejected() {
+    for signature in ["bad", ""] {
+        let response = webhook_contract_request(
+            "configured",
+            serde_json::json!({"challenge":"challenge", "token":"configured"}),
+            Some(signature),
+        )
+        .await;
+        assert!(response.status().is_client_error());
+    }
+}
+
+#[tokio::test]
+async fn webhook_contract_valid_challenge_accepted() {
+    let response = webhook_contract_request(
+        "configured",
+        serde_json::json!({"challenge":"challenge", "token":"configured"}),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!({"challenge":"challenge"})
+    );
+}
+
+#[tokio::test]
+async fn webhook_contract_unsigned_event_rejected_even_with_token() {
+    let response = webhook_contract_request(
+        "configured",
+        serde_json::json!({"header":{"event_type":"im.message.receive_v1", "token":"configured"}}),
+        None,
+    )
+    .await;
+    assert!(response.status().is_client_error());
+}
+
+#[tokio::test]
+async fn webhook_contract_signed_dispatch_and_raw_body_integrity() {
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    let key = "fixture-encrypt-key";
+    let config = zeroclaw_config::schema::LarkConfig {
+        encrypt_key: Some(key.into()),
+        verification_token: Some("configured".into()),
+        ..Default::default()
+    };
+    let mut channel = LarkChannel::from_config(
+        &config,
+        "fixture",
+        resolver_from(vec!["ou_testuser123".into()]),
+    );
+    channel.ack_reactions = false;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let state = LarkHttpAppState {
+        verification_token: "configured".into(),
+        channel: Arc::new(channel),
+        tx,
+    };
+    let body = br#"{"header":{"event_type":"im.message.receive_v1"},"event":{"sender":{"sender_id":{"open_id":"ou_testuser123"}},"message":{"message_type":"text","content":"{\"text\":\"hello\"}","chat_id":"oc_fixture","create_time":"1699999999000"}}}"#;
+    let mut digest = Sha256::new();
+    digest.update(b"123");
+    digest.update(b"nonce");
+    digest.update(key.as_bytes());
+    digest.update(body);
+    let signature = hex::encode(digest.finalize());
+    let mut headers = HeaderMap::new();
+    headers.insert("x-lark-request-timestamp", HeaderValue::from_static("123"));
+    headers.insert("x-lark-request-nonce", HeaderValue::from_static("nonce"));
+    headers.insert(
+        "x-lark-signature",
+        HeaderValue::from_str(&signature.to_ascii_uppercase()).unwrap(),
+    );
+    let response =
+        handle_lark_http_event(State(state.clone()), headers.clone(), body.to_vec().into()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(rx.try_recv().unwrap().content, "hello");
+
+    let mut changed = body.to_vec();
+    changed.push(b' ');
+    let response =
+        handle_lark_http_event(State(state.clone()), headers.clone(), changed.into()).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(rx.try_recv().is_err());
+
+    for name in [
+        "x-lark-request-timestamp",
+        "x-lark-request-nonce",
+        "x-lark-signature",
+    ] {
+        for value in [
+            HeaderValue::from_static(""),
+            HeaderValue::from_bytes(b"\xff").unwrap(),
+        ] {
+            let mut invalid = headers.clone();
+            invalid.insert(name, value);
+            let response =
+                handle_lark_http_event(State(state.clone()), invalid, body.to_vec().into()).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let mut missing = headers.clone();
+        missing.remove(name);
+        let response =
+            handle_lark_http_event(State(state.clone()), missing, body.to_vec().into()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let mut duplicate = headers.clone();
+        duplicate.append(name, HeaderValue::from_static("duplicate"));
+        let response =
+            handle_lark_http_event(State(state.clone()), duplicate, body.to_vec().into()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert!(rx.try_recv().is_err());
+}

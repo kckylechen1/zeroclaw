@@ -905,3 +905,6 @@ tool-runtime-command-build-failed = ランタイムコマンドの構築に失�
 tool-runtime-command-docker-allowed-root = ランタイムコマンドの構築に失敗しました: Docker ワークスペースルート {$path} の正規化に失敗しました: {$cause}
 tool-runtime-command-docker-workspace-path = ランタイムコマンドの構築に失敗しました: Docker ワークスペースパス {$path} の正規化に失敗しました: {$cause}
 turn-max-iterations-reached = *ターンを停止しました: ツールイテレーションの上限に達しました ({ $max_iterations })。*
+
+acp-bridge-allow-once = 今回のみ許可
+acp-bridge-reject-once = 今回のみ拒否

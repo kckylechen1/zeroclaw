@@ -11,7 +11,7 @@ pub(super) struct Binding {
 
 impl Binding {
     pub fn restricted(&self) -> bool {
-        self.initial.device.is_some()
+        self.initial.scoped()
     }
 
     pub fn allows(&self, config: &Config, agent: &str, session: &str, operation: &str) -> bool {
@@ -36,17 +36,29 @@ impl Binding {
             != 1
             || !self.initial.allows_session(session)
             || !current.allows_session(session)
-            || (self.restricted() && current.device.is_none())
+            || (self.initial.device.is_some() != current.device.is_some())
+            || (self.initial.owner.is_some() != current.owner.is_some())
         {
             return false;
         }
         [&self.initial, current].into_iter().all(|bridge| {
-            bridge.device.as_ref().is_none_or(|device| {
-                !session.is_empty()
-                    && zeroclaw_api::session_keys::sanitize_session_key(session) == session
-                    && config.agents.get(agent).is_some_and(|entry| entry.enabled)
-                    && device.allows(agent, operation)
-            })
+            if bridge.device.is_some() && bridge.owner.is_some() {
+                return false;
+            }
+            if !bridge.scoped() {
+                return true;
+            }
+            !session.is_empty()
+                && zeroclaw_api::session_keys::sanitize_session_key(session) == session
+                && config.agents.get(agent).is_some_and(|entry| entry.enabled)
+                && bridge
+                    .device
+                    .as_ref()
+                    .is_none_or(|device| device.allows(agent, operation))
+                && bridge
+                    .owner
+                    .as_ref()
+                    .is_none_or(|owner| owner.allows(agent, operation))
         })
     }
 }
@@ -73,7 +85,7 @@ pub(super) fn authenticated_mode(state: &AppState, config: &Config) -> bool {
             .gateway
             .bridges
             .values()
-            .all(|bridge| bridge.device.is_none())
+            .all(|bridge| !bridge.scoped())
 }
 
 pub(super) fn frame_operation(frame: &serde_json::Value) -> &'static str {
@@ -88,6 +100,11 @@ pub(super) fn frame_operation(frame: &serde_json::Value) -> &'static str {
         }
         Some("answer") => "answer",
         Some("cancel") => "cancel",
+        Some("approval_response")
+            if matches!(frame["decision"].as_str(), Some("approve" | "deny")) =>
+        {
+            "approval_response"
+        }
         _ => "unsupported",
     }
 }

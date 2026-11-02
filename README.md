@@ -63,15 +63,18 @@ Most requests end at L0. A spoken "what's the weather" never waits on Tachi.
 
 ### Rules that do not bend
 
-- **You talk only to the body.** Delegated agents have no Soul, and they never
-  receive your Soul or User Model data.
+- **You talk only to the body.** Delegated agents have no Soul. The body does
+  not export Soul or User Model records; a task carries only the specific
+  authorized facts it needs.
 - **Fail closed, never fall back.** If Tachi is off or unreachable, L0 and L1
   keep working, and a delegation request gets a typed "unavailable" answer.
   Nothing is quietly run locally instead.
-- **Voice never blocks on delegation.** The body acknowledges ("I've asked Codex
-  to do it; I'll tell you when it's done") and ends the turn.
+- **Responsive voice is the target.** An accepted delegation should let the
+  current voice turn finish promptly. Today, status, result and bounded watch
+  reads are available; automatic background completion delivery remains open
+  in #381 and #63. An acknowledgement must not promise an unconfigured delivery.
 - **New external surfaces default closed.** `[tachi]` and `[nodes]` are disabled
-  by default, Tachi accepts only loopback endpoints, and no harness or Node
+  by default, ZeroClaw accepts only loopback Tachi endpoints, and no harness or Node
   capability is available until you grant it explicitly.
 
 Full details: [ADR-013](docs/book/src/architecture/decisions/ADR-013-channels-as-gateway-clients.md)
@@ -81,16 +84,19 @@ Full details: [ADR-013](docs/book/src/architecture/decisions/ADR-013-channels-as
 
 ## Status
 
-This fork is mid-transition. The acceptance gates come from ADR-017; the
-whole-package acceptance is tracked in #374.
+This fork is mid-transition. This status was checked on 2026-11-02 against
+`47baee196`; the acceptance gates come from ADR-017 and whole-package
+acceptance is tracked in [#374](https://github.com/kckylechen1/zeroclaw/issues/374).
 
 | ADR-017 acceptance gate | Status |
 |---|---|
 | L0 request (e.g. weather) completes with Tachi stopped | Not yet recorded as accepted |
 | Delegation with Tachi stopped returns a typed "unavailable" and runs nothing locally | ✅ Covered by tests |
-| One real Codex or Claude Code job runs end to end: started, tracked, reported in the body's voice | ⏳ Open (#381) |
+| Real external work is started, tracked and reported in the body's voice | ⏳ Codex CLI + OpenCode acceptance remains open in #515; project/profile prerequisites are tracked in Tachi #2178 |
 | Retire ZeroClaw's own ACP driver (`execution_subagent`) | ✅ Done (#526) |
 | One headless Node pairs, advertises, is invoked, disconnects, reconnects, is revoked | ✅ Real-process loopback proof with safe `system.info` / `test.echo` (#514) |
+| Web uses the existing scoped turn controls, including Stop and attachments | ⏳ Backend exists; client integration remains open in #549 |
+| A delegated result reaches the owner after the foreground client leaves | ⏳ Background observation and actual delivery remain open in #381 / #63 |
 
 **First physical body:** the Yonbo X1 companion robot (#535). Its dialogue
 still runs through an interim adapter; switching that brain to ZeroClaw (S5)
@@ -114,7 +120,7 @@ cd zeroclaw
 > (`curl -fsSL https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh | bash`)
 > installs **upstream ZeroClaw**, not this fork.
 
-When run from a clone in an interactive terminal, `./install.sh` lets you pick
+When run from a clone in an interactive terminal, `./install.sh --source` lets you pick
 apps and optional features. For an unconfigured install, it then offers CLI or
 browser-based Quickstart. Use `--skip-quickstart` when you only want to install.
 
@@ -130,7 +136,7 @@ Flags:
 
 ```
 ./install.sh --source                # always build from source
-./install.sh --preset minimal        # kernel-only source preset (~6.6 MB)
+./install.sh --preset minimal        # kernel-only source preset
 ./install.sh --minimal               # alias for --preset minimal
 ./install.sh --source --features agent-runtime,channel-discord  # custom feature set
 ./install.sh --with-gateway          # force gateway support on
@@ -164,9 +170,10 @@ To try a local read-only Node, build with the `nodes` feature and follow
 
 ## Capabilities
 
-- **Gateway-first** — the local CLI and the gateway (REST plus the `/ws/chat`
-  event stream) are the only doors to the agent. Messaging platforms become
-  bridges that talk to the gateway (ADR-013).
+- **Gateway-first target** — Clients share the gateway conversation through
+  REST and `/ws/chat`; authorized channel bridges also use `/ws/bridge` for
+  proactive delivery. Legacy channel and ACP entry points remain during the
+  consumer migration in #378 (ADR-013).
 - **Soul and User Model** — a lasting identity and owner model with protected
   authority (ADR-014/015/016/018).
 - **Provider-agnostic** — [model providers](docs/book/src/providers/overview.md) are pluggable: Anthropic, OpenAI, local Ollama, or any OpenAI-compatible endpoint, with [fallback chains and routing](docs/book/src/providers/routing.md).
@@ -176,9 +183,17 @@ To try a local read-only Node, build with the `nodes` feature and follow
   through the opt-in `zeroclaw-node-host` (#514). Each call is bound to the
   device, connection and capability revision; unknown outcomes are never
   replayed. High-risk capabilities stay unavailable.
-- **Delegation through Tachi** — L2 work goes over MCP to Tachi's `tachi_staff` (start / status / result / cancel), with typed errors and no local fallback.
-- **SOP definitions** — event-trigger-format [Standard Operating Procedures](docs/book/src/sop/index.md), authored and validated in ZeroClaw; SOP runs live Tachi-side.
-- **ACP** — IDE / editor integration via [Agent Client Protocol](docs/book/src/channels/acp.md) (JSON-RPC 2.0 over stdio).
+- **Delegation through Tachi** — L2 work uses `tachi_start`, `tachi_status`,
+  `tachi_result`, `tachi_cancel` and bounded `tachi_watch` over the Staff MCP
+  interface, with typed unsupported/unknown outcomes and no local fallback.
+- **SOP definitions** — [Standard Operating Procedures](docs/book/src/sop/index.md)
+  can still be authored and validated. The former local runner is retired;
+  the retained Procedure/TaskIntent seam has no production Tachi peer.
+  Production delegated execution uses the Staff interface above.
+- **ACP** — the optional [gateway-backed ACP bridge](docs/book/src/gateway/api.md)
+  supports new Zed text sessions (#517). Legacy `zeroclaw acp` and its
+  [session store](docs/book/src/channels/acp.md) remain until their consumers
+  migrate under #378.
 
 ## Configuration
 
@@ -215,27 +230,26 @@ Notes:
 - Normal OpenAI Codex subscription auth uses stored auth profiles, not an `api_key` on the provider entry.
 - Claude Max setup-token auth stays on the canonical Anthropic slot: run `claude setup-token`, choose `setup_token` in Quickstart, and paste the generated token into the API key/token prompt.
 - Only set `api_key` / `uri` on `[providers.models.openai.<alias>]` when intentionally targeting a custom OpenAI-compatible gateway or endpoint.
-- If you see `provider streaming failed, falling back to non-streaming chat`, ZeroClaw retries the same request in non-streaming mode. Check `zeroclaw auth status` before changing provider config.
+- Retryable streaming failures may fall back to non-streaming chat. Authentication
+  failures stop before that fallback (#504); check `zeroclaw auth status` before
+  changing provider config.
 
 ## Architecture
 
-```
-  Clients: CLI · phone · speaker · robot dialogue · messaging bridges
-                       │  REST + /ws/chat
-                       ▼
-┌──────────────────────────────────────────────────────────┐
-│                  The body (one process)                   │
-│                                                          │
-│   gateway ── agent loop ── approvals ── scheduler        │
-│                   │                                      │
-│        Soul · User Model · memory                        │
-│                   │                                      │
-│   L0 tools / MCP    L1 reasoning      L2 delegation ─────┼──► Tachi (MCP, loopback)
-│                                                          │       └─► Codex / Claude Code / …
-└──────────────────────────┬───────────────────────────────┘
-                           │ /ws/nodes (v2 handshake, signed identity)
-                           ▼
-          Nodes: node host · robot adapter · speaker (local safety)
+Target topology; the Status section above identifies the remaining acceptance:
+
+```mermaid
+flowchart TD
+  Clients["CLI, Web, bridges and device Clients"] --> Gateway["Gateway"]
+  subgraph Body["ZeroClaw body: one process"]
+    Gateway --> Agent["Agent loop"]
+    Agent --> State["Soul, User Model and memory"]
+    Agent --> Local["L0 tools and L1 reasoning"]
+    Agent --> Control["Approvals and scheduler"]
+  end
+  Agent -->|"L2: loopback MCP"| Tachi["Tachi"]
+  Tachi --> Harness["Admitted CLI agents"]
+  Local -->|"Node v2"| Nodes["Node hosts with local safety"]
 ```
 
 More detail: [ADR-013](docs/book/src/architecture/decisions/ADR-013-channels-as-gateway-clients.md) · [ADR-017](docs/book/src/architecture/decisions/ADR-017-personal-agent-body-edges-and-delegation.md) · [Architecture overview](docs/book/src/architecture/overview.md) · [Crates](docs/book/src/architecture/crates.md). Some upstream architecture pages still describe the multi-channel layout.

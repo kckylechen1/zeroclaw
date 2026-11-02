@@ -65,12 +65,19 @@ scripts/dev/cargo-local.sh test -p <crate> [--lib <filter> | --test <name>]
 
 ```bash
 scripts/dev/cargo-local.sh fmt --all -- --check
-scripts/dev/cargo-local.sh clippy --workspace --all-targets --locked --features ci-all -- -D warnings   # alias: scripts/dev/cargo-local.sh lint-ci
-scripts/dev/leg.sh <leg>                # each test leg that owns a crate you touched
+scripts/dev/leg.sh <leg>                # ONLY each leg that owns a crate you touched — never all legs by default
 bash scripts/ci/provider_dispatch_gate.sh   # model calls go through ProviderDispatch
 bash scripts/ci/docs_quality_gate.sh && bash scripts/ci/docs_links_gate.sh   # docs changes
 (cd web && npm ci && npm run build)     # gateway routes or web/ changed
 ```
+
+**Protected-surface slices** (the Protected list above) additionally run before pushing:
+
+```bash
+scripts/dev/cargo-local.sh lint-ci      # workspace clippy with ci-all features
+```
+
+All other slices rely on hosted CI for workspace clippy: a red CI round costs ~20 min and no local attention, while a local lint-ci costs the same 10–20 min serialized on the shared machine. When CI fails on clippy for a non-protected slice, fix and rerun — do not treat it as a process violation.
 
 - `scripts/dev/leg.sh` runs a leg from `dev/ci/test-partition.json` with the same packages and features as CI (`--list` shows the legs, `--dry-run` prints the commands). Do not run a full-workspace `cargo test`; CI runs every leg in parallel.
 - One cargo process per worktree at a time, and only one agent runs the before-push tier at a time on a shared machine.

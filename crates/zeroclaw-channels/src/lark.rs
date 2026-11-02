@@ -1,8 +1,10 @@
 use async_trait::async_trait;
+use axum::{Json, Router, extract::State, routing::post};
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as ProstMessage;
 use reqwest::multipart::{Form, Part};
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,6 +16,7 @@ use tokio_tungstenite::tungstenite::Message as WsMsg;
 use uuid::Uuid;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
 use zeroclaw_config::schema::StreamMode;
+use zeroclaw_config::tokens::constant_time_eq;
 
 const FEISHU_BASE_URL: &str = "https://open.feishu.cn/open-apis";
 const FEISHU_WS_BASE_URL: &str = "https://open.feishu.cn";
@@ -717,6 +720,7 @@ pub struct LarkChannel {
     app_id: String,
     app_secret: String,
     verification_token: String,
+    encrypt_key: Option<String>,
     port: Option<u16>,
     /// The alias key under `[channels.lark.<alias>]` this handle is bound to.
     /// Used to scope peer-group writes and resolver lookups. (Pre-V3 Feishu
@@ -765,6 +769,189 @@ pub struct LarkChannel {
     api_base_override: Option<String>,
 }
 
+#[derive(Clone)]
+struct LarkHttpAppState {
+    verification_token: String,
+    channel: Arc<LarkChannel>,
+    tx: tokio::sync::mpsc::Sender<ChannelMessage>,
+}
+
+// Adapted from upstream aa6bc2657e (#9110) and e762ce510f (#9574).
+fn verify_challenge_token(incoming: Option<&serde_json::Value>, configured: &str) -> bool {
+    incoming
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|token| {
+            !token.is_empty() && !configured.is_empty() && constant_time_eq(token, configured)
+        })
+}
+
+fn verify_lark_webhook_request(
+    verification_token: &str,
+    encrypt_key: Option<&str>,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    payload: &serde_json::Value,
+) -> bool {
+    // Presence, including empty or invalid header values, forbids token fallback.
+    let has_signature_headers = [
+        "x-lark-request-timestamp",
+        "x-lark-request-nonce",
+        "x-lark-signature",
+    ]
+    .iter()
+    .any(|name| headers.contains_key(*name));
+    if has_signature_headers {
+        let header = |name: &str| {
+            let mut values = headers.get_all(name).iter();
+            let value = values.next()?.to_str().ok()?;
+            if value.is_empty() || values.next().is_some() {
+                return None;
+            }
+            Some(value)
+        };
+        let (Some(timestamp), Some(nonce), Some(signature), Some(key)) = (
+            header("x-lark-request-timestamp"),
+            header("x-lark-request-nonce"),
+            header("x-lark-signature"),
+            encrypt_key.filter(|key| !key.is_empty()),
+        ) else {
+            return false;
+        };
+        if signature.len() != 64 || !signature.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+        let mut digest = Sha256::new();
+        digest.update(timestamp.as_bytes());
+        digest.update(nonce.as_bytes());
+        digest.update(key.as_bytes());
+        digest.update(body);
+        return constant_time_eq(
+            &hex::encode(digest.finalize()),
+            &signature.to_ascii_lowercase(),
+        );
+    }
+    // This fork permits token-only authentication solely for plaintext setup
+    // challenges. Event and approval-card dispatch always require a signature.
+    !payload
+        .as_object()
+        .is_some_and(|object| object.contains_key("encrypt"))
+        && payload
+            .get("challenge")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && verify_challenge_token(payload.get("token"), verification_token)
+}
+
+async fn handle_lark_http_event(
+    State(state): State<LarkHttpAppState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid webhook payload").into_response(),
+    };
+    if !verify_lark_webhook_request(
+        &state.verification_token,
+        state.channel.encrypt_key.as_deref(),
+        &headers,
+        &body,
+        &payload,
+    ) {
+        return (StatusCode::UNAUTHORIZED, "invalid authentication").into_response();
+    }
+    // Encrypted payload handling is not implemented by this fork. Never
+    // acknowledge an envelope we cannot process as a successful event.
+    if payload.get("encrypt").is_some() {
+        return (StatusCode::BAD_REQUEST, "encrypted webhook unsupported").into_response();
+    }
+    if let Some(challenge_value) = payload.get("challenge") {
+        let Some(challenge) = challenge_value.as_str() else {
+            return (StatusCode::BAD_REQUEST, "invalid challenge").into_response();
+        };
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "challenge": challenge })),
+        )
+            .into_response();
+    }
+
+    // Card button click events are not message events — route them
+    // through the approval-card resolver and short-circuit before the
+    // generic message parser sees them.
+    let event_type = payload
+        .pointer("/header/event_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if event_type == "card.action.trigger"
+        && let Some(inner) = payload.get("event")
+    {
+        if let Err(e) = state.channel.handle_card_action_event(inner).await {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Dispatch)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"error": e.to_string()})),
+                "Lark webhook: card action dispatch error"
+            );
+        }
+        return (StatusCode::OK, "ok").into_response();
+    }
+
+    let messages = state.channel.parse_event_payload_async(&payload).await;
+    if !messages.is_empty()
+        && state.channel.ack_reactions
+        && let Some(message_id) = payload
+            .pointer("/event/message/message_id")
+            .and_then(|m| m.as_str())
+    {
+        let reaction_channel = Arc::clone(&state.channel);
+        let reaction_message_id = message_id.to_string();
+        // Prefer the first parsed message's reply_target as the
+        // ack target; parse_event_payload_async already filtered
+        // out unauthorized senders and non-text payloads.
+        let reaction_reply_target = messages[0].reply_target.clone();
+        zeroclaw_spawn::spawn!(async move {
+            if let Err(e) = <LarkChannel as Channel>::add_reaction(
+                &reaction_channel,
+                &reaction_reply_target,
+                &reaction_message_id,
+                "\u{1F440}",
+            )
+            .await
+            {
+                ::zeroclaw_log::record!(
+                    DEBUG,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note,)
+                        .with_attrs(::serde_json::json!({
+                            "message_id": reaction_message_id,
+                            "error": format!("{e}"),
+                            "error_key": "lark.inbound_fast_ack.failed",
+                        })),
+                    "Lark inbound fast-ack failed (soft, webhook path)"
+                );
+            }
+        });
+    }
+
+    for msg in messages {
+        if state.tx.send(msg).await.is_err() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                "message channel closed"
+            );
+            break;
+        }
+    }
+
+    (StatusCode::OK, "ok").into_response()
+}
+
 impl LarkChannel {
     pub fn new(
         app_id: String,
@@ -807,6 +994,7 @@ impl LarkChannel {
             app_id,
             app_secret,
             verification_token,
+            encrypt_key: None,
             port,
             alias: alias.into(),
             peer_resolver,
@@ -855,6 +1043,7 @@ impl LarkChannel {
             config.mention_only,
             platform,
         );
+        ch.encrypt_key = config.encrypt_key.clone();
         ch.receive_mode = config.receive_mode.clone();
         ch.proxy_url = config.proxy_url.clone();
         ch
@@ -3501,117 +3690,6 @@ impl LarkChannel {
         tx: tokio::sync::mpsc::Sender<ChannelMessage>,
     ) -> anyhow::Result<()> {
         self.ensure_bot_open_id().await;
-        use axum::{Json, Router, extract::State, routing::post};
-
-        #[derive(Clone)]
-        struct AppState {
-            verification_token: String,
-            channel: Arc<LarkChannel>,
-            tx: tokio::sync::mpsc::Sender<ChannelMessage>,
-        }
-
-        async fn handle_event(
-            State(state): State<AppState>,
-            Json(payload): Json<serde_json::Value>,
-        ) -> axum::response::Response {
-            use axum::http::StatusCode;
-            use axum::response::IntoResponse;
-
-            // URL verification challenge
-            if let Some(challenge) = payload.get("challenge").and_then(|c| c.as_str()) {
-                // Verify token if present
-                let token_ok = payload
-                    .get("token")
-                    .and_then(|t| t.as_str())
-                    .is_none_or(|t| t == state.verification_token);
-
-                if !token_ok {
-                    return (StatusCode::FORBIDDEN, "invalid token").into_response();
-                }
-
-                let resp = serde_json::json!({ "challenge": challenge });
-                return (StatusCode::OK, Json(resp)).into_response();
-            }
-
-            // Card button click events are not message events — route them
-            // through the approval-card resolver and short-circuit before the
-            // generic message parser sees them.
-            let event_type = payload
-                .pointer("/header/event_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if event_type == "card.action.trigger"
-                && let Some(inner) = payload.get("event")
-            {
-                if let Err(e) = state.channel.handle_card_action_event(inner).await {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(
-                            module_path!(),
-                            ::zeroclaw_log::Action::Dispatch
-                        )
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"error": e.to_string()})),
-                        "Lark webhook: card action dispatch error"
-                    );
-                }
-                return (StatusCode::OK, "ok").into_response();
-            }
-
-            let messages = state.channel.parse_event_payload_async(&payload).await;
-            if !messages.is_empty()
-                && state.channel.ack_reactions
-                && let Some(message_id) = payload
-                    .pointer("/event/message/message_id")
-                    .and_then(|m| m.as_str())
-            {
-                let reaction_channel = Arc::clone(&state.channel);
-                let reaction_message_id = message_id.to_string();
-                // Prefer the first parsed message's reply_target as the
-                // ack target; parse_event_payload_async already filtered
-                // out unauthorized senders and non-text payloads.
-                let reaction_reply_target = messages[0].reply_target.clone();
-                zeroclaw_spawn::spawn!(async move {
-                    if let Err(e) = <LarkChannel as Channel>::add_reaction(
-                        &reaction_channel,
-                        &reaction_reply_target,
-                        &reaction_message_id,
-                        "\u{1F440}",
-                    )
-                    .await
-                    {
-                        ::zeroclaw_log::record!(
-                            DEBUG,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note,
-                            )
-                            .with_attrs(::serde_json::json!({
-                                "message_id": reaction_message_id,
-                                "error": format!("{e}"),
-                                "error_key": "lark.inbound_fast_ack.failed",
-                            })),
-                            "Lark inbound fast-ack failed (soft, webhook path)"
-                        );
-                    }
-                });
-            }
-
-            for msg in messages {
-                if state.tx.send(msg).await.is_err() {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "message channel closed"
-                    );
-                    break;
-                }
-            }
-
-            (StatusCode::OK, "ok").into_response()
-        }
-
         let port = self.port.ok_or_else(|| {
             ::zeroclaw_log::record!(
                 ERROR,
@@ -3623,14 +3701,14 @@ impl LarkChannel {
             anyhow::Error::msg("webhook mode requires `port` to be set in [channels_config.lark]")
         })?;
 
-        let state = AppState {
+        let state = LarkHttpAppState {
             verification_token: self.verification_token.clone(),
             channel: Arc::new(self.clone()),
             tx,
         };
 
         let app = Router::new()
-            .route("/lark", post(handle_event))
+            .route("/lark", post(handle_lark_http_event))
             .with_state(state);
 
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
