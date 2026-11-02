@@ -906,3 +906,6 @@ tool-runtime-command-build-failed = Error al construir el comando de runtime: {$
 tool-runtime-command-docker-allowed-root = Error al construir el comando de runtime: no se pudo canonizar la raíz del espacio de trabajo de Docker {$path}: {$cause}
 tool-runtime-command-docker-workspace-path = Error al construir el comando de runtime: no se pudo canonizar la ruta del espacio de trabajo de Docker {$path}: {$cause}
 turn-max-iterations-reached = *Turno detenido: se alcanzó el máximo de iteraciones de herramientas ({ $max_iterations }).*
+
+acp-bridge-allow-once = Permitir una vez
+acp-bridge-reject-once = Rechazar una vez
