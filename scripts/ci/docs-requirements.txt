@@ -1,0 +1,3 @@
+# CommonMark parsing for the source/navigation/link gate (no renderer or network checks).
+markdown-it-py==4.0.0
+mdurl==0.1.2

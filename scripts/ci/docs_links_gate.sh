@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
 BASE_SHA="${BASE_SHA:-}"
 DOCS_FILES_RAW="${DOCS_FILES:-}"
 
@@ -9,6 +11,8 @@ LINKS_FILE="$(mktemp)"
 HTTP_LINKS_FILE="$(mktemp)"
 trap 'rm -f "$LINKS_FILE" "$HTTP_LINKS_FILE"' EXIT
 
+# --check-local-targets always checks the whole authored book, even with no
+# changed Markdown: deletes/renames can break incoming links on untouched pages.
 python3 ./scripts/ci/collect_changed_links.py \
     --base "$BASE_SHA" \
     --docs-files "$DOCS_FILES_RAW" \
@@ -16,21 +20,4 @@ python3 ./scripts/ci/collect_changed_links.py \
     --http-output "$HTTP_LINKS_FILE" \
     --check-local-targets
 
-if [ ! -s "$LINKS_FILE" ]; then
-    echo "No added links detected in changed docs lines."
-    exit 0
-fi
-
-if [ ! -s "$HTTP_LINKS_FILE" ]; then
-    echo "No added HTTP(S) links detected in changed docs lines."
-    exit 0
-fi
-
-if ! command -v lychee >/dev/null 2>&1; then
-    echo "Added HTTP(S) links detected, but lychee is not installed; skipping optional HTTP(S) validation."
-    echo "Install via: cargo install lychee"
-    exit 0
-fi
-
-echo "Checking added HTTP(S) links with lychee (offline mode)..."
-lychee --offline --no-progress --format detailed "$HTTP_LINKS_FILE"
+echo "Offline docs gate passed: source/navigation/local targets only. HTTP(S) availability and rendered anchors are not checked."

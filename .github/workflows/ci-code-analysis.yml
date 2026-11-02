@@ -1,6 +1,6 @@
-# Static analysis — fast pattern checks on every PR, deep taint on master+schedule.
+# Static analysis: pattern checks for code/config, deep taint on master+schedule.
 #
-# Semgrep (every PR): <60s, no build, catches injection/path-traversal/unsafe
+# Semgrep (code/config PRs and pushes): <60s, no build, catches injection/path-traversal/unsafe
 #   patterns. Community rules auto-detected for Rust.
 # CodeQL (master push + daily): 10-30 min, inter-procedural taint tracking,
 #   SARIF results published to GitHub Security tab.
@@ -25,7 +25,8 @@ on:
     - cron: '37 5 * * *'   # daily at 05:37 UTC — random offset to spread load
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # A prose push must not cancel pending/running analysis for an earlier code push.
+  group: ${{ github.workflow }}-${{ (github.event_name == 'push' && github.sha) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -33,15 +34,30 @@ permissions:
 
 jobs:
 
-  # ── Fast pattern analysis (every PR, ~1 min) ─────────────────────────
+  changes:
+    name: Analysis Scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Classify changes (scheduled scans retain full coverage)
+        id: scope
+        run: python3 scripts/ci/change_scope.py
+
+  # ── Fast pattern analysis (code/config changes, ~1 min) ──────────────
 
   semgrep:
     name: Semgrep
+    needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     container:
       image: semgrep/semgrep@sha256:06938c1f365d3f67b8cedd8bc117607ae64253f88a0e768e9da9408548927dd6 # 2026-06-17
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && needs.changes.outputs.full == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Run Semgrep CE
@@ -55,14 +71,15 @@ jobs:
 
   codeql:
     name: CodeQL
+    needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
       security-events: write
     if: |
-      github.repository == 'zeroclaw-labs/zeroclaw' &&
       github.ref == 'refs/heads/master' &&
+      needs.changes.outputs.full == 'true' &&
       (github.event_name == 'push' || github.event_name == 'schedule')
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

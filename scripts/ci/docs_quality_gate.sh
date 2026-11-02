@@ -2,29 +2,22 @@
 
 set -euo pipefail
 
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
 BASE_SHA="${BASE_SHA:-}"
 DOCS_FILES_RAW="${DOCS_FILES:-}"
-
-if [ -z "$BASE_SHA" ] && git rev-parse --verify origin/master >/dev/null 2>&1; then
-    BASE_SHA="$(git merge-base origin/master HEAD)"
-fi
-
-if [ -z "$DOCS_FILES_RAW" ] && [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
-    DOCS_FILES_RAW="$(git diff --name-only "$BASE_SHA" HEAD | awk '
-        /^docs\/book\/src\/.*\.md$/ || /^docs\/book\/src\/.*\.mdx$/ {
-            print
-        }
-    ')"
-fi
-
-if [ -z "$DOCS_FILES_RAW" ]; then
-    echo "No docs files detected; skipping docs quality gate."
-    exit 0
-fi
 
 if [ -z "$BASE_SHA" ] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
     echo "BASE_SHA is missing or invalid; falling back to full-file markdown lint."
     BASE_SHA=""
+fi
+
+DOCS_FILES_RAW="$(python3 scripts/ci/collect_changed_links.py \
+    --base "$BASE_SHA" --docs-files "$DOCS_FILES_RAW" --list-quality)"
+
+if [ -z "$DOCS_FILES_RAW" ]; then
+    echo "No docs files detected; skipping docs quality gate."
+    exit 0
 fi
 
 ALL_FILES=()
@@ -51,23 +44,30 @@ if [ "${#EXISTING_FILES[@]}" -eq 0 ]; then
     exit 0
 fi
 
-# Em-dash gate: no prose em-dashes (U+2014) in changed docs. Em-dashes inside
+# Em-dash gate: no new prose em-dashes (U+2014), matching the changed-line
+# Markdown policy below. A missing base checks full files. Em-dashes inside
 # fenced code blocks and inline `code` spans (including spans that wrap across
 # lines) are allowed, since those quote literal source, CLI output, or table
 # rules. Everything else uses a comma, colon, semicolon, or period instead.
-python3 - "${EXISTING_FILES[@]}" <<'PY'
+python3 - "$BASE_SHA" "${EXISTING_FILES[@]}" <<'PY'
 import sys
 
+sys.path.insert(0, "scripts/ci")
+from docs_lint_filter import changed_lines
+
 EM = "\u2014"
-files = sys.argv[1:]
+base = sys.argv[1]
+files = sys.argv[2:]
 violations = []
+changed = changed_lines(base, files) if base else {}
 
 for path in files:
     try:
         with open(path, encoding="utf-8") as fh:
             lines = fh.readlines()
-    except (FileNotFoundError, UnicodeDecodeError):
-        continue
+    except (OSError, UnicodeError) as exc:
+        print(f"Cannot read {path}: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     in_fence = False
     in_span = False
@@ -84,7 +84,7 @@ for path in files:
         for ch in line:
             if ch == "`":
                 in_span = not in_span
-            elif ch == EM and not in_span:
+            elif ch == EM and not in_span and (not base or n in changed[path]):
                 violations.append((path, n, line.rstrip()))
                 break
 
@@ -98,7 +98,7 @@ if violations:
     print(f"Blocking prose em-dashes: {len(violations)}")
     sys.exit(1)
 
-print("No prose em-dashes in changed docs files.")
+print("No new prose em-dashes in checked docs lines.")
 PY
 
 if command -v npx >/dev/null 2>&1; then
@@ -157,7 +157,7 @@ with open(dst, "w", encoding="utf-8") as fh:
 PY
 done
 
-cp .markdownlint-cli2.yaml "$MIRROR_ROOT/.markdownlint-cli2.yaml" 2>/dev/null || true
+cp .markdownlint-cli2.yaml "$MIRROR_ROOT/.markdownlint-cli2.yaml"
 
 LINT_OUTPUT_RAW="$(mktemp)"
 LINT_OUTPUT_FILE="$(mktemp)"
@@ -182,107 +182,9 @@ if [ -z "$BASE_SHA" ]; then
     exit "$LINT_EXIT"
 fi
 
-CHANGED_LINES_JSON_FILE="$(mktemp)"
-python3 - "$BASE_SHA" "${EXISTING_FILES[@]}" >"$CHANGED_LINES_JSON_FILE" <<'PY'
-import json
-import re
-import subprocess
-import sys
-
-base = sys.argv[1]
-files = sys.argv[2:]
-
-changed = {}
-hunk = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
-
-for path in files:
-    proc = subprocess.run(
-        ["git", "diff", "--unified=0", base, "HEAD", "--", path],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    ranges = []
-    for line in proc.stdout.splitlines():
-        m = hunk.match(line)
-        if not m:
-            continue
-        start = int(m.group(1))
-        count = int(m.group(2) or "1")
-        if count > 0:
-            ranges.append([start, start + count - 1])
-    changed[path] = ranges
-
-print(json.dumps(changed))
-PY
-
-FILTERED_OUTPUT_FILE="$(mktemp)"
 set +e
-python3 - "$LINT_OUTPUT_FILE" "$CHANGED_LINES_JSON_FILE" >"$FILTERED_OUTPUT_FILE" <<'PY'
-import json
-import re
-import sys
-
-lint_file = sys.argv[1]
-changed_file = sys.argv[2]
-
-with open(changed_file, "r", encoding="utf-8") as f:
-    changed = json.load(f)
-
-line_re = re.compile(r"^(.+?):(\d+)\s+error\s+(MD\d+(?:/[^\s]+)?)\s+(.*)$")
-
-blocking = []
-baseline = []
-other_lines = []
-
-with open(lint_file, "r", encoding="utf-8") as f:
-    for raw_line in f:
-        line = raw_line.rstrip("\n")
-        m = line_re.match(line)
-        if not m:
-            other_lines.append(line)
-            continue
-
-        path, line_no_s, rule, msg = m.groups()
-        line_no = int(line_no_s)
-        ranges = changed.get(path, [])
-
-        is_changed_line = any(start <= line_no <= end for start, end in ranges)
-        entry = f"{path}:{line_no} {rule} {msg}"
-        if is_changed_line:
-            blocking.append(entry)
-        else:
-            baseline.append(entry)
-
-if baseline:
-    print("Existing markdown issues outside changed lines (non-blocking):")
-    for entry in baseline:
-        print(f"  - {entry}")
-
-if blocking:
-    print("Markdown issues introduced on changed lines (blocking):")
-    for entry in blocking:
-        print(f"  - {entry}")
-    print(f"Blocking markdown issues: {len(blocking)}")
-    sys.exit(1)
-
-if baseline:
-    print("No blocking markdown issues on changed lines.")
-    sys.exit(0)
-
-for line in other_lines:
-    print(line)
-
-if any(line.strip() for line in other_lines):
-    print("markdownlint exited non-zero with unclassified output; failing safe.")
-    sys.exit(2)
-
-print("No blocking markdown issues on changed lines.")
-PY
+python3 scripts/ci/docs_lint_filter.py "$BASE_SHA" "$LINT_EXIT" "$LINT_OUTPUT_FILE" "${EXISTING_FILES[@]}"
 SCRIPT_EXIT=$?
 set -e
-
-cat "$FILTERED_OUTPUT_FILE"
-
-rm -f "$LINT_OUTPUT_FILE" "$CHANGED_LINES_JSON_FILE" "$FILTERED_OUTPUT_FILE"
+rm -f "$LINT_OUTPUT_FILE"
 exit "$SCRIPT_EXIT"

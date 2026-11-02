@@ -16,10 +16,10 @@ on:
   merge_group:
 
 concurrency:
-  # Merge-queue runs key on the unique queue ref (github.ref →
-  # `refs/heads/gh-readonly-queue/master/pr-N-<sha>`) so speculative entries
-  # never cancel each other; PRs still key on the PR number.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Preserve every push's selected work: a later prose push must not cancel
+  # an earlier code push or replace it while pending. PRs still key on their
+  # number; merge groups keep their independent queue refs.
+  group: ${{ github.workflow }}-${{ (github.event_name == 'push' && github.sha) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -30,10 +30,40 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # ── Fast serial gate: fail formatting errors before burning compute ───────
+  # Keep the workflow unconditional: path-filtered required workflows remain
+  # pending. Only the documented prose allowlist skips the runtime matrix.
+  changes:
+    name: Change Scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+      docs_build: ${{ steps.scope.outputs.docs_build }}
+      base_sha: ${{ steps.scope.outputs.base_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Test scope and required-result policy
+        run: python3 -m unittest discover -s scripts/ci -p 'test_ci_*.py' -v
+      - name: Validate workflow semantics
+        run: |
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            -o "$RUNNER_TEMP/actionlint/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/actionlint/actionlint.tar.gz" -C "$RUNNER_TEMP/actionlint" actionlint
+          "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/ci-code-analysis.yml
+      - name: Classify the event's actual diff
+        id: scope
+        run: python3 scripts/ci/change_scope.py
+
+  # Fail Rust formatting before the runtime matrix; docs run independently.
 
   fmt:
     name: Format
+    needs: [changes]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -54,9 +84,9 @@ jobs:
 
   repo-structure:
     name: Repository Structure
-    needs: [fmt]
+    needs: [changes, fmt]
     # PR-only: nothing here writes a cache, and the PR run already proved it.
-    if: github.event_name != 'push'
+    if: needs.changes.outputs.full == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -99,7 +129,8 @@ jobs:
 
   lint:
     name: Lint
-    needs: [fmt]
+    needs: [changes, fmt]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     # 25: a cold rust-cache after a Cargo.lock change puts a full workspace
     # clippy at 14-15m on hosted runners.
@@ -169,7 +200,8 @@ jobs:
 
   windows-clippy-tools-changes:
     name: Detect Windows Clippy changes
-    needs: [fmt]
+    needs: [changes, fmt]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -273,7 +305,8 @@ jobs:
 
   build:
     name: ${{ matrix.label }} ${{ matrix.target }}
-    needs: [fmt]
+    needs: [changes, fmt]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -372,7 +405,8 @@ jobs:
   # graphs in the required gate; check-32bit below covers the 32-bit target.
   check:
     name: Check (${{ matrix.name }})
-    needs: [fmt]
+    needs: [changes, fmt]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -410,7 +444,8 @@ jobs:
 
   check-32bit:
     name: Check (32-bit)
-    needs: [fmt]
+    needs: [changes, fmt]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -439,7 +474,8 @@ jobs:
   # moment a workspace member is missing from (or duplicated in) that file.
   test:
     name: Test (${{ matrix.leg }})
-    needs: [fmt]
+    needs: [changes, fmt]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     # 45 per leg. A leg is roughly a quarter of the old serial lane, whose
     # cold run measured ~35 minutes; a timed-out job also skips the
@@ -535,7 +571,8 @@ jobs:
 
   security:
     name: Security
-    needs: [fmt]
+    needs: [changes, fmt]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -576,9 +613,9 @@ jobs:
 
   nix-eval:
     name: Nix Module Eval
-    needs: [fmt]
+    needs: [changes, fmt]
     # PR-only: nothing here writes a cache, and the PR run already proved it.
-    if: github.event_name != 'push'
+    if: needs.changes.outputs.full == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -592,9 +629,9 @@ jobs:
 
   nix-hash-drift:
     name: Nix Hash Drift
-    needs: [fmt]
+    needs: [changes, fmt]
     # PR-only: nothing here writes a cache, and the PR run already proved it.
-    if: github.event_name != 'push'
+    if: needs.changes.outputs.full == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -635,30 +672,70 @@ jobs:
 
   docs-style:
     name: Docs Style
-    needs: [fmt]
-    # PR-only: nothing here writes a cache, and the PR run already proved it.
-    if: github.event_name != 'push'
+    needs: [changes]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-      - name: Resolve base SHA
-        id: base
-        run: echo "sha=$(git merge-base origin/master HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Install pinned Markdown parser
+        run: python3 -m pip install -r scripts/ci/docs-requirements.txt
+      - name: Test document validation
+        run: python3 -m unittest discover -s scripts/ci -p 'test_docs_*.py' -v
       - name: Docs quality gate (markdown lint + em-dash prose check)
         env:
-          BASE_SHA: ${{ steps.base.outputs.sha }}
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
         run: bash scripts/ci/docs_quality_gate.sh
-      - name: Docs link gate (added links)
+      - name: Docs source, navigation and local-link gate
         env:
-          BASE_SHA: ${{ steps.base.outputs.sha }}
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
         run: bash scripts/ci/docs_links_gate.sh
+
+  # Navigation, renderer, generator and build changes must prove the real
+  # publication build. Ordinary prose uses the source/link gate above.
+  docs-build:
+    name: Docs Build
+    needs: [changes, docs-style]
+    if: needs.changes.outputs.docs_build == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+      - name: Install mdBook
+        env:
+          MDBOOK_BIN_VERSION: v0.5.0
+        run: |
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_BIN_VERSION}/mdbook-${MDBOOK_BIN_VERSION}-aarch64-unknown-linux-musl.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: docs-deploy
+          cache-all-crates: true
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Install gettext
+        run: bash scripts/ci/apt_install.sh gettext
+      - name: Validate translation formats
+        run: |
+          failed=0
+          for po in docs/book/po/*.po; do
+            [ -f "$po" ] || continue
+            msgfmt --check-format "$po" -o /dev/null || failed=1
+          done
+          exit "$failed"
+      - name: Build references, rustdoc and all locales without publishing
+        run: cargo mdbook build
 
   installer-drift:
     name: Installer Drift
-    needs: [fmt]
+    needs: [changes, fmt]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -703,7 +780,8 @@ jobs:
 
   web-permission-tests:
     name: Web Permission Tests
-    needs: [fmt]
+    needs: [changes, fmt]
+    if: needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -730,18 +808,17 @@ jobs:
         run: npm run build
 
   # ── Required gate ─────────────────────────────────────────────────────────
-  # Branch protection requires only this single job — internal structure
-  # can change without touching branch protection settings.
+  # Required-check policy: require this stable aggregate. Administrators must
+  # verify the live protection list separately; comments do not set GitHub rules.
 
   gate:
     name: CI Required Gate
     if: always()
-    needs: [fmt, repo-structure, lint, windows-clippy-tools-changes, windows-clippy-tools, build, check, check-32bit, test, security, nix-eval, nix-hash-drift, docs-style, installer-drift, web-permission-tests]
+    needs: [changes, fmt, repo-structure, lint, windows-clippy-tools-changes, windows-clippy-tools, build, check, check-32bit, test, security, nix-eval, nix-hash-drift, docs-style, docs-build, installer-drift, web-permission-tests]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Check results
-        run: |
-          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
-            echo "::error::One or more CI jobs failed or were cancelled"
-            exit 1
-          fi
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/required_gate.py
