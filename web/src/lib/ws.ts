@@ -51,6 +51,11 @@ export class WebSocketClient {
   public onClose: WsCloseHandler | null = null;
   public onError: WsErrorHandler | null = null;
 
+  /** S2 (#549): negotiated epoch, or null before `turn_ready`. */
+  private turnEpoch: string | null = null;
+  /** Requests accepted for admission but not yet sent (pre-`turn_ready`). */
+  private readonly queuedSends: { requestId: string; frame: Record<string, unknown> }[] = [];
+
   private readonly agentAlias: string;
   private readonly baseUrl: string;
   private readonly reconnectDelay: number;
@@ -94,12 +99,26 @@ export class WebSocketClient {
 
     this.ws.onopen = () => {
       this.currentDelay = this.reconnectDelay;
+      // S2 (#549): negotiation precedes every admission on this socket; the
+      // gateway refuses legacy `message` frames once negotiated, and refuses
+      // turn ops before it. The epoch arrives with `turn_ready` below.
+      this.turnEpoch = null;
+      this.sendRaw({ type: 'turn_control', version: 1, op: 'negotiate' });
       this.onOpen?.();
     };
 
     this.ws.onmessage = (ev: MessageEvent) => {
       try {
         const msg = JSON.parse(ev.data) as WsMessage;
+        // S2 (#549): `turn_ready` completes negotiation and flushes anything
+        // queued while the socket was pre-negotiation.
+        if (msg.type === 'turn_ready' && typeof msg.epoch === 'string') {
+          this.turnEpoch = msg.epoch;
+          while (this.turnEpoch === msg.epoch && this.queuedSends.length > 0) {
+            const queued = this.queuedSends.shift()!;
+            this.sendRaw({ ...queued.frame, epoch: msg.epoch });
+          }
+        }
         this.onMessage?.(msg);
       } catch {
         // Ignore non-JSON frames
@@ -116,18 +135,76 @@ export class WebSocketClient {
     };
   }
 
-  /** Send a chat message to the agent. */
-  sendMessage(content: string, attachments?: string[]): void {
+  /** Send a chat message as a negotiated S2 turn (#549). Returns the
+   * `request_id` the caller must correlate `turn_ack`/`turn_event` frames
+   * against. Frames sent before `turn_ready` are queued and flushed with the
+   * negotiated epoch; they are never silently dropped. */
+  sendTurnMessage(content: string, attachments?: string[]): string {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('WebSocket is not connected');
     }
-    this.ws.send(
-      JSON.stringify(
-        attachments && attachments.length > 0
-          ? { type: 'message', content, attachments }
-          : { type: 'message', content },
-      ),
-    );
+    const requestId = generateUUID();
+    const frame: Record<string, unknown> = {
+      type: 'turn_control',
+      version: 1,
+      op: 'message',
+      request_id: requestId,
+      content,
+    };
+    if (attachments && attachments.length > 0) {
+      frame.attachments = attachments;
+    }
+    if (this.turnEpoch === null) {
+      this.queuedSends.push({ requestId, frame });
+    } else {
+      this.sendRaw({ ...frame, epoch: this.turnEpoch });
+    }
+    return requestId;
+  }
+
+  /** Cancel the observed turn (S2 scoped cancellation). Returns the cancel
+   * control's `request_id`, or null when not negotiated — callers fall back to
+   * the legacy session abort in that case. */
+  cancelTurn(turnId: string): string | null {
+    if (this.turnEpoch === null || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return null;
+    }
+    const requestId = generateUUID();
+    this.sendRaw({
+      type: 'turn_control',
+      version: 1,
+      op: 'cancel',
+      epoch: this.turnEpoch,
+      request_id: requestId,
+      turn_id: turnId,
+    });
+    return requestId;
+  }
+
+  /** Replay events after `afterSeq` for an admitted request (S2 resume). */
+  resumeTurn(requestId: string, afterSeq: number): void {
+    if (this.turnEpoch === null || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    this.sendRaw({
+      type: 'turn_control',
+      version: 1,
+      op: 'resume',
+      epoch: this.turnEpoch,
+      request_id: requestId,
+      after_seq: afterSeq,
+    });
+  }
+
+  /** The negotiated S2 epoch, or null before `turn_ready` / after reconnect. */
+  get epoch(): string | null {
+    return this.turnEpoch;
+  }
+
+  /** Negotiation includes the same auth query params as the socket itself, so
+   * admission is bound to the authenticated principal. */
+  private sendRaw(frame: Record<string, unknown>): void {
+    this.ws?.send(JSON.stringify(frame));
   }
 
   /**

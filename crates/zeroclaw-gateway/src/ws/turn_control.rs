@@ -26,6 +26,7 @@ struct Entry {
     request: String,
     turn: String,
     content: String,
+    attachments: Vec<String>,
     sequence: u64,
     events: Vec<Value>,
     bytes: usize,
@@ -189,16 +190,47 @@ pub(super) fn handle(
     }
     let Some(content) = parsed["content"]
         .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= MAX_CONTENT)
+        .filter(|s| s.len() <= MAX_CONTENT)
     else {
         return (Some(error("INVALID_CONTENT")), None);
     };
+    // `attachments` is the sole admitted extra field: the same #491 scoped
+    // handles, shape, limits and authorization as the legacy path — it grants
+    // no new source or identity authority.
+    let attachments = match parsed.get("attachments") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(ids))
+            if ids.len() <= crate::api_attachments::MAX_MESSAGE_ITEMS =>
+        {
+            let Some(ids) = ids
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return (Some(error("INVALID_ATTACHMENTS")), None);
+            };
+            let unique: std::collections::HashSet<_> = ids.iter().collect();
+            if unique.len() != ids.len() {
+                return (Some(error("INVALID_ATTACHMENTS")), None);
+            }
+            ids
+        }
+        Some(_) => return (Some(error("INVALID_ATTACHMENTS")), None),
+    };
+    if content.is_empty() && attachments.is_empty() {
+        return (Some(error("INVALID_CONTENT")), None);
+    }
     // Unsupported input fields must not silently acquire source/attachment authority.
     if parsed.as_object().is_none_or(|fields| {
         fields.keys().any(|field| {
             !matches!(
                 field.as_str(),
-                "type" | "version" | "op" | "epoch" | "request_id" | "content"
+                "type" | "version" | "op" | "epoch" | "request_id" | "content" | "attachments"
             )
         })
     }) {
@@ -213,7 +245,7 @@ pub(super) fn handle(
                 store,
                 request,
                 Some(&entry.turn),
-                if entry.content == content {
+                if entry.content == content && entry.attachments == attachments {
                     "duplicate"
                 } else {
                     "conflict"
@@ -227,7 +259,37 @@ pub(super) fn handle(
     if entries.len() >= MAX_REQUESTS {
         return (Some(error("REQUEST_CAPACITY")), None);
     }
-    let Some(mut claim) = conversation.start_if_idle(content.to_string()) else {
+    // Resolve #491 scoped handles exactly as the legacy message path does:
+    // the attachments store owns materialization; authorization is consulted
+    // before and after resolution because a revoke can race the encode.
+    // Nothing here runs when materialization refuses, so a refused request
+    // never occupies the journal.
+    let mut input = content.to_string();
+    if !attachments.is_empty() {
+        if alias.is_empty() {
+            return (Some(error("ATTACHMENT_UNAVAILABLE")), None);
+        }
+        let payload_scope = crate::api_attachments::Scope {
+            subject: subject.to_string(),
+            session: scope.session_id.clone(),
+            agent: alias.to_string(),
+        };
+        if !crate::api_attachments::scope_authorized(state, &payload_scope) {
+            return (Some(error("UNAUTHORIZED_ATTACHMENTS")), None);
+        }
+        input = match state.ws_conversations.attachments.materialize(
+            &payload_scope,
+            &attachments,
+            content,
+        ) {
+            Ok(materialized) => materialized,
+            Err(_) => return (Some(error("ATTACHMENT_UNAVAILABLE")), None),
+        };
+        if !crate::api_attachments::scope_authorized(state, &payload_scope) {
+            return (Some(error("UNAUTHORIZED_ATTACHMENTS")), None);
+        }
+    }
+    let Some(mut claim) = conversation.start_if_idle(input) else {
         return (Some(ack(store, request, None, "busy")), None);
     };
     // Holding the journal lock serializes reserve/record/map versus other
@@ -253,6 +315,7 @@ pub(super) fn handle(
             request: request.to_string(),
             turn: turn.clone(),
             content: content.to_string(),
+            attachments: attachments.clone(),
             sequence: 0,
             events: Vec::new(),
             bytes: 0,
@@ -290,6 +353,7 @@ impl Store {
                 request: String::new(),
                 turn: String::new(),
                 content: String::new(),
+                attachments: Vec::new(),
                 sequence: 0,
                 events: Vec::new(),
                 bytes: 0,

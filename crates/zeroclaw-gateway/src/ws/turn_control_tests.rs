@@ -730,3 +730,157 @@ async fn s2_wire_delete_active_turn_suppresses_late_events_and_allows_fresh_requ
         "only the new explicit ID may run after deletion"
     );
 }
+
+fn attachment_request(epoch: &str, id: &str, content: &str, attachments: &[String]) -> Value {
+    let mut frame = request(epoch, id, content);
+    frame["attachments"] = json!(attachments);
+    frame
+}
+
+fn s2_attachment_scope() -> crate::api_attachments::Scope {
+    crate::api_attachments::Scope {
+        subject: zeroclaw_config::tokens::hash_token(DEVICE_TOKEN),
+        session: SESSION.into(),
+        agent: "device-agent".into(),
+    }
+}
+
+/// #491 scoped handles through the S2 admission path: same materialization
+/// owner, same denials, journal identity extended to the handle list.
+#[tokio::test]
+async fn s2_wire_attachments_reuse_scoped_handles_with_legacy_denials() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let mut client = fixture.socket(DEVICE_TOKEN).await;
+    let epoch = negotiate(&mut client).await;
+    let scope = s2_attachment_scope();
+    let handle = fixture
+        .state
+        .ws_conversations
+        .attachments
+        .insert(
+            scope.clone(),
+            "note.txt".into(),
+            "text/plain".into(),
+            axum::body::Bytes::from_static(b"s2 attachment contents"),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second_handle = fixture
+        .state
+        .ws_conversations
+        .attachments
+        .insert(
+            scope,
+            "second.txt".into(),
+            "text/plain".into(),
+            axum::body::Bytes::from_static(b"second attachment"),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Accepted: materialized text reaches the provider inside one real turn.
+    let id = uuid::Uuid::new_v4().to_string();
+    let frame = attachment_request(&epoch, &id, "read the note", std::slice::from_ref(&handle));
+    client.send(frame.clone()).await;
+    let ack = client.until("turn_ack").await;
+    assert_eq!(ack["status"], "accepted");
+    let events = terminal(&mut client, &id, ack["turn_id"].as_str().unwrap()).await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "done");
+    assert!(
+        fixture.seen.lock()[0]
+            .to_string()
+            .contains("s2 attachment contents"),
+        "attachment must materialize through the #491 path"
+    );
+
+    // Duplicate: identical content and handles never re-run.
+    client.send(frame).await;
+    assert_eq!(client.until("turn_ack").await["status"], "duplicate");
+    assert_eq!(fixture.seen.lock().len(), 1);
+
+    // Conflict: same request identity, different handle list.
+    client
+        .send(attachment_request(
+            &epoch,
+            &id,
+            "read the note",
+            std::slice::from_ref(&second_handle),
+        ))
+        .await;
+    assert_eq!(client.until("turn_ack").await["status"], "conflict");
+    assert_eq!(fixture.seen.lock().len(), 1);
+
+    // Unknown handle refuses before the turn starts.
+    let unknown = uuid::Uuid::new_v4().to_string();
+    client
+        .send(attachment_request(&epoch, &unknown, "read", &[uuid::Uuid::new_v4().to_string()]))
+        .await;
+    assert_eq!(
+        client.until("turn_error").await["code"],
+        "ATTACHMENT_UNAVAILABLE"
+    );
+
+    // Shape denials: non-UUID, duplicated ids, and over the #491 item limit.
+    for ids in [
+        vec!["not-a-uuid".to_string()],
+        vec![handle.clone(), handle.clone()],
+        vec![
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ],
+    ] {
+        let shape = uuid::Uuid::new_v4().to_string();
+        client
+            .send(attachment_request(&epoch, &shape, "read", &ids))
+            .await;
+        assert_eq!(
+            client.until("turn_error").await["code"],
+            "INVALID_ATTACHMENTS"
+        );
+    }
+
+    // Attachment-only turn (legacy #491 parity): empty text is admissible.
+    let attachment_only = uuid::Uuid::new_v4().to_string();
+    client
+        .send(attachment_request(&epoch, &attachment_only, "", std::slice::from_ref(&handle)))
+        .await;
+    let only_ack = client.until("turn_ack").await;
+    assert_eq!(only_ack["status"], "accepted");
+    let events = terminal(
+        &mut client,
+        &attachment_only,
+        only_ack["turn_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "done");
+
+    // Authorization: revoking the credential from pairing alone leaves the
+    // bridge binding able to chat (the S1 contract) but fails the same
+    // legacy attachment scope gate the HTTP path enforces.
+    assert!(fixture.state.pairing.revoke_token(DEVICE_TOKEN));
+    let revoked = uuid::Uuid::new_v4().to_string();
+    client
+        .send(attachment_request(&epoch, &revoked, "read", std::slice::from_ref(&second_handle)))
+        .await;
+    assert_eq!(
+        client.until("turn_error").await["code"],
+        "UNAUTHORIZED_ATTACHMENTS"
+    );
+
+    // The admitted-field list grew by exactly one name.
+    let smuggled = uuid::Uuid::new_v4().to_string();
+    let mut smuggle = request(&epoch, &smuggled, "read");
+    smuggle["sources"] = json!(["unvetted-source"]);
+    client.send(smuggle).await;
+    assert_eq!(
+        client.until("turn_error").await["code"],
+        "UNSUPPORTED_FIELD"
+    );
+}

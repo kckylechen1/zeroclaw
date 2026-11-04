@@ -229,7 +229,20 @@ export interface WsMessage {
     | "approval_request"
     | "history_trimmed"
     | "aborted"
-    | "turn_state";
+    | "turn_state"
+    // S2 turn-control transport (#498, adopted by the web client in #549).
+    // Display payloads (`chunk`, `done`, …) arrive as `WsMessage` wrapped in
+    // `turn_event.event` and `turn_replay.events[]`.
+    | "turn_ready"
+    | "turn_ack"
+    | "turn_event"
+    | "turn_replay"
+    | "turn_cancel_ack"
+    | "turn_error"
+    | "turn_gap"
+    // Terminal marker wrapped in `turn_event.event` / `turn_replay.events[]`;
+    // never a top-level wire frame.
+    | "turn_terminal";
   content?: string;
   full_response?: string;
   name?: string;
@@ -262,6 +275,25 @@ export interface WsMessage {
   control_version?: number;
   revision?: number;
   turn_id?: string | null;
+  // S2 turn-control transport fields (#549).
+  /** Gateway process epoch; changes when the gateway restarts. */
+  epoch?: string;
+  /** `turn_ack` / `turn_cancel_ack` outcome: accepted | duplicate | conflict |
+   * busy | unknown | requested | stale | no_active. */
+  status?: string;
+  /** Monotonic per-request event order (`turn_event` / `turn_replay`). */
+  seq?: number;
+  /** True on the terminal `turn_event` / on a `turn_replay` whose request already finished. */
+  terminal?: boolean;
+  /** Wrapped display frame for `turn_event`; `turn_terminal` marker carries `outcome`. */
+  event?: WsMessage;
+  /** Replay batch for `turn_replay`; empty when nothing follows `after_seq`. */
+  events?: WsMessage[];
+  /** True when some replayable output was dropped (size bounds); recover via resume. */
+  gap?: boolean;
+  last_seq?: number;
+  /** Terminal outcome on the `turn_terminal` marker: done | aborted | error. */
+  outcome?: string;
 }
 
 export type ApprovalDecision = "approve" | "deny" | "always";
