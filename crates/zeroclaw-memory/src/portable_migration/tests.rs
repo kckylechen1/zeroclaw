@@ -70,11 +70,12 @@ fn restore_fixture(path: &Path, kind: KernelStoreKind) {
         }
     }
     for object in &schema.objects {
-        if object.object_type == "index" && !format::physical_projection(&object.table) {
-            if let Some(sql) = &object.sql {
-                conn.execute_batch(sql)
-                    .expect("restore authentic index before DML");
-            }
+        if object.object_type == "index"
+            && !format::physical_projection(&object.table)
+            && let Some(sql) = &object.sql
+        {
+            conn.execute_batch(sql)
+                .expect("restore authentic index before DML");
         }
     }
     let tx = conn.transaction().unwrap();
