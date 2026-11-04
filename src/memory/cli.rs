@@ -6,6 +6,7 @@ use super::{
 use crate::config::Config;
 use anyhow::{Result, bail};
 use console::style;
+use std::path::Path;
 #[cfg(feature = "agent-runtime")]
 use zeroclaw_runtime::i18n;
 
@@ -40,6 +41,12 @@ fn mt_args(key: &str, args: &[(&str, &str)], fallback: &str) -> String {
 /// Handle `zeroclaw memory <subcommand>` CLI commands.
 pub async fn handle_command(command: crate::MemoryCommands, config: &Config) -> Result<()> {
     match command {
+        crate::MemoryCommands::MigrateKernel {
+            source,
+            destination,
+            store,
+            approved_by,
+        } => handle_kernel_migration(&source, &destination, store, &approved_by),
         crate::MemoryCommands::List {
             category,
             session,
@@ -52,6 +59,62 @@ pub async fn handle_command(command: crate::MemoryCommands, config: &Config) -> 
             handle_clear(config, key, category, yes).await
         }
         crate::MemoryCommands::Reindex => handle_reindex(config).await,
+    }
+}
+
+/// Run the explicit offline conversion without loading the agent configuration.
+/// Successful stdout contains only the structured migration receipt.
+pub fn handle_kernel_migration(
+    source: &Path,
+    destination: &Path,
+    store: crate::KernelMigrationStoreKind,
+    approved_by: &str,
+) -> Result<()> {
+    #[cfg(not(feature = "memory-tachi"))]
+    {
+        let _ = (source, destination, store, approved_by);
+        bail!(mt(
+            "cli-memory-kernel-feature-required",
+            "Kernel migration requires a build with the memory-tachi feature."
+        ));
+    }
+    #[cfg(feature = "memory-tachi")]
+    {
+        if approved_by.trim().is_empty() {
+            bail!(mt(
+                "cli-memory-kernel-approval-required",
+                "Provide a non-empty operator identity with --approved-by."
+            ));
+        }
+        if !cfg!(unix) {
+            bail!(mt(
+                "cli-memory-kernel-platform-required",
+                "Offline kernel migration requires Unix file identity and owner-only permissions. Run it on a Unix system."
+            ));
+        }
+        let kind = match store {
+            crate::KernelMigrationStoreKind::Memory => {
+                zeroclaw_memory::kernel_store::KernelStoreKind::Memory
+            }
+            crate::KernelMigrationStoreKind::Companion => {
+                zeroclaw_memory::kernel_store::KernelStoreKind::Companion
+            }
+        };
+        let receipt = zeroclaw_memory::portable_migration::migrate_kernel_store(
+            source,
+            destination,
+            kind,
+            approved_by,
+        )?;
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
+        eprintln!(
+            "{}",
+            mt(
+                "cli-memory-kernel-migration-complete",
+                "Verified migration complete. Review the receipt before switching database paths."
+            )
+        );
+        Ok(())
     }
 }
 
@@ -470,7 +533,78 @@ fn truncate_content(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use tempfile::TempDir;
+
+    #[derive(Parser)]
+    struct MemoryCli {
+        #[command(subcommand)]
+        command: crate::MemoryCommands,
+    }
+
+    #[test]
+    fn kernel_migration_requires_explicit_paths_role_and_operator() {
+        let args = [
+            "memory",
+            "migrate-kernel",
+            "--source",
+            "old.db",
+            "--destination",
+            "new.db",
+            "--store",
+            "companion",
+            "--approved-by",
+            "operator",
+        ];
+        let parsed = MemoryCli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            parsed.command,
+            crate::MemoryCommands::MigrateKernel {
+                store: crate::KernelMigrationStoreKind::Companion,
+                ..
+            }
+        ));
+        for start in [2, 4, 6, 8] {
+            let mut missing = args.to_vec();
+            missing.drain(start..start + 2);
+            assert!(MemoryCli::try_parse_from(missing).is_err());
+        }
+        let mut unknown_store = args;
+        unknown_store[7] = "shared";
+        assert!(MemoryCli::try_parse_from(unknown_store).is_err());
+    }
+
+    #[cfg(not(feature = "memory-tachi"))]
+    #[test]
+    fn kernel_migration_feature_off_does_not_touch_paths() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("source.db");
+        let destination = dir.path().join("destination.db");
+        let error = handle_kernel_migration(
+            &source,
+            &destination,
+            crate::KernelMigrationStoreKind::Memory,
+            "operator",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("memory-tachi"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(feature = "memory-tachi")]
+    #[test]
+    fn kernel_migration_blank_approval_does_not_touch_paths() {
+        let dir = TempDir::new().unwrap();
+        let error = handle_kernel_migration(
+            &dir.path().join("source.db"),
+            &dir.path().join("destination.db"),
+            crate::KernelMigrationStoreKind::Memory,
+            " \t ",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--approved-by"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn parse_category_known_variants() {

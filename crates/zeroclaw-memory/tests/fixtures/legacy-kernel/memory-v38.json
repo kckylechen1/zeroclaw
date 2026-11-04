@@ -1,0 +1,7861 @@
+{
+  "source_revision": "eba0c48617e8820831bfd22f91d269c6d70f409f",
+  "user_version": 38,
+  "tables": {
+    "a2a_delivery_receipts": {
+      "columns": [
+        "rowid",
+        "receipt_id",
+        "envelope_id",
+        "envelope_version",
+        "state",
+        "actor_agent_identity_id",
+        "actor_admission_id",
+        "identity_assurance",
+        "trust_domain",
+        "trust_basis",
+        "occurred_at"
+      ],
+      "rows": []
+    },
+    "a2a_envelopes": {
+      "columns": [
+        "rowid",
+        "envelope_id",
+        "kind",
+        "issuer_agent_identity_id",
+        "issuer_admission_id",
+        "recipient_agent_identity_id",
+        "recipient_admission_id",
+        "subject_ref",
+        "body",
+        "body_digest",
+        "issuer_identity_assurance",
+        "recipient_identity_assurance",
+        "issuer_trust_domain",
+        "recipient_trust_domain",
+        "issuer_trust_basis",
+        "recipient_trust_basis",
+        "idempotency_key",
+        "created_at",
+        "expires_at",
+        "current_state",
+        "state_version"
+      ],
+      "rows": []
+    },
+    "access_history": {
+      "columns": [
+        "rowid",
+        "memory_id",
+        "accessed_at",
+        "query_hash",
+        "event_kind"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 70
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "2026-07-31T10:00:00+00:00"
+          },
+          {
+            "type": "text",
+            "value": "fixture-query"
+          },
+          {
+            "type": "text",
+            "value": "use"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 91
+          },
+          {
+            "type": "text",
+            "value": "historical-orphan"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "display"
+          }
+        ]
+      ]
+    },
+    "account_custody": {
+      "columns": [
+        "rowid",
+        "auth_ref",
+        "account_id",
+        "custody_kind",
+        "custody_target",
+        "revision",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "agent_identities": {
+      "columns": [
+        "rowid",
+        "agent_identity_id",
+        "display_name",
+        "seat",
+        "capability_json",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "agent_known_state": {
+      "columns": [
+        "rowid",
+        "agent_id",
+        "memory_id",
+        "revision",
+        "synced_at"
+      ],
+      "rows": []
+    },
+    "audit_log": {
+      "columns": [
+        "rowid",
+        "id",
+        "timestamp",
+        "server_id",
+        "tool_name",
+        "args_hash",
+        "success",
+        "duration_ms",
+        "error_kind",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "current_truth_assertions": {
+      "columns": [
+        "rowid",
+        "assertion_id",
+        "subject_repo",
+        "subject_kind",
+        "subject_id",
+        "predicate",
+        "value_json",
+        "issuer",
+        "authority",
+        "source_id",
+        "source_revision",
+        "observed_at",
+        "effective_at",
+        "supersedes",
+        "evidence_json",
+        "review_state",
+        "visibility",
+        "content_digest",
+        "recorded_at"
+      ],
+      "rows": []
+    },
+    "current_truth_projection": {
+      "columns": [
+        "rowid",
+        "repo",
+        "generation",
+        "built_at",
+        "view_json"
+      ],
+      "rows": []
+    },
+    "current_truth_refresh": {
+      "columns": [
+        "rowid",
+        "repo",
+        "subject_token",
+        "fresh",
+        "last_fresh_revision",
+        "last_fresh_at",
+        "last_attempt_at",
+        "unavailable_reason",
+        "repository_visibility",
+        "repository_visibility_at"
+      ],
+      "rows": []
+    },
+    "delivery_events": {
+      "columns": [
+        "rowid",
+        "event_row_id",
+        "delivery_id",
+        "event_id",
+        "kind",
+        "expected_revision",
+        "detail",
+        "payload_digest",
+        "actor",
+        "occurred_at",
+        "recorded_at"
+      ],
+      "rows": []
+    },
+    "delivery_intents": {
+      "columns": [
+        "rowid",
+        "delivery_id",
+        "idempotency_key",
+        "execution_source",
+        "execution_ref",
+        "terminal_receipt_revision",
+        "work_claim_id",
+        "result_ref",
+        "result_revision",
+        "payload_digest",
+        "visibility_class",
+        "delivery_policy",
+        "protocol_capability",
+        "requester_agent_identity_id",
+        "requester_host_identity",
+        "requester_session_ref",
+        "delivery_state",
+        "blocker_class",
+        "active_claim_key",
+        "claimed_by",
+        "claim_expires_at",
+        "attempt_count",
+        "next_retry_at",
+        "expires_at",
+        "created_at",
+        "ready_at",
+        "delivered_at",
+        "dismissed_at",
+        "revision",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "derived_items": {
+      "columns": [
+        "rowid",
+        "id",
+        "text",
+        "path",
+        "summary",
+        "importance",
+        "source",
+        "scope",
+        "metadata",
+        "created_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-derived"
+          },
+          {
+            "type": "text",
+            "value": "synthetic derived evidence"
+          },
+          {
+            "type": "text",
+            "value": "/agents/fixture"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "real",
+            "value": 4602678819172646912
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw"
+          },
+          {
+            "type": "text",
+            "value": "general"
+          },
+          {
+            "type": "text",
+            "value": "{}"
+          },
+          {
+            "type": "text",
+            "value": ""
+          }
+        ]
+      ]
+    },
+    "dispatch_adjudication_signatures": {
+      "columns": [
+        "rowid",
+        "adjudication_id",
+        "signature_id",
+        "evidence_ref",
+        "resolved"
+      ],
+      "rows": []
+    },
+    "dispatch_adjudications": {
+      "columns": [
+        "rowid",
+        "adjudication_id",
+        "outcome_id",
+        "event_key",
+        "verdict",
+        "not_required_reason",
+        "actor",
+        "evidence_ref",
+        "created_at",
+        "insertion_seq"
+      ],
+      "rows": []
+    },
+    "dispatch_outcomes": {
+      "columns": [
+        "rowid",
+        "outcome_id",
+        "dispatch_id",
+        "eval_memory_id",
+        "model",
+        "vendor",
+        "role",
+        "seat",
+        "task_type",
+        "execution_outcome",
+        "reported_outcome",
+        "retry_count",
+        "error_class",
+        "issue_ref",
+        "pr_ref",
+        "flow_id",
+        "cost_tokens",
+        "cost_usd",
+        "verification_present",
+        "diff_present",
+        "evidence_refs",
+        "identity_receipt",
+        "identity_attribution_basis",
+        "idempotency_key",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "edge_observations": {
+      "columns": [
+        "rowid",
+        "observation_id",
+        "source_id",
+        "target_id",
+        "relation",
+        "capture_event_kind",
+        "capture_event_id",
+        "actor",
+        "reason_code",
+        "observed_at",
+        "evidence_hash",
+        "invalidated_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-observation"
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "legacy-private"
+          },
+          {
+            "type": "text",
+            "value": "related"
+          },
+          {
+            "type": "text",
+            "value": "unknown"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "unknown"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "blob",
+            "value": []
+          },
+          {
+            "type": "null"
+          }
+        ]
+      ]
+    },
+    "eval_rubric_scores": {
+      "columns": [
+        "rowid",
+        "rubric_score_id",
+        "adjudication_id",
+        "subject_kind",
+        "rubric_hash",
+        "contract_correctness",
+        "evidence_quality",
+        "safety",
+        "scope_discipline",
+        "intervention_burden",
+        "completion_integrity",
+        "adjudication_confidence",
+        "adjudicator_actor",
+        "adjudicator_vendor",
+        "independence_basis",
+        "occurred_at",
+        "recorded_at"
+      ],
+      "rows": []
+    },
+    "exact_dedupe_apply_lineage": {
+      "columns": [
+        "rowid",
+        "loser_id",
+        "apply_id",
+        "plan_digest",
+        "winner_id",
+        "before_revision",
+        "archived_revision",
+        "loser_valid_until_before",
+        "applied_at"
+      ],
+      "rows": []
+    },
+    "exec_env_resource_bindings": {
+      "columns": [
+        "rowid",
+        "binding_id",
+        "env_id",
+        "resource_id",
+        "created_at",
+        "released_at"
+      ],
+      "rows": []
+    },
+    "exec_env_resources": {
+      "columns": [
+        "rowid",
+        "resource_id",
+        "kind",
+        "path",
+        "bytes",
+        "measured_at",
+        "state",
+        "reclaim_reason",
+        "reclaimed_at",
+        "reclaimed_bytes",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "exec_env_worktree_identities": {
+      "columns": [
+        "rowid",
+        "env_id",
+        "device",
+        "inode",
+        "captured_at"
+      ],
+      "rows": []
+    },
+    "exec_envs": {
+      "columns": [
+        "rowid",
+        "env_id",
+        "kind",
+        "path",
+        "repo_root",
+        "branch",
+        "base_sha",
+        "dispatch_id",
+        "agent_identity_id",
+        "claim_id",
+        "env_class",
+        "state",
+        "reclaim_reason",
+        "schema_version",
+        "created_at",
+        "reclaimed_at"
+      ],
+      "rows": []
+    },
+    "foundry_config": {
+      "columns": [
+        "rowid",
+        "id",
+        "enabled",
+        "max_jobs_per_minute",
+        "distill_concurrency",
+        "enrichment_concurrency",
+        "llm_provider_override",
+        "updated_at",
+        "updated_by"
+      ],
+      "rows": []
+    },
+    "foundry_jobs": {
+      "columns": [
+        "rowid",
+        "id",
+        "kind",
+        "lane",
+        "status",
+        "target_db",
+        "named_project",
+        "path_prefix",
+        "memory_ids",
+        "target_agent_id",
+        "requested_by",
+        "evidence_count",
+        "goal_count",
+        "metadata",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "hard_state": {
+      "columns": [
+        "rowid",
+        "namespace",
+        "key",
+        "value_json",
+        "version",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "store_identity"
+          },
+          {
+            "type": "text",
+            "value": "profile"
+          },
+          {
+            "type": "text",
+            "value": "{\"conferred_by\":\"open:create-fresh\",\"stamped_at\":\"2026-11-04T02:26:04.724Z\",\"value\":\"tachi_full\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.724Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.724Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v1_path_normalize_legacy"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.724Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.724Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.724Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v2_scope_self_normalize"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.725Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 4
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v3_handoff_path_standardize"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.725Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v4_quarantine_cross_db_rows"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.725Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 6
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v5_drop_hypertachi_legacy_columns"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.725Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v6_fold_persons_into_entities"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.725Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.725Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 8
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v7_reconcile_legacy_memory_columns"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.728Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.728Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.728Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 9
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v8_drop_legacy_persons_column"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.728Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.728Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.728Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 10
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v9_relocate_and_drop_location"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.737Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 11
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v10_drop_pack_tables"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.737Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 12
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v11_drop_domains_table"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.737Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 13
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v12_session_claims_unique_identity"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.737Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 14
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v13_hard_state_ns_updated_index"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.737Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.737Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 15
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v14_dispatch_outcomes_reported_outcome"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.738Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 16
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v15_exec_envs_env_class"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.738Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 17
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v16_dispatch_outcomes_identity_receipt"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.738Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 18
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v17_dispatch_outcomes_attribution_basis"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.738Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 19
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v18_dispatch_adjudications"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.738Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 20
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v19_idless_memory_identity"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.738Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.738Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 21
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v20_mirror_eval"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.739Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.739Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.739Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 22
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v21_identity_workclaim_spine"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.740Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.740Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.740Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 23
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v22_memories_symbolic_fts"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.742Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.742Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.742Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 24
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v23_reserved_reference_guards"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.750Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.750Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.750Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 25
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v24_memories_scored_count"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.750Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.750Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.750Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 26
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v25_recall_impression_ledger"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.751Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.751Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.751Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 27
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v26_recall_impression_replay_identity"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.773Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.773Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.773Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 28
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v27_typo_fallback_attribution"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.790Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.790Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.790Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 29
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v28_wiki_recovery_ledgers"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.790Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.790Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.790Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 30
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v29_memory_outbox"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.791Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.791Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.791Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 31
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v30_memory_outbox_destination_apply"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.792Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.792Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.792Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 32
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v31_a2a_mailbox"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.794Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.794Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.794Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 33
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v32_a2a_body_retention"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.811Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.811Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.811Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 34
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v33_harness_session_attachments"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.812Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.812Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.812Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 35
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v34_harness_session_spine"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.823Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.823Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.823Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 36
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v35_harness_session_spine_receipts"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.840Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.840Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.840Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 37
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v36_delivery_spine"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.845Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.845Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.845Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 38
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v37_verified_agent_admissions"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.851Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.851Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.851Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 39
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v38_current_truth"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:04.854Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.854Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.854Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 40
+          },
+          {
+            "type": "text",
+            "value": "zeroclaw-fixture"
+          },
+          {
+            "type": "text",
+            "value": "ordinary"
+          },
+          {
+            "type": "text",
+            "value": "{ \"retained\": true, \"counter\": 7 }"
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "legacy-time"
+          }
+        ]
+      ]
+    },
+    "harness_session_attachments": {
+      "columns": [
+        "rowid",
+        "attachment_id",
+        "host_identity",
+        "identity_attribution_basis",
+        "protocol_version",
+        "adapter_connection_identity",
+        "remote_session_id",
+        "work_claim_id",
+        "expected_transition_version",
+        "agent_identity_id",
+        "contract_digest",
+        "capabilities_json",
+        "tool_profile",
+        "capability_class",
+        "policy_digest",
+        "descriptor_digest",
+        "idempotency_key",
+        "admission_receipt_ref",
+        "state",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "harness_session_capability_advertisements": {
+      "columns": [
+        "rowid",
+        "advertisement_row_id",
+        "attachment_id",
+        "advertisement_seq",
+        "capabilities_json",
+        "source_host_identity",
+        "advertised_at"
+      ],
+      "rows": []
+    },
+    "harness_session_events": {
+      "columns": [
+        "rowid",
+        "event_row_id",
+        "attachment_id",
+        "event_id",
+        "kind",
+        "outcome",
+        "source_revision",
+        "authority_confirmation_ref",
+        "summary",
+        "payload_digest",
+        "occurred_at",
+        "ingested_at",
+        "source_host_identity"
+      ],
+      "rows": []
+    },
+    "harness_session_intervention_results": {
+      "columns": [
+        "rowid",
+        "result_row_id",
+        "attachment_id",
+        "request_id",
+        "disposition",
+        "authority_confirmation_ref",
+        "detail",
+        "recorded_at",
+        "source_host_identity"
+      ],
+      "rows": []
+    },
+    "harness_session_interventions": {
+      "columns": [
+        "rowid",
+        "intervention_row_id",
+        "attachment_id",
+        "request_id",
+        "kind",
+        "reason",
+        "expected_session_revision",
+        "capability_source",
+        "requested_by",
+        "requested_at"
+      ],
+      "rows": []
+    },
+    "harness_session_state": {
+      "columns": [
+        "rowid",
+        "attachment_id",
+        "canonical_state",
+        "canonical_revision",
+        "terminal_digest",
+        "conflicting_terminal_digest",
+        "cleanup_recorded",
+        "last_event_id",
+        "pre_disconnect_rank",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "hub_capabilities": {
+      "columns": [
+        "rowid",
+        "id",
+        "type",
+        "name",
+        "version",
+        "description",
+        "definition",
+        "enabled",
+        "review_status",
+        "health_status",
+        "last_error",
+        "last_success_at",
+        "last_failure_at",
+        "fail_streak",
+        "active_version",
+        "exposure_mode",
+        "uses",
+        "successes",
+        "failures",
+        "avg_rating",
+        "last_used",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "hub_version_routes": {
+      "columns": [
+        "rowid",
+        "alias_id",
+        "active_capability_id",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "identity_admission_verification_receipts": {
+      "columns": [
+        "receipt_id",
+        "admission_id",
+        "agent_identity_id",
+        "connection_id",
+        "issuer_id",
+        "verification_method",
+        "verification_version",
+        "trust_domain",
+        "verification_scope",
+        "evidence_digest",
+        "evidence_ref",
+        "evidence_issued_at",
+        "evidence_expires_at",
+        "nonce",
+        "idempotency_key",
+        "request_digest",
+        "current_state",
+        "verified_at"
+      ],
+      "rows": []
+    },
+    "identity_admission_verification_revocations": {
+      "columns": [
+        "revocation_id",
+        "admission_id",
+        "issuer_id",
+        "evidence_digest",
+        "evidence_ref",
+        "nonce",
+        "revoked_at"
+      ],
+      "rows": []
+    },
+    "identity_admissions": {
+      "columns": [
+        "rowid",
+        "admission_id",
+        "agent_identity_id",
+        "connection_id",
+        "state",
+        "rejection_evidence",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "llm_usage": {
+      "columns": [
+        "rowid",
+        "id",
+        "timestamp",
+        "lane",
+        "model",
+        "provider_host",
+        "provider_logical_name",
+        "provider_key_id",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "max_tokens",
+        "request_chars",
+        "response_chars",
+        "duration_ms",
+        "success",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "memories": {
+      "columns": [
+        "rowid",
+        "id",
+        "path",
+        "summary",
+        "text",
+        "importance",
+        "timestamp",
+        "valid_from",
+        "valid_until",
+        "category",
+        "topic",
+        "keywords",
+        "entities",
+        "source",
+        "scope",
+        "archived",
+        "created_at",
+        "updated_at",
+        "access_count",
+        "scored_count",
+        "last_access",
+        "last_use_at",
+        "revision",
+        "metadata",
+        "retention_policy",
+        "domain",
+        "superseded_by",
+        "idless_identity",
+        "recall_count",
+        "query_diversity",
+        "tier"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "/agents/default__37a8eec1ce19687d/default__37a8eec1ce19687d/core/legacy-active__e8ccfda70b497ef9"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-active"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "fact"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw"
+          },
+          {
+            "type": "text",
+            "value": "general"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.931Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:04.931Z"
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "{\"session_id\":\"fixture-session\",\"zeroclaw_agent\":\"default\",\"zeroclaw_category\":\"core\",\"zeroclaw_key\":\"legacy-active\",\"zeroclaw_namespace\":\"default\"}"
+          },
+          {
+            "type": "text",
+            "value": "durable"
+          },
+          {
+            "type": "text",
+            "value": "zeroclaw"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "raw"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "legacy-archived"
+          },
+          {
+            "type": "text",
+            "value": "/agents/default__37a8eec1ce19687d/default__37a8eec1ce19687d/core/legacy-archived__c07e127e108b134a"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-archived"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "fact"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw"
+          },
+          {
+            "type": "text",
+            "value": "general"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 9
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-07-31T10:00:00+00:00"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "{\"session_id\":\"fixture-session\",\"zeroclaw_agent\":\"default\",\"zeroclaw_category\":\"core\",\"zeroclaw_key\":\"legacy-archived\",\"zeroclaw_namespace\":\"default\"}"
+          },
+          {
+            "type": "text",
+            "value": "durable"
+          },
+          {
+            "type": "text",
+            "value": "zeroclaw"
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "raw"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "legacy-private"
+          },
+          {
+            "type": "text",
+            "value": "/agents/researcher__3588bb7219b1faa3/user__04f8996da763b7a9/core/legacy-private__5af6cc345b3db929"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-private"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "fact"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw"
+          },
+          {
+            "type": "text",
+            "value": "user"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 9
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-07-31T10:00:00+00:00"
+          },
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "{\"session_id\":\"fixture-session\",\"zeroclaw_agent\":\"researcher\",\"zeroclaw_category\":\"core\",\"zeroclaw_key\":\"legacy-private\",\"zeroclaw_namespace\":\"user\"}"
+          },
+          {
+            "type": "text",
+            "value": "durable"
+          },
+          {
+            "type": "text",
+            "value": "zeroclaw"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "raw"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 4
+          },
+          {
+            "type": "text",
+            "value": "legacy-superseded"
+          },
+          {
+            "type": "text",
+            "value": "/agents/default__37a8eec1ce19687d/default__37a8eec1ce19687d/core/legacy-superseded__97e3e945696a4114"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-superseded"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "fact"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw"
+          },
+          {
+            "type": "text",
+            "value": "general"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 9
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-07-31T10:00:00+00:00"
+          },
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "{\"session_id\":\"fixture-session\",\"zeroclaw_agent\":\"default\",\"zeroclaw_category\":\"core\",\"zeroclaw_key\":\"legacy-superseded\",\"zeroclaw_namespace\":\"default\"}"
+          },
+          {
+            "type": "text",
+            "value": "durable"
+          },
+          {
+            "type": "text",
+            "value": "zeroclaw"
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "raw"
+          }
+        ]
+      ]
+    },
+    "memories_fts": {
+      "columns": [
+        "id",
+        "path",
+        "summary",
+        "text",
+        "keywords",
+        "entities"
+      ],
+      "rows": [
+        [
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "/agents/default__37a8eec1ce19687d/default__37a8eec1ce19687d/core/legacy-active__e8ccfda70b497ef9"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "legacy-archived"
+          },
+          {
+            "type": "text",
+            "value": "/agents/default__37a8eec1ce19687d/default__37a8eec1ce19687d/core/legacy-archived__c07e127e108b134a"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-archived"
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "legacy-private"
+          },
+          {
+            "type": "text",
+            "value": "/agents/researcher__3588bb7219b1faa3/user__04f8996da763b7a9/core/legacy-private__5af6cc345b3db929"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-private"
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "legacy-superseded"
+          },
+          {
+            "type": "text",
+            "value": "/agents/default__37a8eec1ce19687d/default__37a8eec1ce19687d/core/legacy-superseded__97e3e945696a4114"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-superseded"
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ]
+      ]
+    },
+    "memories_symbolic_fts": {
+      "columns": [
+        "id",
+        "path",
+        "summary",
+        "text",
+        "keywords",
+        "entities",
+        "topic"
+      ],
+      "rows": [
+        [
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "/agents/default__37a8eec1ce19687d/default__37a8eec1ce19687d/core/legacy-active__e8ccfda70b497ef9"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "legacy-archived"
+          },
+          {
+            "type": "text",
+            "value": "/agents/default__37a8eec1ce19687d/default__37a8eec1ce19687d/core/legacy-archived__c07e127e108b134a"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-archived"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "legacy-private"
+          },
+          {
+            "type": "text",
+            "value": "/agents/researcher__3588bb7219b1faa3/user__04f8996da763b7a9/core/legacy-private__5af6cc345b3db929"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-private"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "legacy-superseded"
+          },
+          {
+            "type": "text",
+            "value": "/agents/default__37a8eec1ce19687d/default__37a8eec1ce19687d/core/legacy-superseded__97e3e945696a4114"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "legacy migration searchable fixture legacy-superseded"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ]
+      ]
+    },
+    "memories_vec": {
+      "columns": [
+        "id",
+        "embedding"
+      ],
+      "rows": [
+        [
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "blob",
+            "value": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              128,
+              58,
+              0,
+              0,
+              0,
+              59,
+              0,
+              0,
+              64,
+              59,
+              0,
+              0,
+              128,
+              59,
+              0,
+              0,
+              160,
+              59,
+              0,
+              0,
+              192,
+              59,
+              0,
+              0,
+              224,
+              59,
+              0,
+              0,
+              0,
+              60,
+              0,
+              0,
+              16,
+              60,
+              0,
+              0,
+              32,
+              60,
+              0,
+              0,
+              48,
+              60,
+              0,
+              0,
+              64,
+              60,
+              0,
+              0,
+              80,
+              60,
+              0,
+              0,
+              96,
+              60,
+              0,
+              0,
+              112,
+              60,
+              0,
+              0,
+              128,
+              60,
+              0,
+              0,
+              136,
+              60,
+              0,
+              0,
+              144,
+              60,
+              0,
+              0,
+              152,
+              60,
+              0,
+              0,
+              160,
+              60,
+              0,
+              0,
+              168,
+              60,
+              0,
+              0,
+              176,
+              60,
+              0,
+              0,
+              184,
+              60,
+              0,
+              0,
+              192,
+              60,
+              0,
+              0,
+              200,
+              60,
+              0,
+              0,
+              208,
+              60,
+              0,
+              0,
+              216,
+              60,
+              0,
+              0,
+              224,
+              60,
+              0,
+              0,
+              232,
+              60,
+              0,
+              0,
+              240,
+              60,
+              0,
+              0,
+              248,
+              60,
+              0,
+              0,
+              0,
+              61,
+              0,
+              0,
+              4,
+              61,
+              0,
+              0,
+              8,
+              61,
+              0,
+              0,
+              12,
+              61,
+              0,
+              0,
+              16,
+              61,
+              0,
+              0,
+              20,
+              61,
+              0,
+              0,
+              24,
+              61,
+              0,
+              0,
+              28,
+              61,
+              0,
+              0,
+              32,
+              61,
+              0,
+              0,
+              36,
+              61,
+              0,
+              0,
+              40,
+              61,
+              0,
+              0,
+              44,
+              61,
+              0,
+              0,
+              48,
+              61,
+              0,
+              0,
+              52,
+              61,
+              0,
+              0,
+              56,
+              61,
+              0,
+              0,
+              60,
+              61,
+              0,
+              0,
+              64,
+              61,
+              0,
+              0,
+              68,
+              61,
+              0,
+              0,
+              72,
+              61,
+              0,
+              0,
+              76,
+              61,
+              0,
+              0,
+              80,
+              61,
+              0,
+              0,
+              84,
+              61,
+              0,
+              0,
+              88,
+              61,
+              0,
+              0,
+              92,
+              61,
+              0,
+              0,
+              96,
+              61,
+              0,
+              0,
+              100,
+              61,
+              0,
+              0,
+              104,
+              61,
+              0,
+              0,
+              108,
+              61,
+              0,
+              0,
+              112,
+              61,
+              0,
+              0,
+              116,
+              61,
+              0,
+              0,
+              120,
+              61,
+              0,
+              0,
+              124,
+              61,
+              0,
+              0,
+              128,
+              61,
+              0,
+              0,
+              130,
+              61,
+              0,
+              0,
+              132,
+              61,
+              0,
+              0,
+              134,
+              61,
+              0,
+              0,
+              136,
+              61,
+              0,
+              0,
+              138,
+              61,
+              0,
+              0,
+              140,
+              61,
+              0,
+              0,
+              142,
+              61,
+              0,
+              0,
+              144,
+              61,
+              0,
+              0,
+              146,
+              61,
+              0,
+              0,
+              148,
+              61,
+              0,
+              0,
+              150,
+              61,
+              0,
+              0,
+              152,
+              61,
+              0,
+              0,
+              154,
+              61,
+              0,
+              0,
+              156,
+              61,
+              0,
+              0,
+              158,
+              61,
+              0,
+              0,
+              160,
+              61,
+              0,
+              0,
+              162,
+              61,
+              0,
+              0,
+              164,
+              61,
+              0,
+              0,
+              166,
+              61,
+              0,
+              0,
+              168,
+              61,
+              0,
+              0,
+              170,
+              61,
+              0,
+              0,
+              172,
+              61,
+              0,
+              0,
+              174,
+              61,
+              0,
+              0,
+              176,
+              61,
+              0,
+              0,
+              178,
+              61,
+              0,
+              0,
+              180,
+              61,
+              0,
+              0,
+              182,
+              61,
+              0,
+              0,
+              184,
+              61,
+              0,
+              0,
+              186,
+              61,
+              0,
+              0,
+              188,
+              61,
+              0,
+              0,
+              190,
+              61,
+              0,
+              0,
+              192,
+              61,
+              0,
+              0,
+              194,
+              61,
+              0,
+              0,
+              196,
+              61,
+              0,
+              0,
+              198,
+              61,
+              0,
+              0,
+              200,
+              61,
+              0,
+              0,
+              202,
+              61,
+              0,
+              0,
+              204,
+              61,
+              0,
+              0,
+              206,
+              61,
+              0,
+              0,
+              208,
+              61,
+              0,
+              0,
+              210,
+              61,
+              0,
+              0,
+              212,
+              61,
+              0,
+              0,
+              214,
+              61,
+              0,
+              0,
+              216,
+              61,
+              0,
+              0,
+              218,
+              61,
+              0,
+              0,
+              220,
+              61,
+              0,
+              0,
+              222,
+              61,
+              0,
+              0,
+              224,
+              61,
+              0,
+              0,
+              226,
+              61,
+              0,
+              0,
+              228,
+              61,
+              0,
+              0,
+              230,
+              61,
+              0,
+              0,
+              232,
+              61,
+              0,
+              0,
+              234,
+              61,
+              0,
+              0,
+              236,
+              61,
+              0,
+              0,
+              238,
+              61,
+              0,
+              0,
+              240,
+              61,
+              0,
+              0,
+              242,
+              61,
+              0,
+              0,
+              244,
+              61,
+              0,
+              0,
+              246,
+              61,
+              0,
+              0,
+              248,
+              61,
+              0,
+              0,
+              250,
+              61,
+              0,
+              0,
+              252,
+              61,
+              0,
+              0,
+              254,
+              61,
+              0,
+              0,
+              0,
+              62,
+              0,
+              0,
+              1,
+              62,
+              0,
+              0,
+              2,
+              62,
+              0,
+              0,
+              3,
+              62,
+              0,
+              0,
+              4,
+              62,
+              0,
+              0,
+              5,
+              62,
+              0,
+              0,
+              6,
+              62,
+              0,
+              0,
+              7,
+              62,
+              0,
+              0,
+              8,
+              62,
+              0,
+              0,
+              9,
+              62,
+              0,
+              0,
+              10,
+              62,
+              0,
+              0,
+              11,
+              62,
+              0,
+              0,
+              12,
+              62,
+              0,
+              0,
+              13,
+              62,
+              0,
+              0,
+              14,
+              62,
+              0,
+              0,
+              15,
+              62,
+              0,
+              0,
+              16,
+              62,
+              0,
+              0,
+              17,
+              62,
+              0,
+              0,
+              18,
+              62,
+              0,
+              0,
+              19,
+              62,
+              0,
+              0,
+              20,
+              62,
+              0,
+              0,
+              21,
+              62,
+              0,
+              0,
+              22,
+              62,
+              0,
+              0,
+              23,
+              62,
+              0,
+              0,
+              24,
+              62,
+              0,
+              0,
+              25,
+              62,
+              0,
+              0,
+              26,
+              62,
+              0,
+              0,
+              27,
+              62,
+              0,
+              0,
+              28,
+              62,
+              0,
+              0,
+              29,
+              62,
+              0,
+              0,
+              30,
+              62,
+              0,
+              0,
+              31,
+              62,
+              0,
+              0,
+              32,
+              62,
+              0,
+              0,
+              33,
+              62,
+              0,
+              0,
+              34,
+              62,
+              0,
+              0,
+              35,
+              62,
+              0,
+              0,
+              36,
+              62,
+              0,
+              0,
+              37,
+              62,
+              0,
+              0,
+              38,
+              62,
+              0,
+              0,
+              39,
+              62,
+              0,
+              0,
+              40,
+              62,
+              0,
+              0,
+              41,
+              62,
+              0,
+              0,
+              42,
+              62,
+              0,
+              0,
+              43,
+              62,
+              0,
+              0,
+              44,
+              62,
+              0,
+              0,
+              45,
+              62,
+              0,
+              0,
+              46,
+              62,
+              0,
+              0,
+              47,
+              62,
+              0,
+              0,
+              48,
+              62,
+              0,
+              0,
+              49,
+              62,
+              0,
+              0,
+              50,
+              62,
+              0,
+              0,
+              51,
+              62,
+              0,
+              0,
+              52,
+              62,
+              0,
+              0,
+              53,
+              62,
+              0,
+              0,
+              54,
+              62,
+              0,
+              0,
+              55,
+              62,
+              0,
+              0,
+              56,
+              62,
+              0,
+              0,
+              57,
+              62,
+              0,
+              0,
+              58,
+              62,
+              0,
+              0,
+              59,
+              62,
+              0,
+              0,
+              60,
+              62,
+              0,
+              0,
+              61,
+              62,
+              0,
+              0,
+              62,
+              62,
+              0,
+              0,
+              63,
+              62,
+              0,
+              0,
+              64,
+              62,
+              0,
+              0,
+              65,
+              62,
+              0,
+              0,
+              66,
+              62,
+              0,
+              0,
+              67,
+              62,
+              0,
+              0,
+              68,
+              62,
+              0,
+              0,
+              69,
+              62,
+              0,
+              0,
+              70,
+              62,
+              0,
+              0,
+              71,
+              62,
+              0,
+              0,
+              72,
+              62,
+              0,
+              0,
+              73,
+              62,
+              0,
+              0,
+              74,
+              62,
+              0,
+              0,
+              75,
+              62,
+              0,
+              0,
+              76,
+              62,
+              0,
+              0,
+              77,
+              62,
+              0,
+              0,
+              78,
+              62,
+              0,
+              0,
+              79,
+              62,
+              0,
+              0,
+              80,
+              62,
+              0,
+              0,
+              81,
+              62,
+              0,
+              0,
+              82,
+              62,
+              0,
+              0,
+              83,
+              62,
+              0,
+              0,
+              84,
+              62,
+              0,
+              0,
+              85,
+              62,
+              0,
+              0,
+              86,
+              62,
+              0,
+              0,
+              87,
+              62,
+              0,
+              0,
+              88,
+              62,
+              0,
+              0,
+              89,
+              62,
+              0,
+              0,
+              90,
+              62,
+              0,
+              0,
+              91,
+              62,
+              0,
+              0,
+              92,
+              62,
+              0,
+              0,
+              93,
+              62,
+              0,
+              0,
+              94,
+              62,
+              0,
+              0,
+              95,
+              62,
+              0,
+              0,
+              96,
+              62,
+              0,
+              0,
+              97,
+              62,
+              0,
+              0,
+              98,
+              62,
+              0,
+              0,
+              99,
+              62,
+              0,
+              0,
+              100,
+              62,
+              0,
+              0,
+              101,
+              62,
+              0,
+              0,
+              102,
+              62,
+              0,
+              0,
+              103,
+              62,
+              0,
+              0,
+              104,
+              62,
+              0,
+              0,
+              105,
+              62,
+              0,
+              0,
+              106,
+              62,
+              0,
+              0,
+              107,
+              62,
+              0,
+              0,
+              108,
+              62,
+              0,
+              0,
+              109,
+              62,
+              0,
+              0,
+              110,
+              62,
+              0,
+              0,
+              111,
+              62,
+              0,
+              0,
+              112,
+              62,
+              0,
+              0,
+              113,
+              62,
+              0,
+              0,
+              114,
+              62,
+              0,
+              0,
+              115,
+              62,
+              0,
+              0,
+              116,
+              62,
+              0,
+              0,
+              117,
+              62,
+              0,
+              0,
+              118,
+              62,
+              0,
+              0,
+              119,
+              62,
+              0,
+              0,
+              120,
+              62,
+              0,
+              0,
+              121,
+              62,
+              0,
+              0,
+              122,
+              62,
+              0,
+              0,
+              123,
+              62,
+              0,
+              0,
+              124,
+              62,
+              0,
+              0,
+              125,
+              62,
+              0,
+              0,
+              126,
+              62,
+              0,
+              0,
+              127,
+              62,
+              0,
+              0,
+              128,
+              62,
+              0,
+              128,
+              128,
+              62,
+              0,
+              0,
+              129,
+              62,
+              0,
+              128,
+              129,
+              62,
+              0,
+              0,
+              130,
+              62,
+              0,
+              128,
+              130,
+              62,
+              0,
+              0,
+              131,
+              62,
+              0,
+              128,
+              131,
+              62,
+              0,
+              0,
+              132,
+              62,
+              0,
+              128,
+              132,
+              62,
+              0,
+              0,
+              133,
+              62,
+              0,
+              128,
+              133,
+              62,
+              0,
+              0,
+              134,
+              62,
+              0,
+              128,
+              134,
+              62,
+              0,
+              0,
+              135,
+              62,
+              0,
+              128,
+              135,
+              62,
+              0,
+              0,
+              136,
+              62,
+              0,
+              128,
+              136,
+              62,
+              0,
+              0,
+              137,
+              62,
+              0,
+              128,
+              137,
+              62,
+              0,
+              0,
+              138,
+              62,
+              0,
+              128,
+              138,
+              62,
+              0,
+              0,
+              139,
+              62,
+              0,
+              128,
+              139,
+              62,
+              0,
+              0,
+              140,
+              62,
+              0,
+              128,
+              140,
+              62,
+              0,
+              0,
+              141,
+              62,
+              0,
+              128,
+              141,
+              62,
+              0,
+              0,
+              142,
+              62,
+              0,
+              128,
+              142,
+              62,
+              0,
+              0,
+              143,
+              62,
+              0,
+              128,
+              143,
+              62,
+              0,
+              0,
+              144,
+              62,
+              0,
+              128,
+              144,
+              62,
+              0,
+              0,
+              145,
+              62,
+              0,
+              128,
+              145,
+              62,
+              0,
+              0,
+              146,
+              62,
+              0,
+              128,
+              146,
+              62,
+              0,
+              0,
+              147,
+              62,
+              0,
+              128,
+              147,
+              62,
+              0,
+              0,
+              148,
+              62,
+              0,
+              128,
+              148,
+              62,
+              0,
+              0,
+              149,
+              62,
+              0,
+              128,
+              149,
+              62,
+              0,
+              0,
+              150,
+              62,
+              0,
+              128,
+              150,
+              62,
+              0,
+              0,
+              151,
+              62,
+              0,
+              128,
+              151,
+              62,
+              0,
+              0,
+              152,
+              62,
+              0,
+              128,
+              152,
+              62,
+              0,
+              0,
+              153,
+              62,
+              0,
+              128,
+              153,
+              62,
+              0,
+              0,
+              154,
+              62,
+              0,
+              128,
+              154,
+              62,
+              0,
+              0,
+              155,
+              62,
+              0,
+              128,
+              155,
+              62,
+              0,
+              0,
+              156,
+              62,
+              0,
+              128,
+              156,
+              62,
+              0,
+              0,
+              157,
+              62,
+              0,
+              128,
+              157,
+              62,
+              0,
+              0,
+              158,
+              62,
+              0,
+              128,
+              158,
+              62,
+              0,
+              0,
+              159,
+              62,
+              0,
+              128,
+              159,
+              62,
+              0,
+              0,
+              160,
+              62,
+              0,
+              128,
+              160,
+              62,
+              0,
+              0,
+              161,
+              62,
+              0,
+              128,
+              161,
+              62,
+              0,
+              0,
+              162,
+              62,
+              0,
+              128,
+              162,
+              62,
+              0,
+              0,
+              163,
+              62,
+              0,
+              128,
+              163,
+              62,
+              0,
+              0,
+              164,
+              62,
+              0,
+              128,
+              164,
+              62,
+              0,
+              0,
+              165,
+              62,
+              0,
+              128,
+              165,
+              62,
+              0,
+              0,
+              166,
+              62,
+              0,
+              128,
+              166,
+              62,
+              0,
+              0,
+              167,
+              62,
+              0,
+              128,
+              167,
+              62,
+              0,
+              0,
+              168,
+              62,
+              0,
+              128,
+              168,
+              62,
+              0,
+              0,
+              169,
+              62,
+              0,
+              128,
+              169,
+              62,
+              0,
+              0,
+              170,
+              62,
+              0,
+              128,
+              170,
+              62,
+              0,
+              0,
+              171,
+              62,
+              0,
+              128,
+              171,
+              62,
+              0,
+              0,
+              172,
+              62,
+              0,
+              128,
+              172,
+              62,
+              0,
+              0,
+              173,
+              62,
+              0,
+              128,
+              173,
+              62,
+              0,
+              0,
+              174,
+              62,
+              0,
+              128,
+              174,
+              62,
+              0,
+              0,
+              175,
+              62,
+              0,
+              128,
+              175,
+              62,
+              0,
+              0,
+              176,
+              62,
+              0,
+              128,
+              176,
+              62,
+              0,
+              0,
+              177,
+              62,
+              0,
+              128,
+              177,
+              62,
+              0,
+              0,
+              178,
+              62,
+              0,
+              128,
+              178,
+              62,
+              0,
+              0,
+              179,
+              62,
+              0,
+              128,
+              179,
+              62,
+              0,
+              0,
+              180,
+              62,
+              0,
+              128,
+              180,
+              62,
+              0,
+              0,
+              181,
+              62,
+              0,
+              128,
+              181,
+              62,
+              0,
+              0,
+              182,
+              62,
+              0,
+              128,
+              182,
+              62,
+              0,
+              0,
+              183,
+              62,
+              0,
+              128,
+              183,
+              62,
+              0,
+              0,
+              184,
+              62,
+              0,
+              128,
+              184,
+              62,
+              0,
+              0,
+              185,
+              62,
+              0,
+              128,
+              185,
+              62,
+              0,
+              0,
+              186,
+              62,
+              0,
+              128,
+              186,
+              62,
+              0,
+              0,
+              187,
+              62,
+              0,
+              128,
+              187,
+              62,
+              0,
+              0,
+              188,
+              62,
+              0,
+              128,
+              188,
+              62,
+              0,
+              0,
+              189,
+              62,
+              0,
+              128,
+              189,
+              62,
+              0,
+              0,
+              190,
+              62,
+              0,
+              128,
+              190,
+              62,
+              0,
+              0,
+              191,
+              62,
+              0,
+              128,
+              191,
+              62,
+              0,
+              0,
+              192,
+              62,
+              0,
+              128,
+              192,
+              62,
+              0,
+              0,
+              193,
+              62,
+              0,
+              128,
+              193,
+              62,
+              0,
+              0,
+              194,
+              62,
+              0,
+              128,
+              194,
+              62,
+              0,
+              0,
+              195,
+              62,
+              0,
+              128,
+              195,
+              62,
+              0,
+              0,
+              196,
+              62,
+              0,
+              128,
+              196,
+              62,
+              0,
+              0,
+              197,
+              62,
+              0,
+              128,
+              197,
+              62,
+              0,
+              0,
+              198,
+              62,
+              0,
+              128,
+              198,
+              62,
+              0,
+              0,
+              199,
+              62,
+              0,
+              128,
+              199,
+              62,
+              0,
+              0,
+              200,
+              62,
+              0,
+              128,
+              200,
+              62,
+              0,
+              0,
+              201,
+              62,
+              0,
+              128,
+              201,
+              62,
+              0,
+              0,
+              202,
+              62,
+              0,
+              128,
+              202,
+              62,
+              0,
+              0,
+              203,
+              62,
+              0,
+              128,
+              203,
+              62,
+              0,
+              0,
+              204,
+              62,
+              0,
+              128,
+              204,
+              62,
+              0,
+              0,
+              205,
+              62,
+              0,
+              128,
+              205,
+              62,
+              0,
+              0,
+              206,
+              62,
+              0,
+              128,
+              206,
+              62,
+              0,
+              0,
+              207,
+              62,
+              0,
+              128,
+              207,
+              62,
+              0,
+              0,
+              208,
+              62,
+              0,
+              128,
+              208,
+              62,
+              0,
+              0,
+              209,
+              62,
+              0,
+              128,
+              209,
+              62,
+              0,
+              0,
+              210,
+              62,
+              0,
+              128,
+              210,
+              62,
+              0,
+              0,
+              211,
+              62,
+              0,
+              128,
+              211,
+              62,
+              0,
+              0,
+              212,
+              62,
+              0,
+              128,
+              212,
+              62,
+              0,
+              0,
+              213,
+              62,
+              0,
+              128,
+              213,
+              62,
+              0,
+              0,
+              214,
+              62,
+              0,
+              128,
+              214,
+              62,
+              0,
+              0,
+              215,
+              62,
+              0,
+              128,
+              215,
+              62,
+              0,
+              0,
+              216,
+              62,
+              0,
+              128,
+              216,
+              62,
+              0,
+              0,
+              217,
+              62,
+              0,
+              128,
+              217,
+              62,
+              0,
+              0,
+              218,
+              62,
+              0,
+              128,
+              218,
+              62,
+              0,
+              0,
+              219,
+              62,
+              0,
+              128,
+              219,
+              62,
+              0,
+              0,
+              220,
+              62,
+              0,
+              128,
+              220,
+              62,
+              0,
+              0,
+              221,
+              62,
+              0,
+              128,
+              221,
+              62,
+              0,
+              0,
+              222,
+              62,
+              0,
+              128,
+              222,
+              62,
+              0,
+              0,
+              223,
+              62,
+              0,
+              128,
+              223,
+              62,
+              0,
+              0,
+              224,
+              62,
+              0,
+              128,
+              224,
+              62,
+              0,
+              0,
+              225,
+              62,
+              0,
+              128,
+              225,
+              62,
+              0,
+              0,
+              226,
+              62,
+              0,
+              128,
+              226,
+              62,
+              0,
+              0,
+              227,
+              62,
+              0,
+              128,
+              227,
+              62,
+              0,
+              0,
+              228,
+              62,
+              0,
+              128,
+              228,
+              62,
+              0,
+              0,
+              229,
+              62,
+              0,
+              128,
+              229,
+              62,
+              0,
+              0,
+              230,
+              62,
+              0,
+              128,
+              230,
+              62,
+              0,
+              0,
+              231,
+              62,
+              0,
+              128,
+              231,
+              62,
+              0,
+              0,
+              232,
+              62,
+              0,
+              128,
+              232,
+              62,
+              0,
+              0,
+              233,
+              62,
+              0,
+              128,
+              233,
+              62,
+              0,
+              0,
+              234,
+              62,
+              0,
+              128,
+              234,
+              62,
+              0,
+              0,
+              235,
+              62,
+              0,
+              128,
+              235,
+              62,
+              0,
+              0,
+              236,
+              62,
+              0,
+              128,
+              236,
+              62,
+              0,
+              0,
+              237,
+              62,
+              0,
+              128,
+              237,
+              62,
+              0,
+              0,
+              238,
+              62,
+              0,
+              128,
+              238,
+              62,
+              0,
+              0,
+              239,
+              62,
+              0,
+              128,
+              239,
+              62,
+              0,
+              0,
+              240,
+              62,
+              0,
+              128,
+              240,
+              62,
+              0,
+              0,
+              241,
+              62,
+              0,
+              128,
+              241,
+              62,
+              0,
+              0,
+              242,
+              62,
+              0,
+              128,
+              242,
+              62,
+              0,
+              0,
+              243,
+              62,
+              0,
+              128,
+              243,
+              62,
+              0,
+              0,
+              244,
+              62,
+              0,
+              128,
+              244,
+              62,
+              0,
+              0,
+              245,
+              62,
+              0,
+              128,
+              245,
+              62,
+              0,
+              0,
+              246,
+              62,
+              0,
+              128,
+              246,
+              62,
+              0,
+              0,
+              247,
+              62,
+              0,
+              128,
+              247,
+              62,
+              0,
+              0,
+              248,
+              62,
+              0,
+              128,
+              248,
+              62,
+              0,
+              0,
+              249,
+              62,
+              0,
+              128,
+              249,
+              62,
+              0,
+              0,
+              250,
+              62,
+              0,
+              128,
+              250,
+              62,
+              0,
+              0,
+              251,
+              62,
+              0,
+              128,
+              251,
+              62,
+              0,
+              0,
+              252,
+              62,
+              0,
+              128,
+              252,
+              62,
+              0,
+              0,
+              253,
+              62,
+              0,
+              128,
+              253,
+              62,
+              0,
+              0,
+              254,
+              62,
+              0,
+              128,
+              254,
+              62,
+              0,
+              0,
+              255,
+              62,
+              0,
+              128,
+              255,
+              62,
+              0,
+              0,
+              0,
+              63,
+              0,
+              64,
+              0,
+              63,
+              0,
+              128,
+              0,
+              63,
+              0,
+              192,
+              0,
+              63,
+              0,
+              0,
+              1,
+              63,
+              0,
+              64,
+              1,
+              63,
+              0,
+              128,
+              1,
+              63,
+              0,
+              192,
+              1,
+              63,
+              0,
+              0,
+              2,
+              63,
+              0,
+              64,
+              2,
+              63,
+              0,
+              128,
+              2,
+              63,
+              0,
+              192,
+              2,
+              63,
+              0,
+              0,
+              3,
+              63,
+              0,
+              64,
+              3,
+              63,
+              0,
+              128,
+              3,
+              63,
+              0,
+              192,
+              3,
+              63,
+              0,
+              0,
+              4,
+              63,
+              0,
+              64,
+              4,
+              63,
+              0,
+              128,
+              4,
+              63,
+              0,
+              192,
+              4,
+              63,
+              0,
+              0,
+              5,
+              63,
+              0,
+              64,
+              5,
+              63,
+              0,
+              128,
+              5,
+              63,
+              0,
+              192,
+              5,
+              63,
+              0,
+              0,
+              6,
+              63,
+              0,
+              64,
+              6,
+              63,
+              0,
+              128,
+              6,
+              63,
+              0,
+              192,
+              6,
+              63,
+              0,
+              0,
+              7,
+              63,
+              0,
+              64,
+              7,
+              63,
+              0,
+              128,
+              7,
+              63,
+              0,
+              192,
+              7,
+              63,
+              0,
+              0,
+              8,
+              63,
+              0,
+              64,
+              8,
+              63,
+              0,
+              128,
+              8,
+              63,
+              0,
+              192,
+              8,
+              63,
+              0,
+              0,
+              9,
+              63,
+              0,
+              64,
+              9,
+              63,
+              0,
+              128,
+              9,
+              63,
+              0,
+              192,
+              9,
+              63,
+              0,
+              0,
+              10,
+              63,
+              0,
+              64,
+              10,
+              63,
+              0,
+              128,
+              10,
+              63,
+              0,
+              192,
+              10,
+              63,
+              0,
+              0,
+              11,
+              63,
+              0,
+              64,
+              11,
+              63,
+              0,
+              128,
+              11,
+              63,
+              0,
+              192,
+              11,
+              63,
+              0,
+              0,
+              12,
+              63,
+              0,
+              64,
+              12,
+              63,
+              0,
+              128,
+              12,
+              63,
+              0,
+              192,
+              12,
+              63,
+              0,
+              0,
+              13,
+              63,
+              0,
+              64,
+              13,
+              63,
+              0,
+              128,
+              13,
+              63,
+              0,
+              192,
+              13,
+              63,
+              0,
+              0,
+              14,
+              63,
+              0,
+              64,
+              14,
+              63,
+              0,
+              128,
+              14,
+              63,
+              0,
+              192,
+              14,
+              63,
+              0,
+              0,
+              15,
+              63,
+              0,
+              64,
+              15,
+              63,
+              0,
+              128,
+              15,
+              63,
+              0,
+              192,
+              15,
+              63,
+              0,
+              0,
+              16,
+              63,
+              0,
+              64,
+              16,
+              63,
+              0,
+              128,
+              16,
+              63,
+              0,
+              192,
+              16,
+              63,
+              0,
+              0,
+              17,
+              63,
+              0,
+              64,
+              17,
+              63,
+              0,
+              128,
+              17,
+              63,
+              0,
+              192,
+              17,
+              63,
+              0,
+              0,
+              18,
+              63,
+              0,
+              64,
+              18,
+              63,
+              0,
+              128,
+              18,
+              63,
+              0,
+              192,
+              18,
+              63,
+              0,
+              0,
+              19,
+              63,
+              0,
+              64,
+              19,
+              63,
+              0,
+              128,
+              19,
+              63,
+              0,
+              192,
+              19,
+              63,
+              0,
+              0,
+              20,
+              63,
+              0,
+              64,
+              20,
+              63,
+              0,
+              128,
+              20,
+              63,
+              0,
+              192,
+              20,
+              63,
+              0,
+              0,
+              21,
+              63,
+              0,
+              64,
+              21,
+              63,
+              0,
+              128,
+              21,
+              63,
+              0,
+              192,
+              21,
+              63,
+              0,
+              0,
+              22,
+              63,
+              0,
+              64,
+              22,
+              63,
+              0,
+              128,
+              22,
+              63,
+              0,
+              192,
+              22,
+              63,
+              0,
+              0,
+              23,
+              63,
+              0,
+              64,
+              23,
+              63,
+              0,
+              128,
+              23,
+              63,
+              0,
+              192,
+              23,
+              63,
+              0,
+              0,
+              24,
+              63,
+              0,
+              64,
+              24,
+              63,
+              0,
+              128,
+              24,
+              63,
+              0,
+              192,
+              24,
+              63,
+              0,
+              0,
+              25,
+              63,
+              0,
+              64,
+              25,
+              63,
+              0,
+              128,
+              25,
+              63,
+              0,
+              192,
+              25,
+              63,
+              0,
+              0,
+              26,
+              63,
+              0,
+              64,
+              26,
+              63,
+              0,
+              128,
+              26,
+              63,
+              0,
+              192,
+              26,
+              63,
+              0,
+              0,
+              27,
+              63,
+              0,
+              64,
+              27,
+              63,
+              0,
+              128,
+              27,
+              63,
+              0,
+              192,
+              27,
+              63,
+              0,
+              0,
+              28,
+              63,
+              0,
+              64,
+              28,
+              63,
+              0,
+              128,
+              28,
+              63,
+              0,
+              192,
+              28,
+              63,
+              0,
+              0,
+              29,
+              63,
+              0,
+              64,
+              29,
+              63,
+              0,
+              128,
+              29,
+              63,
+              0,
+              192,
+              29,
+              63,
+              0,
+              0,
+              30,
+              63,
+              0,
+              64,
+              30,
+              63,
+              0,
+              128,
+              30,
+              63,
+              0,
+              192,
+              30,
+              63,
+              0,
+              0,
+              31,
+              63,
+              0,
+              64,
+              31,
+              63,
+              0,
+              128,
+              31,
+              63,
+              0,
+              192,
+              31,
+              63,
+              0,
+              0,
+              32,
+              63,
+              0,
+              64,
+              32,
+              63,
+              0,
+              128,
+              32,
+              63,
+              0,
+              192,
+              32,
+              63,
+              0,
+              0,
+              33,
+              63,
+              0,
+              64,
+              33,
+              63,
+              0,
+              128,
+              33,
+              63,
+              0,
+              192,
+              33,
+              63,
+              0,
+              0,
+              34,
+              63,
+              0,
+              64,
+              34,
+              63,
+              0,
+              128,
+              34,
+              63,
+              0,
+              192,
+              34,
+              63,
+              0,
+              0,
+              35,
+              63,
+              0,
+              64,
+              35,
+              63,
+              0,
+              128,
+              35,
+              63,
+              0,
+              192,
+              35,
+              63,
+              0,
+              0,
+              36,
+              63,
+              0,
+              64,
+              36,
+              63,
+              0,
+              128,
+              36,
+              63,
+              0,
+              192,
+              36,
+              63,
+              0,
+              0,
+              37,
+              63,
+              0,
+              64,
+              37,
+              63,
+              0,
+              128,
+              37,
+              63,
+              0,
+              192,
+              37,
+              63,
+              0,
+              0,
+              38,
+              63,
+              0,
+              64,
+              38,
+              63,
+              0,
+              128,
+              38,
+              63,
+              0,
+              192,
+              38,
+              63,
+              0,
+              0,
+              39,
+              63,
+              0,
+              64,
+              39,
+              63,
+              0,
+              128,
+              39,
+              63,
+              0,
+              192,
+              39,
+              63,
+              0,
+              0,
+              40,
+              63,
+              0,
+              64,
+              40,
+              63,
+              0,
+              128,
+              40,
+              63,
+              0,
+              192,
+              40,
+              63,
+              0,
+              0,
+              41,
+              63,
+              0,
+              64,
+              41,
+              63,
+              0,
+              128,
+              41,
+              63,
+              0,
+              192,
+              41,
+              63,
+              0,
+              0,
+              42,
+              63,
+              0,
+              64,
+              42,
+              63,
+              0,
+              128,
+              42,
+              63,
+              0,
+              192,
+              42,
+              63,
+              0,
+              0,
+              43,
+              63,
+              0,
+              64,
+              43,
+              63,
+              0,
+              128,
+              43,
+              63,
+              0,
+              192,
+              43,
+              63,
+              0,
+              0,
+              44,
+              63,
+              0,
+              64,
+              44,
+              63,
+              0,
+              128,
+              44,
+              63,
+              0,
+              192,
+              44,
+              63,
+              0,
+              0,
+              45,
+              63,
+              0,
+              64,
+              45,
+              63,
+              0,
+              128,
+              45,
+              63,
+              0,
+              192,
+              45,
+              63,
+              0,
+              0,
+              46,
+              63,
+              0,
+              64,
+              46,
+              63,
+              0,
+              128,
+              46,
+              63,
+              0,
+              192,
+              46,
+              63,
+              0,
+              0,
+              47,
+              63,
+              0,
+              64,
+              47,
+              63,
+              0,
+              128,
+              47,
+              63,
+              0,
+              192,
+              47,
+              63,
+              0,
+              0,
+              48,
+              63,
+              0,
+              64,
+              48,
+              63,
+              0,
+              128,
+              48,
+              63,
+              0,
+              192,
+              48,
+              63,
+              0,
+              0,
+              49,
+              63,
+              0,
+              64,
+              49,
+              63,
+              0,
+              128,
+              49,
+              63,
+              0,
+              192,
+              49,
+              63,
+              0,
+              0,
+              50,
+              63,
+              0,
+              64,
+              50,
+              63,
+              0,
+              128,
+              50,
+              63,
+              0,
+              192,
+              50,
+              63,
+              0,
+              0,
+              51,
+              63,
+              0,
+              64,
+              51,
+              63,
+              0,
+              128,
+              51,
+              63,
+              0,
+              192,
+              51,
+              63,
+              0,
+              0,
+              52,
+              63,
+              0,
+              64,
+              52,
+              63,
+              0,
+              128,
+              52,
+              63,
+              0,
+              192,
+              52,
+              63,
+              0,
+              0,
+              53,
+              63,
+              0,
+              64,
+              53,
+              63,
+              0,
+              128,
+              53,
+              63,
+              0,
+              192,
+              53,
+              63,
+              0,
+              0,
+              54,
+              63,
+              0,
+              64,
+              54,
+              63,
+              0,
+              128,
+              54,
+              63,
+              0,
+              192,
+              54,
+              63,
+              0,
+              0,
+              55,
+              63,
+              0,
+              64,
+              55,
+              63,
+              0,
+              128,
+              55,
+              63,
+              0,
+              192,
+              55,
+              63,
+              0,
+              0,
+              56,
+              63,
+              0,
+              64,
+              56,
+              63,
+              0,
+              128,
+              56,
+              63,
+              0,
+              192,
+              56,
+              63,
+              0,
+              0,
+              57,
+              63,
+              0,
+              64,
+              57,
+              63,
+              0,
+              128,
+              57,
+              63,
+              0,
+              192,
+              57,
+              63,
+              0,
+              0,
+              58,
+              63,
+              0,
+              64,
+              58,
+              63,
+              0,
+              128,
+              58,
+              63,
+              0,
+              192,
+              58,
+              63,
+              0,
+              0,
+              59,
+              63,
+              0,
+              64,
+              59,
+              63,
+              0,
+              128,
+              59,
+              63,
+              0,
+              192,
+              59,
+              63,
+              0,
+              0,
+              60,
+              63,
+              0,
+              64,
+              60,
+              63,
+              0,
+              128,
+              60,
+              63,
+              0,
+              192,
+              60,
+              63,
+              0,
+              0,
+              61,
+              63,
+              0,
+              64,
+              61,
+              63,
+              0,
+              128,
+              61,
+              63,
+              0,
+              192,
+              61,
+              63,
+              0,
+              0,
+              62,
+              63,
+              0,
+              64,
+              62,
+              63,
+              0,
+              128,
+              62,
+              63,
+              0,
+              192,
+              62,
+              63,
+              0,
+              0,
+              63,
+              63,
+              0,
+              64,
+              63,
+              63,
+              0,
+              128,
+              63,
+              63,
+              0,
+              192,
+              63,
+              63,
+              0,
+              0,
+              64,
+              63,
+              0,
+              64,
+              64,
+              63,
+              0,
+              128,
+              64,
+              63,
+              0,
+              192,
+              64,
+              63,
+              0,
+              0,
+              65,
+              63,
+              0,
+              64,
+              65,
+              63,
+              0,
+              128,
+              65,
+              63,
+              0,
+              192,
+              65,
+              63,
+              0,
+              0,
+              66,
+              63,
+              0,
+              64,
+              66,
+              63,
+              0,
+              128,
+              66,
+              63,
+              0,
+              192,
+              66,
+              63,
+              0,
+              0,
+              67,
+              63,
+              0,
+              64,
+              67,
+              63,
+              0,
+              128,
+              67,
+              63,
+              0,
+              192,
+              67,
+              63,
+              0,
+              0,
+              68,
+              63,
+              0,
+              64,
+              68,
+              63,
+              0,
+              128,
+              68,
+              63,
+              0,
+              192,
+              68,
+              63,
+              0,
+              0,
+              69,
+              63,
+              0,
+              64,
+              69,
+              63,
+              0,
+              128,
+              69,
+              63,
+              0,
+              192,
+              69,
+              63,
+              0,
+              0,
+              70,
+              63,
+              0,
+              64,
+              70,
+              63,
+              0,
+              128,
+              70,
+              63,
+              0,
+              192,
+              70,
+              63,
+              0,
+              0,
+              71,
+              63,
+              0,
+              64,
+              71,
+              63,
+              0,
+              128,
+              71,
+              63,
+              0,
+              192,
+              71,
+              63,
+              0,
+              0,
+              72,
+              63,
+              0,
+              64,
+              72,
+              63,
+              0,
+              128,
+              72,
+              63,
+              0,
+              192,
+              72,
+              63,
+              0,
+              0,
+              73,
+              63,
+              0,
+              64,
+              73,
+              63,
+              0,
+              128,
+              73,
+              63,
+              0,
+              192,
+              73,
+              63,
+              0,
+              0,
+              74,
+              63,
+              0,
+              64,
+              74,
+              63,
+              0,
+              128,
+              74,
+              63,
+              0,
+              192,
+              74,
+              63,
+              0,
+              0,
+              75,
+              63,
+              0,
+              64,
+              75,
+              63,
+              0,
+              128,
+              75,
+              63,
+              0,
+              192,
+              75,
+              63,
+              0,
+              0,
+              76,
+              63,
+              0,
+              64,
+              76,
+              63,
+              0,
+              128,
+              76,
+              63,
+              0,
+              192,
+              76,
+              63,
+              0,
+              0,
+              77,
+              63,
+              0,
+              64,
+              77,
+              63,
+              0,
+              128,
+              77,
+              63,
+              0,
+              192,
+              77,
+              63,
+              0,
+              0,
+              78,
+              63,
+              0,
+              64,
+              78,
+              63,
+              0,
+              128,
+              78,
+              63,
+              0,
+              192,
+              78,
+              63,
+              0,
+              0,
+              79,
+              63,
+              0,
+              64,
+              79,
+              63,
+              0,
+              128,
+              79,
+              63,
+              0,
+              192,
+              79,
+              63,
+              0,
+              0,
+              80,
+              63,
+              0,
+              64,
+              80,
+              63,
+              0,
+              128,
+              80,
+              63,
+              0,
+              192,
+              80,
+              63,
+              0,
+              0,
+              81,
+              63,
+              0,
+              64,
+              81,
+              63,
+              0,
+              128,
+              81,
+              63,
+              0,
+              192,
+              81,
+              63,
+              0,
+              0,
+              82,
+              63,
+              0,
+              64,
+              82,
+              63,
+              0,
+              128,
+              82,
+              63,
+              0,
+              192,
+              82,
+              63,
+              0,
+              0,
+              83,
+              63,
+              0,
+              64,
+              83,
+              63,
+              0,
+              128,
+              83,
+              63,
+              0,
+              192,
+              83,
+              63,
+              0,
+              0,
+              84,
+              63,
+              0,
+              64,
+              84,
+              63,
+              0,
+              128,
+              84,
+              63,
+              0,
+              192,
+              84,
+              63,
+              0,
+              0,
+              85,
+              63,
+              0,
+              64,
+              85,
+              63,
+              0,
+              128,
+              85,
+              63,
+              0,
+              192,
+              85,
+              63,
+              0,
+              0,
+              86,
+              63,
+              0,
+              64,
+              86,
+              63,
+              0,
+              128,
+              86,
+              63,
+              0,
+              192,
+              86,
+              63,
+              0,
+              0,
+              87,
+              63,
+              0,
+              64,
+              87,
+              63,
+              0,
+              128,
+              87,
+              63,
+              0,
+              192,
+              87,
+              63,
+              0,
+              0,
+              88,
+              63,
+              0,
+              64,
+              88,
+              63,
+              0,
+              128,
+              88,
+              63,
+              0,
+              192,
+              88,
+              63,
+              0,
+              0,
+              89,
+              63,
+              0,
+              64,
+              89,
+              63,
+              0,
+              128,
+              89,
+              63,
+              0,
+              192,
+              89,
+              63,
+              0,
+              0,
+              90,
+              63,
+              0,
+              64,
+              90,
+              63,
+              0,
+              128,
+              90,
+              63,
+              0,
+              192,
+              90,
+              63,
+              0,
+              0,
+              91,
+              63,
+              0,
+              64,
+              91,
+              63,
+              0,
+              128,
+              91,
+              63,
+              0,
+              192,
+              91,
+              63,
+              0,
+              0,
+              92,
+              63,
+              0,
+              64,
+              92,
+              63,
+              0,
+              128,
+              92,
+              63,
+              0,
+              192,
+              92,
+              63,
+              0,
+              0,
+              93,
+              63,
+              0,
+              64,
+              93,
+              63,
+              0,
+              128,
+              93,
+              63,
+              0,
+              192,
+              93,
+              63,
+              0,
+              0,
+              94,
+              63,
+              0,
+              64,
+              94,
+              63,
+              0,
+              128,
+              94,
+              63,
+              0,
+              192,
+              94,
+              63,
+              0,
+              0,
+              95,
+              63,
+              0,
+              64,
+              95,
+              63,
+              0,
+              128,
+              95,
+              63,
+              0,
+              192,
+              95,
+              63,
+              0,
+              0,
+              96,
+              63,
+              0,
+              64,
+              96,
+              63,
+              0,
+              128,
+              96,
+              63,
+              0,
+              192,
+              96,
+              63,
+              0,
+              0,
+              97,
+              63,
+              0,
+              64,
+              97,
+              63,
+              0,
+              128,
+              97,
+              63,
+              0,
+              192,
+              97,
+              63,
+              0,
+              0,
+              98,
+              63,
+              0,
+              64,
+              98,
+              63,
+              0,
+              128,
+              98,
+              63,
+              0,
+              192,
+              98,
+              63,
+              0,
+              0,
+              99,
+              63,
+              0,
+              64,
+              99,
+              63,
+              0,
+              128,
+              99,
+              63,
+              0,
+              192,
+              99,
+              63,
+              0,
+              0,
+              100,
+              63,
+              0,
+              64,
+              100,
+              63,
+              0,
+              128,
+              100,
+              63,
+              0,
+              192,
+              100,
+              63,
+              0,
+              0,
+              101,
+              63,
+              0,
+              64,
+              101,
+              63,
+              0,
+              128,
+              101,
+              63,
+              0,
+              192,
+              101,
+              63,
+              0,
+              0,
+              102,
+              63,
+              0,
+              64,
+              102,
+              63,
+              0,
+              128,
+              102,
+              63,
+              0,
+              192,
+              102,
+              63,
+              0,
+              0,
+              103,
+              63,
+              0,
+              64,
+              103,
+              63,
+              0,
+              128,
+              103,
+              63,
+              0,
+              192,
+              103,
+              63,
+              0,
+              0,
+              104,
+              63,
+              0,
+              64,
+              104,
+              63,
+              0,
+              128,
+              104,
+              63,
+              0,
+              192,
+              104,
+              63,
+              0,
+              0,
+              105,
+              63,
+              0,
+              64,
+              105,
+              63,
+              0,
+              128,
+              105,
+              63,
+              0,
+              192,
+              105,
+              63,
+              0,
+              0,
+              106,
+              63,
+              0,
+              64,
+              106,
+              63,
+              0,
+              128,
+              106,
+              63,
+              0,
+              192,
+              106,
+              63,
+              0,
+              0,
+              107,
+              63,
+              0,
+              64,
+              107,
+              63,
+              0,
+              128,
+              107,
+              63,
+              0,
+              192,
+              107,
+              63,
+              0,
+              0,
+              108,
+              63,
+              0,
+              64,
+              108,
+              63,
+              0,
+              128,
+              108,
+              63,
+              0,
+              192,
+              108,
+              63,
+              0,
+              0,
+              109,
+              63,
+              0,
+              64,
+              109,
+              63,
+              0,
+              128,
+              109,
+              63,
+              0,
+              192,
+              109,
+              63,
+              0,
+              0,
+              110,
+              63,
+              0,
+              64,
+              110,
+              63,
+              0,
+              128,
+              110,
+              63,
+              0,
+              192,
+              110,
+              63,
+              0,
+              0,
+              111,
+              63,
+              0,
+              64,
+              111,
+              63,
+              0,
+              128,
+              111,
+              63,
+              0,
+              192,
+              111,
+              63,
+              0,
+              0,
+              112,
+              63,
+              0,
+              64,
+              112,
+              63,
+              0,
+              128,
+              112,
+              63,
+              0,
+              192,
+              112,
+              63,
+              0,
+              0,
+              113,
+              63,
+              0,
+              64,
+              113,
+              63,
+              0,
+              128,
+              113,
+              63,
+              0,
+              192,
+              113,
+              63,
+              0,
+              0,
+              114,
+              63,
+              0,
+              64,
+              114,
+              63,
+              0,
+              128,
+              114,
+              63,
+              0,
+              192,
+              114,
+              63,
+              0,
+              0,
+              115,
+              63,
+              0,
+              64,
+              115,
+              63,
+              0,
+              128,
+              115,
+              63,
+              0,
+              192,
+              115,
+              63,
+              0,
+              0,
+              116,
+              63,
+              0,
+              64,
+              116,
+              63,
+              0,
+              128,
+              116,
+              63,
+              0,
+              192,
+              116,
+              63,
+              0,
+              0,
+              117,
+              63,
+              0,
+              64,
+              117,
+              63,
+              0,
+              128,
+              117,
+              63,
+              0,
+              192,
+              117,
+              63,
+              0,
+              0,
+              118,
+              63,
+              0,
+              64,
+              118,
+              63,
+              0,
+              128,
+              118,
+              63,
+              0,
+              192,
+              118,
+              63,
+              0,
+              0,
+              119,
+              63,
+              0,
+              64,
+              119,
+              63,
+              0,
+              128,
+              119,
+              63,
+              0,
+              192,
+              119,
+              63,
+              0,
+              0,
+              120,
+              63,
+              0,
+              64,
+              120,
+              63,
+              0,
+              128,
+              120,
+              63,
+              0,
+              192,
+              120,
+              63,
+              0,
+              0,
+              121,
+              63,
+              0,
+              64,
+              121,
+              63,
+              0,
+              128,
+              121,
+              63,
+              0,
+              192,
+              121,
+              63,
+              0,
+              0,
+              122,
+              63,
+              0,
+              64,
+              122,
+              63,
+              0,
+              128,
+              122,
+              63,
+              0,
+              192,
+              122,
+              63,
+              0,
+              0,
+              123,
+              63,
+              0,
+              64,
+              123,
+              63,
+              0,
+              128,
+              123,
+              63,
+              0,
+              192,
+              123,
+              63,
+              0,
+              0,
+              124,
+              63,
+              0,
+              64,
+              124,
+              63,
+              0,
+              128,
+              124,
+              63,
+              0,
+              192,
+              124,
+              63,
+              0,
+              0,
+              125,
+              63,
+              0,
+              64,
+              125,
+              63,
+              0,
+              128,
+              125,
+              63,
+              0,
+              192,
+              125,
+              63,
+              0,
+              0,
+              126,
+              63,
+              0,
+              64,
+              126,
+              63,
+              0,
+              128,
+              126,
+              63,
+              0,
+              192,
+              126,
+              63,
+              0,
+              0,
+              127,
+              63,
+              0,
+              64,
+              127,
+              63,
+              0,
+              128,
+              127,
+              63,
+              0,
+              192,
+              127,
+              63
+            ]
+          }
+        ]
+      ]
+    },
+    "memory_edges": {
+      "columns": [
+        "rowid",
+        "source_id",
+        "target_id",
+        "relation",
+        "weight",
+        "metadata",
+        "created_at",
+        "valid_from",
+        "valid_to"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "legacy-private"
+          },
+          {
+            "type": "text",
+            "value": "related"
+          },
+          {
+            "type": "real",
+            "value": 4604930618986332160
+          },
+          {
+            "type": "text",
+            "value": "{ \"raw\": true }"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "null"
+          }
+        ]
+      ]
+    },
+    "memory_outbox_destination_apply_receipts": {
+      "columns": [
+        "rowid",
+        "event_id",
+        "object_id",
+        "source_store",
+        "source_partition",
+        "source_revision",
+        "source_payload_digest",
+        "destination_store",
+        "destination_partition",
+        "destination_object_revision",
+        "destination_payload_digest",
+        "application"
+      ],
+      "rows": []
+    },
+    "memory_outbox_events": {
+      "columns": [
+        "rowid",
+        "event_id",
+        "object_id",
+        "object_class",
+        "authority_class",
+        "source_store",
+        "source_partition",
+        "source_revision",
+        "payload_digest",
+        "state",
+        "last_error_class",
+        "created_at",
+        "state_changed_at"
+      ],
+      "rows": []
+    },
+    "memory_search_generation": {
+      "columns": [
+        "rowid",
+        "id",
+        "generation"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 8
+          }
+        ]
+      ]
+    },
+    "mirror_eval_adjudications": {
+      "columns": [
+        "rowid",
+        "adjudication_id",
+        "eval_run_id",
+        "event_key",
+        "actor",
+        "verifier_model",
+        "usefulness",
+        "failure_mode",
+        "first_review_findings",
+        "plan_delta",
+        "next_prompt_delta",
+        "evidence_usable",
+        "used_in_final_claim",
+        "human_override",
+        "evidence_ref",
+        "created_at",
+        "insertion_seq"
+      ],
+      "rows": []
+    },
+    "mirror_eval_observations": {
+      "columns": [
+        "rowid",
+        "observation_id",
+        "eval_run_id",
+        "terminal_outcome",
+        "duration_ms",
+        "cost_tokens",
+        "cost_usd",
+        "result_ref",
+        "artifacts",
+        "effective_model",
+        "effective_backend",
+        "effective_harness",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "mirror_eval_runs": {
+      "columns": [
+        "rowid",
+        "eval_run_id",
+        "register_key",
+        "frozen_contract_ref",
+        "execution_origin",
+        "lifecycle_owner",
+        "harness",
+        "native_child_id",
+        "requested_profile",
+        "requested_model",
+        "requested_agent",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "model_alias_bindings": {
+      "columns": [
+        "rowid",
+        "alias_name",
+        "deployment_id",
+        "priority",
+        "retired",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "model_alias_events": {
+      "columns": [
+        "rowid",
+        "id",
+        "alias_name",
+        "revision",
+        "event_kind",
+        "plan_digest",
+        "evidence",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "model_aliases": {
+      "columns": [
+        "rowid",
+        "alias_name",
+        "required_capabilities",
+        "constraints",
+        "status",
+        "revision",
+        "policy_digest",
+        "source_refs",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "model_deployment_events": {
+      "columns": [
+        "rowid",
+        "id",
+        "deployment_id",
+        "revision",
+        "event_kind",
+        "plan_digest",
+        "evidence",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "model_deployment_health": {
+      "columns": [
+        "rowid",
+        "deployment_id",
+        "state",
+        "cooldown_until",
+        "last_success_at",
+        "last_attempt_at",
+        "last_error",
+        "error_count",
+        "evidence_kind",
+        "observed_at",
+        "metadata",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "model_deployments": {
+      "columns": [
+        "rowid",
+        "deployment_id",
+        "provider_account_id",
+        "endpoint_ref",
+        "protocol_kind",
+        "provider_model_id",
+        "effective_version",
+        "capabilities",
+        "context_window",
+        "max_output",
+        "attachment_bounds",
+        "region",
+        "data_policy",
+        "pricing_snapshot_ref",
+        "catalog_source",
+        "fetched_at",
+        "effective_at",
+        "expires_at",
+        "status",
+        "revision",
+        "source_refs",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "pricing_snapshots": {
+      "columns": [
+        "rowid",
+        "snapshot_id",
+        "provider_kind",
+        "pricing_data",
+        "catalog_source",
+        "fetched_at",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "processed_events": {
+      "columns": [
+        "rowid",
+        "event_hash",
+        "event_id",
+        "worker",
+        "created_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-hash"
+          },
+          {
+            "type": "text",
+            "value": "fixture-event"
+          },
+          {
+            "type": "text",
+            "value": "fixture-worker"
+          },
+          {
+            "type": "text",
+            "value": ""
+          }
+        ]
+      ]
+    },
+    "provider_account_aliases": {
+      "columns": [
+        "rowid",
+        "account_id",
+        "alias_name",
+        "source_kind",
+        "first_seen",
+        "last_seen",
+        "retired"
+      ],
+      "rows": []
+    },
+    "provider_account_events": {
+      "columns": [
+        "rowid",
+        "id",
+        "account_id",
+        "revision",
+        "event_kind",
+        "plan_digest",
+        "evidence",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "provider_accounts": {
+      "columns": [
+        "rowid",
+        "account_id",
+        "provider_kind",
+        "auth_mode",
+        "auth_ref",
+        "account_fingerprint",
+        "account_class",
+        "capabilities",
+        "credential_policy_ref",
+        "refresh_authority",
+        "status",
+        "revision",
+        "source_refs",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "recall_cache": {
+      "columns": [
+        "rowid",
+        "cache_id",
+        "generation_fingerprint",
+        "query",
+        "rows_json",
+        "result_count",
+        "reranked",
+        "hit_count",
+        "created_at",
+        "updated_at",
+        "last_hit_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "stale-fixture"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "[]"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "null"
+          }
+        ]
+      ]
+    },
+    "recall_impression_groups": {
+      "columns": [
+        "rowid",
+        "group_id",
+        "created_at",
+        "legacy_query_bucket",
+        "query_fingerprint",
+        "fusion_policy_version",
+        "pre_boost_adjustment_version",
+        "tie_break_policy_version",
+        "candidate_policy_version",
+        "schema_identity",
+        "weights_profile",
+        "semantic_weight",
+        "fts_weight",
+        "symbolic_weight",
+        "decay_weight",
+        "use_rrf",
+        "rrf_k",
+        "top_k",
+        "candidate_count",
+        "displayed_count",
+        "scored_returned_count",
+        "replay_count",
+        "typo_fallback_activated",
+        "typo_fallback_prefilter_count",
+        "typo_fallback_compared_count",
+        "typo_fallback_token_comparison_count",
+        "typo_fallback_edit_cell_count",
+        "typo_fallback_candidate_count"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-group"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "real",
+            "value": 4596373779694328218
+          },
+          {
+            "type": "real",
+            "value": 4591870180066957722
+          },
+          {
+            "type": "real",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "real",
+            "value": 4633641066610819072
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      ]
+    },
+    "recall_impressions": {
+      "columns": [
+        "rowid",
+        "group_id",
+        "memory_id",
+        "vector_score",
+        "fts_score",
+        "symbolic_score",
+        "decay_score",
+        "vec_rank",
+        "fts_rank",
+        "sym_rank",
+        "merge_adjustment",
+        "pre_boost_score",
+        "pre_boost_rank",
+        "tie_break_epoch_millis",
+        "final_score",
+        "final_rank",
+        "scored",
+        "scored_returned",
+        "access_count_at_recall",
+        "typo_fallback_candidate"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-group"
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "real",
+            "value": 4596373779694328218
+          },
+          {
+            "type": "real",
+            "value": 4591870180066957722
+          },
+          {
+            "type": "real",
+            "value": 0
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "none"
+          },
+          {
+            "type": "real",
+            "value": 4605380978949069210
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "real",
+            "value": 4605380978949069210
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      ]
+    },
+    "rem_source_claims": {
+      "columns": [
+        "rowid",
+        "source_key",
+        "source_identity",
+        "draft_id",
+        "claimed_at"
+      ],
+      "rows": []
+    },
+    "route_decisions": {
+      "columns": [
+        "rowid",
+        "route_decision_id",
+        "dispatch_id",
+        "recommendation_id",
+        "selected_profile",
+        "selected_model",
+        "assignment_mode",
+        "override_flag",
+        "contract_hash",
+        "env_id",
+        "host_profile",
+        "work_claim_id",
+        "occurred_at",
+        "recorded_at"
+      ],
+      "rows": []
+    },
+    "route_recommendations": {
+      "columns": [
+        "rowid",
+        "recommendation_id",
+        "task_type",
+        "risk",
+        "candidates",
+        "recommended_profile",
+        "policy_source_revision",
+        "rows_considered",
+        "occurred_at",
+        "recorded_at"
+      ],
+      "rows": []
+    },
+    "sandbox_exec_audit": {
+      "columns": [
+        "rowid",
+        "id",
+        "timestamp",
+        "capability_id",
+        "stage",
+        "decision",
+        "reason",
+        "duration_ms",
+        "tool_name",
+        "error_kind",
+        "metadata",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "sandbox_policies": {
+      "columns": [
+        "rowid",
+        "capability_id",
+        "runtime_type",
+        "env_allowlist",
+        "fs_read_roots",
+        "fs_write_roots",
+        "cwd_roots",
+        "max_startup_ms",
+        "max_tool_ms",
+        "max_concurrency",
+        "enabled",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "sandbox_rules": {
+      "columns": [
+        "rowid",
+        "agent_role",
+        "path_pattern",
+        "access_level",
+        "created_at"
+      ],
+      "rows": []
+    },
+    "session_claims": {
+      "columns": [
+        "rowid",
+        "claim_id",
+        "session_client",
+        "issue_ref",
+        "flow_id",
+        "dispatch_id",
+        "branch",
+        "worktree_path",
+        "declared_file_scope",
+        "agent_identity_id",
+        "role",
+        "mode",
+        "expected_head",
+        "lease_expires_at",
+        "transition_version",
+        "exec_env_id",
+        "orphaned_at",
+        "state",
+        "release_reason",
+        "created_at",
+        "heartbeat_at",
+        "released_at"
+      ],
+      "rows": []
+    },
+    "sqlite_sequence": {
+      "columns": [
+        "rowid",
+        "name",
+        "seq"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "memories_vec_rowids"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "memories_vec_chunks"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          }
+        ]
+      ]
+    },
+    "tachi_events": {
+      "columns": [
+        "rowid",
+        "id",
+        "source_repo",
+        "adapter",
+        "project",
+        "domain",
+        "session_id",
+        "actor",
+        "event_type",
+        "authority",
+        "effects",
+        "projection_hints",
+        "payload_json",
+        "provenance_json",
+        "created_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-event"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "zeroclaw.fixture"
+          },
+          {
+            "type": "text",
+            "value": "collect_only"
+          },
+          {
+            "type": "text",
+            "value": "[]"
+          },
+          {
+            "type": "text",
+            "value": "[]"
+          },
+          {
+            "type": "text",
+            "value": "{ \"retained\": true }"
+          },
+          {
+            "type": "text",
+            "value": "{}"
+          },
+          {
+            "type": "text",
+            "value": ""
+          }
+        ]
+      ]
+    },
+    "vault_audit": {
+      "columns": [
+        "rowid",
+        "id",
+        "timestamp",
+        "operation",
+        "secret_name",
+        "success",
+        "detail"
+      ],
+      "rows": []
+    },
+    "vault_config": {
+      "columns": [
+        "rowid",
+        "id",
+        "salt",
+        "verifier",
+        "kdf_algorithm",
+        "kdf_params",
+        "cipher",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "vault_entries": {
+      "columns": [
+        "rowid",
+        "name",
+        "encrypted_value",
+        "nonce",
+        "secret_type",
+        "description",
+        "allowed_agents",
+        "created_at",
+        "updated_at",
+        "accessed_at",
+        "access_count"
+      ],
+      "rows": []
+    },
+    "vault_key_health": {
+      "columns": [
+        "rowid",
+        "logical_name",
+        "key_id",
+        "status",
+        "cooldown_until",
+        "last_success",
+        "last_attempt",
+        "last_error",
+        "error_count",
+        "auth_failed",
+        "disabled",
+        "metadata",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "vault_key_rotations": {
+      "columns": [
+        "rowid",
+        "prefix",
+        "current_index",
+        "total_keys",
+        "rotation_strategy",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "virtual_capability_bindings": {
+      "columns": [
+        "rowid",
+        "vc_id",
+        "capability_id",
+        "priority",
+        "version_pin",
+        "enabled",
+        "metadata",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    }
+  }
+}

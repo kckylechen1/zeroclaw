@@ -1,19 +1,18 @@
-//! Tachi / memcore memory backend (feature `tachi`).
+//! ZeroClaw memory adapter over the shared portable kernel (feature `tachi`).
 //!
 //! # Licensing
 //!
-//! `memcore` is licensed under **AGPL-3.0**. Any distributed binary built with
-//! the `memory-tachi` / `tachi` feature is therefore AGPL-affected. Keep that
-//! feature off for releases that must remain under ZeroClaw's own license terms
-//! alone.
+//! `portable-kernel` / `memcore` is licensed under **AGPL-3.0**. Any distributed
+//! binary built with the `memory-tachi` / `tachi` feature is therefore
+//! AGPL-affected. Keep that feature off for releases that must remain under
+//! ZeroClaw's own license terms alone.
 //!
-//! # Hyperion deployments
+//! # Store ownership
 //!
-//! Hyperion trading memory must keep using the hapi memory-server MCP on
-//! `:6888` (`hapi_save` / `hapi_search` / `hapi_memory`). Do **not** set
-//! `memory.backend = "tachi"` for trading memory — this backend is for
-//! ZeroClaw-native agent stores (e.g. RomanBath), not the Hyperion memory
-//! contract in `AGENTS.md`.
+//! This adapter owns ZeroClaw's generic memory database. Hypermem is the
+//! Hyperion adapter over the same kernel; each host keeps its own behavior
+//! and databases. Companion memory uses a separate role and file, while Soul
+//! and User Model retain their existing stores and authority.
 //!
 //! # Known limitations
 //!
@@ -34,11 +33,12 @@ use super::traits::{
     ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryStats, StoreOptions,
     is_recent_recall_query,
 };
+use crate::kernel_store::{KernelStoreKind, MIGRATE_CLI_HINT};
 use anyhow::Context;
 use async_trait::async_trait;
 use chrono::Local;
-use memcore::{HybridWeights, MemoryStore, SearchOptions};
 use parking_lot::{Mutex, RwLock};
+use portable_kernel::{DbOpenContext, HybridWeights, MemoryStore, SearchOptions};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -119,12 +119,24 @@ impl TachiMemory {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let store = MemoryStore::open(
+        let intent = if db_path.try_exists()? {
+            DbOpenContext::open_existing_deny()
+        } else {
+            DbOpenContext::create_fresh()
+        };
+        let context = KernelStoreKind::Memory.context(intent);
+        let store = MemoryStore::open_with_context(
             db_path
                 .to_str()
                 .context("tachi memory db path is not valid UTF-8")?,
+            &context,
         )
-        .map_err(|e| anyhow::Error::msg(format!("failed to open tachi memory db: {e}")))?;
+        .map_err(|e| {
+            anyhow::Error::msg(format!(
+                "failed to open tachi memory db: {e}; runtime opens never migrate or adopt \
+                 a store identity. Use `{MIGRATE_CLI_HINT}` for supported legacy stores."
+            ))
+        })?;
         let list_page_size = list_page_size.max(1);
         Ok(Self {
             alias: alias.to_string(),
@@ -318,7 +330,7 @@ impl TachiMemory {
         embedder.embed_one(text).await.ok()
     }
 
-    fn memcore_to_zeroclaw(entry: memcore::MemoryEntry, score: Option<f64>) -> MemoryEntry {
+    fn memcore_to_zeroclaw(entry: portable_kernel::MemoryEntry, score: Option<f64>) -> MemoryEntry {
         let metadata = entry.metadata.clone();
         let key = Self::metadata_str(&metadata, METADATA_ZC_KEY).unwrap_or_else(|| {
             entry
@@ -425,7 +437,7 @@ impl TachiMemory {
         prefix: &str,
         page_size: usize,
         max_grow: usize,
-    ) -> anyhow::Result<Vec<memcore::MemoryEntry>> {
+    ) -> anyhow::Result<Vec<portable_kernel::MemoryEntry>> {
         let mut limit = page_size.max(1);
         let max_grow = max_grow.max(limit);
         loop {
@@ -448,7 +460,7 @@ impl TachiMemory {
         store: &MemoryStore,
         prefix: &str,
         limit: usize,
-    ) -> anyhow::Result<Vec<memcore::MemoryEntry>> {
+    ) -> anyhow::Result<Vec<portable_kernel::MemoryEntry>> {
         store
             .list_by_path_recent(prefix, limit.max(1), false)
             .map_err(|e| anyhow::Error::msg(format!("tachi list_recent failed: {e}")))
@@ -560,7 +572,7 @@ impl TachiMemory {
             let tier = existing
                 .as_ref()
                 .map(|e| e.tier.clone())
-                .unwrap_or_else(memcore::types::default_tier);
+                .unwrap_or_else(portable_kernel::types::default_tier);
             let revision = existing.as_ref().map(|e| e.revision).unwrap_or(1);
             // Map zeroclaw pin ↔ memcore retention_policy so stale archival
             // spares pinned rows (`archive_stale_low_value_memories` exempts
@@ -577,7 +589,7 @@ impl TachiMemory {
                 }
             };
 
-            let entry = memcore::MemoryEntry {
+            let entry = portable_kernel::MemoryEntry {
                 id,
                 path: path_c,
                 summary: content_c.chars().take(100).collect(),

@@ -728,6 +728,15 @@ struct ResponseToolUseWrapper {
 
 // ── BedrockModelProvider ─────────────────────────────────────────────
 
+/// Per-instance rejection fixture: negative credential tests must never probe
+/// ambient credentials, EC2 metadata, or a live Bedrock endpoint.
+#[cfg(test)]
+#[derive(Default)]
+struct MissingCredentialsFixture {
+    credential_lookups: std::sync::atomic::AtomicUsize,
+    requests: std::sync::atomic::AtomicUsize,
+}
+
 pub struct BedrockModelProvider {
     /// `[providers.models.<family>.<alias>]` config-key alias.
     alias: String,
@@ -735,6 +744,8 @@ pub struct BedrockModelProvider {
     max_tokens: u32,
     /// Cached SigV4 credentials from `credential_process` (with expiry).
     cred_cache: Mutex<Option<AwsCredentials>>,
+    #[cfg(test)]
+    missing_credentials_fixture: Option<Arc<MissingCredentialsFixture>>,
 }
 
 /// Typed builder for [`BedrockModelProvider`].
@@ -792,6 +803,8 @@ impl BedrockBuilder {
                 .max_tokens
                 .unwrap_or(zeroclaw_api::model_provider::BASELINE_MAX_TOKENS),
             cred_cache: Mutex::new(None),
+            #[cfg(test)]
+            missing_credentials_fixture: None,
         }
     }
 
@@ -811,6 +824,8 @@ impl BedrockBuilder {
                 .max_tokens
                 .unwrap_or(zeroclaw_api::model_provider::BASELINE_MAX_TOKENS),
             cred_cache: Mutex::new(None),
+            #[cfg(test)]
+            missing_credentials_fixture: None,
         }
     }
 }
@@ -901,6 +916,13 @@ impl BedrockModelProvider {
 
     /// Resolve auth: use cached if available, otherwise try env vars then IMDS.
     async fn resolve_auth(&self) -> anyhow::Result<BedrockAuth> {
+        #[cfg(test)]
+        if let Some(fixture) = &self.missing_credentials_fixture {
+            fixture
+                .credential_lookups
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            anyhow::bail!("credentials not set (isolated test fixture)");
+        }
         // If we already have auth cached, re-resolve from the same source.
         if let Some(ref auth) = self.auth {
             match auth {
@@ -1428,6 +1450,13 @@ impl BedrockModelProvider {
         model: &str,
         request_body: &ConverseRequest,
     ) -> anyhow::Result<ConverseResponse> {
+        #[cfg(test)]
+        if let Some(fixture) = &self.missing_credentials_fixture {
+            fixture
+                .requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            anyhow::bail!("unexpected transport call in missing-credentials fixture");
+        }
         let payload = serde_json::to_vec(request_body)?;
 
         // Debug: log image blocks in payload (truncated)
@@ -1903,18 +1932,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn chat_fails_without_credentials() {
-        let _env_lock = env_lock();
-        let _ak = EnvGuard::set("AWS_ACCESS_KEY_ID", None);
-        let _sk = EnvGuard::set("AWS_SECRET_ACCESS_KEY", None);
-        let _bearer = EnvGuard::set("BEDROCK_API_KEY", None);
-        let _config = EnvGuard::set("AWS_CONFIG_FILE", Some("/dev/null"));
+        let fixture = Arc::new(MissingCredentialsFixture::default());
         let model_provider = BedrockModelProvider {
             alias: "test".to_string(),
             auth: None,
             max_tokens: zeroclaw_api::model_provider::BASELINE_MAX_TOKENS,
             cred_cache: Mutex::new(None),
+            #[cfg(test)]
+            missing_credentials_fixture: Some(Arc::clone(&fixture)),
         };
         let result = model_provider
             .chat_with_system(None, "hello", "anthropic.claude-sonnet-4-6", Some(0.7))
@@ -1922,11 +1948,18 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("credentials not set")
-                || err.contains("169.254.169.254")
-                || err.to_lowercase().contains("credential")
-                || err.to_lowercase().contains("builder error"),
-            "Expected missing-credentials style error, got: {err}"
+            err.contains("credentials not set"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            fixture
+                .credential_lookups
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            fixture.requests.load(std::sync::atomic::Ordering::Relaxed),
+            0
         );
     }
 
@@ -2480,6 +2513,8 @@ mod tests {
             auth: None,
             max_tokens: zeroclaw_api::model_provider::BASELINE_MAX_TOKENS,
             cred_cache: Mutex::new(None),
+            #[cfg(test)]
+            missing_credentials_fixture: None,
         };
         let result = model_provider.warmup().await;
         assert!(result.is_ok());
@@ -2492,6 +2527,8 @@ mod tests {
             auth: None,
             max_tokens: zeroclaw_api::model_provider::BASELINE_MAX_TOKENS,
             cred_cache: Mutex::new(None),
+            #[cfg(test)]
+            missing_credentials_fixture: None,
         };
         let caps = model_provider.capabilities();
         assert!(caps.native_tool_calling);
@@ -2853,6 +2890,8 @@ credential_process=some-command
             auth: None,
             max_tokens: zeroclaw_api::model_provider::BASELINE_MAX_TOKENS,
             cred_cache: Mutex::new(None),
+            #[cfg(test)]
+            missing_credentials_fixture: None,
         };
         assert!(model_provider.cached_credentials().is_none());
     }
@@ -2865,6 +2904,8 @@ credential_process=some-command
             auth: None,
             max_tokens: zeroclaw_api::model_provider::BASELINE_MAX_TOKENS,
             cred_cache: Mutex::new(Some(make_creds(Some(future)))),
+            #[cfg(test)]
+            missing_credentials_fixture: None,
         };
         let cached = model_provider.cached_credentials();
         assert!(cached.is_some());
@@ -2879,6 +2920,8 @@ credential_process=some-command
             auth: None,
             max_tokens: zeroclaw_api::model_provider::BASELINE_MAX_TOKENS,
             cred_cache: Mutex::new(Some(make_creds(Some(past)))),
+            #[cfg(test)]
+            missing_credentials_fixture: None,
         };
         assert!(model_provider.cached_credentials().is_none());
     }
@@ -2891,6 +2934,8 @@ credential_process=some-command
             auth: None,
             max_tokens: zeroclaw_api::model_provider::BASELINE_MAX_TOKENS,
             cred_cache: Mutex::new(None),
+            #[cfg(test)]
+            missing_credentials_fixture: None,
         };
         assert!(model_provider.cached_credentials().is_none());
         model_provider.cache_credentials(&make_creds(Some(future)));

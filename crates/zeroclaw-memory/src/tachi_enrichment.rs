@@ -18,8 +18,8 @@
 //!   limitation. The orchestrator / `DefaultMemoryStrategy` path is the
 //!   supported cadence.
 
-use memcore::MemoryStore;
 use parking_lot::Mutex;
+use portable_kernel::MemoryStore;
 use std::collections::HashSet;
 use std::sync::Arc;
 use zeroclaw_api::model_provider::ModelProvider;
@@ -159,8 +159,8 @@ fn collect_candidates(store: &Arc<Mutex<MemoryStore>>) -> anyhow::Result<Vec<Enr
     let missing_meta = guard
         .entries_missing_metadata()
         .map_err(|e| anyhow::Error::msg(format!("tachi enrichment: missing metadata: {e}")))?;
-    for (id, text, _summary, revision) in missing_meta {
-        push_raw_candidate(&guard, &mut seen, &mut out, id, text, revision)?;
+    for row in missing_meta {
+        push_raw_candidate(&guard, &mut seen, &mut out, row.id, row.text, row.revision)?;
         if out.len() >= ENRICHMENT_BATCH_LIMIT {
             return Ok(out);
         }
@@ -180,8 +180,8 @@ fn push_raw_candidate(
     if !seen.insert(id.clone()) {
         return Ok(());
     }
-    // memcore scanners (entries_missing_summaries / entries_missing_metadata at
-    // rev 7ae2c0a0) have no anchor/tier/LIMIT filter — post-filtering is ours.
+    // Kernel scanners do not enforce ZeroClaw's anchor/tier/provider policy;
+    // these filters and the batch limit belong to the host adapter.
     if id.starts_with("anchor:") {
         return Ok(());
     }
@@ -289,7 +289,7 @@ mod tests {
     use crate::tachi::TachiMemory;
     use crate::traits::Memory;
     use async_trait::async_trait;
-    use memcore::MemoryEntry;
+    use portable_kernel::MemoryEntry;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use zeroclaw_api::attribution::{Attributable, ModelProviderKind, ProviderKind, Role};
@@ -595,7 +595,7 @@ mod tests {
             // Anchors have empty keywords → entries_missing_metadata surfaces
             // them; post-filter must skip by id prefix (and non-raw tier).
             store
-                .ensure_anchor(memcore::AnchorKind::Issue, "enrich-skip")
+                .ensure_anchor(portable_kernel::AnchorKind::Issue, "enrich-skip")
                 .unwrap()
         };
         assert!(anchor_id.starts_with("anchor:"));

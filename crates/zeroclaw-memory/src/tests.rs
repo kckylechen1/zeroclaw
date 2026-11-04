@@ -18,6 +18,131 @@ fn factory_sqlite() {
     assert_eq!(mem.name(), "sqlite");
 }
 
+#[cfg(not(feature = "tachi"))]
+#[test]
+fn factory_tachi_without_feature_refuses_without_creating_store() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = MemoryConfig {
+        backend: "tachi".into(),
+        hygiene_enabled: false,
+        ..MemoryConfig::default()
+    };
+    let error = create_memory(&cfg, tmp.path(), None).err().unwrap();
+    assert!(error.to_string().contains("memory-tachi"), "{error:#}");
+    assert!(!tmp.path().join("memory/tachi.db").exists());
+}
+
+#[cfg(feature = "tachi")]
+#[tokio::test]
+async fn factory_tachi_preserves_agent_isolation_and_allowlist_after_restart() {
+    use zeroclaw_config::multi_agent::AgentAlias;
+    use zeroclaw_config::schema::AliasedAgentConfig;
+
+    let tmp = TempDir::new().unwrap();
+    let mut config = Config {
+        data_dir: tmp.path().join("data"),
+        config_path: tmp.path().join("config.toml"),
+        memory: MemoryConfig {
+            backend: "tachi".into(),
+            embedding_provider: "none".into(),
+            hygiene_enabled: false,
+            ..MemoryConfig::default()
+        },
+        ..Config::default()
+    };
+    config
+        .agents
+        .insert("alpha".into(), AliasedAgentConfig::default());
+    config
+        .agents
+        .insert("beta".into(), AliasedAgentConfig::default());
+    {
+        let alpha = create_memory_for_agent(&config, "alpha", None)
+            .await
+            .unwrap();
+        let beta = create_memory_for_agent(&config, "beta", None)
+            .await
+            .unwrap();
+        alpha
+            .store(
+                "alpha-note",
+                "kernelisolation alpha note",
+                MemoryCategory::Core,
+                None,
+            )
+            .await
+            .unwrap();
+        beta.store(
+            "beta-note",
+            "kernelisolation beta note",
+            MemoryCategory::Core,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    // All handles are dropped before exercising the persisted role and scoped
+    // production wrappers again. The raw backend deliberately has wider reads.
+    {
+        let alpha = create_memory_for_agent(&config, "alpha", None)
+            .await
+            .unwrap();
+        let beta = create_memory_for_agent(&config, "beta", None)
+            .await
+            .unwrap();
+        let alpha_hits = alpha
+            .recall("kernelisolation", 10, None, None, None)
+            .await
+            .unwrap();
+        let beta_hits = beta
+            .recall("kernelisolation", 10, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(alpha_hits.len(), 1);
+        assert_eq!(alpha_hits[0].key, "alpha-note");
+        assert_eq!(beta_hits.len(), 1);
+        assert_eq!(beta_hits[0].key, "beta-note");
+        assert!(
+            alpha
+                .recall_for_agents(&["beta"], "kernelisolation", 10, None, None, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            beta.recall_for_agents(&["alpha"], "kernelisolation", 10, None, None, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    config
+        .agents
+        .get_mut("alpha")
+        .unwrap()
+        .workspace
+        .read_memory_from
+        .push(AgentAlias::new("beta"));
+    let alpha = create_memory_for_agent(&config, "alpha", None)
+        .await
+        .unwrap();
+    let keys: std::collections::BTreeSet<_> = alpha
+        .recall("kernelisolation", 10, None, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.key)
+        .collect();
+    assert_eq!(
+        keys,
+        ["alpha-note".to_owned(), "beta-note".to_owned()]
+            .into_iter()
+            .collect()
+    );
+    assert!(config.data_dir.join("memory/tachi.db").exists());
+    assert!(!tmp.path().join("memory/tachi.db").exists());
+}
+
 #[tokio::test]
 async fn per_agent_markdown_factory_applies_memory_policy() {
     use zeroclaw_config::multi_agent::{AgentAlias, AgentMemoryConfig, MemoryBackendKind};

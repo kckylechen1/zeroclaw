@@ -198,7 +198,7 @@ mod tests {
         use super::*;
         use crate::companion::create_companion_store;
         use crate::companion::legacy_capture::seed_legacy_capture;
-        use memcore::OutboxState;
+        use portable_kernel::OutboxState;
         use tempfile::TempDir;
         use zeroclaw_config::schema::Config;
 

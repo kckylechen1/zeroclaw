@@ -22,6 +22,8 @@ pub mod dedup;
 pub mod embeddings;
 pub mod hygiene;
 pub mod importance;
+#[cfg(feature = "tachi")]
+pub mod kernel_store;
 pub mod knowledge_graph;
 pub mod lucid;
 pub mod markdown;
@@ -31,6 +33,8 @@ pub mod none;
 pub mod normalize;
 pub mod policy;
 pub mod policy_gate;
+#[cfg(feature = "tachi")]
+pub mod portable_migration;
 pub mod redact;
 pub mod rerank;
 pub mod response_cache;

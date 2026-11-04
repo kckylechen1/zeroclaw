@@ -1,7 +1,7 @@
 //! Historical capture rows for decoding and outbox tests only.
 //! U4 retired capture writes, retries and turn-settlement identity minting.
 
-use memcore::{MemoryEntry, OutboxEventMeta};
+use portable_kernel::{MemoryEntry, OutboxEventMeta};
 use zeroclaw_api::companion::{CaptureOutcome, CaptureReceipt};
 
 use super::CompanionStore;
@@ -129,7 +129,7 @@ fn historical_capture_decodes_with_attribution_and_pending_outbox_after_reopen()
     assert_eq!(stored.origin, CaptureOrigin::Channel);
     assert_eq!(stored.partition, SourcePartition::UserModel);
     let pending = reopened.with_store(|mem| {
-        mem.list_outbox_events(memcore::OutboxState::Pending, 100)
+        mem.list_outbox_events(portable_kernel::OutboxState::Pending, 100)
             .expect("read pending historical events")
     });
     assert_eq!(pending.len(), 1);

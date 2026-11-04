@@ -1,0 +1,3935 @@
+{
+  "source_revision": "eba0c48617e8820831bfd22f91d269c6d70f409f",
+  "user_version": 38,
+  "profile": "portable_kernel",
+  "objects": [
+    {
+      "object_type": "index",
+      "name": "idx_access_hist_hash",
+      "table": "access_history",
+      "sql": "CREATE INDEX idx_access_hist_hash\n            ON access_history(memory_id, query_hash) WHERE query_hash != ''"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_access_hist_mem",
+      "table": "access_history",
+      "sql": "CREATE INDEX idx_access_hist_mem ON access_history(memory_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_access_hist_mem_kind_time",
+      "table": "access_history",
+      "sql": "CREATE INDEX idx_access_hist_mem_kind_time\n            ON access_history(memory_id, event_kind, accessed_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_access_hist_mem_time",
+      "table": "access_history",
+      "sql": "CREATE INDEX idx_access_hist_mem_time ON access_history(memory_id, accessed_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_access_hist_time",
+      "table": "access_history",
+      "sql": "CREATE INDEX idx_access_hist_time ON access_history(accessed_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_delivery_events_ack_key_global",
+      "table": "delivery_events",
+      "sql": "CREATE UNIQUE INDEX idx_delivery_events_ack_key_global\n            ON delivery_events(event_id) WHERE kind = 'delivered'"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_delivery_events_claim_key_global",
+      "table": "delivery_events",
+      "sql": "CREATE UNIQUE INDEX idx_delivery_events_claim_key_global\n            ON delivery_events(event_id) WHERE kind = 'claimed'"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_delivery_events_delivery",
+      "table": "delivery_events",
+      "sql": "CREATE INDEX idx_delivery_events_delivery\n            ON delivery_events(delivery_id, event_row_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_delivery_intents_execution",
+      "table": "delivery_intents",
+      "sql": "CREATE INDEX idx_delivery_intents_execution\n            ON delivery_intents(execution_source, execution_ref)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_delivery_intents_state_requester",
+      "table": "delivery_intents",
+      "sql": "CREATE INDEX idx_delivery_intents_state_requester\n            ON delivery_intents(delivery_state, requester_agent_identity_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_derived_created_at",
+      "table": "derived_items",
+      "sql": "CREATE INDEX idx_derived_created_at   ON derived_items(created_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_derived_path",
+      "table": "derived_items",
+      "sql": "CREATE INDEX idx_derived_path         ON derived_items(path)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_derived_source",
+      "table": "derived_items",
+      "sql": "CREATE INDEX idx_derived_source       ON derived_items(source)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_edge_obs_edge",
+      "table": "edge_observations",
+      "sql": "CREATE INDEX idx_edge_obs_edge\n            ON edge_observations(source_id, target_id, relation)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_edge_obs_observed_at",
+      "table": "edge_observations",
+      "sql": "CREATE INDEX idx_edge_obs_observed_at\n            ON edge_observations(observed_at)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_edges_relation",
+      "table": "memory_edges",
+      "sql": "CREATE INDEX idx_edges_relation ON memory_edges(relation)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_edges_source",
+      "table": "memory_edges",
+      "sql": "CREATE INDEX idx_edges_source ON memory_edges(source_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_edges_target",
+      "table": "memory_edges",
+      "sql": "CREATE INDEX idx_edges_target ON memory_edges(target_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_hard_state_ns_updated",
+      "table": "hard_state",
+      "sql": "CREATE INDEX idx_hard_state_ns_updated\n            ON hard_state(namespace, updated_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_harness_session_attachments_claim",
+      "table": "harness_session_attachments",
+      "sql": "CREATE INDEX idx_harness_session_attachments_claim\n            ON harness_session_attachments(work_claim_id, expected_transition_version)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_harness_session_attachments_receipt",
+      "table": "harness_session_attachments",
+      "sql": "CREATE INDEX idx_harness_session_attachments_receipt\n            ON harness_session_attachments(admission_receipt_ref, created_at)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_harness_session_events_revision",
+      "table": "harness_session_events",
+      "sql": "CREATE INDEX idx_harness_session_events_revision\n            ON harness_session_events(attachment_id, source_revision)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_harness_session_interventions_attachment",
+      "table": "harness_session_interventions",
+      "sql": "CREATE INDEX idx_harness_session_interventions_attachment\n            ON harness_session_interventions(attachment_id, requested_at)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_archived",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_archived    ON memories(archived)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_domain",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_domain ON memories(domain)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_idless_identity_active",
+      "table": "memories",
+      "sql": "CREATE UNIQUE INDEX idx_memories_idless_identity_active\n            ON memories(idless_identity)\n            WHERE idless_identity IS NOT NULL AND archived = 0 AND superseded_by IS NULL"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_importance",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_importance  ON memories(importance DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_last_access",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_last_access ON memories(last_access DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_path",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_path        ON memories(path)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_path_active_ts",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_path_active_ts ON memories(path, timestamp DESC) WHERE archived = 0 AND superseded_by IS NULL"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_recall",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_recall ON memories(recall_count DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_retention_policy",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_retention_policy ON memories(retention_policy)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_superseded",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_superseded ON memories(superseded_by)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_tier",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_tier ON memories(tier)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_timestamp",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_timestamp   ON memories(timestamp DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memories_valid_time",
+      "table": "memories",
+      "sql": "CREATE INDEX idx_memories_valid_time  ON memories(valid_from, valid_until)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memory_outbox_destination_apply_object",
+      "table": "memory_outbox_destination_apply_receipts",
+      "sql": "CREATE INDEX idx_memory_outbox_destination_apply_object\n            ON memory_outbox_destination_apply_receipts(object_id, event_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memory_outbox_events_object",
+      "table": "memory_outbox_events",
+      "sql": "CREATE INDEX idx_memory_outbox_events_object\n            ON memory_outbox_events(object_id, created_at)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memory_outbox_events_state_changed",
+      "table": "memory_outbox_events",
+      "sql": "CREATE INDEX idx_memory_outbox_events_state_changed\n            ON memory_outbox_events(state, state_changed_at)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_memory_outbox_events_state_created",
+      "table": "memory_outbox_events",
+      "sql": "CREATE INDEX idx_memory_outbox_events_state_created\n            ON memory_outbox_events(state, created_at)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_processed_events_created_at",
+      "table": "processed_events",
+      "sql": "CREATE INDEX idx_processed_events_created_at ON processed_events(created_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_recall_cache_updated",
+      "table": "recall_cache",
+      "sql": "CREATE INDEX idx_recall_cache_updated ON recall_cache(updated_at)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_recall_impression_groups_created",
+      "table": "recall_impression_groups",
+      "sql": "CREATE INDEX idx_recall_impression_groups_created\n            ON recall_impression_groups(created_at DESC, group_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_recall_impression_groups_fingerprint",
+      "table": "recall_impression_groups",
+      "sql": "CREATE INDEX idx_recall_impression_groups_fingerprint\n            ON recall_impression_groups(query_fingerprint, created_at DESC)\n            WHERE query_fingerprint IS NOT NULL"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_recall_impressions_group_final_rank",
+      "table": "recall_impressions",
+      "sql": "CREATE INDEX idx_recall_impressions_group_final_rank\n            ON recall_impressions(group_id, final_rank, memory_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_recall_impressions_memory",
+      "table": "recall_impressions",
+      "sql": "CREATE INDEX idx_recall_impressions_memory\n            ON recall_impressions(memory_id, group_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_rem_source_claims_draft",
+      "table": "rem_source_claims",
+      "sql": "CREATE INDEX idx_rem_source_claims_draft\n            ON rem_source_claims(draft_id)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_tachi_events_created_at",
+      "table": "tachi_events",
+      "sql": "CREATE INDEX idx_tachi_events_created_at ON tachi_events(created_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_tachi_events_project_domain",
+      "table": "tachi_events",
+      "sql": "CREATE INDEX idx_tachi_events_project_domain ON tachi_events(project, domain, created_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_tachi_events_session",
+      "table": "tachi_events",
+      "sql": "CREATE INDEX idx_tachi_events_session ON tachi_events(session_id, created_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "idx_tachi_events_type",
+      "table": "tachi_events",
+      "sql": "CREATE INDEX idx_tachi_events_type ON tachi_events(event_type, created_at DESC)"
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_delivery_events_1",
+      "table": "delivery_events",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_delivery_intents_1",
+      "table": "delivery_intents",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_delivery_intents_2",
+      "table": "delivery_intents",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_derived_items_1",
+      "table": "derived_items",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_edge_observations_1",
+      "table": "edge_observations",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_exact_dedupe_apply_lineage_1",
+      "table": "exact_dedupe_apply_lineage",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_hard_state_1",
+      "table": "hard_state",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_harness_session_attachments_1",
+      "table": "harness_session_attachments",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_harness_session_attachments_2",
+      "table": "harness_session_attachments",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_harness_session_attachments_3",
+      "table": "harness_session_attachments",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_harness_session_capability_advertisements_1",
+      "table": "harness_session_capability_advertisements",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_harness_session_events_1",
+      "table": "harness_session_events",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_harness_session_intervention_results_1",
+      "table": "harness_session_intervention_results",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_harness_session_interventions_1",
+      "table": "harness_session_interventions",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_harness_session_state_1",
+      "table": "harness_session_state",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_memories_1",
+      "table": "memories",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_memories_vec_info_1",
+      "table": "memories_vec_info",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_memories_vec_rowids_1",
+      "table": "memories_vec_rowids",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_memories_vec_vector_chunks00_1",
+      "table": "memories_vec_vector_chunks00",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_memory_edges_1",
+      "table": "memory_edges",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_memory_outbox_destination_apply_receipts_1",
+      "table": "memory_outbox_destination_apply_receipts",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_memory_outbox_events_1",
+      "table": "memory_outbox_events",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_processed_events_1",
+      "table": "processed_events",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_recall_cache_1",
+      "table": "recall_cache",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_recall_impression_groups_1",
+      "table": "recall_impression_groups",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_recall_impressions_1",
+      "table": "recall_impressions",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_rem_source_claims_1",
+      "table": "rem_source_claims",
+      "sql": null
+    },
+    {
+      "object_type": "index",
+      "name": "sqlite_autoindex_tachi_events_1",
+      "table": "tachi_events",
+      "sql": null
+    },
+    {
+      "object_type": "table",
+      "name": "access_history",
+      "table": "access_history",
+      "sql": "CREATE TABLE access_history (\n            memory_id  TEXT NOT NULL,\n            accessed_at TEXT NOT NULL,\n            query_hash  TEXT NOT NULL DEFAULT '',\n            event_kind  TEXT NOT NULL DEFAULT 'display'\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "delivery_events",
+      "table": "delivery_events",
+      "sql": "CREATE TABLE delivery_events (\n            event_row_id INTEGER PRIMARY KEY AUTOINCREMENT,\n            delivery_id TEXT NOT NULL REFERENCES delivery_intents(delivery_id),\n            event_id TEXT NOT NULL CHECK (length(event_id) <= 256 AND length(trim(event_id)) > 0 AND instr(CAST(event_id AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            kind TEXT NOT NULL CHECK (kind IN ('intent_created', 'result_ready', 'result_superseded', 'claimed', 'delivered', 'blocked', 'retry_scheduled', 'dismissed', 'claim_expired', 'transition_debt')),\n            expected_revision INTEGER CHECK (expected_revision IS NULL OR expected_revision >= 1),\n            detail TEXT CHECK (detail IS NULL OR (length(detail) > 0 AND length(detail) <= 1000 AND instr(CAST(detail AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            payload_digest TEXT CHECK (payload_digest IS NULL OR (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*' AND length(CAST(payload_digest AS BLOB)) = length(payload_digest))),\n            actor TEXT NOT NULL CHECK (length(trim(actor)) > 0),\n            occurred_at TEXT NOT NULL CHECK (length(occurred_at) <= 64 AND instr(CAST(occurred_at AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            recorded_at TEXT NOT NULL,\n            UNIQUE (delivery_id, event_id)\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "delivery_intents",
+      "table": "delivery_intents",
+      "sql": "CREATE TABLE delivery_intents (\n            delivery_id TEXT PRIMARY KEY,\n            idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) <= 128 AND length(trim(idempotency_key)) > 0 AND instr(CAST(idempotency_key AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            execution_source TEXT NOT NULL CHECK (execution_source IN ('managed_dispatch', 'attached_session')),\n            execution_ref TEXT NOT NULL CHECK (length(execution_ref) <= 128 AND length(trim(execution_ref)) > 0 AND instr(CAST(execution_ref AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            terminal_receipt_revision INTEGER NOT NULL CHECK (terminal_receipt_revision >= 0),\n            work_claim_id TEXT CHECK (work_claim_id IS NULL OR (length(work_claim_id) <= 128 AND length(trim(work_claim_id)) > 0 AND instr(CAST(work_claim_id AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            result_ref TEXT NOT NULL CHECK (length(result_ref) <= 512 AND length(trim(result_ref)) > 0 AND instr(CAST(result_ref AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            result_revision INTEGER NOT NULL CHECK (result_revision >= 1),\n            payload_digest TEXT NOT NULL CHECK (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*' AND length(CAST(payload_digest AS BLOB)) = length(payload_digest)),\n            visibility_class TEXT NOT NULL CHECK (visibility_class IN ('public', 'private')),\n            delivery_policy TEXT NOT NULL CHECK (delivery_policy IN ('return_to_current_call', 'resume_requester_operation', 'announce_requester_session', 'silent_artifact_only')),\n            protocol_capability TEXT NOT NULL CHECK (length(protocol_capability) <= 128 AND length(trim(protocol_capability)) > 0 AND instr(CAST(protocol_capability AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            requester_agent_identity_id TEXT CHECK (requester_agent_identity_id IS NULL OR (length(requester_agent_identity_id) <= 128 AND length(trim(requester_agent_identity_id)) > 0 AND instr(CAST(requester_agent_identity_id AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            requester_host_identity TEXT CHECK (requester_host_identity IS NULL OR (length(requester_host_identity) <= 128 AND length(trim(requester_host_identity)) > 0 AND instr(CAST(requester_host_identity AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            requester_session_ref TEXT CHECK (requester_session_ref IS NULL OR (length(requester_session_ref) <= 256 AND length(trim(requester_session_ref)) > 0 AND instr(CAST(requester_session_ref AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            delivery_state TEXT NOT NULL CHECK (delivery_state IN ('not_ready', 'ready', 'requester_queued', 'delivered', 'blocked', 'retrying', 'dismissed')),\n            blocker_class TEXT CHECK (blocker_class IS NULL OR (length(blocker_class) <= 128 AND length(trim(blocker_class)) > 0 AND instr(CAST(blocker_class AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            active_claim_key TEXT CHECK (active_claim_key IS NULL OR (length(active_claim_key) <= 128 AND length(trim(active_claim_key)) > 0 AND instr(CAST(active_claim_key AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            claimed_by TEXT CHECK (claimed_by IS NULL OR (length(claimed_by) <= 128 AND length(trim(claimed_by)) > 0 AND instr(CAST(claimed_by AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            claim_expires_at TEXT CHECK (claim_expires_at IS NULL OR (length(claim_expires_at) <= 64 AND instr(CAST(claim_expires_at AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),\n            next_retry_at TEXT CHECK (next_retry_at IS NULL OR (length(next_retry_at) <= 64 AND instr(CAST(next_retry_at AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            expires_at TEXT CHECK (expires_at IS NULL OR (length(expires_at) <= 64 AND instr(CAST(expires_at AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            created_at TEXT NOT NULL,\n            ready_at TEXT,\n            delivered_at TEXT,\n            dismissed_at TEXT,\n            revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),\n            updated_at TEXT NOT NULL,\n            CHECK (delivery_state != 'delivered' OR delivered_at IS NOT NULL),\n            CHECK (delivery_state != 'dismissed' OR dismissed_at IS NOT NULL),\n            CHECK (delivery_state = 'requester_queued' OR (active_claim_key IS NULL AND claimed_by IS NULL AND claim_expires_at IS NULL)),\n            CHECK (delivery_state != 'requester_queued' OR (active_claim_key IS NOT NULL AND claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL)),\n            CHECK (delivery_state IN ('blocked', 'retrying') OR blocker_class IS NULL)\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "derived_items",
+      "table": "derived_items",
+      "sql": "CREATE TABLE derived_items (\n            id         TEXT PRIMARY KEY,\n            text       TEXT NOT NULL DEFAULT '',\n            path       TEXT NOT NULL DEFAULT '/',\n            summary    TEXT NOT NULL DEFAULT '',\n            importance REAL NOT NULL DEFAULT 0.5,\n            source     TEXT NOT NULL DEFAULT '',\n            scope      TEXT NOT NULL DEFAULT 'general',\n            metadata   TEXT NOT NULL DEFAULT '{}',\n            created_at TEXT NOT NULL DEFAULT ''\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "edge_observations",
+      "table": "edge_observations",
+      "sql": "CREATE TABLE edge_observations (\n            observation_id     TEXT PRIMARY KEY,\n            source_id          TEXT NOT NULL,\n            target_id          TEXT NOT NULL,\n            relation           TEXT NOT NULL,\n            capture_event_kind TEXT NOT NULL DEFAULT 'unknown',\n            capture_event_id   TEXT NOT NULL DEFAULT '',\n            actor              TEXT NOT NULL DEFAULT 'unknown',\n            reason_code        TEXT NOT NULL DEFAULT '',\n            observed_at        TEXT NOT NULL,\n            evidence_hash      TEXT,\n            invalidated_at     TEXT\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "exact_dedupe_apply_lineage",
+      "table": "exact_dedupe_apply_lineage",
+      "sql": "CREATE TABLE exact_dedupe_apply_lineage (\n            loser_id          TEXT PRIMARY KEY NOT NULL,\n            apply_id          TEXT NOT NULL,\n            plan_digest       TEXT NOT NULL,\n            winner_id         TEXT NOT NULL,\n            before_revision   INTEGER NOT NULL,\n            archived_revision INTEGER NOT NULL,\n            loser_valid_until_before TEXT,\n            applied_at        TEXT NOT NULL\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "hard_state",
+      "table": "hard_state",
+      "sql": "CREATE TABLE hard_state (\n            namespace        TEXT NOT NULL,\n            key              TEXT NOT NULL,\n            value_json       TEXT NOT NULL DEFAULT '{}',\n            version          INTEGER NOT NULL DEFAULT 1,\n            created_at       TEXT NOT NULL DEFAULT '',\n            updated_at       TEXT NOT NULL DEFAULT '',\n            PRIMARY KEY (namespace, key)\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "harness_session_attachments",
+      "table": "harness_session_attachments",
+      "sql": "CREATE TABLE harness_session_attachments (\n            attachment_id TEXT PRIMARY KEY NOT NULL,\n            host_identity TEXT NOT NULL CHECK (length(trim(host_identity)) > 0),\n            identity_attribution_basis TEXT NOT NULL CHECK (identity_attribution_basis IN ('trusted_local_host_declared', 'verified')),\n            protocol_version TEXT NOT NULL CHECK (length(trim(protocol_version)) > 0),\n            adapter_connection_identity TEXT NOT NULL CHECK (length(trim(adapter_connection_identity)) > 0),\n            remote_session_id TEXT NOT NULL CHECK (length(trim(remote_session_id)) > 0),\n            work_claim_id TEXT NOT NULL CHECK (length(trim(work_claim_id)) > 0),\n            expected_transition_version INTEGER NOT NULL CHECK (expected_transition_version >= 0),\n            agent_identity_id TEXT NOT NULL CHECK (length(trim(agent_identity_id)) > 0),\n            contract_digest TEXT NOT NULL CHECK (length(trim(contract_digest)) > 0),\n            capabilities_json TEXT NOT NULL CHECK (json_valid(capabilities_json)),\n            tool_profile TEXT NOT NULL CHECK (length(trim(tool_profile)) > 0),\n            capability_class TEXT NOT NULL CHECK (length(trim(capability_class)) > 0),\n            policy_digest TEXT NOT NULL CHECK (length(trim(policy_digest)) > 0),\n            descriptor_digest TEXT NOT NULL CHECK (length(trim(descriptor_digest)) > 0),\n            idempotency_key TEXT NOT NULL CHECK (length(trim(idempotency_key)) > 0),\n            admission_receipt_ref TEXT NOT NULL CHECK (length(trim(admission_receipt_ref)) > 0),\n            state TEXT NOT NULL CHECK (state IN ('attached', 'reconnect_failed', 'unknown')),\n            created_at TEXT NOT NULL,\n            updated_at TEXT NOT NULL,\n            UNIQUE (idempotency_key),\n            UNIQUE (host_identity, protocol_version, adapter_connection_identity, remote_session_id)\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "harness_session_capability_advertisements",
+      "table": "harness_session_capability_advertisements",
+      "sql": "CREATE TABLE harness_session_capability_advertisements (\n            advertisement_row_id INTEGER PRIMARY KEY AUTOINCREMENT,\n            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),\n            advertisement_seq INTEGER NOT NULL CHECK (advertisement_seq >= 1),\n            capabilities_json TEXT NOT NULL CHECK (\n                json_valid(capabilities_json)\n                AND length(CAST(capabilities_json AS BLOB)) <= 256\n                AND json_remove(capabilities_json, '$.observe', '$.wait', '$.prompt', '$.cancel', '$.resume', '$.load', '$.events', '$.artifacts') = '{}'\n                AND COALESCE(json_type(capabilities_json, '$.observe'), '') IN ('true', 'false')\n                AND COALESCE(json_type(capabilities_json, '$.wait'), '') IN ('true', 'false')\n                AND COALESCE(json_type(capabilities_json, '$.prompt'), '') IN ('true', 'false')\n                AND COALESCE(json_type(capabilities_json, '$.cancel'), '') IN ('true', 'false')\n                AND COALESCE(json_type(capabilities_json, '$.resume'), '') IN ('true', 'false')\n                AND COALESCE(json_type(capabilities_json, '$.load'), '') IN ('true', 'false')\n                AND COALESCE(json_type(capabilities_json, '$.events'), '') IN ('true', 'false')\n                AND COALESCE(json_type(capabilities_json, '$.artifacts'), '') IN ('true', 'false')\n            ),\n            source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),\n            advertised_at TEXT NOT NULL,\n            UNIQUE (attachment_id, advertisement_seq)\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "harness_session_events",
+      "table": "harness_session_events",
+      "sql": "CREATE TABLE harness_session_events (\n            event_row_id INTEGER PRIMARY KEY AUTOINCREMENT,\n            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),\n            event_id TEXT NOT NULL CHECK (length(event_id) <= 128 AND length(trim(event_id)) > 0 AND instr(CAST(event_id AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            kind TEXT NOT NULL CHECK (kind IN ('accepted', 'started', 'progress', 'input_required', 'terminal', 'cleanup')),\n            outcome TEXT CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'cancelled')),\n            source_revision INTEGER NOT NULL CHECK (source_revision >= 0),\n            authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR (length(authority_confirmation_ref) <= 128 AND length(trim(authority_confirmation_ref)) > 0 AND instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            summary TEXT CHECK (summary IS NULL OR (length(summary) > 0 AND length(summary) <= 2000 AND instr(CAST(summary AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            payload_digest TEXT CHECK (payload_digest IS NULL OR (length(payload_digest) <= 128 AND length(trim(payload_digest)) > 0 AND payload_digest NOT GLOB '*[^A-Za-z0-9+=/_:-]*' AND length(CAST(payload_digest AS BLOB)) = length(payload_digest))),\n            occurred_at TEXT NOT NULL CHECK (length(occurred_at) <= 64 AND instr(CAST(occurred_at AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            ingested_at TEXT NOT NULL,\n            source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),\n            UNIQUE (attachment_id, event_id),\n            CHECK (kind != 'terminal' OR outcome IS NOT NULL),\n            CHECK (outcome IS NULL OR kind = 'terminal'),\n            CHECK (kind = 'terminal' OR outcome IS NULL),\n            CHECK (outcome != 'cancelled' OR (authority_confirmation_ref IS NOT NULL AND length(trim(authority_confirmation_ref)) > 0))\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "harness_session_intervention_results",
+      "table": "harness_session_intervention_results",
+      "sql": "CREATE TABLE harness_session_intervention_results (\n            result_row_id INTEGER PRIMARY KEY AUTOINCREMENT,\n            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),\n            request_id TEXT NOT NULL,\n            disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'refused', 'unsupported', 'failed')),\n            authority_confirmation_ref TEXT CHECK (authority_confirmation_ref IS NULL OR (length(authority_confirmation_ref) <= 128 AND length(trim(authority_confirmation_ref)) > 0 AND instr(CAST(authority_confirmation_ref AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            detail TEXT CHECK (detail IS NULL OR (length(detail) > 0 AND length(detail) <= 2000 AND instr(CAST(detail AS BLOB), CAST(x'00' AS BLOB)) = 0)),\n            recorded_at TEXT NOT NULL,\n            source_host_identity TEXT NOT NULL CHECK (length(trim(source_host_identity)) > 0),\n            UNIQUE (attachment_id, request_id)\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "harness_session_interventions",
+      "table": "harness_session_interventions",
+      "sql": "CREATE TABLE harness_session_interventions (\n            intervention_row_id INTEGER PRIMARY KEY AUTOINCREMENT,\n            attachment_id TEXT NOT NULL REFERENCES harness_session_attachments(attachment_id),\n            request_id TEXT NOT NULL CHECK (length(request_id) <= 128 AND length(trim(request_id)) > 0 AND instr(CAST(request_id AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            kind TEXT NOT NULL CHECK (kind IN ('request_status', 'prompt_or_correct', 'request_pause', 'request_cancel', 'request_resume')),\n            reason TEXT NOT NULL CHECK (length(reason) > 0 AND length(reason) <= 1000 AND instr(CAST(reason AS BLOB), CAST(x'00' AS BLOB)) = 0),\n            expected_session_revision INTEGER NOT NULL CHECK (expected_session_revision >= 0),\n            capability_source TEXT NOT NULL CHECK (capability_source IN ('declared', 'advertised', 'legacy_unknown')),\n            requested_by TEXT NOT NULL CHECK (length(trim(requested_by)) > 0),\n            requested_at TEXT NOT NULL,\n            UNIQUE (attachment_id, request_id)\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "harness_session_state",
+      "table": "harness_session_state",
+      "sql": "CREATE TABLE harness_session_state (\n            attachment_id TEXT PRIMARY KEY NOT NULL REFERENCES harness_session_attachments(attachment_id),\n            canonical_state TEXT NOT NULL CHECK (canonical_state IN\n                ('accepted', 'started', 'progressing', 'input_required', 'completed', 'failed',\n                 'cancelled', 'inconsistent_reconciling', 'unknown_orphaned')),\n            canonical_revision INTEGER NOT NULL CHECK (canonical_revision >= 0),\n            terminal_digest TEXT CHECK (terminal_digest IS NULL OR length(trim(terminal_digest)) > 0),\n            conflicting_terminal_digest TEXT CHECK (conflicting_terminal_digest IS NULL OR length(trim(conflicting_terminal_digest)) > 0),\n            cleanup_recorded INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_recorded IN (0, 1)),\n            last_event_id TEXT CHECK (last_event_id IS NULL OR length(trim(last_event_id)) > 0),\n            pre_disconnect_rank INTEGER NOT NULL DEFAULT -1 CHECK (pre_disconnect_rank >= -1),\n            updated_at TEXT NOT NULL\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "memories",
+      "table": "memories",
+      "sql": "CREATE TABLE \"memories\" (\n            id           TEXT PRIMARY KEY,\n            path         TEXT NOT NULL DEFAULT '/',\n            summary      TEXT NOT NULL DEFAULT '',\n            text         TEXT NOT NULL DEFAULT '',\n            importance   REAL NOT NULL DEFAULT 0.7,\n            timestamp    TEXT NOT NULL,\n            valid_from   TEXT NOT NULL DEFAULT '',\n            valid_until  TEXT,\n            category     TEXT NOT NULL DEFAULT 'fact',\n            topic        TEXT NOT NULL DEFAULT '',\n            keywords     TEXT NOT NULL DEFAULT '[]',\n            entities     TEXT NOT NULL DEFAULT '[]',\n            source       TEXT NOT NULL DEFAULT 'manual',\n            scope        TEXT NOT NULL DEFAULT 'general',\n            archived     INTEGER NOT NULL DEFAULT 0,\n            created_at   TEXT NOT NULL DEFAULT '',\n            updated_at   TEXT NOT NULL DEFAULT '',\n            access_count INTEGER NOT NULL DEFAULT 0,\n            scored_count INTEGER NOT NULL DEFAULT 0,\n            last_access  TEXT,\n            last_use_at  TEXT,\n            revision     INTEGER NOT NULL DEFAULT 1,\n             metadata     TEXT NOT NULL DEFAULT '{}',\n             retention_policy TEXT,\n             domain       TEXT,\n             superseded_by TEXT,\n             idless_identity TEXT,\n             recall_count    INTEGER NOT NULL DEFAULT 0,\n             query_diversity INTEGER NOT NULL DEFAULT 0,\n             tier            TEXT NOT NULL DEFAULT 'raw',\n             CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval','sticky')),\n            CHECK (scope IN ('user','project','general')),\n            CHECK (retention_policy IS NULL OR retention_policy IN ('ephemeral','durable','permanent','pinned')),\n            CHECK (\n                source IN ('manual','extraction','migration','auto','foundry_distill','foundry_recall_rerank_cache','handoff','kanban','wiki','ghost','ingest_event')\n                OR source LIKE 'external:%'\n            )\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_fts",
+      "table": "memories_fts",
+      "sql": "CREATE VIRTUAL TABLE memories_fts USING fts5(\n            id UNINDEXED,\n            path,\n            summary,\n            text,\n            keywords,\n            entities,\n            tokenize = 'simple'\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_fts_config",
+      "table": "memories_fts_config",
+      "sql": "CREATE TABLE 'memories_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_fts_content",
+      "table": "memories_fts_content",
+      "sql": "CREATE TABLE 'memories_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4, c5)"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_fts_data",
+      "table": "memories_fts_data",
+      "sql": "CREATE TABLE 'memories_fts_data'(id INTEGER PRIMARY KEY, block BLOB)"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_fts_docsize",
+      "table": "memories_fts_docsize",
+      "sql": "CREATE TABLE 'memories_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_fts_idx",
+      "table": "memories_fts_idx",
+      "sql": "CREATE TABLE 'memories_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_symbolic_fts",
+      "table": "memories_symbolic_fts",
+      "sql": "CREATE VIRTUAL TABLE memories_symbolic_fts USING fts5(\n            id,\n            path,\n            summary,\n            text,\n            keywords,\n            entities,\n            topic,\n            tokenize = 'trigram case_sensitive 0'\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_symbolic_fts_config",
+      "table": "memories_symbolic_fts_config",
+      "sql": "CREATE TABLE 'memories_symbolic_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_symbolic_fts_content",
+      "table": "memories_symbolic_fts_content",
+      "sql": "CREATE TABLE 'memories_symbolic_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4, c5, c6)"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_symbolic_fts_data",
+      "table": "memories_symbolic_fts_data",
+      "sql": "CREATE TABLE 'memories_symbolic_fts_data'(id INTEGER PRIMARY KEY, block BLOB)"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_symbolic_fts_docsize",
+      "table": "memories_symbolic_fts_docsize",
+      "sql": "CREATE TABLE 'memories_symbolic_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_symbolic_fts_idx",
+      "table": "memories_symbolic_fts_idx",
+      "sql": "CREATE TABLE 'memories_symbolic_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_vec",
+      "table": "memories_vec",
+      "sql": "CREATE VIRTUAL TABLE memories_vec USING vec0(\n            id      TEXT PRIMARY KEY,\n            embedding float[1024]\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_vec_chunks",
+      "table": "memories_vec_chunks",
+      "sql": "CREATE TABLE \"memories_vec_chunks\"(chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,size INTEGER NOT NULL,validity BLOB NOT NULL,rowids BLOB NOT NULL)"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_vec_info",
+      "table": "memories_vec_info",
+      "sql": "CREATE TABLE \"memories_vec_info\" (key text primary key, value any)"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_vec_rowids",
+      "table": "memories_vec_rowids",
+      "sql": "CREATE TABLE \"memories_vec_rowids\"(rowid INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,chunk_id INTEGER,chunk_offset INTEGER)"
+    },
+    {
+      "object_type": "table",
+      "name": "memories_vec_vector_chunks00",
+      "table": "memories_vec_vector_chunks00",
+      "sql": "CREATE TABLE \"memories_vec_vector_chunks00\"(rowid PRIMARY KEY,vectors BLOB NOT NULL)"
+    },
+    {
+      "object_type": "table",
+      "name": "memory_edges",
+      "table": "memory_edges",
+      "sql": "CREATE TABLE memory_edges (\n            source_id  TEXT NOT NULL,\n            target_id  TEXT NOT NULL,\n            relation   TEXT NOT NULL,\n            weight     REAL NOT NULL DEFAULT 1.0,\n            metadata   TEXT NOT NULL DEFAULT '{}',\n            created_at TEXT NOT NULL DEFAULT '', \"valid_from\" TEXT NOT NULL DEFAULT '', \"valid_to\" TEXT,\n            PRIMARY KEY (source_id, target_id, relation)\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "memory_outbox_destination_apply_receipts",
+      "table": "memory_outbox_destination_apply_receipts",
+      "sql": "CREATE TABLE memory_outbox_destination_apply_receipts (\n            event_id                         TEXT PRIMARY KEY NOT NULL,\n            object_id                        TEXT NOT NULL,\n            source_store                     TEXT NOT NULL,\n            source_partition                 TEXT NOT NULL,\n            source_revision                  INTEGER NOT NULL,\n            source_payload_digest            TEXT NOT NULL,\n            destination_store                TEXT NOT NULL,\n            destination_partition            TEXT NOT NULL,\n            destination_object_revision      INTEGER NOT NULL,\n            destination_payload_digest       TEXT NOT NULL,\n            application                      TEXT NOT NULL CHECK (application = 'applied')\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "memory_outbox_events",
+      "table": "memory_outbox_events",
+      "sql": "CREATE TABLE memory_outbox_events (\n            event_id         TEXT PRIMARY KEY NOT NULL,\n            object_id        TEXT NOT NULL,\n            object_class     TEXT NOT NULL,\n            authority_class  TEXT NOT NULL,\n            source_store     TEXT NOT NULL,\n            source_partition TEXT NOT NULL,\n            source_revision  INTEGER NOT NULL,\n            payload_digest   TEXT NOT NULL,\n            state            TEXT NOT NULL CHECK (state IN ('pending', 'in_flight', 'acknowledged', 'rejected', 'conflicted', 'quarantined')),\n            last_error_class TEXT,\n            created_at       TEXT NOT NULL,\n            state_changed_at TEXT NOT NULL\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "memory_search_generation",
+      "table": "memory_search_generation",
+      "sql": "CREATE TABLE memory_search_generation (\n        id INTEGER PRIMARY KEY CHECK (id = 1),\n        generation INTEGER NOT NULL CHECK (generation >= 0)\n    )"
+    },
+    {
+      "object_type": "table",
+      "name": "processed_events",
+      "table": "processed_events",
+      "sql": "CREATE TABLE processed_events (\n            event_hash TEXT NOT NULL,\n            event_id   TEXT NOT NULL DEFAULT '',\n            worker     TEXT NOT NULL DEFAULT '',\n            created_at TEXT NOT NULL DEFAULT '',\n            PRIMARY KEY (event_hash, worker)\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "recall_cache",
+      "table": "recall_cache",
+      "sql": "CREATE TABLE recall_cache (\n            cache_id      TEXT PRIMARY KEY,\n            generation_fingerprint TEXT NOT NULL DEFAULT '',\n            query         TEXT NOT NULL DEFAULT '',\n            rows_json     TEXT NOT NULL DEFAULT '[]',\n            result_count  INTEGER NOT NULL DEFAULT 0,\n            reranked      INTEGER NOT NULL DEFAULT 0,\n            hit_count     INTEGER NOT NULL DEFAULT 0,\n            created_at    TEXT NOT NULL DEFAULT '',\n            updated_at    TEXT NOT NULL DEFAULT '',\n            last_hit_at   TEXT\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "recall_impression_groups",
+      "table": "recall_impression_groups",
+      "sql": "CREATE TABLE recall_impression_groups (\n            group_id         TEXT PRIMARY KEY,\n            created_at       TEXT NOT NULL,\n            legacy_query_bucket TEXT,\n            query_fingerprint TEXT,\n            fusion_policy_version TEXT,\n            pre_boost_adjustment_version TEXT,\n            tie_break_policy_version TEXT,\n            candidate_policy_version TEXT,\n            schema_identity TEXT,\n            weights_profile  TEXT NOT NULL,\n            semantic_weight  REAL NOT NULL,\n            fts_weight       REAL NOT NULL,\n            symbolic_weight  REAL NOT NULL,\n            decay_weight     REAL NOT NULL,\n            use_rrf          INTEGER NOT NULL CHECK (use_rrf IN (0, 1)),\n            rrf_k            REAL NOT NULL,\n            top_k            INTEGER NOT NULL,\n            candidate_count  INTEGER NOT NULL,\n            displayed_count  INTEGER NOT NULL,\n            scored_returned_count INTEGER NOT NULL,\n            replay_count     INTEGER NOT NULL DEFAULT 0, \"typo_fallback_activated\" INTEGER NOT NULL DEFAULT 0, \"typo_fallback_prefilter_count\" INTEGER NOT NULL DEFAULT 0, \"typo_fallback_compared_count\" INTEGER NOT NULL DEFAULT 0, \"typo_fallback_token_comparison_count\" INTEGER NOT NULL DEFAULT 0, \"typo_fallback_edit_cell_count\" INTEGER NOT NULL DEFAULT 0, \"typo_fallback_candidate_count\" INTEGER NOT NULL DEFAULT 0,\n            CHECK (\n                (query_fingerprint IS NULL\n                 AND fusion_policy_version IS NULL\n                 AND pre_boost_adjustment_version IS NULL\n                 AND tie_break_policy_version IS NULL\n                 AND candidate_policy_version IS NULL\n                 AND schema_identity IS NULL)\n                OR\n                (query_fingerprint IS NOT NULL\n                 AND length(query_fingerprint) = 64\n                 AND query_fingerprint NOT GLOB '*[^0-9a-f]*'\n                 AND fusion_policy_version IS NOT NULL\n                 AND pre_boost_adjustment_version IS NOT NULL\n                 AND tie_break_policy_version IS NOT NULL\n                 AND candidate_policy_version IS NOT NULL\n                 AND schema_identity IS NOT NULL)\n            )\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "recall_impressions",
+      "table": "recall_impressions",
+      "sql": "CREATE TABLE recall_impressions (\n            group_id              TEXT NOT NULL,\n            memory_id             TEXT NOT NULL,\n            vector_score          REAL NOT NULL,\n            fts_score             REAL NOT NULL,\n            symbolic_score        REAL NOT NULL,\n            decay_score           REAL NOT NULL,\n            vec_rank              INTEGER,\n            fts_rank              INTEGER,\n            sym_rank              INTEGER,\n            merge_adjustment      TEXT NOT NULL CHECK (merge_adjustment IN ('none', 'exact_id', 'superseded_scale', 'exact_id_superseded_scale')),\n            pre_boost_score       REAL NOT NULL,\n            pre_boost_rank        INTEGER NOT NULL,\n            tie_break_epoch_millis INTEGER NOT NULL,\n            final_score           REAL NOT NULL,\n            final_rank            INTEGER NOT NULL,\n            scored                INTEGER NOT NULL CHECK (scored IN (0, 1)),\n            scored_returned       INTEGER NOT NULL CHECK (scored_returned IN (0, 1)),\n            access_count_at_recall INTEGER NOT NULL, \"typo_fallback_candidate\" INTEGER NOT NULL DEFAULT 0,\n            PRIMARY KEY (group_id, memory_id),\n            FOREIGN KEY (group_id) REFERENCES recall_impression_groups(group_id) ON DELETE CASCADE\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "rem_source_claims",
+      "table": "rem_source_claims",
+      "sql": "CREATE TABLE rem_source_claims (\n            source_key      TEXT PRIMARY KEY NOT NULL,\n            source_identity TEXT NOT NULL,\n            draft_id        TEXT NOT NULL,\n            claimed_at      TEXT NOT NULL\n        )"
+    },
+    {
+      "object_type": "table",
+      "name": "sqlite_sequence",
+      "table": "sqlite_sequence",
+      "sql": "CREATE TABLE sqlite_sequence(name,seq)"
+    },
+    {
+      "object_type": "table",
+      "name": "tachi_events",
+      "table": "tachi_events",
+      "sql": "CREATE TABLE tachi_events (\n            id               TEXT PRIMARY KEY,\n            source_repo      TEXT NOT NULL DEFAULT '',\n            adapter          TEXT NOT NULL DEFAULT '',\n            project          TEXT NOT NULL DEFAULT '',\n            domain           TEXT NOT NULL DEFAULT '',\n            session_id       TEXT NOT NULL DEFAULT '',\n            actor            TEXT NOT NULL DEFAULT '',\n            event_type       TEXT NOT NULL,\n            authority        TEXT NOT NULL DEFAULT 'collect_only',\n            effects          TEXT NOT NULL DEFAULT '[]',\n            projection_hints TEXT NOT NULL DEFAULT '[]',\n            payload_json     TEXT NOT NULL DEFAULT '{}',\n            provenance_json  TEXT NOT NULL DEFAULT '{}',\n            created_at       TEXT NOT NULL\n        )"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memories_reserved_refs_insert_guard",
+      "table": "memories",
+      "sql": "CREATE TRIGGER memories_reserved_refs_insert_guard\n        BEFORE INSERT ON memories\n        WHEN (\n             json_type(NEW.metadata, '$.evidence_refs_v1') IS NOT NULL\n             OR json_type(NEW.metadata, '$.source_refs') IS NOT NULL\n         )\n         AND NOT EXISTS (\n             SELECT 1\n             FROM memories AS current\n             WHERE current.id = NEW.id\n               AND json_type(current.metadata, '$.evidence_refs_v1')\n                   IS json_type(NEW.metadata, '$.evidence_refs_v1')\n               AND json_quote(json_extract(current.metadata, '$.evidence_refs_v1'))\n                   IS json_quote(json_extract(NEW.metadata, '$.evidence_refs_v1'))\n               AND json_type(current.metadata, '$.source_refs')\n                   IS json_type(NEW.metadata, '$.source_refs')\n               AND json_quote(json_extract(current.metadata, '$.source_refs'))\n                   IS json_quote(json_extract(NEW.metadata, '$.source_refs'))\n         )\n         AND tachi_reserved_reference_write_enabled() = 0\n        BEGIN\n            SELECT RAISE(ABORT, 'reserved memory reference metadata requires typed mutation');\n        END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memories_reserved_refs_update_guard",
+      "table": "memories",
+      "sql": "CREATE TRIGGER memories_reserved_refs_update_guard\n        BEFORE UPDATE OF metadata ON memories\n        WHEN (\n             json_type(NEW.metadata, '$.evidence_refs_v1')\n                 IS NOT json_type(OLD.metadata, '$.evidence_refs_v1')\n             OR json_quote(json_extract(NEW.metadata, '$.evidence_refs_v1'))\n                 IS NOT json_quote(json_extract(OLD.metadata, '$.evidence_refs_v1'))\n             OR json_type(NEW.metadata, '$.source_refs')\n                 IS NOT json_type(OLD.metadata, '$.source_refs')\n             OR json_quote(json_extract(NEW.metadata, '$.source_refs'))\n                 IS NOT json_quote(json_extract(OLD.metadata, '$.source_refs'))\n         )\n         AND tachi_reserved_reference_write_enabled() = 0\n        BEGIN\n            SELECT RAISE(ABORT, 'reserved memory reference metadata requires typed mutation');\n        END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memory_access_search_generation_after_delete",
+      "table": "access_history",
+      "sql": "CREATE TRIGGER memory_access_search_generation_after_delete\n    AFTER DELETE ON access_history\n    BEGIN\n        SELECT CASE\n            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1\n                THEN RAISE(ABORT, 'memory search generation row missing')\n            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807\n                THEN RAISE(ABORT, 'memory search generation exhausted')\n        END;\n        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;\n    END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memory_access_search_generation_after_insert",
+      "table": "access_history",
+      "sql": "CREATE TRIGGER memory_access_search_generation_after_insert\n    AFTER INSERT ON access_history\n    BEGIN\n        SELECT CASE\n            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1\n                THEN RAISE(ABORT, 'memory search generation row missing')\n            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807\n                THEN RAISE(ABORT, 'memory search generation exhausted')\n        END;\n        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;\n    END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memory_access_search_generation_after_update",
+      "table": "access_history",
+      "sql": "CREATE TRIGGER memory_access_search_generation_after_update\n    AFTER UPDATE ON access_history\n    BEGIN\n        SELECT CASE\n            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1\n                THEN RAISE(ABORT, 'memory search generation row missing')\n            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807\n                THEN RAISE(ABORT, 'memory search generation exhausted')\n        END;\n        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;\n    END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memory_edge_search_generation_after_delete",
+      "table": "memory_edges",
+      "sql": "CREATE TRIGGER memory_edge_search_generation_after_delete\n    AFTER DELETE ON memory_edges\n    BEGIN\n        SELECT CASE\n            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1\n                THEN RAISE(ABORT, 'memory search generation row missing')\n            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807\n                THEN RAISE(ABORT, 'memory search generation exhausted')\n        END;\n        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;\n    END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memory_edge_search_generation_after_insert",
+      "table": "memory_edges",
+      "sql": "CREATE TRIGGER memory_edge_search_generation_after_insert\n    AFTER INSERT ON memory_edges\n    BEGIN\n        SELECT CASE\n            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1\n                THEN RAISE(ABORT, 'memory search generation row missing')\n            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807\n                THEN RAISE(ABORT, 'memory search generation exhausted')\n        END;\n        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;\n    END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memory_edge_search_generation_after_update",
+      "table": "memory_edges",
+      "sql": "CREATE TRIGGER memory_edge_search_generation_after_update\n    AFTER UPDATE ON memory_edges\n    BEGIN\n        SELECT CASE\n            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1\n                THEN RAISE(ABORT, 'memory search generation row missing')\n            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807\n                THEN RAISE(ABORT, 'memory search generation exhausted')\n        END;\n        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;\n    END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memory_search_generation_after_delete",
+      "table": "memories",
+      "sql": "CREATE TRIGGER memory_search_generation_after_delete\n    AFTER DELETE ON memories\n    BEGIN\n        SELECT CASE\n            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1\n                THEN RAISE(ABORT, 'memory search generation row missing')\n            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807\n                THEN RAISE(ABORT, 'memory search generation exhausted')\n        END;\n        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;\n    END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memory_search_generation_after_insert",
+      "table": "memories",
+      "sql": "CREATE TRIGGER memory_search_generation_after_insert\n    AFTER INSERT ON memories\n    BEGIN\n        SELECT CASE\n            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1\n                THEN RAISE(ABORT, 'memory search generation row missing')\n            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807\n                THEN RAISE(ABORT, 'memory search generation exhausted')\n        END;\n        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;\n    END"
+    },
+    {
+      "object_type": "trigger",
+      "name": "memory_search_generation_after_update",
+      "table": "memories",
+      "sql": "CREATE TRIGGER memory_search_generation_after_update\n    AFTER UPDATE ON memories\n    BEGIN\n        SELECT CASE\n            WHEN (SELECT COUNT(*) FROM memory_search_generation WHERE id = 1) != 1\n                THEN RAISE(ABORT, 'memory search generation row missing')\n            WHEN (SELECT generation FROM memory_search_generation WHERE id = 1) >= 9223372036854775807\n                THEN RAISE(ABORT, 'memory search generation exhausted')\n        END;\n        UPDATE memory_search_generation SET generation = generation + 1 WHERE id = 1;\n    END"
+    }
+  ],
+  "tables": {
+    "access_history": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "memory_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "accessed_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "query_hash",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "event_kind",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'display'",
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "delivery_events": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "event_row_id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "delivery_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "event_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "kind",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "expected_revision",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "detail",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "payload_digest",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "actor",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "occurred_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "recorded_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "delivery_intents": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "delivery_id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "idempotency_key",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "execution_source",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "execution_ref",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "terminal_receipt_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "work_claim_id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "result_ref",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "result_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "payload_digest",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "visibility_class",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "delivery_policy",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "protocol_capability",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "requester_agent_identity_id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "requester_host_identity",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "requester_session_ref",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "delivery_state",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "blocker_class",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "active_claim_key",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "claimed_by",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "claim_expires_at",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "attempt_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "next_retry_at",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "expires_at",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "ready_at",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "delivered_at",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "dismissed_at",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "1",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "updated_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "derived_items": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "text",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "path",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'/'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "summary",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "importance",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": "0.5",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "scope",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'general'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "metadata",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'{}'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "edge_observations": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "observation_id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "source_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "target_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "relation",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "capture_event_kind",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'unknown'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "capture_event_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "actor",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'unknown'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "reason_code",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "observed_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "evidence_hash",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "invalidated_at",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "exact_dedupe_apply_lineage": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "loser_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "apply_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "plan_digest",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "winner_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "before_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "archived_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "loser_valid_until_before",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "applied_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "hard_state": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "namespace",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "key",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 2,
+          "hidden": 0
+        },
+        {
+          "name": "value_json",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'{}'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "version",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "1",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "updated_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "harness_session_attachments": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "attachment_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "host_identity",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "identity_attribution_basis",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "protocol_version",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "adapter_connection_identity",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "remote_session_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "work_claim_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "expected_transition_version",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "agent_identity_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "contract_digest",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "capabilities_json",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "tool_profile",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "capability_class",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "policy_digest",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "descriptor_digest",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "idempotency_key",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "admission_receipt_ref",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "state",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "updated_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "harness_session_capability_advertisements": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "advertisement_row_id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "attachment_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "advertisement_seq",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "capabilities_json",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_host_identity",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "advertised_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "harness_session_events": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "event_row_id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "attachment_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "event_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "kind",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "outcome",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "authority_confirmation_ref",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "summary",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "payload_digest",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "occurred_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "ingested_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_host_identity",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "harness_session_intervention_results": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "result_row_id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "attachment_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "request_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "disposition",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "authority_confirmation_ref",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "detail",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "recorded_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_host_identity",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "harness_session_interventions": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "intervention_row_id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "attachment_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "request_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "kind",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "reason",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "expected_session_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "capability_source",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "requested_by",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "requested_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "harness_session_state": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "attachment_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "canonical_state",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "canonical_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "terminal_digest",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "conflicting_terminal_digest",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "cleanup_recorded",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "last_event_id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "pre_disconnect_rank",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "-1",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "updated_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "path",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'/'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "summary",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "text",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "importance",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": "0.7",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "timestamp",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "valid_from",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "valid_until",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "category",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'fact'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "topic",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "keywords",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'[]'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "entities",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'[]'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'manual'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "scope",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'general'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "archived",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "updated_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "access_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "scored_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "last_access",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "last_use_at",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "1",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "metadata",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'{}'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "retention_policy",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "domain",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "superseded_by",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "idless_identity",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "recall_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "query_diversity",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "tier",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'raw'",
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_fts": {
+      "kind": "virtual",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "path",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "summary",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "text",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "keywords",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "entities",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "memories_fts",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 1
+        },
+        {
+          "name": "rank",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 1
+        }
+      ]
+    },
+    "memories_fts_config": {
+      "kind": "shadow",
+      "without_rowid": true,
+      "strict": false,
+      "columns": [
+        {
+          "name": "k",
+          "declared_type": "",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "v",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_fts_content": {
+      "kind": "shadow",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "c0",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c1",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c2",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c3",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c4",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c5",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_fts_data": {
+      "kind": "shadow",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "block",
+          "declared_type": "BLOB",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_fts_docsize": {
+      "kind": "shadow",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "sz",
+          "declared_type": "BLOB",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_fts_idx": {
+      "kind": "shadow",
+      "without_rowid": true,
+      "strict": false,
+      "columns": [
+        {
+          "name": "segid",
+          "declared_type": "",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "term",
+          "declared_type": "",
+          "not_null": true,
+          "default": null,
+          "primary_key": 2,
+          "hidden": 0
+        },
+        {
+          "name": "pgno",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_symbolic_fts": {
+      "kind": "virtual",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "path",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "summary",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "text",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "keywords",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "entities",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "topic",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "memories_symbolic_fts",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 1
+        },
+        {
+          "name": "rank",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 1
+        }
+      ]
+    },
+    "memories_symbolic_fts_config": {
+      "kind": "shadow",
+      "without_rowid": true,
+      "strict": false,
+      "columns": [
+        {
+          "name": "k",
+          "declared_type": "",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "v",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_symbolic_fts_content": {
+      "kind": "shadow",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "c0",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c1",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c2",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c3",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c4",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c5",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "c6",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_symbolic_fts_data": {
+      "kind": "shadow",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "block",
+          "declared_type": "BLOB",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_symbolic_fts_docsize": {
+      "kind": "shadow",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "sz",
+          "declared_type": "BLOB",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_symbolic_fts_idx": {
+      "kind": "shadow",
+      "without_rowid": true,
+      "strict": false,
+      "columns": [
+        {
+          "name": "segid",
+          "declared_type": "",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "term",
+          "declared_type": "",
+          "not_null": true,
+          "default": null,
+          "primary_key": 2,
+          "hidden": 0
+        },
+        {
+          "name": "pgno",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_vec": {
+      "kind": "virtual",
+      "without_rowid": true,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "embedding",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "distance",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 1
+        },
+        {
+          "name": "k",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 1
+        }
+      ]
+    },
+    "memories_vec_chunks": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "chunk_id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "size",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "validity",
+          "declared_type": "BLOB",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "rowids",
+          "declared_type": "BLOB",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_vec_info": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "key",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "value",
+          "declared_type": "ANY",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_vec_rowids": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "rowid",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "chunk_id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "chunk_offset",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memories_vec_vector_chunks00": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "rowid",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "vectors",
+          "declared_type": "BLOB",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memory_edges": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "source_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "target_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 2,
+          "hidden": 0
+        },
+        {
+          "name": "relation",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 3,
+          "hidden": 0
+        },
+        {
+          "name": "weight",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": "1.0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "metadata",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'{}'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "valid_from",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "valid_to",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memory_outbox_destination_apply_receipts": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "event_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "object_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_store",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_partition",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_payload_digest",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "destination_store",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "destination_partition",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "destination_object_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "destination_payload_digest",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "application",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memory_outbox_events": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "event_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "object_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "object_class",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "authority_class",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_store",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_partition",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "source_revision",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "payload_digest",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "state",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "last_error_class",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "state_changed_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "memory_search_generation": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "generation",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "processed_events": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "event_hash",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "event_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "worker",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 2,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "recall_cache": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "cache_id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "generation_fingerprint",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "query",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "rows_json",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'[]'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "result_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "reranked",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "hit_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "updated_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "last_hit_at",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "recall_impression_groups": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "group_id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "legacy_query_bucket",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "query_fingerprint",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "fusion_policy_version",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "pre_boost_adjustment_version",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "tie_break_policy_version",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "candidate_policy_version",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "schema_identity",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "weights_profile",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "semantic_weight",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "fts_weight",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "symbolic_weight",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "decay_weight",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "use_rrf",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "rrf_k",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "top_k",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "candidate_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "displayed_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "scored_returned_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "replay_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "typo_fallback_activated",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "typo_fallback_prefilter_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "typo_fallback_compared_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "typo_fallback_token_comparison_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "typo_fallback_edit_cell_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "typo_fallback_candidate_count",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "recall_impressions": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "group_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "memory_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 2,
+          "hidden": 0
+        },
+        {
+          "name": "vector_score",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "fts_score",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "symbolic_score",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "decay_score",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "vec_rank",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "fts_rank",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "sym_rank",
+          "declared_type": "INTEGER",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "merge_adjustment",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "pre_boost_score",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "pre_boost_rank",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "tie_break_epoch_millis",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "final_score",
+          "declared_type": "REAL",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "final_rank",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "scored",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "scored_returned",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "access_count_at_recall",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "typo_fallback_candidate",
+          "declared_type": "INTEGER",
+          "not_null": true,
+          "default": "0",
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "rem_source_claims": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "source_key",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "source_identity",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "draft_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "claimed_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "sqlite_sequence": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "name",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "seq",
+          "declared_type": "",
+          "not_null": false,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    },
+    "tachi_events": {
+      "kind": "table",
+      "without_rowid": false,
+      "strict": false,
+      "columns": [
+        {
+          "name": "id",
+          "declared_type": "TEXT",
+          "not_null": false,
+          "default": null,
+          "primary_key": 1,
+          "hidden": 0
+        },
+        {
+          "name": "source_repo",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "adapter",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "project",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "domain",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "session_id",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "actor",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "''",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "event_type",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "authority",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'collect_only'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "effects",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'[]'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "projection_hints",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'[]'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "payload_json",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'{}'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "provenance_json",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": "'{}'",
+          "primary_key": 0,
+          "hidden": 0
+        },
+        {
+          "name": "created_at",
+          "declared_type": "TEXT",
+          "not_null": true,
+          "default": null,
+          "primary_key": 0,
+          "hidden": 0
+        }
+      ]
+    }
+  },
+  "migration_keys": [
+    "v10_drop_pack_tables",
+    "v11_drop_domains_table",
+    "v12_session_claims_unique_identity",
+    "v13_hard_state_ns_updated_index",
+    "v14_dispatch_outcomes_reported_outcome",
+    "v15_exec_envs_env_class",
+    "v16_dispatch_outcomes_identity_receipt",
+    "v17_dispatch_outcomes_attribution_basis",
+    "v18_dispatch_adjudications",
+    "v19_idless_memory_identity",
+    "v1_path_normalize_legacy",
+    "v20_mirror_eval",
+    "v21_identity_workclaim_spine",
+    "v22_memories_symbolic_fts",
+    "v23_reserved_reference_guards",
+    "v24_memories_scored_count",
+    "v25_recall_impression_ledger",
+    "v26_recall_impression_replay_identity",
+    "v27_typo_fallback_attribution",
+    "v28_wiki_recovery_ledgers",
+    "v29_memory_outbox",
+    "v2_scope_self_normalize",
+    "v30_memory_outbox_destination_apply",
+    "v31_a2a_mailbox",
+    "v32_a2a_body_retention",
+    "v33_harness_session_attachments",
+    "v34_harness_session_spine",
+    "v35_harness_session_spine_receipts",
+    "v36_delivery_spine",
+    "v37_verified_agent_admissions",
+    "v38_current_truth",
+    "v3_handoff_path_standardize",
+    "v4_quarantine_cross_db_rows",
+    "v5_drop_hypertachi_legacy_columns",
+    "v6_fold_persons_into_entities",
+    "v7_reconcile_legacy_memory_columns",
+    "v8_drop_legacy_persons_column",
+    "v9_relocate_and_drop_location"
+  ]
+}

@@ -2,11 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::kernel_store::{KernelStoreKind, MIGRATE_CLI_HINT};
 use anyhow::Context;
-use memcore::{DbOpenContext, MemoryError, MemoryStore, StoreProfile};
 use parking_lot::Mutex;
-
-const MIGRATE_CLI_HINT: &str = "zeroclaw companion migrate";
+use portable_kernel::{DbOpenContext, MemoryError, MemoryStore, StoreProfile};
 
 /// In-process PortableKernel store for companion memory.
 ///
@@ -30,7 +29,7 @@ impl CompanionStore {
     /// Returns when the directory cannot be created, memcore refuses the open
     /// (including schema mismatch), or owner-only permissions cannot be set.
     pub(crate) fn open_runtime(path: &Path) -> anyhow::Result<Self> {
-        if path.exists() {
+        if path.try_exists()? {
             Self::open_existing_deny(path)
         } else {
             Self::create_fresh(path)
@@ -48,7 +47,7 @@ impl CompanionStore {
     /// # Errors
     /// Returns when the path is missing or memcore refuses deny-migration open.
     pub fn open_for_status_probe(path: &Path) -> anyhow::Result<Self> {
-        if !path.exists() {
+        if !path.try_exists()? {
             anyhow::bail!(
                 "companion memory at {} does not exist; status probe never creates a store",
                 path.display()
@@ -59,14 +58,20 @@ impl CompanionStore {
 
     /// CLI seam for schema upgrades. Runtime and the daemon must not call this.
     ///
-    /// The only legitimate caller is the future `zeroclaw companion migrate`
-    /// command in the binary crate. That CLI passes a typed
-    /// `Allow { approved_by }` context. The CLI body itself is a later slice.
+    /// This seam upgrades only an already owned companion store under typed
+    /// `Allow { approved_by }` authority. It never adopts an unstamped role or
+    /// a different profile. Legacy conversion uses the separate offline
+    /// `zeroclaw memory migrate-kernel` source-to-destination path.
     ///
     /// # Errors
-    /// Returns when the path is missing or memcore refuses the authorized open.
+    /// Returns when approval is empty, the path is missing, or the kernel
+    /// refuses the authorized open.
     pub fn open_for_schema_migrate(path: &Path, approved_by: &str) -> anyhow::Result<Self> {
-        if !path.exists() {
+        anyhow::ensure!(
+            !approved_by.trim().is_empty(),
+            "companion schema migration requires a non-empty approved_by"
+        );
+        if !path.try_exists()? {
             anyhow::bail!(
                 "companion memory at {} does not exist; nothing to migrate. \
                  Enable companion memory once so a store is created, or pass the \
@@ -74,8 +79,8 @@ impl CompanionStore {
                 path.display()
             );
         }
-        let ctx = DbOpenContext::open_existing_allow(approved_by)
-            .with_profile(StoreProfile::PortableKernel);
+        let ctx =
+            KernelStoreKind::Companion.context(DbOpenContext::open_existing_allow(approved_by));
         Self::open_with_context(path, &ctx)
     }
 
@@ -112,12 +117,12 @@ impl CompanionStore {
     }
 
     fn create_fresh(path: &Path) -> anyhow::Result<Self> {
-        let ctx = DbOpenContext::create_fresh().with_profile(StoreProfile::PortableKernel);
+        let ctx = KernelStoreKind::Companion.context(DbOpenContext::create_fresh());
         Self::open_with_context(path, &ctx)
     }
 
     fn open_existing_deny(path: &Path) -> anyhow::Result<Self> {
-        let ctx = DbOpenContext::open_existing_deny().with_profile(StoreProfile::PortableKernel);
+        let ctx = KernelStoreKind::Companion.context(DbOpenContext::open_existing_deny());
         Self::open_with_context(path, &ctx)
     }
 
@@ -150,7 +155,8 @@ fn map_open_error(err: MemoryError, path: &Path) -> anyhow::Error {
             stored, expected, ..
         } => format!(
             "companion memory at {} is schema {stored} (this build expects {expected}); \
-             runtime opens never migrate. Run `{MIGRATE_CLI_HINT}` to upgrade, then restart.",
+             runtime opens never migrate. Use `{MIGRATE_CLI_HINT}` for supported \
+             legacy stores with a separate destination, then select the verified copy.",
             path.display()
         ),
         MemoryError::DbCreateTargetExists { stored, .. } => format!(
@@ -160,7 +166,8 @@ fn map_open_error(err: MemoryError, path: &Path) -> anyhow::Error {
             path.display()
         ),
         other => format!(
-            "failed to open companion memory at {}: {other}",
+            "failed to open companion memory at {}: {other}; runtime opens never adopt \
+             a store identity. Use `{MIGRATE_CLI_HINT}` for supported legacy stores.",
             path.display()
         ),
     };
@@ -264,7 +271,7 @@ fn harden_existing_sqlite_sidecars(db_path: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::companion::{create_companion_store, reload_companion_store};
-    use memcore::MemoryEntry;
+    use portable_kernel::MemoryEntry;
     use tempfile::TempDir;
     use zeroclaw_config::schema::Config;
 
@@ -428,7 +435,7 @@ mod tests {
             conn.pragma_update(
                 None,
                 "user_version",
-                memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+                portable_kernel::db::PORTABLE_OUTPUT_STAMP - 1,
             )
             .expect("backdate schema stamp");
         }
@@ -456,12 +463,12 @@ mod tests {
             conn.pragma_update(
                 None,
                 "user_version",
-                memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+                portable_kernel::db::PORTABLE_OUTPUT_STAMP - 1,
             )
             .expect("backdate schema stamp");
         }
         let migrated =
-            CompanionStore::open_for_schema_migrate(&path, "cli:zeroclaw companion migrate")
+            CompanionStore::open_for_schema_migrate(&path, "test:owned-companion-upgrade")
                 .expect("CLI Allow seam");
         drop(migrated);
         CompanionStore::open_runtime(&path).expect("runtime opens after explicit migrate");

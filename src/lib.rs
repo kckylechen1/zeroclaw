@@ -816,9 +816,31 @@ Examples:
     },
 }
 
+/// Select the host-owned store for an explicit offline kernel migration.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KernelMigrationStoreKind {
+    Memory,
+    Companion,
+}
+
 /// Memory management subcommands
 #[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MemoryCommands {
+    /// Copy a recognized legacy kernel database to a new, verified database.
+    MigrateKernel {
+        /// Existing standalone memcore database; never modified.
+        #[arg(long)]
+        source: std::path::PathBuf,
+        /// New database path; must not exist.
+        #[arg(long)]
+        destination: std::path::PathBuf,
+        /// Host-owned store role to admit at the destination.
+        #[arg(long, value_enum)]
+        store: KernelMigrationStoreKind,
+        /// Operator identity recorded in the migration receipt.
+        #[arg(long)]
+        approved_by: String,
+    },
     /// List memory entries with optional filters
     List {
         /// Filter by category (core, daily, conversation, or custom name)

@@ -158,6 +158,11 @@ cli-auth-list-about = List auth profiles
 cli-auth-status-about = Show auth status with active profile and token expiry info
 
 cli-memory-list-about = List memory entries with optional filters
+cli-memory-migrate-kernel-about = Copy a recognized legacy kernel database to a new, verified database
+cli-memory-kernel-feature-required = Kernel migration requires a build with the memory-tachi feature.
+cli-memory-kernel-approval-required = Provide a non-empty operator identity with --approved-by.
+cli-memory-kernel-platform-required = Offline kernel migration requires Unix file identity and owner-only permissions. Run it on a Unix system.
+cli-memory-kernel-migration-complete = Verified migration complete. Review the receipt before switching database paths.
 cli-memory-get-about = Get a specific memory entry by key
 cli-memory-stats-about = Show memory backend statistics and health
 cli-memory-clear-about = Clear memories by category, by key, or clear all

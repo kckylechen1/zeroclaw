@@ -1,0 +1,3164 @@
+{
+  "source_revision": "eba0c48617e8820831bfd22f91d269c6d70f409f",
+  "user_version": 38,
+  "tables": {
+    "access_history": {
+      "columns": [
+        "rowid",
+        "memory_id",
+        "accessed_at",
+        "query_hash",
+        "event_kind"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 70
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-pending"
+          },
+          {
+            "type": "text",
+            "value": "2026-07-31T10:00:00+00:00"
+          },
+          {
+            "type": "text",
+            "value": "fixture-query"
+          },
+          {
+            "type": "text",
+            "value": "use"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 91
+          },
+          {
+            "type": "text",
+            "value": "historical-orphan"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "display"
+          }
+        ]
+      ]
+    },
+    "delivery_events": {
+      "columns": [
+        "rowid",
+        "event_row_id",
+        "delivery_id",
+        "event_id",
+        "kind",
+        "expected_revision",
+        "detail",
+        "payload_digest",
+        "actor",
+        "occurred_at",
+        "recorded_at"
+      ],
+      "rows": []
+    },
+    "delivery_intents": {
+      "columns": [
+        "rowid",
+        "delivery_id",
+        "idempotency_key",
+        "execution_source",
+        "execution_ref",
+        "terminal_receipt_revision",
+        "work_claim_id",
+        "result_ref",
+        "result_revision",
+        "payload_digest",
+        "visibility_class",
+        "delivery_policy",
+        "protocol_capability",
+        "requester_agent_identity_id",
+        "requester_host_identity",
+        "requester_session_ref",
+        "delivery_state",
+        "blocker_class",
+        "active_claim_key",
+        "claimed_by",
+        "claim_expires_at",
+        "attempt_count",
+        "next_retry_at",
+        "expires_at",
+        "created_at",
+        "ready_at",
+        "delivered_at",
+        "dismissed_at",
+        "revision",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "derived_items": {
+      "columns": [
+        "rowid",
+        "id",
+        "text",
+        "path",
+        "summary",
+        "importance",
+        "source",
+        "scope",
+        "metadata",
+        "created_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-derived"
+          },
+          {
+            "type": "text",
+            "value": "synthetic derived evidence"
+          },
+          {
+            "type": "text",
+            "value": "/agents/fixture"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "real",
+            "value": 4602678819172646912
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw"
+          },
+          {
+            "type": "text",
+            "value": "general"
+          },
+          {
+            "type": "text",
+            "value": "{}"
+          },
+          {
+            "type": "text",
+            "value": ""
+          }
+        ]
+      ]
+    },
+    "edge_observations": {
+      "columns": [
+        "rowid",
+        "observation_id",
+        "source_id",
+        "target_id",
+        "relation",
+        "capture_event_kind",
+        "capture_event_id",
+        "actor",
+        "reason_code",
+        "observed_at",
+        "evidence_hash",
+        "invalidated_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-observation"
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "legacy-private"
+          },
+          {
+            "type": "text",
+            "value": "related"
+          },
+          {
+            "type": "text",
+            "value": "unknown"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "unknown"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "blob",
+            "value": []
+          },
+          {
+            "type": "null"
+          }
+        ]
+      ]
+    },
+    "exact_dedupe_apply_lineage": {
+      "columns": [
+        "rowid",
+        "loser_id",
+        "apply_id",
+        "plan_digest",
+        "winner_id",
+        "before_revision",
+        "archived_revision",
+        "loser_valid_until_before",
+        "applied_at"
+      ],
+      "rows": []
+    },
+    "hard_state": {
+      "columns": [
+        "rowid",
+        "namespace",
+        "key",
+        "value_json",
+        "version",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "store_identity"
+          },
+          {
+            "type": "text",
+            "value": "profile"
+          },
+          {
+            "type": "text",
+            "value": "{\"conferred_by\":\"open:create-fresh\",\"stamped_at\":\"2026-11-04T02:26:05.276Z\",\"value\":\"portable_kernel\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v1_path_normalize_legacy"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.276Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v2_scope_self_normalize"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.276Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 4
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v3_handoff_path_standardize"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.276Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v4_quarantine_cross_db_rows"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.276Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 6
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v5_drop_hypertachi_legacy_columns"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.276Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v6_fold_persons_into_entities"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.276Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.276Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 8
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v7_reconcile_legacy_memory_columns"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.277Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.277Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.277Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 9
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v8_drop_legacy_persons_column"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.278Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.278Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.278Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 10
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v9_relocate_and_drop_location"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.281Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.281Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.281Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 11
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v10_drop_pack_tables"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 12
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v11_drop_domains_table"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 13
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v12_session_claims_unique_identity"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 14
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v13_hard_state_ns_updated_index"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 15
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v14_dispatch_outcomes_reported_outcome"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 16
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v15_exec_envs_env_class"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 17
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v16_dispatch_outcomes_identity_receipt"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 18
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v17_dispatch_outcomes_attribution_basis"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 19
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v18_dispatch_adjudications"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 20
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v19_idless_memory_identity"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 21
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v20_mirror_eval"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 22
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v21_identity_workclaim_spine"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.282Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.282Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 23
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v22_memories_symbolic_fts"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.284Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.284Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.284Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 24
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v23_reserved_reference_guards"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.287Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.287Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.287Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 25
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v24_memories_scored_count"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.287Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.287Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.287Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 26
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v25_recall_impression_ledger"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.288Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.288Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.288Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 27
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v26_recall_impression_replay_identity"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.295Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.295Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.295Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 28
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v27_typo_fallback_attribution"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.304Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.304Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.304Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 29
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v28_wiki_recovery_ledgers"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.304Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.304Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.304Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 30
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v29_memory_outbox"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.306Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.306Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.306Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 31
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v30_memory_outbox_destination_apply"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.306Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.306Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.306Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 32
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v31_a2a_mailbox"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.306Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.306Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.306Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 33
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v32_a2a_body_retention"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.307Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.307Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.307Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 34
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v33_harness_session_attachments"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.307Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.307Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.307Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 35
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v34_harness_session_spine"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.316Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.316Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.316Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 36
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v35_harness_session_spine_receipts"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.327Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.327Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.327Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 37
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v36_delivery_spine"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.331Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.331Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.331Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 38
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v37_verified_agent_admissions"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.331Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.331Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.331Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 39
+          },
+          {
+            "type": "text",
+            "value": "migrations"
+          },
+          {
+            "type": "text",
+            "value": "v38_current_truth"
+          },
+          {
+            "type": "text",
+            "value": "{\"ran_at\":\"2026-11-04T02:26:05.331Z\"}"
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.331Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.331Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 40
+          },
+          {
+            "type": "text",
+            "value": "zeroclaw-fixture"
+          },
+          {
+            "type": "text",
+            "value": "ordinary"
+          },
+          {
+            "type": "text",
+            "value": "{ \"retained\": true, \"counter\": 7 }"
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "legacy-time"
+          }
+        ]
+      ]
+    },
+    "harness_session_attachments": {
+      "columns": [
+        "rowid",
+        "attachment_id",
+        "host_identity",
+        "identity_attribution_basis",
+        "protocol_version",
+        "adapter_connection_identity",
+        "remote_session_id",
+        "work_claim_id",
+        "expected_transition_version",
+        "agent_identity_id",
+        "contract_digest",
+        "capabilities_json",
+        "tool_profile",
+        "capability_class",
+        "policy_digest",
+        "descriptor_digest",
+        "idempotency_key",
+        "admission_receipt_ref",
+        "state",
+        "created_at",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "harness_session_capability_advertisements": {
+      "columns": [
+        "rowid",
+        "advertisement_row_id",
+        "attachment_id",
+        "advertisement_seq",
+        "capabilities_json",
+        "source_host_identity",
+        "advertised_at"
+      ],
+      "rows": []
+    },
+    "harness_session_events": {
+      "columns": [
+        "rowid",
+        "event_row_id",
+        "attachment_id",
+        "event_id",
+        "kind",
+        "outcome",
+        "source_revision",
+        "authority_confirmation_ref",
+        "summary",
+        "payload_digest",
+        "occurred_at",
+        "ingested_at",
+        "source_host_identity"
+      ],
+      "rows": []
+    },
+    "harness_session_intervention_results": {
+      "columns": [
+        "rowid",
+        "result_row_id",
+        "attachment_id",
+        "request_id",
+        "disposition",
+        "authority_confirmation_ref",
+        "detail",
+        "recorded_at",
+        "source_host_identity"
+      ],
+      "rows": []
+    },
+    "harness_session_interventions": {
+      "columns": [
+        "rowid",
+        "intervention_row_id",
+        "attachment_id",
+        "request_id",
+        "kind",
+        "reason",
+        "expected_session_revision",
+        "capability_source",
+        "requested_by",
+        "requested_at"
+      ],
+      "rows": []
+    },
+    "harness_session_state": {
+      "columns": [
+        "rowid",
+        "attachment_id",
+        "canonical_state",
+        "canonical_revision",
+        "terminal_digest",
+        "conflicting_terminal_digest",
+        "cleanup_recorded",
+        "last_event_id",
+        "pre_disconnect_rank",
+        "updated_at"
+      ],
+      "rows": []
+    },
+    "memories": {
+      "columns": [
+        "rowid",
+        "id",
+        "path",
+        "summary",
+        "text",
+        "importance",
+        "timestamp",
+        "valid_from",
+        "valid_until",
+        "category",
+        "topic",
+        "keywords",
+        "entities",
+        "source",
+        "scope",
+        "archived",
+        "created_at",
+        "updated_at",
+        "access_count",
+        "scored_count",
+        "last_access",
+        "last_use_at",
+        "revision",
+        "metadata",
+        "retention_policy",
+        "domain",
+        "superseded_by",
+        "idless_identity",
+        "recall_count",
+        "query_diversity",
+        "tier"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-pending"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-pending"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-pending\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-pending\"}"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "fact"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw-companion-capture"
+          },
+          {
+            "type": "text",
+            "value": "general"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.407Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.407Z"
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "{\"object_class\":\"capture_receipt\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-pending\"}"
+          },
+          {
+            "type": "text",
+            "value": "durable"
+          },
+          {
+            "type": "text",
+            "value": "companion"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "raw"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-claimed"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-claimed"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-claimed\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-claimed\"}"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "fact"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw-companion-capture"
+          },
+          {
+            "type": "text",
+            "value": "general"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.415Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.415Z"
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "{\"object_class\":\"capture_receipt\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-claimed\"}"
+          },
+          {
+            "type": "text",
+            "value": "durable"
+          },
+          {
+            "type": "text",
+            "value": "companion"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "raw"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-acked"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-acked"
+          },
+          {
+            "type": "text",
+            "value": "synthetic capture updated after acknowledgement"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-acked\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-acked\"}"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "fact"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw-companion-capture"
+          },
+          {
+            "type": "text",
+            "value": "general"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.419Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.426Z"
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 4
+          },
+          {
+            "type": "text",
+            "value": "{\"object_class\":\"capture_receipt\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-acked\"}"
+          },
+          {
+            "type": "text",
+            "value": "durable"
+          },
+          {
+            "type": "text",
+            "value": "companion"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "raw"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 4
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-local-wins"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-local-wins"
+          },
+          {
+            "type": "text",
+            "value": "synthetic capture updated before local-wins resolution"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-local-wins\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-local-wins\"}"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "fact"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "external:zeroclaw-companion-capture"
+          },
+          {
+            "type": "text",
+            "value": "general"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.431Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.439Z"
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": "2026-08-01T10:00:00.000Z"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 4
+          },
+          {
+            "type": "text",
+            "value": "{\"object_class\":\"capture_receipt\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-local-wins\"}"
+          },
+          {
+            "type": "text",
+            "value": "durable"
+          },
+          {
+            "type": "text",
+            "value": "companion"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "raw"
+          }
+        ]
+      ]
+    },
+    "memories_fts": {
+      "columns": [
+        "id",
+        "path",
+        "summary",
+        "text",
+        "keywords",
+        "entities"
+      ],
+      "rows": [
+        [
+          {
+            "type": "text",
+            "value": "capture:fixture-pending"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-pending"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-pending\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-pending\"}"
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "capture:fixture-claimed"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-claimed"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-claimed\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-claimed\"}"
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "capture:fixture-acked"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-acked"
+          },
+          {
+            "type": "text",
+            "value": "synthetic capture updated after acknowledgement"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-acked\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-acked\"}"
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "capture:fixture-local-wins"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-local-wins"
+          },
+          {
+            "type": "text",
+            "value": "synthetic capture updated before local-wins resolution"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-local-wins\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-local-wins\"}"
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          }
+        ]
+      ]
+    },
+    "memories_symbolic_fts": {
+      "columns": [
+        "id",
+        "path",
+        "summary",
+        "text",
+        "keywords",
+        "entities",
+        "topic"
+      ],
+      "rows": [
+        [
+          {
+            "type": "text",
+            "value": "capture:fixture-pending"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-pending"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-pending\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-pending\"}"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "capture:fixture-claimed"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-claimed"
+          },
+          {
+            "type": "text",
+            "value": "synthetic legacy kernel fixture"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-claimed\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-claimed\"}"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "capture:fixture-acked"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-acked"
+          },
+          {
+            "type": "text",
+            "value": "synthetic capture updated after acknowledgement"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-acked\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-acked\"}"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "capture:fixture-local-wins"
+          },
+          {
+            "type": "text",
+            "value": "/companion/user_model/capture_receipt/fixture-local-wins"
+          },
+          {
+            "type": "text",
+            "value": "synthetic capture updated before local-wins resolution"
+          },
+          {
+            "type": "text",
+            "value": "{\"agent_identity_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"authority_class\":\"owner_authored\",\"event_id\":\"capture:fixture-local-wins\",\"origin\":\"channel\",\"outcome\":\"not_evaluated\",\"partition\":\"user_model\",\"persisted_at\":\"2026-08-01T10:00:00.000Z\",\"principal_id\":\"fixture-principal\",\"session_id\":\"fixture-session\",\"turn_id\":\"fixture-local-wins\"}"
+          },
+          {
+            "type": "text",
+            "value": "[\"legacy\"]"
+          },
+          {
+            "type": "text",
+            "value": "[\"fixture\"]"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          }
+        ]
+      ]
+    },
+    "memories_vec": {
+      "columns": [
+        "id",
+        "embedding"
+      ],
+      "rows": []
+    },
+    "memory_edges": {
+      "columns": [
+        "rowid",
+        "source_id",
+        "target_id",
+        "relation",
+        "weight",
+        "metadata",
+        "created_at",
+        "valid_from",
+        "valid_to"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "text",
+            "value": "legacy-private"
+          },
+          {
+            "type": "text",
+            "value": "related"
+          },
+          {
+            "type": "real",
+            "value": 4604930618986332160
+          },
+          {
+            "type": "text",
+            "value": "{ \"raw\": true }"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "null"
+          }
+        ]
+      ]
+    },
+    "memory_outbox_destination_apply_receipts": {
+      "columns": [
+        "rowid",
+        "event_id",
+        "object_id",
+        "source_store",
+        "source_partition",
+        "source_revision",
+        "source_payload_digest",
+        "destination_store",
+        "destination_partition",
+        "destination_object_revision",
+        "destination_payload_digest",
+        "application"
+      ],
+      "rows": []
+    },
+    "memory_outbox_events": {
+      "columns": [
+        "rowid",
+        "event_id",
+        "object_id",
+        "object_class",
+        "authority_class",
+        "source_store",
+        "source_partition",
+        "source_revision",
+        "payload_digest",
+        "state",
+        "last_error_class",
+        "created_at",
+        "state_changed_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-pending"
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-pending"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          },
+          {
+            "type": "text",
+            "value": "owner_authored"
+          },
+          {
+            "type": "text",
+            "value": "companion"
+          },
+          {
+            "type": "text",
+            "value": "user_model"
+          },
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "78e9f9a67bdce9590fce932297c268ccb4a7f81fbd8bbe240833a037a4ecd6c6"
+          },
+          {
+            "type": "text",
+            "value": "pending"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.409Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.409Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 2
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-claimed"
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-claimed"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          },
+          {
+            "type": "text",
+            "value": "owner_authored"
+          },
+          {
+            "type": "text",
+            "value": "companion"
+          },
+          {
+            "type": "text",
+            "value": "user_model"
+          },
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "f039ddd28c4119750071ce47c0a832d52a72223470dc38928b17b9f1a643e665"
+          },
+          {
+            "type": "text",
+            "value": "in_flight"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.416Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.418Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-acked"
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-acked"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          },
+          {
+            "type": "text",
+            "value": "owner_authored"
+          },
+          {
+            "type": "text",
+            "value": "companion"
+          },
+          {
+            "type": "text",
+            "value": "user_model"
+          },
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "5df43c8e0e7ecf788849797dff3bfebec851f02f9878b16fd52aaf574e9d68fd"
+          },
+          {
+            "type": "text",
+            "value": "acknowledged"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.421Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.424Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 4
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-local-wins"
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-local-wins"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          },
+          {
+            "type": "text",
+            "value": "owner_authored"
+          },
+          {
+            "type": "text",
+            "value": "companion"
+          },
+          {
+            "type": "text",
+            "value": "user_model"
+          },
+          {
+            "type": "integer",
+            "value": 3
+          },
+          {
+            "type": "text",
+            "value": "0727a0365e5e98c16c9d9303fb3546e4fdf53da778667d63271a2f8004733555"
+          },
+          {
+            "type": "text",
+            "value": "quarantined"
+          },
+          {
+            "type": "text",
+            "value": "conflict_resolved_local_wins"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.433Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.443Z"
+          }
+        ],
+        [
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-local-wins::local-wins"
+          },
+          {
+            "type": "text",
+            "value": "capture:fixture-local-wins"
+          },
+          {
+            "type": "text",
+            "value": "capture_receipt"
+          },
+          {
+            "type": "text",
+            "value": "owner_authored"
+          },
+          {
+            "type": "text",
+            "value": "companion"
+          },
+          {
+            "type": "text",
+            "value": "user_model"
+          },
+          {
+            "type": "integer",
+            "value": 4
+          },
+          {
+            "type": "text",
+            "value": "dc2a020fe99b09ce4bd1ca017333fb735604fc90ebd15e63ec77175d7c78b66d"
+          },
+          {
+            "type": "text",
+            "value": "pending"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.443Z"
+          },
+          {
+            "type": "text",
+            "value": "2026-11-04T02:26:05.443Z"
+          }
+        ]
+      ]
+    },
+    "memory_search_generation": {
+      "columns": [
+        "rowid",
+        "id",
+        "generation"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 10
+          }
+        ]
+      ]
+    },
+    "processed_events": {
+      "columns": [
+        "rowid",
+        "event_hash",
+        "event_id",
+        "worker",
+        "created_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-hash"
+          },
+          {
+            "type": "text",
+            "value": "fixture-event"
+          },
+          {
+            "type": "text",
+            "value": "fixture-worker"
+          },
+          {
+            "type": "text",
+            "value": ""
+          }
+        ]
+      ]
+    },
+    "recall_cache": {
+      "columns": [
+        "rowid",
+        "cache_id",
+        "generation_fingerprint",
+        "query",
+        "rows_json",
+        "result_count",
+        "reranked",
+        "hit_count",
+        "created_at",
+        "updated_at",
+        "last_hit_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "stale-fixture"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "legacy"
+          },
+          {
+            "type": "text",
+            "value": "[]"
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "null"
+          }
+        ]
+      ]
+    },
+    "recall_impression_groups": {
+      "columns": [
+        "rowid",
+        "group_id",
+        "created_at",
+        "legacy_query_bucket",
+        "query_fingerprint",
+        "fusion_policy_version",
+        "pre_boost_adjustment_version",
+        "tie_break_policy_version",
+        "candidate_policy_version",
+        "schema_identity",
+        "weights_profile",
+        "semantic_weight",
+        "fts_weight",
+        "symbolic_weight",
+        "decay_weight",
+        "use_rrf",
+        "rrf_k",
+        "top_k",
+        "candidate_count",
+        "displayed_count",
+        "scored_returned_count",
+        "replay_count",
+        "typo_fallback_activated",
+        "typo_fallback_prefilter_count",
+        "typo_fallback_compared_count",
+        "typo_fallback_token_comparison_count",
+        "typo_fallback_edit_cell_count",
+        "typo_fallback_candidate_count"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-group"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "fixture"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "real",
+            "value": 4596373779694328218
+          },
+          {
+            "type": "real",
+            "value": 4591870180066957722
+          },
+          {
+            "type": "real",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "real",
+            "value": 4633641066610819072
+          },
+          {
+            "type": "integer",
+            "value": 5
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      ]
+    },
+    "recall_impressions": {
+      "columns": [
+        "rowid",
+        "group_id",
+        "memory_id",
+        "vector_score",
+        "fts_score",
+        "symbolic_score",
+        "decay_score",
+        "vec_rank",
+        "fts_rank",
+        "sym_rank",
+        "merge_adjustment",
+        "pre_boost_score",
+        "pre_boost_rank",
+        "tie_break_epoch_millis",
+        "final_score",
+        "final_rank",
+        "scored",
+        "scored_returned",
+        "access_count_at_recall",
+        "typo_fallback_candidate"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-group"
+          },
+          {
+            "type": "text",
+            "value": "legacy-active"
+          },
+          {
+            "type": "real",
+            "value": 4604480259023595110
+          },
+          {
+            "type": "real",
+            "value": 4596373779694328218
+          },
+          {
+            "type": "real",
+            "value": 4591870180066957722
+          },
+          {
+            "type": "real",
+            "value": 0
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "type": "text",
+            "value": "none"
+          },
+          {
+            "type": "real",
+            "value": 4605380978949069210
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 0
+          },
+          {
+            "type": "real",
+            "value": 4605380978949069210
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "integer",
+            "value": 7
+          },
+          {
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      ]
+    },
+    "rem_source_claims": {
+      "columns": [
+        "rowid",
+        "source_key",
+        "source_identity",
+        "draft_id",
+        "claimed_at"
+      ],
+      "rows": []
+    },
+    "sqlite_sequence": {
+      "columns": [
+        "rowid",
+        "name",
+        "seq"
+      ],
+      "rows": []
+    },
+    "tachi_events": {
+      "columns": [
+        "rowid",
+        "id",
+        "source_repo",
+        "adapter",
+        "project",
+        "domain",
+        "session_id",
+        "actor",
+        "event_type",
+        "authority",
+        "effects",
+        "projection_hints",
+        "payload_json",
+        "provenance_json",
+        "created_at"
+      ],
+      "rows": [
+        [
+          {
+            "type": "integer",
+            "value": 1
+          },
+          {
+            "type": "text",
+            "value": "fixture-event"
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": ""
+          },
+          {
+            "type": "text",
+            "value": "zeroclaw.fixture"
+          },
+          {
+            "type": "text",
+            "value": "collect_only"
+          },
+          {
+            "type": "text",
+            "value": "[]"
+          },
+          {
+            "type": "text",
+            "value": "[]"
+          },
+          {
+            "type": "text",
+            "value": "{ \"retained\": true }"
+          },
+          {
+            "type": "text",
+            "value": "{}"
+          },
+          {
+            "type": "text",
+            "value": ""
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -6,6 +6,7 @@ mod config_schema;
 mod dockerignore_test;
 mod gateway;
 mod gemini_capabilities;
+mod memory_kernel_migration_cli;
 mod provider_resolution;
 mod provider_schema;
 mod security;

@@ -28,7 +28,7 @@ This repository is an independent project (decision 2026-08-16). Upstream `zeroc
 | Cron `allowed_tools = []` means deny-all | asserts the opposite in a test | deliberate |
 | `ModelProvider::set_credential` with real 429 rotation | logs "cannot apply … Retrying with original key" | deliberate |
 | WeChat state persistence is atomic and non-blocking | blocking, non-atomic write | deliberate |
-| Tachi memory backend behind the `tachi` feature | absent | deliberate |
+| Portable memory kernel behind `memory-tachi` (`zeroclaw-memory/tachi`) | absent | deliberate; distinct ZeroClaw memory and companion roles |
 | HyperMemory custom CRUD backend | absent | retired; never re-add |
 
 ### Known gaps
@@ -94,7 +94,33 @@ Hyperion, the owner's quantitative-trading system, is not an active consumer of 
 3. Real position writes require human OTP confirmation.
 4. Timezone `Asia/Shanghai`; A-share lot 100 shares (STAR: minimum 200, then 1-share increments).
 
-The companion memcore stores (#49) are a separate, feature-gated, in-process exception. They never share a live database with, or connect to, a network memory service.
+The companion stores (#49) are a separate, feature-gated, in-process exception.
+The optional shared Portable Kernel (#560) supplies persistence for the Tachi
+memory backend and companion store, with distinct exact roles and separate
+database files. They never share a live database with, or connect to, a network
+memory service. Hypermem remains Hyperion's adapter; the shared kernel does not
+own ZeroClaw's Soul, User Model, personality policy or Tachi delegation bridge.
+
+### Portable kernel adoption (#560)
+
+`memory-tachi` pins `portable-kernel` 1.9.0 at Tachi revision
+`b0c754a0cd3e4e7ffd0199691e08954942b492bd`, without default/admin features.
+This includes the snapshot-reopen fix in
+[Tachi #2205](https://github.com/kckylechen1/Tachi/pull/2205), on top of the shared
+kernel contracts in [Tachi #2198](https://github.com/kckylechen1/Tachi/pull/2198).
+Generic memory requires `PortableKernel` / `zeroclaw-memory`; companion requires
+`PortableKernel` / `zeroclaw-companion`. Existing runtime and status-probe paths
+never upgrade a schema or adopt an unowned store. Backend/config names and
+database locations remain unchanged.
+
+Upstream comparison:
+`zeroclaw-labs/zeroclaw@7f39e313e7fe554da1c85a83a4b5f00f6ef537e4` has no
+Tachi/memcore/Portable Kernel adapter in its tree or memory dependency manifest.
+This implements the fork's existing owner boundary, with no upstream code port.
+The standalone `memcore` runtime dependency is replaced only after preserving
+the existing memory, enrichment, governance and companion consumers. No store or
+configuration key is retired. See the
+[operator migration procedure](../setup/portable-memory.md).
 
 ## Yonbo device host import
 
