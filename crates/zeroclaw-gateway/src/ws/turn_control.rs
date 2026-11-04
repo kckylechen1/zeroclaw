@@ -93,14 +93,28 @@ pub(super) fn handle(
     if !matches!(operation, "negotiate" | "message" | "resume" | "cancel") {
         return (Some(error("UNKNOWN_OPERATION")), None);
     }
+    // Errors past this point name the operation so a client can tell an
+    // admission failure (its turn will never start) from a failed control.
+    let error_op = |code: &str| -> Value {
+        json!({"type":"turn_error", "version":VERSION, "op":operation, "code":code})
+    };
     let alias = conversation
         .key()
         .rsplit_once('\u{1f}')
         .map_or("", |(_, alias)| alias);
-    let permission = if operation == "cancel" {
-        "cancel"
-    } else {
-        "chat"
+    // Bridge-operation parity: the legacy classifier routes attachment-bearing
+    // messages to "unsupported", so a restricted bridge cannot carry them.
+    // Negotiate/resume are transport bookkeeping and stay "chat". The
+    // classifier reads the legacy frame shape, so project this op's payload
+    // into that view — a turn_control envelope itself would classify as
+    // "unsupported" wholesale.
+    let permission = match operation {
+        "cancel" => "cancel",
+        "message" => device::frame_operation(&json!({
+            "type": "message",
+            "attachments": parsed.get("attachments"),
+        })),
+        _ => "chat",
     };
     if !device::permitted(state, scope, alias, permission)
         || !question_answer_authorized(state, scope)
@@ -108,7 +122,7 @@ pub(super) fn handle(
         return (Some(device::refusal("BRIDGE_OPERATION_DENIED")), None);
     }
     let Some(subject) = scope.auth_subject.as_deref() else {
-        return (Some(error("AUTHENTICATION_REQUIRED")), None);
+        return (Some(error_op("AUTHENTICATION_REQUIRED")), None);
     };
     let store = &state.ws_conversations.turn_control;
     if operation == "negotiate" {
@@ -125,28 +139,28 @@ pub(super) fn handle(
         );
     }
     if !*negotiated {
-        return (Some(error("NEGOTIATION_REQUIRED")), None);
+        return (Some(error_op("NEGOTIATION_REQUIRED")), None);
     }
     if parsed["epoch"].as_str() != Some(store.epoch.as_str()) {
-        return (Some(error("EPOCH_MISMATCH")), None);
+        return (Some(error_op("EPOCH_MISMATCH")), None);
     }
     let Some(request) = parsed["request_id"]
         .as_str()
         .filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
     else {
-        return (Some(error("INVALID_REQUEST_ID")), None);
+        return (Some(error_op("INVALID_REQUEST_ID")), None);
     };
     let receipt_key = key(conversation.key(), subject, &store.epoch, request);
     let mut entries = store.entries.lock();
     if operation == "resume" {
         let Some(after) = parsed["after_seq"].as_u64() else {
-            return (Some(error("INVALID_SEQUENCE")), None);
+            return (Some(error_op("INVALID_SEQUENCE")), None);
         };
         return (
             Some(match entries.get(&receipt_key) {
                 None => ack(store, request, None, "unknown"),
                 Some(entry) if entry.redacted => ack(store, request, None, "unknown"),
-                Some(entry) if after > entry.sequence => error("INVALID_SEQUENCE"),
+                Some(entry) if after > entry.sequence => error_op("INVALID_SEQUENCE"),
                 Some(entry) => {
                     let mut events: Vec<_> = entry
                         .events
@@ -172,7 +186,7 @@ pub(super) fn handle(
             .as_str()
             .filter(|id| uuid::Uuid::parse_str(id).is_ok())
         else {
-            return (Some(error("INVALID_TURN_ID")), None);
+            return (Some(error_op("INVALID_TURN_ID")), None);
         };
         let status = match entries.get(&receipt_key) {
             None => "unknown",
@@ -192,7 +206,7 @@ pub(super) fn handle(
         .as_str()
         .filter(|s| s.len() <= MAX_CONTENT)
     else {
-        return (Some(error("INVALID_CONTENT")), None);
+        return (Some(error_op("INVALID_CONTENT")), None);
     };
     // `attachments` is the sole admitted extra field: the same #491 scoped
     // handles, shape, limits and authorization as the legacy path — it grants
@@ -212,18 +226,18 @@ pub(super) fn handle(
                 })
                 .collect::<Option<Vec<_>>>()
             else {
-                return (Some(error("INVALID_ATTACHMENTS")), None);
+                return (Some(error_op("INVALID_ATTACHMENTS")), None);
             };
             let unique: std::collections::HashSet<_> = ids.iter().collect();
             if unique.len() != ids.len() {
-                return (Some(error("INVALID_ATTACHMENTS")), None);
+                return (Some(error_op("INVALID_ATTACHMENTS")), None);
             }
             ids
         }
-        Some(_) => return (Some(error("INVALID_ATTACHMENTS")), None),
+        Some(_) => return (Some(error_op("INVALID_ATTACHMENTS")), None),
     };
     if content.is_empty() && attachments.is_empty() {
-        return (Some(error("INVALID_CONTENT")), None);
+        return (Some(error_op("INVALID_CONTENT")), None);
     }
     // Unsupported input fields must not silently acquire source/attachment authority.
     if parsed.as_object().is_none_or(|fields| {
@@ -234,7 +248,7 @@ pub(super) fn handle(
             )
         })
     }) {
-        return (Some(error("UNSUPPORTED_FIELD")), None);
+        return (Some(error_op("UNSUPPORTED_FIELD")), None);
     }
     if let Some(entry) = entries.get(&receipt_key) {
         if entry.redacted {
@@ -257,7 +271,7 @@ pub(super) fn handle(
     // No eviction: forgetting accepted identities would permit an old request
     // to run again once a session backend's finite receipt window expires.
     if entries.len() >= MAX_REQUESTS {
-        return (Some(error("REQUEST_CAPACITY")), None);
+        return (Some(error_op("REQUEST_CAPACITY")), None);
     }
     // Resolve #491 scoped handles exactly as the legacy message path does:
     // the attachments store owns materialization; authorization is consulted
@@ -267,7 +281,7 @@ pub(super) fn handle(
     let mut input = content.to_string();
     if !attachments.is_empty() {
         if alias.is_empty() {
-            return (Some(error("ATTACHMENT_UNAVAILABLE")), None);
+            return (Some(error_op("ATTACHMENT_UNAVAILABLE")), None);
         }
         let payload_scope = crate::api_attachments::Scope {
             subject: subject.to_string(),
@@ -275,7 +289,7 @@ pub(super) fn handle(
             agent: alias.to_string(),
         };
         if !crate::api_attachments::scope_authorized(state, &payload_scope) {
-            return (Some(error("UNAUTHORIZED_ATTACHMENTS")), None);
+            return (Some(error_op("UNAUTHORIZED_ATTACHMENTS")), None);
         }
         input = match state.ws_conversations.attachments.materialize(
             &payload_scope,
@@ -283,10 +297,10 @@ pub(super) fn handle(
             content,
         ) {
             Ok(materialized) => materialized,
-            Err(_) => return (Some(error("ATTACHMENT_UNAVAILABLE")), None),
+            Err(_) => return (Some(error_op("ATTACHMENT_UNAVAILABLE")), None),
         };
         if !crate::api_attachments::scope_authorized(state, &payload_scope) {
-            return (Some(error("UNAUTHORIZED_ATTACHMENTS")), None);
+            return (Some(error_op("UNAUTHORIZED_ATTACHMENTS")), None);
         }
     }
     let Some(mut claim) = conversation.start_if_idle(input) else {
@@ -302,7 +316,7 @@ pub(super) fn handle(
         }
         Err(_) => {
             conversation.finish_turn(claim.generation);
-            return (Some(error("REQUEST_NOT_RECORDED")), None);
+            return (Some(error_op("REQUEST_NOT_RECORDED")), None);
         }
     }
     let turn = claim.turn_id.clone();
@@ -375,7 +389,14 @@ impl Store {
             "request_id":entry.request,"turn_id":turn,"seq":entry.sequence,
             "event":payload,"terminal":terminal});
         // Do not expose internal receipt identities in the projected payload.
-        if let Some(fields) = event["event"].as_object_mut() {
+        // Tool-call ids are client-facing correlation and must survive: the
+        // web client matches tool results to cards by id (see toolCardMatch).
+        if let Some(fields) = event["event"].as_object_mut()
+            && fields
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("tc1:"))
+        {
             fields.remove("id");
         }
         if terminal {

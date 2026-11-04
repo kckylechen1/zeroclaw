@@ -77,14 +77,19 @@ const live = sent[2]!;
 assert.equal(live.epoch, 'epoch-1');
 assert.equal(live.request_id, liveId);
 assert.deepEqual(live.attachments, ['h1', 'h2']);
-// Scoped cancel carries the observed turn id and a fresh request id.
-const cancelId = s2.cancelTurn('turn-abc')!;
-assert.notEqual(cancelId, liveId);
+// Scoped cancel reuses the MESSAGE's request id: the server journals and
+// looks the control up under the original admission's identity, so a fresh
+// id would always resolve to `unknown` and never cancel anything.
+assert.equal(s2.cancelTurn(liveId, 'turn-abc'), true);
 const cancel = sent[3]!;
-assert.deepEqual(
-  { ...cancel, request_id: '' },
-  { type: 'turn_control', version: 1, op: 'cancel', epoch: 'epoch-1', request_id: '', turn_id: 'turn-abc' },
-);
+assert.deepEqual(cancel, {
+  type: 'turn_control',
+  version: 1,
+  op: 'cancel',
+  epoch: 'epoch-1',
+  request_id: liveId,
+  turn_id: 'turn-abc',
+});
 // Resume addresses an admitted request after a sequence number.
 s2.resumeTurn(liveId, 7);
 assert.deepEqual(

@@ -162,14 +162,14 @@ export class WebSocketClient {
     return requestId;
   }
 
-  /** Cancel the observed turn (S2 scoped cancellation). Returns the cancel
-   * control's `request_id`, or null when not negotiated — callers fall back to
-   * the legacy session abort in that case. */
-  cancelTurn(turnId: string): string | null {
+  /** Cancel the observed turn (S2 scoped cancellation). The control MUST
+   * carry the original message's `requestId`: the server journals and looks
+   * the cancellation up under that admission's identity — a fresh id would
+   * always resolve to `unknown`. Returns false when not negotiated. */
+  cancelTurn(requestId: string, turnId: string): boolean {
     if (this.turnEpoch === null || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return null;
+      return false;
     }
-    const requestId = generateUUID();
     this.sendRaw({
       type: 'turn_control',
       version: 1,
@@ -178,7 +178,7 @@ export class WebSocketClient {
       request_id: requestId,
       turn_id: turnId,
     });
-    return requestId;
+    return true;
   }
 
   /** Replay events after `afterSeq` for an admitted request (S2 resume). */

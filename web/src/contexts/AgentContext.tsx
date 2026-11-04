@@ -338,8 +338,16 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       case 'turn_event': {
         const active = activeTurnRef.current;
         if (!active || msg.request_id !== active.requestId) break;
+        // Late-ACK recovery: events and replays carry the authoritative turn
+        // identity even when the accepted ACK was never observed.
+        if (active.turnId === null && typeof msg.turn_id === 'string') {
+          active.turnId = msg.turn_id;
+        }
+        // Live ring and resume snapshot can overlap after a reconnect: apply
+        // each sequence number at most once.
         if (typeof msg.seq === 'number') {
-          active.lastSeq = Math.max(active.lastSeq, msg.seq);
+          if (msg.seq <= active.lastSeq) break;
+          active.lastSeq = msg.seq;
         }
         const inner = msg.event;
         if (!inner) break;
@@ -367,6 +375,9 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       case 'turn_replay': {
         const active = activeTurnRef.current;
         if (!active || msg.request_id !== active.requestId) break;
+        if (active.turnId === null && typeof msg.turn_id === 'string') {
+          active.turnId = msg.turn_id;
+        }
         if (msg.gap) addNotice(t('agent.replay_gap'));
         for (const event of msg.events ?? []) {
           handleWsMessage(event);
@@ -381,6 +392,12 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       }
 
       case 'turn_cancel_ack': {
+        // Correlate to the observed turn: a late ack for an old turn must not
+        // rewrite the current turn's Stop state.
+        const active = activeTurnRef.current;
+        if (active && typeof msg.turn_id === 'string' && msg.turn_id !== active.turnId) {
+          break;
+        }
         if (msg.status === 'requested') {
           // Requested ≠ confirmed: the badge stays until the terminal marker.
           setStopRequested(true);
@@ -393,15 +410,18 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       }
 
       case 'turn_error': {
+        // The error names its operation: an admission failure (`op: message`)
+        // means our turn will never start and must settle now; a failed
+        // cancel/resume control leaves any running turn to its own frames.
         const active = activeTurnRef.current;
-        if (active && msg.request_id === active.requestId) {
-          // Our admission was refused before the turn started.
-          addNotice(t('agent.turn_refused').replace('{code}', msg.code ?? 'UNKNOWN'));
+        const refused = t('agent.turn_refused').replace('{code}', msg.code ?? 'UNKNOWN');
+        if (active && !active.terminalSeen && msg.op === 'message') {
+          addNotice(refused);
           finalizeActiveTurn();
-        } else if (msg.code !== 'EPOCH_MISMATCH') {
+        } else if (msg.op !== 'message' && msg.code !== 'EPOCH_MISMATCH') {
           // A cancel/resume control failed; EPOCH_MISMATCH self-heals on
           // reconnect, everything else deserves a visible trace.
-          addNotice(t('agent.turn_refused').replace('{code}', msg.code ?? 'UNKNOWN'));
+          addNotice(refused);
         }
         break;
       }
@@ -846,6 +866,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     armWatchdog();
 
     try {
+      // Snapshot the turn to cancel BEFORE any await: a later turn may start
+      // while the config write is in flight and must not become the target
+      // (#549 async-cancel correlation).
+      const switchTarget = activeTurnRef.current;
       // Per-agent switch: write THIS agent's own model_provider ref (multi-agent
       // / schema V3). `model` here is a provider ref (e.g. "kilo.minimax_m3").
       // The global `model`/`default_model` keys were removed in V3.
@@ -857,21 +881,22 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
 
       // If a turn is actively streaming, cancel it on the backend before we
       // tear down the socket. S2 (#549): bind the cancellation to the observed
-      // turn so a late/duplicate control can never reach a newer turn; the
-      // legacy session abort remains the fallback for an unnegotiated socket.
+      // turn so a late/duplicate control can never reach a newer turn. On a
+      // negotiated socket there is no REST fallback (a session-level abort
+      // cancels whatever turn is current server-side); the legacy fallback
+      // only exists for a socket that never negotiated.
       if (typing) {
         try {
-          const active = activeTurnRef.current;
           const negotiated = wsRef.current?.epoch ?? null;
-          if (negotiated && active?.turnId) {
-            wsRef.current?.cancelTurn(active.turnId);
+          if (negotiated && switchTarget?.turnId) {
+            wsRef.current?.cancelTurn(switchTarget.requestId, switchTarget.turnId);
             await Promise.race([
-              waitForTerminal(active.turnId, 1_500),
+              waitForTerminal(switchTarget.turnId, 1_500),
               new Promise((_, reject) =>
                 setTimeout(() => reject(new Error('abort-timeout')), 1_500),
               ),
             ]);
-          } else {
+          } else if (!negotiated) {
             await Promise.race([
               abortSession(sessionIdRef.current),
               new Promise((_, reject) =>
@@ -1054,17 +1079,23 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       // to round-trip; the user clicked Stop and expects the UI to follow.
       setPendingApproval(null);
       // S2 (#549): scoped cancellation of the observed turn; "requested" is
-      // shown until the terminal marker confirms aborted. Falls back to the
-      // legacy session abort only when the socket never negotiated.
+      // shown until the terminal marker confirms aborted. On a negotiated
+      // socket there is deliberately NO fallback: a session-level REST abort
+      // cancels whatever turn is current server-side and could kill a newer
+      // turn, and without an observed turn id there is nothing scoped to
+      // stop (the identity binds on the first event; click again then).
       const active = activeTurnRef.current;
-      if (wsRef.current?.epoch && active?.turnId) {
-        wsRef.current.cancelTurn(active.turnId);
+      const ws = wsRef.current;
+      if (!ws?.epoch) {
+        try {
+          await abortSession(sessionIdRef.current);
+        } catch {
+          // Best-effort abort
+        }
         return;
       }
-      try {
-        await abortSession(sessionIdRef.current);
-      } catch {
-        // Best-effort abort
+      if (active?.turnId) {
+        ws.cancelTurn(active.requestId, active.turnId);
       }
     },
     stopRequested,
