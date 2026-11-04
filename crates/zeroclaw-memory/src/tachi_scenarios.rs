@@ -24,7 +24,7 @@
 mod tests {
     use crate::tachi::TachiMemory;
     use crate::traits::{Memory, MemoryCategory};
-    use memcore::{MemoryEntry, MemoryStore};
+    use portable_kernel::{MemoryEntry, MemoryStore};
     use std::sync::Arc;
     use tempfile::TempDir;
 

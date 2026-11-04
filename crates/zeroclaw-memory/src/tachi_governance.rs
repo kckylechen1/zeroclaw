@@ -7,8 +7,8 @@
 //! no direct SQL into the kernel schema, and no second DB open on production
 //! paths.
 
-use memcore::{MemoryEntry, MemoryStore, NEAR_DUP_RAW_SCAN_CAP, near_duplicate_raw_pairs};
 use parking_lot::Mutex;
+use portable_kernel::{MemoryEntry, MemoryStore, NEAR_DUP_RAW_SCAN_CAP, near_duplicate_raw_pairs};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -50,9 +50,9 @@ pub fn run_tachi_governance(store: &mut MemoryStore) -> anyhow::Result<TachiGove
     // gets consolidated per sweep, asserted by the tests below) predates that
     // regime, so run it under the legacy regime explicitly rather than
     // silently losing promotion.
-    let legacy_recall = memcore::RecallConfig {
+    let legacy_recall = portable_kernel::RecallConfig {
         use_provenance_recency: false,
-        ..memcore::RecallConfig::default()
+        ..portable_kernel::RecallConfig::default()
     };
     report.promoted = store
         .promote_diversely_recalled_raw_memories(&legacy_recall)
@@ -694,7 +694,7 @@ mod tests {
         .await
         .unwrap();
 
-        let find_row = |store: &memcore::MemoryStore| {
+        let find_row = |store: &portable_kernel::MemoryStore| {
             store
                 .list_by_path("/agents", 64, false)
                 .unwrap()

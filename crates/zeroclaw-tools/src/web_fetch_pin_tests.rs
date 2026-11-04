@@ -238,8 +238,10 @@ async fn redirect_rejection_suppresses_firecrawl_but_normal_fallback_still_works
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "web_fetch::pin_contract::redirect_rejection_suppresses_firecrawl_but_normal_fallback_still_works", "--nocapture"])
             .env(KEY, "fixture-only")
-            .env("NO_PROXY", "*")
-            .env("no_proxy", "*")
+            // The pinned-IP proxy matcher needs explicit loopback entries;
+            // a hostname wildcard does not exempt the fixture's literal IP.
+            .env("NO_PROXY", "127.0.0.1,::1,localhost")
+            .env("no_proxy", "127.0.0.1,::1,localhost")
             .output().unwrap();
         assert!(
             output.status.success(),

@@ -2550,6 +2550,89 @@ async fn schema_migration_tolerates_concurrent_initialization() {
     assert!(cols.contains("superseded_by"));
 }
 
+#[cfg(feature = "tachi")]
+fn exclusive_auto_extension_fixture() -> (TempDir, std::path::PathBuf, Connection) {
+    portable_kernel::db::enable_simple_auto_extension().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("open-contention.db");
+    let holder = Connection::open(&path).unwrap();
+    holder
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE open_probe(value TEXT NOT NULL);
+             INSERT INTO open_probe VALUES ('preserved');
+             BEGIN EXCLUSIVE;",
+        )
+        .unwrap();
+    let raw_error = Connection::open(&path).unwrap_err();
+    assert!(
+        is_db_locked_error(&raw_error),
+        "fixture must reproduce a lock failure inside native open: {raw_error}"
+    );
+    (tmp, path, holder)
+}
+
+#[cfg(feature = "tachi")]
+#[test]
+fn sqlite_open_retries_auto_extension_contention_with_and_without_caller_timeout() {
+    for timeout in [None, Some(1)] {
+        let (_tmp, path, holder) = exclusive_auto_extension_fixture();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            holder.execute_batch("ROLLBACK").unwrap();
+        });
+        let result = SqliteMemory::open_connection(&path, timeout);
+        release.join().unwrap();
+        let conn = result.expect("transient open lock must be retried");
+        let value: String = conn
+            .query_row("SELECT value FROM open_probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "preserved");
+        let busy_timeout: u64 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout, 5_000, "retain rusqlite's normal busy handler");
+    }
+}
+
+#[cfg(feature = "tachi")]
+#[test]
+fn sqlite_open_lock_retry_respects_shorter_caller_deadline() {
+    let (_tmp, path, holder) = exclusive_auto_extension_fixture();
+    let start = Instant::now();
+    let result = SqliteMemory::open_connection(&path, Some(1));
+    let elapsed = start.elapsed();
+    holder.execute_batch("ROLLBACK").unwrap();
+    assert!(result.is_err(), "held lock must not produce a connection");
+    assert!(elapsed >= Duration::from_millis(800), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+}
+
+#[test]
+fn sqlite_open_expired_deadline_creates_no_file() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("must-not-open.db");
+    let err = SqliteMemory::open_connection_retry(&path, Instant::now()).unwrap_err();
+    assert!(err.to_string().contains("deadline expired"), "{err:#}");
+    assert!(!path.exists());
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn sqlite_open_non_lock_failure_is_returned_without_retry_or_parent_creation() {
+    for timeout in [None, Some(1)] {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("missing-parent");
+        let path = parent.join("cannot-open.db");
+        let err = SqliteMemory::open_connection(&path, timeout).unwrap_err();
+        let sqlite = err
+            .downcast_ref::<rusqlite::Error>()
+            .expect("original SQLite error is preserved");
+        assert!(!is_db_locked_error(sqlite), "{err:#}");
+        assert!(!parent.exists());
+    }
+}
+
 // ── §4.1 Concurrent write contention tests ──────────────
 
 #[tokio::test]

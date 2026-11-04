@@ -8361,8 +8361,9 @@ pub struct SqliteStorageConfig {
     /// Optional override for the SQLite database path.
     /// When unset, defaults to `<workspace_dir>/brain.db`.
     pub path: Option<String>,
-    /// Maximum seconds to wait when opening the DB if it's locked.
-    /// `None` waits indefinitely. Recommended max: 300.
+    /// Maximum seconds the caller waits for a connection to open (capped at 300).
+    /// `None` disables that timeout. Transient open-lock retries stop after 5 seconds.
+    /// A native open already in progress cannot be cancelled by this timeout.
     pub open_timeout_secs: Option<u64>,
 }
 

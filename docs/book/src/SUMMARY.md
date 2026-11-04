@@ -23,6 +23,7 @@
   - [Docker & containers](./setup/container.md)
   - [Service management](./setup/service.md)
   - [Platform install files](./setup/dist-files.md)
+  - [Portable memory kernel](./setup/portable-memory.md)
 - [Architecture](./architecture/overview.md)
   - [Request lifecycle](./architecture/request-lifecycle.md)
   - [Channel runtime lifecycle](./architecture/channel-runtime-lifecycle.md)

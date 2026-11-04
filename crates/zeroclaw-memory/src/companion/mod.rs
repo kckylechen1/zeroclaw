@@ -2,7 +2,7 @@
 //!
 //! Sibling of the generic [`crate::Memory`] backend. `TachiMemory` must never
 //! open this file. Runtime opens always deny schema migration; upgrades go
-//! through `zeroclaw companion migrate` (CLI body is a later slice).
+//! through the explicit offline `zeroclaw memory migrate-kernel` command.
 
 use std::sync::Arc;
 

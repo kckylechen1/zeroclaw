@@ -284,6 +284,6 @@ version = "=0.51.0"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# memcore rides the public read-only mirror (generated from the private
-# source monorepo); pinned by rev in zeroclaw-memory. See that Cargo.toml.
-allow-git = ["https://github.com/kckylechen1/memcore"]
+# Optional portable kernel and its internal crates share this immutable source;
+# the exact revision is pinned in zeroclaw-memory/Cargo.toml.
+allow-git = ["https://github.com/kckylechen1/Tachi"]

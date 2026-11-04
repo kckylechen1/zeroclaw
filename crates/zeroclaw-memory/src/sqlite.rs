@@ -17,19 +17,29 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::sync::{Mutex as StdMutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zeroclaw_api::session_keys::sanitize_session_key;
 use zeroclaw_config::schema::SearchMode;
 
 /// Maximum allowed open timeout (seconds) to avoid unreasonable waits.
 const SQLITE_OPEN_TIMEOUT_CAP_SECS: u64 = 300;
+const SQLITE_OPEN_LOCK_RETRY_BUDGET: Duration = Duration::from_secs(5);
 static SQLITE_MEMORY_STARTUP_LOCK: StdMutex<()> = StdMutex::new(());
 
 fn acquire_sqlite_startup_lock() -> MutexGuard<'static, ()> {
     SQLITE_MEMORY_STARTUP_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn is_db_locked_error(error: &rusqlite::Error) -> bool {
+    use rusqlite::ffi::ErrorCode;
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(err.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
 }
 
 /// SQLite memory with agent/key identity for global rows and agent/session/key
@@ -142,7 +152,9 @@ impl SqliteMemory {
         })
     }
 
-    /// Open SQLite connection, optionally with a timeout (for locked/slow storage).
+    /// Open SQLite with bounded lock retries and an optional caller timeout.
+    /// Native opens already in progress cannot be cancelled; the deadline
+    /// prevents a delayed worker or backoff from starting a later attempt.
     fn open_connection(
         db_path: &Path,
         open_timeout_secs: Option<u64>,
@@ -151,12 +163,14 @@ impl SqliteMemory {
 
         let conn = if let Some(secs) = open_timeout_secs {
             let capped = secs.min(SQLITE_OPEN_TIMEOUT_CAP_SECS);
+            let timeout = Duration::from_secs(capped);
+            let deadline = Instant::now() + timeout.min(SQLITE_OPEN_LOCK_RETRY_BUDGET);
             let (tx, rx) = mpsc::channel();
             thread::spawn(move || {
-                let result = Connection::open(&path_buf);
+                let result = Self::open_connection_retry(&path_buf, deadline);
                 let _ = tx.send(result);
             });
-            match rx.recv_timeout(Duration::from_secs(capped)) {
+            match rx.recv_timeout(timeout) {
                 Ok(Ok(c)) => c,
                 Ok(Err(e)) => return Err(e).context("SQLite failed to open database"),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -167,23 +181,43 @@ impl SqliteMemory {
                 }
             }
         } else {
-            Connection::open(&path_buf).context("SQLite failed to open database")?
+            Self::open_connection_retry(&path_buf, Instant::now() + SQLITE_OPEN_LOCK_RETRY_BUDGET)
+                .context("SQLite failed to open database")?
         };
 
         Ok(conn)
     }
 
+    fn open_connection_retry(db_path: &Path, deadline: Instant) -> anyhow::Result<Connection> {
+        // Kernel SQLite auto-extensions are process-wide and can read schema
+        // during open, before rusqlite installs its normal busy handler.
+        // Retry only the failed connection open; never replay schema changes.
+        let mut backoff = Duration::from_millis(10);
+        loop {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "SQLite open deadline expired before connection attempt"
+            );
+            match Connection::open(db_path) {
+                Ok(conn) => return Ok(conn),
+                Err(error) if is_db_locked_error(&error) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(error.into());
+                    }
+                    thread::sleep(backoff.min(remaining));
+                    if Instant::now() >= deadline {
+                        return Err(error.into());
+                    }
+                    backoff = (backoff * 2).min(Duration::from_millis(250));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     /// Initialize all tables: memories, FTS5, `embedding_cache`
     fn init_schema(conn: &Connection) -> anyhow::Result<()> {
-        fn is_db_locked_error(e: &rusqlite::Error) -> bool {
-            use rusqlite::ffi::ErrorCode;
-            matches!(
-                e,
-                rusqlite::Error::SqliteFailure(err, _)
-                    if matches!(err.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-            )
-        }
-
         fn execute_batch_retry(conn: &Connection, sql: &str) -> Result<(), rusqlite::Error> {
             // SQLite can return "database is locked" during concurrent schema
             // initialization even though the operations are safe/idempotent.

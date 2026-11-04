@@ -26,10 +26,11 @@ serde_json = { version = "1.0", default-features = false, features = ["std"] }
 sha2 = "0.10"
 tokio = { version = "1.50", default-features = false, features = ["fs", "io-util", "macros", "process", "sync", "time"] }
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
-memcore = { version = "1.9.2", git = "https://github.com/kckylechen1/memcore.git", rev = "eba0c48617e8820831bfd22f91d269c6d70f409f", default-features = false, optional = true }
+portable_kernel = { package = "portable-kernel", version = "1.9.0", git = "https://github.com/kckylechen1/Tachi.git", rev = "b0c754a0cd3e4e7ffd0199691e08954942b492bd", default-features = false, optional = true }
+tempfile = { version = "3.26", optional = true }
 
 [features]
-tachi = ["dep:memcore"]
+tachi = ["dep:portable_kernel", "dep:tempfile", "rusqlite/backup", "rusqlite/functions"]
 
 [dev-dependencies]
 filetime = "0.2"
