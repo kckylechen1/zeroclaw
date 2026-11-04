@@ -295,7 +295,7 @@ fn validate_target_with_boundary(
     receipt: Option<(&str, &str)>,
     mut boundary: impl FnMut() -> Result<()>,
 ) -> Result<Vec<TableDigest>> {
-    boundary()?;
+    boundary().context("before target kernel reopen")?;
     {
         let store = open_store(path, kind, DbOpenContext::open_existing_deny())?;
         if let Some((key, json)) = receipt {
@@ -308,7 +308,7 @@ fn validate_target_with_boundary(
             );
         }
     }
-    boundary()?;
+    boundary().context("after target kernel reopen")?;
     let conn = open_read_only_snapshot(path)?;
     ensure!(
         schema::stamp(&conn, "profile")?.as_deref() == Some("portable_kernel")
@@ -333,7 +333,7 @@ fn validate_target_with_boundary(
     drop(foreign_keys);
     conn.execute_batch("ROLLBACK")?;
     close_connection(conn)?;
-    boundary()?;
+    boundary().context("after target SQLite readback")?;
     Ok(actual)
 }
 

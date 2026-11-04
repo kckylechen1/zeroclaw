@@ -98,10 +98,27 @@ fn restore_fixture(path: &Path, kind: KernelStoreKind) {
     }
     conn.pragma_update(None, "user_version", fixture.user_version)
         .unwrap();
-    assert_eq!(format::objects(&conn).unwrap(), schema.objects);
-    assert_eq!(format::table_shapes(&conn).unwrap(), schema.tables);
     close_connection(conn).unwrap();
     checkpoint(path).unwrap();
+    // Match the legacy generator's fresh-reader census. On the connection
+    // that creates vec0, SQLite reports some backing tables as `shadow`;
+    // their durable DDL and column shapes are unchanged after reopening.
+    let conn = open_read_only_snapshot(path).unwrap();
+    assert_eq!(format::objects(&conn).unwrap(), schema.objects);
+    let shapes = format::table_shapes(&conn).unwrap();
+    assert_eq!(
+        shapes.keys().collect::<Vec<_>>(),
+        schema.tables.keys().collect::<Vec<_>>(),
+        "restored fixture table names"
+    );
+    for (name, expected) in &schema.tables {
+        assert_eq!(
+            shapes.get(name),
+            Some(expected),
+            "restored fixture table shape: {name}"
+        );
+    }
+    close_connection(conn).unwrap();
 }
 
 fn mutate(path: &Path, mutation: impl FnOnce(&Connection)) {
