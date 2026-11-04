@@ -730,3 +730,195 @@ async fn s2_wire_delete_active_turn_suppresses_late_events_and_allows_fresh_requ
         "only the new explicit ID may run after deletion"
     );
 }
+
+fn attachment_request(epoch: &str, id: &str, content: &str, attachments: &[String]) -> Value {
+    let mut frame = request(epoch, id, content);
+    frame["attachments"] = json!(attachments);
+    frame
+}
+
+fn s2_attachment_scope(token: &str) -> crate::api_attachments::Scope {
+    crate::api_attachments::Scope {
+        subject: zeroclaw_config::tokens::hash_token(token),
+        session: SESSION.into(),
+        agent: "device-agent".into(),
+    }
+}
+
+/// #491 scoped handles through the S2 admission path: same materialization
+/// owner, same denials, journal identity extended to the handle list, and
+/// bridge-operation parity with the legacy classifier (restricted bridges
+/// cannot carry attachments at all).
+#[tokio::test]
+async fn s2_wire_attachments_reuse_scoped_handles_with_legacy_denials() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+
+    // ── Owner (pairing) socket: the attachment-capable path ────────────────
+    let mut owner = fixture.socket(OWNER_TOKEN).await;
+    let epoch = negotiate(&mut owner).await;
+    let scope = s2_attachment_scope(OWNER_TOKEN);
+    let handle = fixture
+        .state
+        .ws_conversations
+        .attachments
+        .insert(
+            scope.clone(),
+            "note.txt".into(),
+            "text/plain".into(),
+            axum::body::Bytes::from_static(b"s2 attachment contents"),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let second_handle = fixture
+        .state
+        .ws_conversations
+        .attachments
+        .insert(
+            scope,
+            "second.txt".into(),
+            "text/plain".into(),
+            axum::body::Bytes::from_static(b"second attachment"),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Accepted: materialized text reaches the provider inside one real turn.
+    let id = uuid::Uuid::new_v4().to_string();
+    let frame = attachment_request(&epoch, &id, "read the note", std::slice::from_ref(&handle));
+    owner.send(frame.clone()).await;
+    let ack = owner.until("turn_ack").await;
+    assert_eq!(ack["status"], "accepted");
+    let events = terminal(&mut owner, &id, ack["turn_id"].as_str().unwrap()).await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "done");
+    assert!(
+        fixture.seen.lock()[0]
+            .to_string()
+            .contains("s2 attachment contents"),
+        "attachment must materialize through the #491 path"
+    );
+
+    // Duplicate: identical content and handles never re-run.
+    owner.send(frame).await;
+    assert_eq!(owner.until("turn_ack").await["status"], "duplicate");
+    assert_eq!(fixture.seen.lock().len(), 1);
+
+    // Conflict: same request identity, different handle list.
+    owner
+        .send(attachment_request(
+            &epoch,
+            &id,
+            "read the note",
+            std::slice::from_ref(&second_handle),
+        ))
+        .await;
+    assert_eq!(owner.until("turn_ack").await["status"], "conflict");
+    assert_eq!(fixture.seen.lock().len(), 1);
+
+    // Unknown handle refuses before the turn starts; the error names the op.
+    let unknown = uuid::Uuid::new_v4().to_string();
+    owner
+        .send(attachment_request(&epoch, &unknown, "read", std::slice::from_ref(&uuid::Uuid::new_v4().to_string())))
+        .await;
+    let unknown_error = owner.until("turn_error").await;
+    assert_eq!(unknown_error["code"], "ATTACHMENT_UNAVAILABLE");
+    assert_eq!(unknown_error["op"], "message");
+
+    // Shape denials: non-UUID, duplicated ids, and over the #491 item limit.
+    for ids in [
+        vec!["not-a-uuid".to_string()],
+        vec![handle.clone(), handle.clone()],
+        vec![
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ],
+    ] {
+        let shape = uuid::Uuid::new_v4().to_string();
+        owner
+            .send(attachment_request(&epoch, &shape, "read", &ids))
+            .await;
+        assert_eq!(
+            owner.until("turn_error").await["code"],
+            "INVALID_ATTACHMENTS"
+        );
+    }
+
+    // Attachment-only turn (legacy #491 parity): empty text is admissible.
+    let attachment_only = uuid::Uuid::new_v4().to_string();
+    owner
+        .send(attachment_request(&epoch, &attachment_only, "", std::slice::from_ref(&handle)))
+        .await;
+    let only_ack = owner.until("turn_ack").await;
+    assert_eq!(only_ack["status"], "accepted");
+    let events = terminal(
+        &mut owner,
+        &attachment_only,
+        only_ack["turn_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "done");
+
+    // The admitted-field list grew by exactly one name.
+    let smuggled = uuid::Uuid::new_v4().to_string();
+    let mut smuggle = request(&epoch, &smuggled, "read");
+    smuggle["sources"] = json!(["unvetted-source"]);
+    owner.send(smuggle).await;
+    assert_eq!(
+        owner.until("turn_error").await["code"],
+        "UNSUPPORTED_FIELD"
+    );
+
+    // ── Device bridge socket: legacy operation parity ──────────────────────
+    // The legacy classifier routes attachment-bearing messages to
+    // "unsupported"; a chat-only restricted bridge must be refused identically
+    // through S2, while its plain chat keeps working.
+    let mut device = fixture.socket(DEVICE_TOKEN).await;
+    let device_epoch = negotiate(&mut device).await;
+    let denied = uuid::Uuid::new_v4().to_string();
+    device
+        .send(attachment_request(
+            &device_epoch,
+            &denied,
+            "read",
+            std::slice::from_ref(&second_handle),
+        ))
+        .await;
+    device.denied().await;
+    let plain = uuid::Uuid::new_v4().to_string();
+    device.send(request(&device_epoch, &plain, "plain device chat")).await;
+    let plain_ack = device.until("turn_ack").await;
+    assert_eq!(plain_ack["status"], "accepted");
+    let events = terminal(
+        &mut device,
+        &plain,
+        plain_ack["turn_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "done");
+
+    // ── Defense in depth: revoking the pairing credential keeps attachments
+    // refused (the operation gate denies them for the restricted bridge
+    // regardless of pairing state, and the materialize-time scope re-check
+    // remains as the second layer).
+    assert!(fixture.state.pairing.revoke_token(DEVICE_TOKEN));
+    let revoked = uuid::Uuid::new_v4().to_string();
+    device
+        .send(attachment_request(
+            &device_epoch,
+            &revoked,
+            "read",
+            std::slice::from_ref(&second_handle),
+        ))
+        .await;
+    device.denied().await;
+    assert!(
+        fixture.seen.lock().len() >= 2,
+        "owner and device plain turns ran; attachment turns did not"
+    );
+}

@@ -126,6 +126,7 @@ export function AgentChatInner({
     clearAllMessages,
     addLocalMessage,
     abortSession,
+    stopRequested,
     pendingApproval,
     respondToApproval,
     contextMaxTokens,
@@ -419,9 +420,10 @@ export function AgentChatInner({
     clearAllMessages();
   }, [clearAllMessages]);
 
-  // Stop button: POST /api/sessions/{id}/abort. The gateway cancels the
-  // in-flight turn, the WS handler sends an `error` frame which our
-  // onMessage handler already maps to typing=false.
+  // Stop button (#549): S2 scoped cancellation of the observed turn — the
+  // gateway acks `requested`, then the terminal marker confirms `aborted`
+  // (our handler maps that to typing=false). The legacy session-abort REST
+  // call remains the fallback for an unnegotiated socket.
   const handleAbort = useCallback(async () => {
     try {
       await abortSession();
@@ -753,11 +755,12 @@ export function AgentChatInner({
               variant="danger"
               size="md"
               onClick={handleAbort}
+              disabled={stopRequested}
               className="flex-shrink-0 w-10 px-0"
-              aria-label={t('agent.stop')}
-              title={t('agent.stop')}
+              aria-label={stopRequested ? t('agent.stop_requested') : t('agent.stop')}
+              title={stopRequested ? t('agent.stop_requested') : t('agent.stop')}
             >
-              <Square className="h-4 w-4" fill="currentColor" />
+              <Square className={`h-4 w-4 ${stopRequested ? 'animate-pulse' : ''}`} fill="currentColor" />
             </Button>
           ) : (
             <Button

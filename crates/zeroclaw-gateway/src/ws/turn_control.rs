@@ -26,6 +26,7 @@ struct Entry {
     request: String,
     turn: String,
     content: String,
+    attachments: Vec<String>,
     sequence: u64,
     events: Vec<Value>,
     bytes: usize,
@@ -92,14 +93,28 @@ pub(super) fn handle(
     if !matches!(operation, "negotiate" | "message" | "resume" | "cancel") {
         return (Some(error("UNKNOWN_OPERATION")), None);
     }
+    // Errors past this point name the operation so a client can tell an
+    // admission failure (its turn will never start) from a failed control.
+    let error_op = |code: &str| -> Value {
+        json!({"type":"turn_error", "version":VERSION, "op":operation, "code":code})
+    };
     let alias = conversation
         .key()
         .rsplit_once('\u{1f}')
         .map_or("", |(_, alias)| alias);
-    let permission = if operation == "cancel" {
-        "cancel"
-    } else {
-        "chat"
+    // Bridge-operation parity: the legacy classifier routes attachment-bearing
+    // messages to "unsupported", so a restricted bridge cannot carry them.
+    // Negotiate/resume are transport bookkeeping and stay "chat". The
+    // classifier reads the legacy frame shape, so project this op's payload
+    // into that view — a turn_control envelope itself would classify as
+    // "unsupported" wholesale.
+    let permission = match operation {
+        "cancel" => "cancel",
+        "message" => device::frame_operation(&json!({
+            "type": "message",
+            "attachments": parsed.get("attachments"),
+        })),
+        _ => "chat",
     };
     if !device::permitted(state, scope, alias, permission)
         || !question_answer_authorized(state, scope)
@@ -107,7 +122,7 @@ pub(super) fn handle(
         return (Some(device::refusal("BRIDGE_OPERATION_DENIED")), None);
     }
     let Some(subject) = scope.auth_subject.as_deref() else {
-        return (Some(error("AUTHENTICATION_REQUIRED")), None);
+        return (Some(error_op("AUTHENTICATION_REQUIRED")), None);
     };
     let store = &state.ws_conversations.turn_control;
     if operation == "negotiate" {
@@ -124,28 +139,28 @@ pub(super) fn handle(
         );
     }
     if !*negotiated {
-        return (Some(error("NEGOTIATION_REQUIRED")), None);
+        return (Some(error_op("NEGOTIATION_REQUIRED")), None);
     }
     if parsed["epoch"].as_str() != Some(store.epoch.as_str()) {
-        return (Some(error("EPOCH_MISMATCH")), None);
+        return (Some(error_op("EPOCH_MISMATCH")), None);
     }
     let Some(request) = parsed["request_id"]
         .as_str()
         .filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
     else {
-        return (Some(error("INVALID_REQUEST_ID")), None);
+        return (Some(error_op("INVALID_REQUEST_ID")), None);
     };
     let receipt_key = key(conversation.key(), subject, &store.epoch, request);
     let mut entries = store.entries.lock();
     if operation == "resume" {
         let Some(after) = parsed["after_seq"].as_u64() else {
-            return (Some(error("INVALID_SEQUENCE")), None);
+            return (Some(error_op("INVALID_SEQUENCE")), None);
         };
         return (
             Some(match entries.get(&receipt_key) {
                 None => ack(store, request, None, "unknown"),
                 Some(entry) if entry.redacted => ack(store, request, None, "unknown"),
-                Some(entry) if after > entry.sequence => error("INVALID_SEQUENCE"),
+                Some(entry) if after > entry.sequence => error_op("INVALID_SEQUENCE"),
                 Some(entry) => {
                     let mut events: Vec<_> = entry
                         .events
@@ -171,7 +186,7 @@ pub(super) fn handle(
             .as_str()
             .filter(|id| uuid::Uuid::parse_str(id).is_ok())
         else {
-            return (Some(error("INVALID_TURN_ID")), None);
+            return (Some(error_op("INVALID_TURN_ID")), None);
         };
         let status = match entries.get(&receipt_key) {
             None => "unknown",
@@ -189,20 +204,51 @@ pub(super) fn handle(
     }
     let Some(content) = parsed["content"]
         .as_str()
-        .filter(|s| !s.is_empty() && s.len() <= MAX_CONTENT)
+        .filter(|s| s.len() <= MAX_CONTENT)
     else {
-        return (Some(error("INVALID_CONTENT")), None);
+        return (Some(error_op("INVALID_CONTENT")), None);
     };
+    // `attachments` is the sole admitted extra field: the same #491 scoped
+    // handles, shape, limits and authorization as the legacy path — it grants
+    // no new source or identity authority.
+    let attachments = match parsed.get("attachments") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(ids))
+            if ids.len() <= crate::api_attachments::MAX_MESSAGE_ITEMS =>
+        {
+            let Some(ids) = ids
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return (Some(error_op("INVALID_ATTACHMENTS")), None);
+            };
+            let unique: std::collections::HashSet<_> = ids.iter().collect();
+            if unique.len() != ids.len() {
+                return (Some(error_op("INVALID_ATTACHMENTS")), None);
+            }
+            ids
+        }
+        Some(_) => return (Some(error_op("INVALID_ATTACHMENTS")), None),
+    };
+    if content.is_empty() && attachments.is_empty() {
+        return (Some(error_op("INVALID_CONTENT")), None);
+    }
     // Unsupported input fields must not silently acquire source/attachment authority.
     if parsed.as_object().is_none_or(|fields| {
         fields.keys().any(|field| {
             !matches!(
                 field.as_str(),
-                "type" | "version" | "op" | "epoch" | "request_id" | "content"
+                "type" | "version" | "op" | "epoch" | "request_id" | "content" | "attachments"
             )
         })
     }) {
-        return (Some(error("UNSUPPORTED_FIELD")), None);
+        return (Some(error_op("UNSUPPORTED_FIELD")), None);
     }
     if let Some(entry) = entries.get(&receipt_key) {
         if entry.redacted {
@@ -213,7 +259,7 @@ pub(super) fn handle(
                 store,
                 request,
                 Some(&entry.turn),
-                if entry.content == content {
+                if entry.content == content && entry.attachments == attachments {
                     "duplicate"
                 } else {
                     "conflict"
@@ -225,9 +271,39 @@ pub(super) fn handle(
     // No eviction: forgetting accepted identities would permit an old request
     // to run again once a session backend's finite receipt window expires.
     if entries.len() >= MAX_REQUESTS {
-        return (Some(error("REQUEST_CAPACITY")), None);
+        return (Some(error_op("REQUEST_CAPACITY")), None);
     }
-    let Some(mut claim) = conversation.start_if_idle(content.to_string()) else {
+    // Resolve #491 scoped handles exactly as the legacy message path does:
+    // the attachments store owns materialization; authorization is consulted
+    // before and after resolution because a revoke can race the encode.
+    // Nothing here runs when materialization refuses, so a refused request
+    // never occupies the journal.
+    let mut input = content.to_string();
+    if !attachments.is_empty() {
+        if alias.is_empty() {
+            return (Some(error_op("ATTACHMENT_UNAVAILABLE")), None);
+        }
+        let payload_scope = crate::api_attachments::Scope {
+            subject: subject.to_string(),
+            session: scope.session_id.clone(),
+            agent: alias.to_string(),
+        };
+        if !crate::api_attachments::scope_authorized(state, &payload_scope) {
+            return (Some(error_op("UNAUTHORIZED_ATTACHMENTS")), None);
+        }
+        input = match state.ws_conversations.attachments.materialize(
+            &payload_scope,
+            &attachments,
+            content,
+        ) {
+            Ok(materialized) => materialized,
+            Err(_) => return (Some(error_op("ATTACHMENT_UNAVAILABLE")), None),
+        };
+        if !crate::api_attachments::scope_authorized(state, &payload_scope) {
+            return (Some(error_op("UNAUTHORIZED_ATTACHMENTS")), None);
+        }
+    }
+    let Some(mut claim) = conversation.start_if_idle(input) else {
         return (Some(ack(store, request, None, "busy")), None);
     };
     // Holding the journal lock serializes reserve/record/map versus other
@@ -240,7 +316,7 @@ pub(super) fn handle(
         }
         Err(_) => {
             conversation.finish_turn(claim.generation);
-            return (Some(error("REQUEST_NOT_RECORDED")), None);
+            return (Some(error_op("REQUEST_NOT_RECORDED")), None);
         }
     }
     let turn = claim.turn_id.clone();
@@ -253,6 +329,7 @@ pub(super) fn handle(
             request: request.to_string(),
             turn: turn.clone(),
             content: content.to_string(),
+            attachments: attachments.clone(),
             sequence: 0,
             events: Vec::new(),
             bytes: 0,
@@ -290,6 +367,7 @@ impl Store {
                 request: String::new(),
                 turn: String::new(),
                 content: String::new(),
+                attachments: Vec::new(),
                 sequence: 0,
                 events: Vec::new(),
                 bytes: 0,
@@ -310,8 +388,14 @@ impl Store {
         let mut event = json!({"type":"turn_event", "version":VERSION, "epoch":self.epoch,
             "request_id":entry.request,"turn_id":turn,"seq":entry.sequence,
             "event":payload,"terminal":terminal});
-        // Do not expose internal receipt identities in the projected payload.
-        if let Some(fields) = event["event"].as_object_mut() {
+        // Do not expose the internal receipt identity in the projected
+        // payload. Match EXACTLY this entry's receipt key: provider-sourced
+        // tool-call ids pass through verbatim (they are client-facing
+        // correlation), and a prefix test would strip a legitimate id that
+        // happens to start with the journal namespace.
+        if let Some(fields) = event["event"].as_object_mut()
+            && fields.get("id").and_then(Value::as_str) == Some(request)
+        {
             fields.remove("id");
         }
         if terminal {

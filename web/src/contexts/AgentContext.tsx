@@ -40,6 +40,34 @@ export interface ChatMessage {
   notice?: boolean;
 }
 
+/** S2 correlation state for the one in-flight request this surface tracks
+ *  (#549). `turnId` binds after `turn_ack: accepted` (or the first event /
+ *  replay, when the ACK was lost). Display dedup is by APPLIED sequence set:
+ *  the live ring and a resume snapshot can interleave (live seq N+1 may
+ *  arrive before the replay carrying N), so a max-watermark check would drop
+ *  never-displayed events. `resumeSeq` is the contiguous watermark — resume
+ *  asks for everything after it, so events displayed out of order still get
+ *  replayed to their consumer rather than silently skipped. */
+interface ActiveTurn {
+  requestId: string;
+  turnId: string | null;
+  /** Highest sequence observed (informational). */
+  lastSeq: number;
+  /** Highest sequence with all of 1..N applied — the resume anchor. */
+  resumeSeq: number;
+  appliedSeqs: Set<number>;
+  terminalSeen: boolean;
+  /** The terminal marker's own seq — it is re-delivered by replay even
+   * beyond the replay-cache bound, so it is exempt from pruning. */
+  terminalSeq: number | null;
+  /** A replay declared a server-side gap: missing middle events can never be
+   * filled, so a later live terminal must settle immediately. */
+  gapSeen: boolean;
+  /** Grace timer armed when a live terminal outruns the replay that may
+   * still fill the holes below it. */
+  terminalTimer: ReturnType<typeof setTimeout> | null;
+}
+
 interface AgentContextValue {
   messages: ChatMessage[];
   sendMessage: (content: string, attachments?: string[]) => void;
@@ -64,6 +92,9 @@ interface AgentContextValue {
    */
   addLocalMessage: (content: string) => void;
   abortSession: () => Promise<void>;
+  /** True between a scoped Stop being requested and its terminal confirm —
+   *  distinct from "confirmed stopped" so the UI never shows success early. */
+  stopRequested: boolean;
   /**
    * Pending supervised-mode tool-approval prompt, or null. Populated when the
    * gateway emits an `approval_request` frame; cleared once the user responds
@@ -128,6 +159,8 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   // Context window tracking (from "done" WS frames). See #7311.
   const [contextMaxTokens, setContextMaxTokens] = useState<number | null>(null);
   const [contextInputTokens, setContextInputTokens] = useState<number | null>(null);
+  // S2 (#549): between a scoped Stop being requested and its terminal confirm.
+  const [stopRequested, setStopRequested] = useState(false);
 
   const wsRef = useRef<WebSocketClient | null>(null);
   const pendingContentRef = useRef('');
@@ -137,6 +170,12 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   const switchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsVersionRef = useRef(0);
   const localMessageMutationVersionRef = useRef(0);
+  // S2 (#549): correlation for the one in-flight request, the epoch seen by
+  // the previous socket (reconnect reconciliation), and model-switch waiters
+  // parked until the cancelled turn's terminal marker arrives.
+  const activeTurnRef = useRef<ActiveTurn | null>(null);
+  const lastEpochRef = useRef<string | null>(null);
+  const terminalWaitersRef = useRef(new Map<string, () => void>());
 
   // Prime the model-provider catalog once so error formatting can resolve
   // display names from the backend registry rather than a local shadow list.
@@ -209,8 +248,56 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     return () => clearTimeout(id);
   }, [pendingApproval]);
 
-  // Centralised WebSocket message handler — reused across initial connect and reconnects.
-  const handleWsMessage = useCallback((msg: WsMessage) => {
+  // S2 lifecycle helpers (#549). Notices are ephemeral transcript bubbles;
+  // finalize clears correlation, the stop badge and the typing spinner.
+  const addNotice = useCallback((content: string) => {
+    localMessageMutationVersionRef.current += 1;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: generateUUID(),
+        role: 'agent',
+        content,
+        timestamp: new Date(),
+        ephemeral: true,
+        notice: true,
+      },
+    ]);
+  }, []);
+
+  const finalizeActiveTurn = useCallback(() => {
+    if (activeTurnRef.current?.terminalTimer) {
+      clearTimeout(activeTurnRef.current.terminalTimer);
+    }
+    activeTurnRef.current = null;
+    setStopRequested(false);
+    setTyping(false);
+  }, []);
+
+  /** Resolve (without waiting) any model-switch waiter parked on this turn. */
+  const releaseTerminalWaiter = useCallback((turnId: string) => {
+    terminalWaitersRef.current.get(turnId)?.();
+    terminalWaitersRef.current.delete(turnId);
+  }, []);
+
+  const waitForTerminal = useCallback((turnId: string, ms: number) =>
+    new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        terminalWaitersRef.current.delete(turnId);
+        resolve(false);
+      }, ms);
+      terminalWaitersRef.current.set(turnId, () => {
+        clearTimeout(timer);
+        terminalWaitersRef.current.delete(turnId);
+        resolve(true);
+      });
+    }), []);
+
+  // Centralised WebSocket message handler — reused across initial connect and
+  // reconnects, and re-entered for S2-wrapped display frames (#549): a
+  // `turn_event.event` payload is an ordinary display frame, so it recurses
+  // through this same handler rather than a parallel display path.
+  const handleWsMessage = useCallback(function handleWsMessage(msg: WsMessage) {
     switch (msg.type) {
       case 'session_start':
       case 'connected':
@@ -221,6 +308,214 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         // yet (#379), so these stay intentionally inert; typed here so the
         // frame shape is part of the contract instead of silently unknown.
         break;
+
+      case 'turn_ready': {
+        // Negotiation completed on this socket. Reconcile a request still
+        // pending from a previous socket: same process epoch → resume from
+        // the contiguous anchor (a held-open terminal resumes too — the
+        // replay answer settles it); a changed epoch means the gateway
+        // restarted and a still-unknown outcome is surfaced, never resent
+        // (the server journal is gone with the process).
+        const epoch = typeof msg.epoch === 'string' ? msg.epoch : null;
+        const previous = lastEpochRef.current;
+        lastEpochRef.current = epoch;
+        const active = activeTurnRef.current;
+        if (epoch && previous === epoch && active) {
+          wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
+        } else if (epoch && previous && previous !== epoch && active) {
+          if (!active.terminalSeen) {
+            addNotice(t('agent.turn_outcome_unknown'));
+          }
+          finalizeActiveTurn();
+        }
+        break;
+      }
+
+      case 'turn_ack': {
+        const active = activeTurnRef.current;
+        if (!active || msg.request_id !== active.requestId) break;
+        switch (msg.status) {
+          case 'accepted':
+            active.turnId = msg.turn_id ?? null;
+            break;
+          case 'duplicate':
+            // The request already ran (or is running) under this identity;
+            // reconcile by replaying everything past our applied sequence.
+            wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
+            break;
+          case 'conflict':
+            addNotice(t('agent.turn_conflict'));
+            finalizeActiveTurn();
+            break;
+          case 'busy':
+            addNotice(t('agent.turn_busy'));
+            finalizeActiveTurn();
+            break;
+          default:
+            // `unknown` (and anything unrecognized): the effect of this
+            // request identity cannot be determined here — never resend.
+            addNotice(t('agent.turn_outcome_unknown'));
+            finalizeActiveTurn();
+        }
+        break;
+      }
+
+      case 'turn_event': {
+        const active = activeTurnRef.current;
+        if (!active || msg.request_id !== active.requestId) break;
+        const inner = msg.event;
+        // Late-ACK recovery: events and replays carry the authoritative turn
+        // identity even when the accepted ACK was never observed.
+        if (active.turnId === null && typeof msg.turn_id === 'string') {
+          active.turnId = msg.turn_id;
+        }
+        // Record the terminal's own seq BEFORE any pruning in this handler:
+        // the marker is re-delivered by replay even beyond the replay-cache
+        // bound, so it must survive the dedup-set trim (round-5 review P3).
+        if (inner?.type === 'turn_terminal' && typeof msg.seq === 'number') {
+          active.terminalSeq = msg.seq;
+        }
+        // Dedup by applied sequence, not a watermark: the live ring can
+        // deliver seq N+1 before the replay carrying N, and both must display.
+        if (typeof msg.seq === 'number') {
+          if (active.appliedSeqs.has(msg.seq)) break;
+          active.appliedSeqs.add(msg.seq);
+          active.lastSeq = Math.max(active.lastSeq, msg.seq);
+          while (active.appliedSeqs.has(active.resumeSeq + 1)) {
+            active.resumeSeq += 1;
+          }
+          // Bounded by the re-deliverable domain: the server replays only its
+          // cached prefix (first `replay_events` events — not a rolling
+          // window) plus the terminal marker, so sequence numbers beyond that
+          // bound can only ever arrive live-once and need no dedup entry.
+          const replayLimit = wsRef.current?.replayLimit ?? 128;
+          if (active.appliedSeqs.size > replayLimit + 32) {
+            for (const seq of active.appliedSeqs) {
+              if (seq > replayLimit && seq !== active.terminalSeq) {
+                active.appliedSeqs.delete(seq);
+              }
+            }
+          }
+        }
+        if (!inner) break;
+        if (inner.type === 'turn_terminal') {
+          active.terminalSeen = true;
+          if (inner.outcome === 'aborted') {
+            // Mirror the legacy `aborted` cleanup; the server publishes the
+            // legacy frame too, but the marker can arrive as the sole witness
+            // on a replayed terminal.
+            pendingContentRef.current = '';
+            pendingThinkingRef.current = '';
+            capturedThinkingRef.current = '';
+            setStreamingContent('');
+            setStreamingThinking('');
+            setPendingApproval(null);
+          }
+          releaseTerminalWaiter(msg.turn_id ?? '');
+          // A live terminal can outrun the replay that fills the holes below
+          // it (live seq 11 before replay 6-11). Settling now would drop the
+          // never-displayed middle forever — but holes do NOT prove a replay
+          // is still in flight (a server-side gap already declared the middle
+          // lost). Hold only when the middle is still fillable, with a
+          // bounded grace; the replay (or the timer) settles the turn.
+          const holesBelowTerminal =
+            typeof msg.seq === 'number' && active.resumeSeq < msg.seq - 1;
+          if (holesBelowTerminal && !active.gapSeen) {
+            const requestId = active.requestId;
+            active.terminalTimer = setTimeout(() => {
+              const current = activeTurnRef.current;
+              if (current?.requestId === requestId) {
+                addNotice(t('agent.replay_gap'));
+                finalizeActiveTurn();
+              }
+            }, 3_000);
+          } else {
+            if (holesBelowTerminal && active.gapSeen) {
+              addNotice(t('agent.replay_gap'));
+            }
+            finalizeActiveTurn();
+          }
+          break;
+        }
+        handleWsMessage(inner);
+        break;
+      }
+
+      case 'turn_replay': {
+        const active = activeTurnRef.current;
+        if (!active || msg.request_id !== active.requestId) break;
+        if (active.turnId === null && typeof msg.turn_id === 'string') {
+          active.turnId = msg.turn_id;
+        }
+        if (msg.gap) {
+          active.gapSeen = true;
+          addNotice(t('agent.replay_gap'));
+        }
+        for (const event of msg.events ?? []) {
+          handleWsMessage(event);
+        }
+        if (msg.terminal === true || active.terminalSeen) {
+          // Either the replay itself says the request finished, or its
+          // terminal marker already arrived live and was held open for
+          // exactly this replay (or its grace timer is pending — the first
+          // path to reach here wins; finalize clears the timer).
+          releaseTerminalWaiter(active.turnId ?? '');
+          finalizeActiveTurn();
+        }
+        break;
+      }
+
+      case 'turn_cancel_ack': {
+        // Correlate to the observed turn: a late ack for an old turn must not
+        // rewrite the current turn's Stop state.
+        const active = activeTurnRef.current;
+        if (active && typeof msg.turn_id === 'string' && msg.turn_id !== active.turnId) {
+          break;
+        }
+        if (msg.status === 'requested') {
+          // Requested ≠ confirmed: the badge stays until the terminal marker.
+          setStopRequested(true);
+        } else {
+          // stale / no_active / unknown — nothing was cancelled; leave any
+          // running turn's UI state to its own frames.
+          setStopRequested(false);
+        }
+        break;
+      }
+
+      case 'turn_error': {
+        // The error names its operation: an admission failure (`op: message`)
+        // means our turn will never start and must settle now; a failed
+        // cancel/resume control leaves any running turn to its own frames.
+        // Pre-parse errors carry no `op`; they can only precede any admission
+        // this client made, so while one is pending (no turn bound yet) they
+        // settle it too instead of spinning forever.
+        const active = activeTurnRef.current;
+        const refused = t('agent.turn_refused').replace('{code}', msg.code ?? 'UNKNOWN');
+        const admissionPending = !!active && !active.terminalSeen && active.turnId === null;
+        if (
+          active
+          && !active.terminalSeen
+          && (msg.op === 'message' || (msg.op === undefined && admissionPending))
+        ) {
+          addNotice(refused);
+          finalizeActiveTurn();
+        } else if (msg.op !== 'message' && msg.op !== undefined && msg.code !== 'EPOCH_MISMATCH') {
+          // A cancel/resume control failed; EPOCH_MISMATCH self-heals on
+          // reconnect, everything else deserves a visible trace.
+          addNotice(refused);
+        }
+        break;
+      }
+
+      case 'turn_gap': {
+        const active = activeTurnRef.current;
+        addNotice(t('agent.replay_gap'));
+        if (active) {
+          wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
+        }
+        break;
+      }
 
       case 'thinking':
         setTyping(true);
@@ -448,7 +743,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         setPendingApproval(null);
         break;
     }
-  }, []);
+  }, [addNotice, finalizeActiveTurn, releaseTerminalWaiter]);
 
   // Wire up a WebSocketClient instance with version-guarded callbacks.
   const attachSocketCallbacks = useCallback((ws: WebSocketClient) => {
@@ -597,7 +892,21 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   const sendMessage = useCallback((content: string, attachments?: string[]) => {
     if (!wsRef.current?.connected) return;
     try {
-      wsRef.current.sendMessage(content, attachments);
+      // S2 (#549): admission carries a client-minted request_id; every later
+      // turn frame for this bubble correlates against it.
+      const requestId = wsRef.current.sendTurnMessage(content, attachments);
+      activeTurnRef.current = {
+        requestId,
+        turnId: null,
+        lastSeq: 0,
+        resumeSeq: 0,
+        appliedSeqs: new Set(),
+        terminalSeen: false,
+        terminalSeq: null,
+        gapSeen: false,
+        terminalTimer: null,
+      };
+      setStopRequested(false);
       setTyping(true);
       pendingContentRef.current = '';
       pendingThinkingRef.current = '';
@@ -649,6 +958,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     armWatchdog();
 
     try {
+      // Snapshot the turn to cancel BEFORE any await: a later turn may start
+      // while the config write is in flight and must not become the target
+      // (#549 async-cancel correlation).
+      const switchTarget = activeTurnRef.current;
       // Per-agent switch: write THIS agent's own model_provider ref (multi-agent
       // / schema V3). `model` here is a provider ref (e.g. "kilo.minimax_m3").
       // The global `model`/`default_model` keys were removed in V3.
@@ -658,19 +971,33 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       // touching the live socket so we never tear it down after giving up.
       if (pendingModelSwitchRef.current !== model) return;
 
-      // If a turn is actively streaming, abort it on the backend before we tear
-      // down the socket. This prevents the old model from continuing to execute
-      // tools or persisting its response into the session after we switch.
+      // If a turn is actively streaming, cancel it on the backend before we
+      // tear down the socket. S2 (#549): bind the cancellation to the observed
+      // turn so a late/duplicate control can never reach a newer turn. On a
+      // negotiated socket there is no REST fallback (a session-level abort
+      // cancels whatever turn is current server-side); the legacy fallback
+      // only exists for a socket that never negotiated.
       if (typing) {
         try {
-          await Promise.race([
-            abortSession(sessionIdRef.current),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('abort-timeout')), 1_500),
-            ),
-          ]);
+          const negotiated = wsRef.current?.hasNegotiated ?? false;
+          if (negotiated && switchTarget?.turnId) {
+            wsRef.current?.cancelTurn(switchTarget.requestId, switchTarget.turnId);
+            await Promise.race([
+              waitForTerminal(switchTarget.turnId, 1_500),
+              new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('abort-timeout')), 1_500),
+              ),
+            ]);
+          } else if (!negotiated) {
+            await Promise.race([
+              abortSession(sessionIdRef.current),
+              new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('abort-timeout')), 1_500),
+              ),
+            ]);
+          }
         } catch {
-          // Best-effort: if abort fails or times out we still proceed with the
+          // Best-effort: if cancel fails or times out we still proceed with the
           // switch so the user is never stuck. The old turn may continue on the
           // server, but the UI will show a clean new session.
         }
@@ -729,7 +1056,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setModelLoading(false);
       setError(err instanceof Error ? err.message : t('agent.failed_switch_model'));
     }
-  }, [attachSocketCallbacks, modelLoading, typing, agentAlias]);
+  }, [attachSocketCallbacks, modelLoading, typing, agentAlias, waitForTerminal]);
 
   const deleteMessage = useCallback((id: string) => {
     localMessageMutationVersionRef.current += 1;
@@ -843,12 +1170,28 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       // backend on a late click anyway. Don't wait for the `aborted` frame
       // to round-trip; the user clicked Stop and expects the UI to follow.
       setPendingApproval(null);
-      try {
-        await abortSession(sessionIdRef.current);
-      } catch {
-        // Best-effort abort
+      // S2 (#549): scoped cancellation of the observed turn; "requested" is
+      // shown until the terminal marker confirms aborted. Once ANY socket of
+      // this client has negotiated S2 there is deliberately NO fallback —
+      // including during a reconnect window (epoch is null there, but a
+      // session-level REST abort cancels whatever turn is current server-side
+      // and could kill a newer turn). Without an observed turn id there is
+      // nothing scoped to stop; the identity binds on the first event/ack.
+      const active = activeTurnRef.current;
+      const ws = wsRef.current;
+      if (!ws?.hasNegotiated) {
+        try {
+          await abortSession(sessionIdRef.current);
+        } catch {
+          // Best-effort abort
+        }
+        return;
+      }
+      if (active?.turnId) {
+        ws.cancelTurn(active.requestId, active.turnId);
       }
     },
+    stopRequested,
     pendingApproval,
     respondToApproval,
     // Context window tracking (from "done" WS frames). See #7311.
