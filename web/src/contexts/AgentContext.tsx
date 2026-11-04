@@ -362,6 +362,16 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
           while (active.appliedSeqs.has(active.resumeSeq + 1)) {
             active.resumeSeq += 1;
           }
+          // Bounded: below the resume anchor nothing can be replayed again,
+          // and the server only replays its last 128 cached events, so
+          // sequence numbers older than that window can never re-arrive.
+          if (active.appliedSeqs.size > 256) {
+            for (const seq of active.appliedSeqs) {
+              if (seq <= active.resumeSeq || seq <= active.lastSeq - 256) {
+                active.appliedSeqs.delete(seq);
+              }
+            }
+          }
         }
         const inner = msg.event;
         if (!inner) break;
@@ -379,7 +389,16 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
             setPendingApproval(null);
           }
           releaseTerminalWaiter(msg.turn_id ?? '');
-          finalizeActiveTurn();
+          // A live terminal can outrun the replay that fills the holes below
+          // it (live seq 11 before replay 6-11). Settling now would drop the
+          // never-displayed middle forever, so hold the turn open until the
+          // in-flight replay lands — the race that created the holes implies
+          // one is coming; it finalizes in the turn_replay case.
+          const holesBelowTerminal =
+            typeof msg.seq === 'number' && active.resumeSeq < msg.seq - 1;
+          if (!holesBelowTerminal) {
+            finalizeActiveTurn();
+          }
           break;
         }
         handleWsMessage(inner);
@@ -396,9 +415,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         for (const event of msg.events ?? []) {
           handleWsMessage(event);
         }
-        if (msg.terminal === true && !active.terminalSeen) {
-          // The journal says the request finished, but the terminal marker
-          // itself was within the dropped window: settle without it.
+        if (msg.terminal === true || active.terminalSeen) {
+          // Either the replay itself says the request finished, or its
+          // terminal marker already arrived live and was held open for
+          // exactly this replay.
           releaseTerminalWaiter(active.turnId ?? '');
           finalizeActiveTurn();
         }
