@@ -309,6 +309,12 @@ fn validate_target_with_boundary(
         }
     }
     boundary().context("after target kernel reopen")?;
+    // The kernel reopen selects WAL mode. After its writable handle closes,
+    // require a clean boundary before switching this owned file back to DELETE.
+    // A later read-only WAL connection can leave WAL/SHM files on close even
+    // when it made no writes; never classify those as foreign and clean them up.
+    checkpoint(path)?;
+    boundary().context("after target readback checkpoint")?;
     let conn = open_read_only_snapshot(path)?;
     ensure!(
         schema::stamp(&conn, "profile")?.as_deref() == Some("portable_kernel")
