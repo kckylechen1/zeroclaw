@@ -363,10 +363,17 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       case 'turn_event': {
         const active = activeTurnRef.current;
         if (!active || msg.request_id !== active.requestId) break;
+        const inner = msg.event;
         // Late-ACK recovery: events and replays carry the authoritative turn
         // identity even when the accepted ACK was never observed.
         if (active.turnId === null && typeof msg.turn_id === 'string') {
           active.turnId = msg.turn_id;
+        }
+        // Record the terminal's own seq BEFORE any pruning in this handler:
+        // the marker is re-delivered by replay even beyond the replay-cache
+        // bound, so it must survive the dedup-set trim (round-5 review P3).
+        if (inner?.type === 'turn_terminal' && typeof msg.seq === 'number') {
+          active.terminalSeq = msg.seq;
         }
         // Dedup by applied sequence, not a watermark: the live ring can
         // deliver seq N+1 before the replay carrying N, and both must display.
@@ -390,11 +397,9 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
             }
           }
         }
-        const inner = msg.event;
         if (!inner) break;
         if (inner.type === 'turn_terminal') {
           active.terminalSeen = true;
-          active.terminalSeq = typeof msg.seq === 'number' ? msg.seq : null;
           if (inner.outcome === 'aborted') {
             // Mirror the legacy `aborted` cleanup; the server publishes the
             // legacy frame too, but the marker can arrive as the sole witness
