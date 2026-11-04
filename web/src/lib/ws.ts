@@ -59,6 +59,10 @@ export class WebSocketClient {
    * only Stop path) from a socket that genuinely never negotiated (legacy
    * REST-abort fallback). */
   private negotiatedOnce = false;
+  /** S2 (#549): the server's replay-cache event bound from `turn_ready`
+   * limits. Events with seq beyond it are live-only (never replayed), which
+   * bounds the client's applied-sequence dedup set. */
+  private replayEventLimit: number | null = null;
   /** Requests accepted for admission but not yet sent (pre-`turn_ready`). */
   private readonly queuedSends: { requestId: string; frame: Record<string, unknown> }[] = [];
 
@@ -121,6 +125,10 @@ export class WebSocketClient {
         if (msg.type === 'turn_ready' && typeof msg.epoch === 'string') {
           this.turnEpoch = msg.epoch;
           this.negotiatedOnce = true;
+          const replayEvents = msg.limits?.replay_events;
+          if (typeof replayEvents === 'number' && replayEvents > 0) {
+            this.replayEventLimit = replayEvents;
+          }
           while (this.turnEpoch === msg.epoch && this.queuedSends.length > 0) {
             const queued = this.queuedSends.shift()!;
             this.sendRaw({ ...queued.frame, epoch: msg.epoch });
@@ -214,6 +222,11 @@ export class WebSocketClient {
    * but a session-level abort could still cancel a newer turn server-side. */
   get hasNegotiated(): boolean {
     return this.negotiatedOnce;
+  }
+
+  /** Server replay-cache bound (events), or null before negotiation. */
+  get replayLimit(): number | null {
+    return this.replayEventLimit;
   }
 
   /** Negotiation includes the same auth query params as the socket itself, so

@@ -280,6 +280,14 @@ export interface WsMessage {
   epoch?: string;
   /** The failing operation on `turn_error` (message | cancel | resume). */
   op?: string;
+  /** Negotiated bounds on `turn_ready`: the server's replay-cache size. */
+  limits?: {
+    replay_events?: number;
+    content_bytes?: number;
+    replay_bytes?: number;
+    requests_per_epoch?: number;
+    write_timeout_ms?: number;
+  };
   /** `turn_ack` / `turn_cancel_ack` outcome: accepted | duplicate | conflict |
    * busy | unknown | requested | stale | no_active. */
   status?: string;

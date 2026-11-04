@@ -57,6 +57,15 @@ interface ActiveTurn {
   resumeSeq: number;
   appliedSeqs: Set<number>;
   terminalSeen: boolean;
+  /** The terminal marker's own seq — it is re-delivered by replay even
+   * beyond the replay-cache bound, so it is exempt from pruning. */
+  terminalSeq: number | null;
+  /** A replay declared a server-side gap: missing middle events can never be
+   * filled, so a later live terminal must settle immediately. */
+  gapSeen: boolean;
+  /** Grace timer armed when a live terminal outruns the replay that may
+   * still fill the holes below it. */
+  terminalTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface AgentContextValue {
@@ -257,6 +266,9 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   }, []);
 
   const finalizeActiveTurn = useCallback(() => {
+    if (activeTurnRef.current?.terminalTimer) {
+      clearTimeout(activeTurnRef.current.terminalTimer);
+    }
     activeTurnRef.current = null;
     setStopRequested(false);
     setTyping(false);
@@ -300,17 +312,20 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       case 'turn_ready': {
         // Negotiation completed on this socket. Reconcile a request still
         // pending from a previous socket: same process epoch → resume from
-        // the last applied sequence; a changed epoch means the gateway
-        // restarted and the old request's outcome is unknowable — surface it
-        // and never resend (the server journal is gone with the process).
+        // the contiguous anchor (a held-open terminal resumes too — the
+        // replay answer settles it); a changed epoch means the gateway
+        // restarted and a still-unknown outcome is surfaced, never resent
+        // (the server journal is gone with the process).
         const epoch = typeof msg.epoch === 'string' ? msg.epoch : null;
         const previous = lastEpochRef.current;
         lastEpochRef.current = epoch;
         const active = activeTurnRef.current;
-        if (epoch && previous === epoch && active && !active.terminalSeen) {
+        if (epoch && previous === epoch && active) {
           wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
-        } else if (epoch && previous && previous !== epoch && active && !active.terminalSeen) {
-          addNotice(t('agent.turn_outcome_unknown'));
+        } else if (epoch && previous && previous !== epoch && active) {
+          if (!active.terminalSeen) {
+            addNotice(t('agent.turn_outcome_unknown'));
+          }
           finalizeActiveTurn();
         }
         break;
@@ -362,12 +377,14 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
           while (active.appliedSeqs.has(active.resumeSeq + 1)) {
             active.resumeSeq += 1;
           }
-          // Bounded: below the resume anchor nothing can be replayed again,
-          // and the server only replays its last 128 cached events, so
-          // sequence numbers older than that window can never re-arrive.
-          if (active.appliedSeqs.size > 256) {
+          // Bounded by the re-deliverable domain: the server replays only its
+          // cached prefix (first `replay_events` events — not a rolling
+          // window) plus the terminal marker, so sequence numbers beyond that
+          // bound can only ever arrive live-once and need no dedup entry.
+          const replayLimit = wsRef.current?.replayLimit ?? 128;
+          if (active.appliedSeqs.size > replayLimit + 32) {
             for (const seq of active.appliedSeqs) {
-              if (seq <= active.resumeSeq || seq <= active.lastSeq - 256) {
+              if (seq > replayLimit && seq !== active.terminalSeq) {
                 active.appliedSeqs.delete(seq);
               }
             }
@@ -377,6 +394,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         if (!inner) break;
         if (inner.type === 'turn_terminal') {
           active.terminalSeen = true;
+          active.terminalSeq = typeof msg.seq === 'number' ? msg.seq : null;
           if (inner.outcome === 'aborted') {
             // Mirror the legacy `aborted` cleanup; the server publishes the
             // legacy frame too, but the marker can arrive as the sole witness
@@ -391,12 +409,25 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
           releaseTerminalWaiter(msg.turn_id ?? '');
           // A live terminal can outrun the replay that fills the holes below
           // it (live seq 11 before replay 6-11). Settling now would drop the
-          // never-displayed middle forever, so hold the turn open until the
-          // in-flight replay lands — the race that created the holes implies
-          // one is coming; it finalizes in the turn_replay case.
+          // never-displayed middle forever — but holes do NOT prove a replay
+          // is still in flight (a server-side gap already declared the middle
+          // lost). Hold only when the middle is still fillable, with a
+          // bounded grace; the replay (or the timer) settles the turn.
           const holesBelowTerminal =
             typeof msg.seq === 'number' && active.resumeSeq < msg.seq - 1;
-          if (!holesBelowTerminal) {
+          if (holesBelowTerminal && !active.gapSeen) {
+            const requestId = active.requestId;
+            active.terminalTimer = setTimeout(() => {
+              const current = activeTurnRef.current;
+              if (current?.requestId === requestId) {
+                addNotice(t('agent.replay_gap'));
+                finalizeActiveTurn();
+              }
+            }, 3_000);
+          } else {
+            if (holesBelowTerminal && active.gapSeen) {
+              addNotice(t('agent.replay_gap'));
+            }
             finalizeActiveTurn();
           }
           break;
@@ -411,14 +442,18 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         if (active.turnId === null && typeof msg.turn_id === 'string') {
           active.turnId = msg.turn_id;
         }
-        if (msg.gap) addNotice(t('agent.replay_gap'));
+        if (msg.gap) {
+          active.gapSeen = true;
+          addNotice(t('agent.replay_gap'));
+        }
         for (const event of msg.events ?? []) {
           handleWsMessage(event);
         }
         if (msg.terminal === true || active.terminalSeen) {
           // Either the replay itself says the request finished, or its
           // terminal marker already arrived live and was held open for
-          // exactly this replay.
+          // exactly this replay (or its grace timer is pending — the first
+          // path to reach here wins; finalize clears the timer).
           releaseTerminalWaiter(active.turnId ?? '');
           finalizeActiveTurn();
         }
@@ -862,6 +897,9 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         resumeSeq: 0,
         appliedSeqs: new Set(),
         terminalSeen: false,
+        terminalSeq: null,
+        gapSeen: false,
+        terminalTimer: null,
       };
       setStopRequested(false);
       setTyping(true);
