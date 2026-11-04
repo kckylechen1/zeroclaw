@@ -44,7 +44,9 @@ The source gate reports the exact known generated pages and snippets it defers. 
 
 `CI Required Gate` uses `if: always()` and `scripts/ci/required_gate.py` to verify the complete dependency set, classifier outputs, and every expected job result. Failures, cancellations, missing results, and unexpected skips fail the gate. A skip is accepted only when the event and selected scope explicitly expect it.
 
-The intended branch rule requires this stable aggregate. Cloud protection alignment remains a separate step under #552: confirm the actual effective required checks before treating the source policy as enforced. If protection still requires individual legacy jobs, a red aggregate alone does not make it a required merge barrier. Add and verify the aggregate on the current PR head before retiring obsolete required-check names; preserve the applicable review and bypass rules. See [Allowed actions and cloud verification](#allowed-actions) for read-only inspection.
+`master` requires `CI Required Gate` from GitHub Actions and an up-to-date branch. This aggregate replaces the legacy leaf-check requirements; its expected-result policy still enforces every selected check. Repository merge settings allow squash merging only. Auto-merge is available, but it must be enabled separately for each PR and still waits for the applicable checks and review requirements.
+
+Preserve linear history and the applicable review and bypass rules. Confirm the effective required checks and merge settings in GitHub before relying on this policy; settings can change independently of the source. See [Allowed actions and cloud verification](#allowed-actions) for read-only inspection.
 
 Fresh required CI is normally the shared evidence for the Cargo surfaces it actually runs. A local rerun of the same Cargo command on the same head, target, and feature set is duplicate confidence, not a stronger proof. Before asking for extra Cargo or Clippy, compare the changed surface with the current workflow files and the actual checks on the PR. Extra validation belongs where the required gate does not prove the thing under review:
 
@@ -246,6 +248,8 @@ Bind inspection to the task's verified repository. For this fork, the read-only 
 ```sh
 TARGET_REPO=kckylechen1/zeroclaw
 test "$(gh repo view "$TARGET_REPO" --json nameWithOwner --jq .nameWithOwner)" = "$TARGET_REPO" || exit 1
+gh api "repos/$TARGET_REPO" \
+  --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, allow_auto_merge}'
 gh api "repos/$TARGET_REPO/branches/master/protection/required_status_checks"
 gh api "repos/$TARGET_REPO/rules/branches/master"
 gh api "repos/$TARGET_REPO/actions/permissions"
