@@ -51,8 +51,14 @@ export class WebSocketClient {
   public onClose: WsCloseHandler | null = null;
   public onError: WsErrorHandler | null = null;
 
-  /** S2 (#549): negotiated epoch, or null before `turn_ready`. */
+  /** S2 (#549): negotiated epoch, or null before `turn_ready` / during a
+   * reconnect window (onopen clears it until the new socket negotiates). */
   private turnEpoch: string | null = null;
+  /** S2 (#549): latched on the first successful negotiation. Distinguishes a
+   * reconnect window (epoch null but S2 in use — scoped cancellation is the
+   * only Stop path) from a socket that genuinely never negotiated (legacy
+   * REST-abort fallback). */
+  private negotiatedOnce = false;
   /** Requests accepted for admission but not yet sent (pre-`turn_ready`). */
   private readonly queuedSends: { requestId: string; frame: Record<string, unknown> }[] = [];
 
@@ -114,6 +120,7 @@ export class WebSocketClient {
         // queued while the socket was pre-negotiation.
         if (msg.type === 'turn_ready' && typeof msg.epoch === 'string') {
           this.turnEpoch = msg.epoch;
+          this.negotiatedOnce = true;
           while (this.turnEpoch === msg.epoch && this.queuedSends.length > 0) {
             const queued = this.queuedSends.shift()!;
             this.sendRaw({ ...queued.frame, epoch: msg.epoch });
@@ -199,6 +206,14 @@ export class WebSocketClient {
   /** The negotiated S2 epoch, or null before `turn_ready` / after reconnect. */
   get epoch(): string | null {
     return this.turnEpoch;
+  }
+
+  /** True once ANY socket of this client completed S2 negotiation. Stop and
+   * model-switch use this (not `epoch`) to decide whether the legacy REST
+   * abort fallback is allowed: during a reconnect window the epoch is null
+   * but a session-level abort could still cancel a newer turn server-side. */
+  get hasNegotiated(): boolean {
+    return this.negotiatedOnce;
   }
 
   /** Negotiation includes the same auth query params as the socket itself, so

@@ -388,14 +388,13 @@ impl Store {
         let mut event = json!({"type":"turn_event", "version":VERSION, "epoch":self.epoch,
             "request_id":entry.request,"turn_id":turn,"seq":entry.sequence,
             "event":payload,"terminal":terminal});
-        // Do not expose internal receipt identities in the projected payload.
-        // Tool-call ids are client-facing correlation and must survive: the
-        // web client matches tool results to cards by id (see toolCardMatch).
+        // Do not expose the internal receipt identity in the projected
+        // payload. Match EXACTLY this entry's receipt key: provider-sourced
+        // tool-call ids pass through verbatim (they are client-facing
+        // correlation), and a prefix test would strip a legitimate id that
+        // happens to start with the journal namespace.
         if let Some(fields) = event["event"].as_object_mut()
-            && fields
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id.starts_with("tc1:"))
+            && fields.get("id").and_then(Value::as_str) == Some(request)
         {
             fields.remove("id");
         }
