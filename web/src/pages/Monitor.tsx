@@ -99,49 +99,67 @@ export default function Monitor() {
   /** Per-category incremental cursors (newest timestamp fetched). */
   const sinceRef = useRef<Record<string, string | undefined>>({});
   /** Accumulated timeline keyed by event id — incremental refreshes MERGE,
-   * never replace, so a quiet poll cannot wipe already-displayed history. */
+   * never replace, so a quiet poll cannot wipe already-displayed history.
+   * The map itself is pruned to the newest MAX_ROWS after each merge (the
+   * render cap alone would let it grow unbounded on a long-lived page). */
   const rowsRef = useRef(new Map<string, TimelineRow>());
-  /** Refresh generation: only the latest refresh may apply its results. */
-  const generationRef = useRef(0);
+  /** In-flight guard: refreshes never overlap, so a slow batch can never be
+   * superseded-and-dropped by the next interval tick (starvation) — a tick
+   * that fires while a refresh runs is simply skipped. */
+  const busyRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    const generation = ++generationRef.current;
-    const batches = await Promise.all(
-      TIMELINE_CATEGORIES.map((category, index) =>
-        fetchCategory(category, sinceRef.current[category]).then((result) => ({
-          category,
-          index,
-          result,
-        })),
-      ),
-    );
-    if (generation !== generationRef.current) {
-      return; // superseded by a newer refresh (manual + interval overlap)
+    if (busyRef.current) {
+      return;
     }
-    let anyTruncated = false;
-    for (const { category, result } of batches) {
-      for (const event of result.events) {
-        const row = toRow(event);
-        rowsRef.current.set(row.key, row);
+    busyRef.current = true;
+    try {
+      const batches = await Promise.all(
+        TIMELINE_CATEGORIES.map((category) =>
+          fetchCategory(category, sinceRef.current[category]).then((result) => ({
+            category,
+            result,
+          })),
+        ),
+      );
+      let anyTruncated = false;
+      for (const { category, result } of batches) {
+        for (const event of result.events) {
+          const row = toRow(event);
+          rowsRef.current.set(row.key, row);
+        }
+        if (!result.failed && result.events.length > 0) {
+          const newest = result.events.reduce((acc, event) =>
+            (event['@timestamp'] ?? '') > (acc['@timestamp'] ?? '') ? event : acc,
+          );
+          sinceRef.current[category] = newest['@timestamp'];
+        }
+        if (!result.atEnd) {
+          anyTruncated = true;
+        }
       }
-      if (!result.failed && result.events.length > 0) {
-        const newest = result.events.reduce((acc, event) =>
-          (event['@timestamp'] ?? '') > (acc['@timestamp'] ?? '') ? event : acc,
-        );
-        sinceRef.current[category] = newest['@timestamp'];
+      // Latch: once a page was truncated, older skipped events can never
+      // arrive on later polls — the notice must not clear on a quiet one.
+      setTruncated((prev) => prev || anyTruncated);
+      const merged = [...rowsRef.current.values()].sort((a, b) => {
+        if (a.timestamp > b.timestamp) return -1;
+        if (a.timestamp < b.timestamp) return 1;
+        return 0;
+      });
+      const kept = merged.slice(0, MAX_ROWS);
+      if (merged.length > kept.length) {
+        const keepKeys = new Set(kept.map((row) => row.key));
+        for (const key of rowsRef.current.keys()) {
+          if (!keepKeys.has(key)) {
+            rowsRef.current.delete(key);
+          }
+        }
       }
-      if (!result.atEnd) {
-        anyTruncated = true;
-      }
+      setRows(kept);
+      setLoading(false);
+    } finally {
+      busyRef.current = false;
     }
-    setTruncated(anyTruncated);
-    const merged = [...rowsRef.current.values()].sort((a, b) => {
-      if (a.timestamp > b.timestamp) return -1;
-      if (a.timestamp < b.timestamp) return 1;
-      return 0;
-    });
-    setRows(merged.slice(0, MAX_ROWS));
-    setLoading(false);
   }, []);
 
   useEffect(() => {

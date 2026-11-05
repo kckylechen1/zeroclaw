@@ -1016,7 +1016,11 @@ async fn s2_wire_events_land_in_structured_log_without_content() {
             Err(_elapsed) => {}
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                panic!("broadcast hook replaced mid-test")
+                // The hook locks cover the api.rs broadcast tests, but
+                // `run_gateway`-based tests install the hook without them.
+                // Resubscribe and keep draining; events buffered on the old
+                // sender are lost, which the deadline treats as a failure.
+                rx = zeroclaw_log::subscribe_or_install();
             }
         }
         let terminals = collected

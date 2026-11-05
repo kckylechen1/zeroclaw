@@ -693,7 +693,12 @@ pub(super) fn finish(
         // Legacy turns carry no S2 journal entry (and legacy callers may send
         // no id at all) — event() could not record them, so the terminal
         // lifecycle log happens here (#564). Identities only, never content.
-        log_terminal(conversation.key(), request, turn, outcome);
+        // A journal-rejected S2 request (redacted session) also lands here,
+        // but its stored identity is the INTERNAL receipt key — not
+        // client-facing — so it is logged without a request id rather than
+        // putting the journal namespace into the timeline.
+        let client_request = request.filter(|id| !id.starts_with("tc1:"));
+        log_terminal(conversation.key(), client_request, turn, outcome);
     }
 }
 
