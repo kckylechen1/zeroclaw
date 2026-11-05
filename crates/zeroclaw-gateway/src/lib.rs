@@ -1261,6 +1261,17 @@ pub async fn run_gateway(
     let broadcast_hook_guard =
         zeroclaw_runtime::observability::set_scoped_broadcast_hook(broadcast_layer);
 
+    // The hook swap itself is what broadcast-consuming unit tests race
+    // against, so the test-only lock wraps ONLY the swap (holding a
+    // parking_lot guard across awaits would make this future !Send). A unit
+    // test holding the lock for its duration therefore never observes a
+    // mid-test sender replacement. No-op in production builds.
+    #[cfg(test)]
+    {
+        let _test_gateway_start_guard = TEST_GATEWAY_START_LOCK.lock();
+        zeroclaw_log::set_broadcast_hook(event_tx.clone());
+    }
+    #[cfg(not(test))]
     zeroclaw_log::set_broadcast_hook(event_tx.clone());
 
     // Bound into AppState. Not a broadcaster — the broadcaster is the
@@ -2944,6 +2955,14 @@ async fn handle_pair_code(State(state): State<AppState>) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests;
+
+/// Test-only: a full `run_gateway` start replaces the process-global log
+/// broadcast hook. Unit tests that subscribe the broadcast and drive turns
+/// (see ws::device_tests::turn_control_tests) take this lock so a concurrent
+/// gateway start cannot swap the sender under them. Compiled out of
+/// production builds.
+#[cfg(test)]
+pub(crate) static TEST_GATEWAY_START_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 #[cfg(test)]
 mod accept_error_tests {

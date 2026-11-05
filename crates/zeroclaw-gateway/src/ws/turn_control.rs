@@ -558,6 +558,15 @@ pub(super) fn handle(
 }
 
 impl Store {
+    /// True when the journal holds any entry (live or tombstoned) for this
+    /// request identity. Receipt keys are length-delimited hashes minted at
+    /// admission, so membership is an EXACT ownership test — unlike a string
+    /// prefix, it cannot misclassify a caller-chosen legacy id that merely
+    /// starts with the journal namespace.
+    pub(crate) fn owns_request(&self, request: &str) -> bool {
+        self.entries.lock().contains_key(request)
+    }
+
     /// Session deletion removes transport-held content too. Keep only the
     /// opaque receipt key as a tombstone: deleting a receipt must not let the
     /// same accepted request execute again. Admission and this hook share the
@@ -693,11 +702,12 @@ pub(super) fn finish(
         // Legacy turns carry no S2 journal entry (and legacy callers may send
         // no id at all) — event() could not record them, so the terminal
         // lifecycle log happens here (#564). Identities only, never content.
-        // A journal-rejected S2 request (redacted session) also lands here,
-        // but its stored identity is the INTERNAL receipt key — not
-        // client-facing — so it is logged without a request id rather than
-        // putting the journal namespace into the timeline.
-        let client_request = request.filter(|id| !id.starts_with("tc1:"));
+        // A journal-REJECTED S2 request (redacted session) also lands here,
+        // but its stored identity is the internal receipt key, not a
+        // client-chosen id — journal ownership (exact key membership, never a
+        // string prefix) decides which ids may surface in the timeline.
+        let client_request =
+            request.filter(|id| !state.ws_conversations.turn_control.owns_request(id));
         log_terminal(conversation.key(), client_request, turn, outcome);
     }
 }

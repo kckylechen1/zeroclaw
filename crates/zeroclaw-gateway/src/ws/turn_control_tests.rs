@@ -926,13 +926,18 @@ async fn s2_wire_attachments_reuse_scoped_handles_with_legacy_denials() {
 /// #564 brain monitor: S2 wire events land in the structured log with full
 /// identities and NO content (canary privacy proof). The in-process log
 /// broadcast is the capture seam — the same feed `/api/logs` persists.
+/// Holding the gateway-start lock across the test's awaits is the point —
+/// it serializes this whole test against any full-gateway start's hook swap.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn s2_wire_events_land_in_structured_log_without_content() {
     // Serialize against the global log plumbing: other tests in this binary
     // take the same guards and one of them clears the broadcast hook, which
-    // would Close this receiver mid-collection.
+    // would Close this receiver mid-collection. The gateway-start lock also
+    // covers full `run_gateway` tests, whose hook swap takes no log locks.
     let _writer_guard = zeroclaw_log::__private_test_writer_lock();
     let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+    let _gateway_start_guard = crate::TEST_GATEWAY_START_LOCK.lock();
     // record! fans out through the global tracing subscriber; tests must
     // install the capture layer (idempotent across parallel tests) before
     // subscribing the broadcast, or every event drops into the no-op default.
