@@ -998,9 +998,35 @@ async fn s2_wire_events_land_in_structured_log_without_content() {
     assert_eq!(events.last().unwrap()["event"]["outcome"], "aborted");
 
     // A LEGACY turn (unnegotiated socket, caller-chosen id) must terminal-log
-    // too — finish() records it when no S2 journal entry exists.
-    let legacy_id = uuid::Uuid::new_v4().to_string();
-    let mut legacy_socket = fixture.socket(OWNER_TOKEN).await;
+    // too — finish() records it when no S2 journal entry exists. Its id
+    // deliberately equals the FIRST S2 admission's journal receipt key,
+    // computable by any caller (all hash inputs are client-known): ownership
+    // must key on the TURN match, so this different turn keeps its id.
+    let receipt_key = super::super::super::turn_control::key(
+        &format!(
+            "{}{SESSION}\u{1f}device-agent",
+            super::super::super::GW_SESSION_PREFIX
+        ),
+        &zeroclaw_config::tokens::hash_token(OWNER_TOKEN),
+        &epoch,
+        &first,
+    );
+    let legacy_id = receipt_key;
+    // Different session: the S2 admission recorded a session-scoped receipt
+    // under this key in SESSION, which would otherwise answer "duplicate".
+    // The owner (pairing) token is not bridge-session-bound, so a second
+    // session is admissible.
+    let (status, mut legacy_socket) = DeviceWire::upgrade(
+        fixture.address,
+        "agent=device-agent&session_id=monitor-cross-session",
+        OWNER_TOKEN,
+    )
+    .await;
+    assert_eq!(status, 101);
+    legacy_socket
+        .send(json!({"type":"connect"}))
+        .await;
+    legacy_socket.until("connected").await;
     legacy_socket
         .send(json!({"type":"message", "id": legacy_id, "content":"legacy-canary-content"}))
         .await;
@@ -1126,7 +1152,17 @@ async fn s2_wire_events_land_in_structured_log_without_content() {
         })
         .expect("legacy terminal event must be logged");
     assert_eq!(legacy_terminal["attributes"]["outcome"], "done");
-    assert_eq!(legacy_terminal["attributes"]["session_id"], SESSION);
+    // The cross-session legacy turn keeps its caller-chosen id — even though
+    // that id is byte-identical to the FIRST admission's journal receipt key
+    // — because ownership is turn-scoped, and logs its own session id.
+    assert_eq!(
+        legacy_terminal["attributes"]["request_id"],
+        legacy_id.as_str()
+    );
+    assert_eq!(
+        legacy_terminal["attributes"]["session_id"],
+        "monitor-cross-session"
+    );
     assert_eq!(legacy_terminal["attributes"]["agent"], "device-agent");
 
     let negotiated = collected

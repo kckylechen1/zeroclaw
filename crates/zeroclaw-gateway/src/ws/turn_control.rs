@@ -132,7 +132,9 @@ fn log_terminal(conversation: &str, request: Option<&str>, turn: &str, outcome: 
     );
 }
 
-fn key(conversation: &str, subject: &str, epoch: &str, request: &str) -> String {
+/// Length-delimited receipt key minting; also exercised directly by the
+/// cross-session monitor test (a caller can compute their own key).
+pub(super) fn key(conversation: &str, subject: &str, epoch: &str, request: &str) -> String {
     // Length-delimited identity cannot collide with another principal or with
     // the legacy caller-chosen request namespace by accidental concatenation.
     let mut hash = Sha256::new();
@@ -558,13 +560,18 @@ pub(super) fn handle(
 }
 
 impl Store {
-    /// True when the journal holds any entry (live or tombstoned) for this
-    /// request identity. Receipt keys are length-delimited hashes minted at
-    /// admission, so membership is an EXACT ownership test — unlike a string
-    /// prefix, it cannot misclassify a caller-chosen legacy id that merely
-    /// starts with the journal namespace.
-    pub(crate) fn owns_request(&self, request: &str) -> bool {
-        self.entries.lock().contains_key(request)
+    /// True when the journal holds an entry that plausibly belongs to THIS
+    /// turn's admission: a live entry with a matching turn, or a redacted
+    /// tombstone (whose turn was erased). Global key membership alone would
+    /// misclassify a caller-chosen legacy id that DELIBERATELY equals another
+    /// session's receipt key — the key's hash inputs are all known to the
+    /// caller, so no collision search is needed — hence the turn match. A
+    /// redacted tombstone conservatively suppresses (its id is internal).
+    pub(crate) fn owns_request_for_turn(&self, request: &str, turn: &str) -> bool {
+        self.entries
+            .lock()
+            .get(request)
+            .is_some_and(|entry| entry.redacted || entry.turn == turn)
     }
 
     /// Session deletion removes transport-held content too. Keep only the
@@ -704,10 +711,14 @@ pub(super) fn finish(
         // lifecycle log happens here (#564). Identities only, never content.
         // A journal-REJECTED S2 request (redacted session) also lands here,
         // but its stored identity is the internal receipt key, not a
-        // client-chosen id — journal ownership (exact key membership, never a
-        // string prefix) decides which ids may surface in the timeline.
-        let client_request =
-            request.filter(|id| !state.ws_conversations.turn_control.owns_request(id));
+        // client-chosen id — journal ownership scoped to THIS turn decides
+        // which ids may surface in the timeline (see owns_request_for_turn).
+        let client_request = request.filter(|id| {
+            !state
+                .ws_conversations
+                .turn_control
+                .owns_request_for_turn(id, turn)
+        });
         log_terminal(conversation.key(), client_request, turn, outcome);
     }
 }
