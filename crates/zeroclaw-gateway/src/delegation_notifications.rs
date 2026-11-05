@@ -42,10 +42,6 @@ pub(crate) type StatusFetch<'a> = &'a (
 const DELEGATION: &str = "delegation";
 const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 const PAGE_SIZE: usize = 500;
-/// Hard bound on rows walked per sweep before the rotation wraps, so
-/// sustained full pages above the cursor still guarantee every row a visit
-/// within a bounded number of passes.
-const SWEEP_ROW_BOUND: usize = 2_000;
 
 /// Destination configuration owns the target; the startup data root owns this
 /// gateway's stores (a changed root waits for the owning gateway to restart).
@@ -93,14 +89,15 @@ fn owning_agent(source_id: &str) -> &str {
         .map_or("", |(agent, _)| agent)
 }
 
-/// Scan position across passes: `cursor` is the last rowid examined, and
-/// `budget` bounds how many more rows THIS sweep may walk before wrapping —
-/// a wrap happens on a short page (natural end) OR on budget exhaustion, so
-/// sustained full pages above the cursor can never starve earlier rows
-/// forever. Tests shrink `page_size` to exercise pagination directly.
+/// Scan position across passes: `cursor` is the last rowid examined; a wrap
+/// happens ONLY on a short page (natural end of the rowid order). Monotone
+/// consumption cannot starve any row: new claims always land at rowids ABOVE
+/// every existing one, so unvisited older rows are always consumed before
+/// newer inserts, and the sweep reaches its natural end in
+/// ceil(total/page_size) passes. (A restart resets the cursor — coverage is
+/// delayed, never lost.) Tests shrink `page_size` to exercise pagination.
 pub(crate) struct Rotation {
     pub cursor: i64,
-    pub budget: usize,
     pub page_size: usize,
 }
 
@@ -108,18 +105,38 @@ impl Default for Rotation {
     fn default() -> Self {
         Self {
             cursor: 0,
-            budget: SWEEP_ROW_BOUND,
             page_size: PAGE_SIZE,
         }
     }
 }
 
-/// The persistent notified marker: `outcome \x1f bridge \x1f recipient`.
-/// Destination-scoped, so changing the target legitimately re-notifies the
-/// new destination (the documented contract) while an unchanged destination
-/// is suppressed past the outbox's own retention.
-fn marker_for(outcome: &str, bridge: &str, recipient: &str) -> String {
+/// The persistent notified marker: a bounded, `\x1e`-separated list of
+/// `outcome \x1f bridge \x1f recipient` entries (most recent last). Every
+/// destination this outcome was already notified to is remembered, so a
+/// target flip A→B→A does not re-notify A after outbox retention evicted A's
+/// receipt — while a genuinely new destination still gets its notice. The
+/// list is capped (oldest entries dropped) so a lifetime of target churn
+/// cannot grow it unboundedly.
+const MARKER_LIST_CAP: usize = 8;
+
+fn marker_entry(outcome: &str, bridge: &str, recipient: &str) -> String {
     format!("{outcome}\u{1f}{bridge}\u{1f}{recipient}")
+}
+
+/// True when the marker list already contains `entry`.
+fn marker_contains(list: &str, entry: &str) -> bool {
+    list.split('\u{1e}').any(|item| item == entry)
+}
+
+/// Append `entry` to the list, dropping the oldest beyond the cap.
+fn marker_push(list: &str, entry: &str) -> String {
+    let mut items: Vec<&str> = list
+        .split('\u{1e}')
+        .filter(|item| !item.is_empty())
+        .collect();
+    items.push(entry);
+    let start = items.len().saturating_sub(MARKER_LIST_CAP);
+    items[start..].join("\u{1e}")
 }
 
 /// One reconcile pass: walk ONE bounded page of dispatch bindings past the
@@ -150,16 +167,15 @@ pub(crate) async fn reconcile(
         let sessions = SqliteSessionBackend::new(data_dir)?;
         sessions.list_dispatch_bindings_page(rotation.cursor, rotation.page_size)?
     };
-    if page.len() < rotation.page_size || rotation.budget <= page.len() {
+    if page.len() < rotation.page_size {
         rotation.cursor = 0;
-        rotation.budget = SWEEP_ROW_BOUND;
     } else {
         rotation.cursor = page.last().expect("full page is nonempty").rowid;
-        rotation.budget -= page.len();
     }
     let outbox = BridgeOutbox::shared(data_dir)?;
     let mut notified = 0;
     let mut marks: Vec<(i64, String)> = Vec::new();
+    let mut enqueue_failure: Option<anyhow::Error> = None;
     for row in &page {
         if stop.is_cancelled() {
             break;
@@ -215,10 +231,15 @@ pub(crate) async fn reconcile(
             .result_notification
             .as_ref()
             .expect("eligible() checked the target");
-        // Destination-scoped suppression: only skip when THIS destination was
-        // already notified of THIS outcome.
-        let marker = marker_for(outcome, &target.bridge, &target.recipient);
-        if row.notified_outcome.as_deref() == Some(marker.as_str()) {
+        // Destination-scoped suppression: skip only when THIS outcome was
+        // already notified to THIS destination (across the whole remembered
+        // target history, so A→B→A stays silent after retention eviction).
+        let entry = marker_entry(outcome, &target.bridge, &target.recipient);
+        if row
+            .notified_outcome
+            .as_deref()
+            .is_some_and(|list| marker_contains(list, &entry))
+        {
             continue;
         }
         let content = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
@@ -229,7 +250,10 @@ pub(crate) async fn reconcile(
                 ("dispatch", short(&row.dispatch_id)),
             ],
         );
-        outbox.enqueue_source(
+        // An enqueue failure (e.g. outbox capacity) must not discard the
+        // markers of rows already enqueued this pass: record the error, stop
+        // enqueueing further rows, and still flush what succeeded.
+        if let Err(error) = outbox.enqueue_source(
             &target.bridge,
             &target.recipient,
             target.thread_id.as_deref(),
@@ -237,19 +261,32 @@ pub(crate) async fn reconcile(
             DELEGATION,
             &source_identity(&row.agent_alias, &row.request_id),
             outcome,
-        )?;
-        marks.push((row.rowid, marker));
+        ) {
+            enqueue_failure = Some(error);
+            break;
+        }
+        marks.push((row.rowid, entry));
         notified += 1;
     }
     // Batched marker persistence: one short-lived handle per pass, after the
-    // awaits. A crash between enqueue and this write is bounded by the outbox
-    // dedup window (documented residual: at most one re-notification per
-    // outcome after retention eviction, requiring a crash in that window).
+    // awaits — reached on success, cancellation AND enqueue failure alike.
+    // A crash between enqueue and this write is bounded by the outbox dedup
+    // window (documented residual: at most one re-notification per outcome
+    // after retention eviction, requiring a crash in that window).
     if !marks.is_empty() {
         let sessions = SqliteSessionBackend::new(data_dir)?;
-        for (rowid, marker) in marks {
-            sessions.mark_binding_notified(rowid, &marker)?;
+        for (rowid, entry) in &marks {
+            let existing = sessions
+                .list_dispatch_bindings_page(0, i64::MAX as usize)
+                .ok()
+                .and_then(|rows| rows.into_iter().find(|candidate| candidate.rowid == *rowid))
+                .and_then(|candidate| candidate.notified_outcome);
+            let merged = marker_push(existing.as_deref().unwrap_or(""), entry);
+            sessions.mark_binding_notified(*rowid, &merged)?;
         }
+    }
+    if let Some(error) = enqueue_failure {
+        return Err(error);
     }
     Ok(notified)
 }
@@ -565,7 +602,6 @@ mod tests {
         let queried = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut rotation = Rotation {
             cursor: 0,
-            budget: 2_000,
             page_size: 2,
         };
         let counter = std::sync::Arc::clone(&queried);
@@ -612,22 +648,67 @@ mod tests {
                 .iter()
                 .any(|row| row["source_id"].as_str().unwrap().contains("req-stale"))
         );
+    }
 
-        // Budget exhaustion wraps even on sustained full pages.
-        let mut rotation = Rotation {
-            cursor: 0,
-            budget: 1,
-            page_size: 2,
-        };
-        // Mark everything already notified so enqueues stop; only rotation matters.
-        reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
-            .await
-            .unwrap();
-        assert_eq!(
-            rotation.cursor, 0,
-            "budget exhaustion wraps despite a full page"
+    #[tokio::test]
+    async fn target_flip_a_to_b_to_a_stays_silent_after_retention_loss() {
+        let (tmp, config) = fixture_config();
+        let shared = RwLock::new(config.clone());
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        seed_binding(
+            &backend,
+            &shared.read(),
+            "butler",
+            "req-flip",
+            "disp-flip",
+            None,
         );
-        assert_eq!(rotation.budget, 2_000, "budget resets on wrap");
+        let stop = tokio_util::sync::CancellationToken::new();
+
+        async fn notify_once(
+            config: Config,
+            tmp: &tempfile::TempDir,
+            stop: &tokio_util::sync::CancellationToken,
+        ) -> usize {
+            let shared = RwLock::new(config);
+            let mut rotation = Rotation::default();
+            // Evict the outbox before every observation: only the marker
+            // list can suppress re-notification. Ensure the schema exists
+            // first (the very first eviction precedes any enqueue).
+            BridgeOutbox::shared(tmp.path()).unwrap();
+            let path = tmp.path().join("sessions").join("bridge_outbox.db");
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("DELETE FROM bridge_outbox", []).unwrap();
+            drop(conn);
+            reconcile(&shared, tmp.path(), stop, &mut rotation, &|a, d, r| {
+                completed_fetch(a, d, r)
+            })
+            .await
+            .unwrap()
+        }
+
+        // A → B → A with eviction each time: A once, B once, A silent.
+        assert_eq!(
+            notify_once(config.clone(), &tmp, &stop).await,
+            1,
+            "A notified"
+        );
+        let mut to_b = config.clone();
+        to_b.tachi
+            .result_notification
+            .as_mut()
+            .expect("target")
+            .recipient = "owner-b".into();
+        assert_eq!(
+            notify_once(to_b, &tmp, &stop).await,
+            1,
+            "B notified (new destination)"
+        );
+        assert_eq!(
+            notify_once(config, &tmp, &stop).await,
+            0,
+            "A stays silent: remembered across the flip despite eviction"
+        );
     }
 
     #[tokio::test]
