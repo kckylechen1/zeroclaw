@@ -99,13 +99,21 @@ fn owning_agent(source_id: &str) -> &str {
 pub(crate) struct Rotation {
     pub cursor: i64,
     pub page_size: usize,
+    /// Full pages seen since the last wrap. Even under sustained churn (a
+    /// full page of new bindings every pass), a forced rewind every
+    /// REWIND_PASSES guarantees rows near the head are RE-observed — a
+    /// binding first seen Working must be asked again after it completes.
+    pub full_pages_since_wrap: usize,
 }
+
+const REWIND_PASSES: usize = 8;
 
 impl Default for Rotation {
     fn default() -> Self {
         Self {
             cursor: 0,
             page_size: PAGE_SIZE,
+            full_pages_since_wrap: 0,
         }
     }
 }
@@ -169,8 +177,15 @@ pub(crate) async fn reconcile(
     };
     if page.len() < rotation.page_size {
         rotation.cursor = 0;
+        rotation.full_pages_since_wrap = 0;
+    } else if rotation.full_pages_since_wrap >= REWIND_PASSES {
+        // Forced rewind: sustained full pages would otherwise postpone the
+        // natural wrap forever, and head rows would never be RE-observed.
+        rotation.cursor = 0;
+        rotation.full_pages_since_wrap = 0;
     } else {
         rotation.cursor = page.last().expect("full page is nonempty").rowid;
+        rotation.full_pages_since_wrap += 1;
     }
     let outbox = BridgeOutbox::shared(data_dir)?;
     let mut notified = 0;
@@ -603,6 +618,7 @@ mod tests {
         let mut rotation = Rotation {
             cursor: 0,
             page_size: 2,
+            full_pages_since_wrap: 0,
         };
         let counter = std::sync::Arc::clone(&queried);
         let fetch =
@@ -647,6 +663,65 @@ mod tests {
             !rows
                 .iter()
                 .any(|row| row["source_id"].as_str().unwrap().contains("req-stale"))
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_rewind_reobserves_head_rows_under_sustained_full_pages() {
+        let (tmp, config) = fixture_config();
+        let shared = RwLock::new(config);
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        // 18 bindings with page_size 2 = 9 full pages, never a short page
+        // until past the end — the forced rewind must fire first.
+        for index in 0..18 {
+            seed_binding(
+                &backend,
+                &shared.read(),
+                "butler",
+                &format!("req-r{index:02}"),
+                &format!("disp-r{index:02}"),
+                None,
+            );
+        }
+        let stop = tokio_util::sync::CancellationToken::new();
+        let queries = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut rotation = Rotation {
+            cursor: 0,
+            page_size: 2,
+            full_pages_since_wrap: 0,
+        };
+        // Every dispatch reports terminal — one notification per row.
+        let counter = std::sync::Arc::clone(&queries);
+        let fetch =
+            move |_agent: &str, _dispatch: &str, _route: &zeroclaw_config::tachi::TachiConfig| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok(status(RunState::Completed)) }.boxed()
+            };
+        // Nine full pages: pages 1-8 advance (counter 1..8), page 9 is full
+        // AND the counter is at the rewind threshold → forced wrap.
+        for pass in 0..9 {
+            reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+                .await
+                .unwrap();
+            if pass < 8 {
+                assert!(rotation.cursor > 0, "pages 1-8 advance");
+            }
+        }
+        assert_eq!(rotation.cursor, 0, "the 9th full page forces a rewind");
+        assert_eq!(rotation.full_pages_since_wrap, 0);
+        assert_eq!(
+            queries.load(std::sync::atomic::Ordering::SeqCst),
+            18,
+            "every row covered exactly once before the rewind"
+        );
+        // The next pass re-observes from the top — head rows are asked again.
+        reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+            .await
+            .unwrap();
+        assert_eq!(
+            queries.load(std::sync::atomic::Ordering::SeqCst),
+            20,
+            "the first two rows are RE-observed after the rewind"
         );
     }
 

@@ -273,6 +273,21 @@ impl SqliteSessionBackend {
         Ok(rows)
     }
 
+    /// The current notified-marker history of one binding (by rowid), or
+    /// `None` when the row carries no marker. Read errors propagate — a
+    /// lost-history overwrite is worse than a skipped flush.
+    pub fn binding_notified_marker(&self, rowid: i64) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT notified_outcome FROM session_delegations WHERE rowid = ?1",
+            params![rowid],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("reading a delegation notification marker")
+    }
+
     /// Persist the outcome this binding's owner was already notified about.
     /// The marker survives outbox retention (the outbox may evict its dedup
     /// receipts; the delegation claim never expires), so a long-terminal run

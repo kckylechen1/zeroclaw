@@ -48,11 +48,17 @@ each dispatch for its status, and enqueues one notice per terminal outcome
 into the same bridge outbox the cron path uses. Deduplication is twofold: the
 outbox's canonical `(source_kind, source_id, event_id)` identity — where
 `source_id` scopes by both owning agent and request — and a `notified_outcome`
-marker persisted on the delegation claim itself (destination-scoped), which
-outlives the outbox's dedup-retention window so an evicted receipt cannot
-resurrect a notice — the one residual is a crash in the small window between
-enqueue and the marker write, which can re-notify once after retention
-eviction.
+marker persisted on the delegation claim itself (a bounded history of the
+destinations this outcome was already notified to), which outlives the
+outbox's dedup-retention window so an evicted receipt cannot resurrect a
+notice. Residuals, stated plainly: a crash or marker-write failure in the
+small window between enqueue and the marker write can re-notify once after
+retention eviction; more than eight distinct destination switches on one
+binding start evicting the oldest remembered destinations (a switch back to
+an evicted destination re-notifies it); and a binding table that grows by a
+full page of new claims every minute forever would delay deep rows'
+observations — the forced rewind keeps the head re-observed, not an
+unbounded tail.
 Re-observing the same outcome never queues a second notice **for the same
 destination**; changing `bridge`/`recipient` to a new target legitimately
 notifies the new target again, and a *different* outcome on the same request
