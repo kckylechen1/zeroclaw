@@ -908,3 +908,4 @@ turn-max-iterations-reached = *ターンを停止しました: ツールイテ�
 
 acp-bridge-allow-once = 今回のみ許可
 acp-bridge-reject-once = 今回のみ拒否
+delegation-result-notice = 委派タスク {$request} が結果 {$outcome} で終了しました。エージェントに確認するか、dispatch {$dispatch} の tachi_result を参照してください。

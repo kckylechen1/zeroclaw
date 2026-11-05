@@ -28,6 +28,49 @@ still running or waiting. It is not a push stream or a background notification.
 Use immediate status reads to keep chat and voice responsive.
 Status and watch preserve Tachi's `read_projection`: a canonical working receipt
 can coexist with orphaned execution, unavailable control, and unknown outcome.
+
+### Unattended terminal notices
+
+Delegated runs that finish while nobody is watching are delivered through the
+existing attention pipeline (#63), not a new one. With an explicit destination
+configured:
+
+```toml
+[tachi.result_notification]
+bridge = "telegram" # Must already exist in gateway.bridges.
+recipient = "<owner-chat-id>"
+# thread_id = "<optional-topic-id>"
+```
+
+the gateway walks the stored request/dispatch bindings once a minute, asks
+each dispatch for its status, and enqueues one notice per terminal outcome
+(`completed`, `failed`, `canceled`, or a `partial` closure that needs input)
+into the same bridge outbox the cron path uses. Deduplication is twofold: the
+outbox's canonical `(source_kind, source_id, event_id)` identity, where
+`source_id` scopes by both owning agent and request, and a `notified_outcome`
+marker persisted on the delegation claim itself (a bounded history of the
+destinations this outcome was already notified to), which outlives the
+outbox's dedup-retention window so an evicted receipt cannot resurrect a
+notice. Residuals, stated plainly: a crash or marker-write failure in the
+small window between enqueue and the marker write can re-notify once after
+retention eviction; more than eight distinct destination switches on one
+binding start evicting the oldest remembered destinations (a switch back to
+an evicted destination re-notifies it); and a binding table that grows by a
+full page of new claims every minute forever would delay deep rows'
+observations: the forced rewind keeps the head re-observed, not an
+unbounded tail.
+Re-observing the same outcome never queues a second notice **for the same
+destination**; changing `bridge`/`recipient` to a new target legitimately
+notifies the new target again, and a *different* outcome on the same request
+is always a new event. `thread_id` is not part of the outbox identity: editing
+only the thread withholds (not redirects) still-undelivered notices.
+Observation also honors route provenance: a dispatch is queried only when the
+current `[tachi]` route fingerprint matches the binding's stored digest (the
+same `route_conflict` protection the interactive tools apply), and a failing
+status query is an unknown outcome that never notifies; execution truth stays
+with Tachi's receipts. Notices are withheld when the agent is disabled or the
+destination stops matching, and delivery follows the attention policy (quiet
+hours, snooze, mute) like any other source.
 These recovery facts do not imply completion or trigger a replacement launch.
 
 For a successful MCP response, the first `content` block is Tachi's canonical

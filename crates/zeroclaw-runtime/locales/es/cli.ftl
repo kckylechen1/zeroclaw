@@ -909,3 +909,4 @@ turn-max-iterations-reached = *Turno detenido: se alcanzó el máximo de iteraci
 
 acp-bridge-allow-once = Permitir una vez
 acp-bridge-reject-once = Rechazar una vez
+delegation-result-notice = La tarea delegada {$request} terminó con resultado {$outcome}. Pregunta al agente o consulta tachi_result para el despacho {$dispatch}.

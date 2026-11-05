@@ -22,6 +22,7 @@ pub mod api_soul;
 pub mod api_user_model;
 mod attention;
 pub mod auth_rate_limit;
+mod delegation_notifications;
 #[cfg(feature = "nodes")]
 pub mod device_identity;
 #[cfg(feature = "nodes")]
@@ -1431,6 +1432,8 @@ pub async fn run_gateway(
         state.path_prefix.clone(),
         state.shutdown_tx.subscribe(),
     );
+    let delegation_notifications_task =
+        delegation_notifications::start(Arc::clone(&state.config), state.shutdown_tx.subscribe());
 
     // Build router with middleware
     let inner = Router::new()
@@ -1829,6 +1832,7 @@ pub async fn run_gateway(
     }
 
     drop(review_notifications_task);
+    drop(delegation_notifications_task);
     drop(broadcast_hook_guard);
     Ok(())
 }

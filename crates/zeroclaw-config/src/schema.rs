@@ -16637,6 +16637,18 @@ impl Config {
                 );
             }
         }
+        if let Some(target) = &self.tachi.result_notification {
+            if let Err(reason) = target.validate() {
+                validation_bail!(InvalidFormat, "tachi.result_notification", "{reason}");
+            }
+            if !self.gateway.bridges.contains_key(&target.bridge) {
+                validation_bail!(
+                    InvalidFormat,
+                    "tachi.result_notification.bridge",
+                    "delegation result notification bridge must be configured in gateway.bridges"
+                );
+            }
+        }
         if let Err(reason) = crate::node_allowlist::validate_config(self) {
             validation_bail!(InvalidFormat, "allowed_tools", "{reason}");
         }

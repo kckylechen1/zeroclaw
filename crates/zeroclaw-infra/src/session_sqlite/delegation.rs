@@ -28,8 +28,33 @@ pub(super) fn migrate_route_provenance(conn: &mut Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_session_delegations_request ON session_delegations(request_id)",
         [],
     ).context("indexing delegation request lookup")?;
+    let has_notified: bool = tx.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('session_delegations') WHERE name = 'notified_outcome'",
+        [],
+        |row| row.get(0),
+    ).context("inspecting delegation notification schema")?;
+    if !has_notified {
+        tx.execute(
+            "ALTER TABLE session_delegations ADD COLUMN notified_outcome TEXT",
+            [],
+        )
+        .context("adding delegation notification schema")?;
+    }
     tx.commit()
         .context("committing delegation route provenance schema")
+}
+
+/// One dispatch-binding row for the (#63) unattended observer.
+/// `agent_alias` is the OWNING alias: legacy scopes (`alias:<64-hex>`)
+/// are parsed down to the alias so agent-eligibility lookups match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchBindingRow {
+    pub rowid: i64,
+    pub agent_alias: String,
+    pub request_id: String,
+    pub dispatch_id: String,
+    pub route_digest: Option<String>,
+    pub notified_outcome: Option<String>,
 }
 
 fn legacy_route<'a>(scope: &'a str, agent_alias: &str) -> Option<&'a str> {
@@ -194,6 +219,101 @@ impl SqliteSessionBackend {
                 "delegation binding rejected: missing claim or conflicting payload/route/dispatch"
             );
         }
+        Ok(())
+    }
+
+    /// One page of dispatch bindings strictly after `after_rowid`, ascending.
+    /// Pagination is by the implicit rowid; the observer rotates its cursor
+    /// across passes so a bounded page can never permanently starve later
+    /// rows (delegation claims are permanent and never TTL-evicted).
+    pub fn list_dispatch_bindings_page(
+        &self,
+        after_rowid: i64,
+        limit: usize,
+    ) -> Result<Vec<DispatchBindingRow>> {
+        let conn = self.conn.lock();
+        let mut query = conn.prepare(
+            "SELECT rowid, agent_alias, request_id, dispatch_id, route_digest, notified_outcome
+             FROM session_delegations
+             WHERE dispatch_id IS NOT NULL AND rowid > ?1
+             ORDER BY rowid LIMIT ?2",
+        )?;
+        let rows = query
+            .query_map(params![after_rowid, limit as i64], |row| {
+                let scope: String = row.get(1)?;
+                let stored_digest: Option<String> = row.get(4)?;
+                // Legacy route scope (`alias:<64-hex>`): report the owner AND
+                // recover the route fact from the suffix — legacy rows carry
+                // a NULL route_digest column (the same recovery find_binding
+                // performs for the interactive tools).
+                let legacy = scope.split_once(':').filter(|(_, suffix)| {
+                    suffix.len() == 64
+                        && suffix
+                            .bytes()
+                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                });
+                let (owner, route_digest) = match legacy {
+                    Some((alias, suffix)) => (
+                        alias.to_string(),
+                        stored_digest.or_else(|| Some(suffix.to_string())),
+                    ),
+                    None => (scope.clone(), stored_digest),
+                };
+                Ok(DispatchBindingRow {
+                    rowid: row.get(0)?,
+                    agent_alias: owner,
+                    request_id: row.get(2)?,
+                    dispatch_id: row.get(3)?,
+                    route_digest,
+                    notified_outcome: row.get(5)?,
+                })
+            })
+            .context("listing delegation dispatch bindings")?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The current notified-marker history of one binding (by rowid), or
+    /// `None` when the row carries no marker. Read errors propagate — a
+    /// lost-history overwrite is worse than a skipped flush.
+    pub fn binding_notified_marker(&self, rowid: i64) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT notified_outcome FROM session_delegations WHERE rowid = ?1",
+            params![rowid],
+            // SQL NULL (never notified) must read as None, not error.
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .context("reading a delegation notification marker")
+        .map(|value| value.flatten())
+    }
+
+    /// The highest binding rowid, or 0 for an empty table. The observer uses
+    /// this at sweep start to distinguish churn (rows appearing beyond the
+    /// sweep's original extent) from a finite table it is simply walking.
+    pub fn max_binding_rowid(&self) -> Result<i64> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM session_delegations",
+            [],
+            |row| row.get(0),
+        )
+        .context("reading the max delegation rowid")
+    }
+
+    /// Persist the outcome this binding's owner was already notified about.
+    /// The marker survives outbox retention (the outbox may evict its dedup
+    /// receipts; the delegation claim never expires), so a long-terminal run
+    /// cannot be re-notified after retention cleanup.
+    pub fn mark_binding_notified(&self, rowid: i64, outcome: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE session_delegations SET notified_outcome = ?2 WHERE rowid = ?1",
+            params![rowid, outcome],
+        )
+        .context("marking delegation notification")?;
         Ok(())
     }
 

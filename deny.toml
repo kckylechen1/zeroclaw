@@ -16,6 +16,10 @@ ignore = [
     # rustls-pemfile -- unmaintained, functionality moved to rustls-pki-types;
     # transitive dep, upstream migration tracked
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive dep awaiting upstream migration to rustls-pki-types" },
+    # pin-utils -- upstream archived 2026-10-01; transitive via async-imap 0.11
+    # with no safe upgrade; advisory recommends core::pin::pin! (Rust 1.68+) as
+    # the replacement, which only async-imap can adopt
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained (archived upstream); transitive via async-imap 0.11; no safe upgrade; advisory replacement core::pin::pin! is upstream's to adopt" },
     # rustls-webpki -- two versions in tree; direct dep bumped in #5786 but a
     # second transitive copy via rumqttc v0.25.1 remains; all advisories below
     # affect only the 0.102.x copy; the 0.103.x copy is patched.
