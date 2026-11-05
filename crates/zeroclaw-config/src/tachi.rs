@@ -452,4 +452,54 @@ mod tests {
         };
         assert_eq!(explicit.resolved_agent_identity("home"), "butler.main");
     }
+
+    #[test]
+    fn result_notification_target_field_rules() {
+        let mut config = enabled();
+        config.result_notification = Some(DelegationNotificationConfig {
+            bridge: "telegram".into(),
+            recipient: "owner-chat".into(),
+            thread_id: None,
+        });
+        assert!(config.validate().is_ok());
+
+        config.result_notification = Some(DelegationNotificationConfig {
+            bridge: " telegram".into(),
+            recipient: "owner".into(),
+            thread_id: None,
+        });
+        assert_eq!(
+            config.validate().unwrap_err().0,
+            "tachi.result_notification",
+            "untrimmed bridge is rejected"
+        );
+
+        config.result_notification = Some(DelegationNotificationConfig {
+            bridge: "telegram".into(),
+            recipient: String::new(),
+            thread_id: None,
+        });
+        assert!(config.validate().is_err(), "empty recipient is rejected");
+
+        config.result_notification = Some(DelegationNotificationConfig {
+            bridge: "telegram".into(),
+            recipient: "owner".into(),
+            thread_id: Some("no\tcontrol".into()),
+        });
+        assert!(
+            config.validate().is_err(),
+            "control characters are rejected"
+        );
+
+        // A disabled section never validates the target.
+        let disabled = TachiConfig {
+            result_notification: Some(DelegationNotificationConfig {
+                bridge: String::new(),
+                recipient: String::new(),
+                thread_id: None,
+            }),
+            ..TachiConfig::default()
+        };
+        assert!(disabled.validate().is_ok());
+    }
 }

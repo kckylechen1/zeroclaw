@@ -175,6 +175,20 @@ fn hash(value: &Value) -> String {
     format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
 }
 
+/// The immutable route provenance fingerprint for a delegation claim: the
+/// Tachi endpoint, the resolved caller identity and the project binding, as
+/// of claim time. Status/result operations refuse a dispatch whose stored
+/// digest differs from the CURRENT route's fingerprint; the #63 unattended
+/// observer reuses this exact function for the same protection.
+#[must_use]
+pub fn route_fingerprint(tachi: &zeroclaw_config::tachi::TachiConfig, agent_alias: &str) -> String {
+    hash(&json!({
+        "endpoint": tachi.endpoint.trim(),
+        "identity": tachi.resolved_agent_identity(agent_alias),
+        "project": tachi.project.as_deref().map(str::trim),
+    }))
+}
+
 #[async_trait]
 impl Tool for TachiDelegationTool {
     fn name(&self) -> &str {
@@ -230,11 +244,7 @@ impl Tool for TachiDelegationTool {
         // fingerprint becomes immutable provenance only when a claim is made;
         // live policy and routing are still resolved afresh on every operation.
         let scope = self.service.agent_alias.clone();
-        let route_digest = hash(&json!({
-            "endpoint": tachi.endpoint.trim(),
-            "identity": tachi.resolved_agent_identity(&self.service.agent_alias),
-            "project":tachi.project.as_deref().map(str::trim),
-        }));
+        let route_digest = route_fingerprint(&tachi, &self.service.agent_alias);
         let start: Option<StartArgs> = if self.action == DelegationAction::Start {
             match serde_json::from_value(args.clone()) {
                 Ok(value) => Some(value),

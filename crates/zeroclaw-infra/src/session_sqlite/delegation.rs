@@ -28,8 +28,33 @@ pub(super) fn migrate_route_provenance(conn: &mut Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_session_delegations_request ON session_delegations(request_id)",
         [],
     ).context("indexing delegation request lookup")?;
+    let has_notified: bool = tx.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('session_delegations') WHERE name = 'notified_outcome'",
+        [],
+        |row| row.get(0),
+    ).context("inspecting delegation notification schema")?;
+    if !has_notified {
+        tx.execute(
+            "ALTER TABLE session_delegations ADD COLUMN notified_outcome TEXT",
+            [],
+        )
+        .context("adding delegation notification schema")?;
+    }
     tx.commit()
         .context("committing delegation route provenance schema")
+}
+
+/// One dispatch-binding row for the (#63) unattended observer.
+/// `agent_alias` is the OWNING alias: legacy scopes (`alias:<64-hex>`)
+/// are parsed down to the alias so agent-eligibility lookups match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchBindingRow {
+    pub rowid: i64,
+    pub agent_alias: String,
+    pub request_id: String,
+    pub dispatch_id: String,
+    pub route_digest: Option<String>,
+    pub notified_outcome: Option<String>,
 }
 
 fn legacy_route<'a>(scope: &'a str, agent_alias: &str) -> Option<&'a str> {
@@ -197,28 +222,61 @@ impl SqliteSessionBackend {
         Ok(())
     }
 
-    /// List delegation bindings that have a canonical dispatch reference,
-    /// newest-first is not required: callers reconcile by identity, not
-    /// order. Bounded by `limit`; the (#63) unattended observer walks this
-    /// to ask each dispatch for its terminal state. Legacy route scopes are
-    /// reported under their owning agent alias.
-    pub fn list_dispatch_bindings(&self, limit: usize) -> Result<Vec<(String, String, String)>> {
+    /// One page of dispatch bindings strictly after `after_rowid`, ascending.
+    /// Pagination is by the implicit rowid; the observer rotates its cursor
+    /// across passes so a bounded page can never permanently starve later
+    /// rows (delegation claims are permanent and never TTL-evicted).
+    pub fn list_dispatch_bindings_page(
+        &self,
+        after_rowid: i64,
+        limit: usize,
+    ) -> Result<Vec<DispatchBindingRow>> {
         let conn = self.conn.lock();
         let mut query = conn.prepare(
-            "SELECT agent_alias, request_id, dispatch_id FROM session_delegations
-             WHERE dispatch_id IS NOT NULL LIMIT ?1",
+            "SELECT rowid, agent_alias, request_id, dispatch_id, route_digest, notified_outcome
+             FROM session_delegations
+             WHERE dispatch_id IS NOT NULL AND rowid > ?1
+             ORDER BY rowid LIMIT ?2",
         )?;
         let rows = query
-            .query_map([limit as i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
+            .query_map(params![after_rowid, limit as i64], |row| {
+                let scope: String = row.get(1)?;
+                // Legacy route scope (`alias:<64-hex>`): report the owner.
+                let owner = scope
+                    .split_once(':')
+                    .filter(|(_, suffix)| {
+                        suffix.len() == 64
+                            && suffix
+                                .bytes()
+                                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                    })
+                    .map_or(scope.as_str(), |(alias, _)| alias);
+                Ok(DispatchBindingRow {
+                    rowid: row.get(0)?,
+                    agent_alias: owner.to_string(),
+                    request_id: row.get(2)?,
+                    dispatch_id: row.get(3)?,
+                    route_digest: row.get(4)?,
+                    notified_outcome: row.get(5)?,
+                })
             })
             .context("listing delegation dispatch bindings")?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Persist the outcome this binding's owner was already notified about.
+    /// The marker survives outbox retention (the outbox may evict its dedup
+    /// receipts; the delegation claim never expires), so a long-terminal run
+    /// cannot be re-notified after retention cleanup.
+    pub fn mark_binding_notified(&self, rowid: i64, outcome: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE session_delegations SET notified_outcome = ?2 WHERE rowid = ?1",
+            params![rowid, outcome],
+        )
+        .context("marking delegation notification")?;
+        Ok(())
     }
 
     /// Resolve a stable or uniquely preserved legacy reference. The caller
