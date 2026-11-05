@@ -105,7 +105,9 @@ pub(crate) struct Rotation {
     /// rewind fires only when a page contains rows BEYOND this extent —
     /// churn is outrunning the sweep — so a finite static table always
     /// walks to its natural end at ANY depth, while sustained insertion
-    /// still guarantees head re-observation every REWIND_PASSES pages.
+    /// bounds head re-observation: the wait is finite and grows with sweep
+    /// depth (the rewind fires once the sweep passes the recorded extent
+    /// with the counter at threshold), not a fixed every-N-pages cadence.
     pub sweep_max_rowid: i64,
 }
 
