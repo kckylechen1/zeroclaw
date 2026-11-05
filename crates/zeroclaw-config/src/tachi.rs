@@ -75,6 +75,12 @@ pub struct TachiConfig {
     /// listed is refused before Tachi is contacted. Empty by default.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub harnesses: HashMap<String, String>,
+    /// Explicit opt-in destination for delegated-run terminal notices
+    /// (#63 delegated-result delivery). Reuses the existing bridge outbox
+    /// and its attention policy; no recipient is inferred.
+    #[nested]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_notification: Option<DelegationNotificationConfig>,
 }
 
 impl Default for TachiConfig {
@@ -86,7 +92,45 @@ impl Default for TachiConfig {
             project: None,
             poll_secs: default_poll_secs(),
             harnesses: HashMap::new(),
+            result_notification: None,
         }
+    }
+}
+
+/// Owner-selected bridge destination for delegated-run terminal notices;
+/// delivery uses the existing BridgeOutbox (same shape as the review
+/// notification target, distinct semantics and validation path).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+#[prefix = "tachi.result_notification"]
+pub struct DelegationNotificationConfig {
+    pub bridge: String,
+    pub recipient: String,
+    pub thread_id: Option<String>,
+}
+
+impl DelegationNotificationConfig {
+    /// Mirrors the review-notification target's field rules.
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value) in [
+            ("bridge", self.bridge.as_str()),
+            ("recipient", self.recipient.as_str()),
+        ]
+        .into_iter()
+        .chain(self.thread_id.as_deref().map(|v| ("thread_id", v)))
+        {
+            if value.is_empty()
+                || value.trim() != value
+                || value.len() > 256
+                || value.chars().any(char::is_control)
+            {
+                return Err(format!(
+                    "tachi.result_notification.{field} must be nonempty, trimmed, at most 256 bytes and free of control characters"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -227,6 +271,11 @@ impl TachiConfig {
                     format!("tachi.harnesses.{name} must name a Tachi profile"),
                 ));
             }
+        }
+        if let Some(target) = &self.result_notification
+            && let Err(reason) = target.validate()
+        {
+            return Err(("tachi.result_notification".to_string(), reason));
         }
         Ok(())
     }

@@ -197,6 +197,30 @@ impl SqliteSessionBackend {
         Ok(())
     }
 
+    /// List delegation bindings that have a canonical dispatch reference,
+    /// newest-first is not required: callers reconcile by identity, not
+    /// order. Bounded by `limit`; the (#63) unattended observer walks this
+    /// to ask each dispatch for its terminal state. Legacy route scopes are
+    /// reported under their owning agent alias.
+    pub fn list_dispatch_bindings(&self, limit: usize) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock();
+        let mut query = conn.prepare(
+            "SELECT agent_alias, request_id, dispatch_id FROM session_delegations
+             WHERE dispatch_id IS NOT NULL LIMIT ?1",
+        )?;
+        let rows = query
+            .query_map([limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .context("listing delegation dispatch bindings")?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Resolve a stable or uniquely preserved legacy reference. The caller
     /// must compare immutable route provenance before using the dispatch ID.
     pub fn read_delegation_request(

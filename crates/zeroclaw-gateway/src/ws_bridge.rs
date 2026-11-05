@@ -348,6 +348,7 @@ async fn send_pending(
                 .map_err(|_| "attention_invalid_policy")?;
                 permitted
                     && crate::review_notifications::permits_delivery(&config, outbox, &row)
+                    && crate::delegation_notifications::permits_delivery(&config, outbox, &row)
                     && outbox
                         .claim(bridge, &row.id, now.timestamp())
                         .map_err(|_| "attention_store_unavailable")?
