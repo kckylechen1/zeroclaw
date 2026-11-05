@@ -99,6 +99,39 @@ fn log_refusal(scope: &WsTurnScope, alias: &str, request: &str, code: &str, atta
     );
 }
 
+/// Terminal lifecycle event for BOTH paths (#564). `conversation` is the
+/// gateway conversation key (`gw_<session>\x1f<agent>`); the logged
+/// `session_id` strips the transport prefix so admission, cancel and
+/// terminal events for one turn carry the SAME identity. Outcome mapping:
+/// `done` succeeds; `aborted`/`error` fail (matching the legacy cancel
+/// logging); anything else is unknown — never a silent success.
+fn log_terminal(conversation: &str, request: Option<&str>, turn: &str, outcome: &str) {
+    let (session_key, agent) = conversation
+        .rsplit_once('\u{1f}')
+        .unwrap_or((conversation, ""));
+    let session_id = session_key
+        .strip_prefix(super::GW_SESSION_PREFIX)
+        .unwrap_or(session_key);
+    ::zeroclaw_log::record!(
+        INFO,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Complete)
+            .with_category(::zeroclaw_log::EventCategory::Session)
+            .with_outcome(match outcome {
+                "done" => ::zeroclaw_log::EventOutcome::Success,
+                "aborted" | "error" => ::zeroclaw_log::EventOutcome::Failure,
+                _ => ::zeroclaw_log::EventOutcome::Unknown,
+            })
+            .with_attrs(::serde_json::json!({
+                "session_id": session_id,
+                "agent": agent,
+                "request_id": request,
+                "turn_id": turn,
+                "outcome": outcome,
+            })),
+        "turn terminal"
+    );
+}
+
 fn key(conversation: &str, subject: &str, epoch: &str, request: &str) -> String {
     // Length-delimited identity cannot collide with another principal or with
     // the legacy caller-chosen request namespace by accidental concatenation.
@@ -298,6 +331,7 @@ pub(super) fn handle(
         .as_str()
         .filter(|s| s.len() <= MAX_CONTENT)
     else {
+        log_refusal(scope, alias, request, "INVALID_CONTENT", 0);
         return (Some(error_op("INVALID_CONTENT")), None);
     };
     // `attachments` is the sole admitted extra field: the same #491 scoped
@@ -334,6 +368,7 @@ pub(super) fn handle(
         }
     };
     if content.is_empty() && attachments.is_empty() {
+        log_refusal(scope, alias, request, "INVALID_CONTENT", 0);
         return (Some(error_op("INVALID_CONTENT")), None);
     }
     // Unsupported input fields must not silently acquire source/attachment authority.
@@ -345,6 +380,7 @@ pub(super) fn handle(
             )
         })
     }) {
+        log_refusal(scope, alias, request, "UNSUPPORTED_FIELD", 0);
         return (Some(error_op("UNSUPPORTED_FIELD")), None);
     }
     if let Some(entry) = entries.get(&receipt_key) {
@@ -379,6 +415,7 @@ pub(super) fn handle(
     // No eviction: forgetting accepted identities would permit an old request
     // to run again once a session backend's finite receipt window expires.
     if entries.len() >= MAX_REQUESTS {
+        log_refusal(scope, alias, request, "REQUEST_CAPACITY", 0);
         return (Some(error_op("REQUEST_CAPACITY")), None);
     }
     // Resolve #491 scoped handles exactly as the legacy message path does:
@@ -575,33 +612,13 @@ impl Store {
         if terminal {
             event["stream_complete"] = (!entry.gap).into();
             entry.terminal = Some(event.clone());
-            // Brain-monitor terminal event (#564): the one turn-lifecycle
-            // signal that covers BOTH the S2 and legacy paths (finish() funnels
-            // here). Identities and outcome only — never payload content.
-            let outcome = payload["outcome"].as_str().unwrap_or("unknown");
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Complete)
-                    .with_category(::zeroclaw_log::EventCategory::Session)
-                    .with_outcome(if outcome == "error" {
-                        ::zeroclaw_log::EventOutcome::Failure
-                    } else {
-                        ::zeroclaw_log::EventOutcome::Success
-                    })
-                    .with_attrs(::serde_json::json!({
-                        "session_id": entry.conversation.rsplit_once('\u{1f}').map_or(
-                            entry.conversation.as_str(),
-                            |(session, _)| session,
-                        ),
-                        "agent": entry.conversation.rsplit_once('\u{1f}').map_or(
-                            "",
-                            |(_, agent)| agent,
-                        ),
-                        "request_id": entry.request,
-                        "turn_id": turn,
-                        "outcome": outcome,
-                    })),
-                "turn terminal"
+            // Brain-monitor terminal (#564), S2 journal path: log the CLIENT's
+            // request id (entry.request), not the internal receipt key.
+            log_terminal(
+                &entry.conversation,
+                Some(&entry.request),
+                turn,
+                payload["outcome"].as_str().unwrap_or("unknown"),
             );
         } else {
             let bytes = event.to_string().len();
@@ -660,15 +677,23 @@ pub(super) fn finish(
     turn: &str,
     outcome: &str,
 ) {
-    if let Some(request) = request
+    let journaled = if let Some(request) = request
         && let Some(event) = state.ws_conversations.turn_control.event(
             request,
             turn,
             &json!({"type":"turn_terminal","outcome":outcome}),
             true,
-        )
-    {
+        ) {
         conversation.publish_control(&event);
+        true
+    } else {
+        false
+    };
+    if !journaled {
+        // Legacy turns carry no S2 journal entry (and legacy callers may send
+        // no id at all) — event() could not record them, so the terminal
+        // lifecycle log happens here (#564). Identities only, never content.
+        log_terminal(conversation.key(), request, turn, outcome);
     }
 }
 

@@ -17,15 +17,26 @@ const PAGE_LIMIT = 120;
 const MAX_ROWS = 240;
 const POLL_MS = 2_000;
 
-function fetchCategory(category: string, sinceTs?: string): Promise<LogEvent[]> {
+interface CategoryFetch {
+  events: LogEvent[];
+  atEnd: boolean;
+  failed: boolean;
+}
+
+/**
+ * One cursor PER category: a shared cursor would advance past events of a
+ * category whose query failed or lagged behind the others, permanently
+ * skipping them. A failed fetch returns no cursor advance.
+ */
+function fetchCategory(category: string, sinceTs?: string): Promise<CategoryFetch> {
   return getLogs({
     category,
     limit: PAGE_LIMIT,
     hide_internal: true,
     ...(sinceTs ? { since_ts: sinceTs } : {}),
   })
-    .then((res) => res.events)
-    .catch(() => []);
+    .then((res) => ({ events: res.events, atEnd: res.at_end !== false, failed: false }))
+    .catch(() => ({ events: [] as LogEvent[], atEnd: true, failed: true }));
 }
 
 interface TimelineRow {
@@ -84,15 +95,51 @@ export default function Monitor() {
   const [rows, setRows] = useState<TimelineRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [auto, setAuto] = useState(true);
-  const sinceRef = useRef<string | undefined>(undefined);
+  const [truncated, setTruncated] = useState(false);
+  /** Per-category incremental cursors (newest timestamp fetched). */
+  const sinceRef = useRef<Record<string, string | undefined>>({});
+  /** Accumulated timeline keyed by event id — incremental refreshes MERGE,
+   * never replace, so a quiet poll cannot wipe already-displayed history. */
+  const rowsRef = useRef(new Map<string, TimelineRow>());
+  /** Refresh generation: only the latest refresh may apply its results. */
+  const generationRef = useRef(0);
 
   const refresh = useCallback(async () => {
+    const generation = ++generationRef.current;
     const batches = await Promise.all(
-      TIMELINE_CATEGORIES.map((category) => fetchCategory(category, sinceRef.current)),
+      TIMELINE_CATEGORIES.map((category, index) =>
+        fetchCategory(category, sinceRef.current[category]).then((result) => ({
+          category,
+          index,
+          result,
+        })),
+      ),
     );
-    const merged = batches.flat().map(toRow);
-    merged.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
-    sinceRef.current = merged[0]?.timestamp ?? sinceRef.current;
+    if (generation !== generationRef.current) {
+      return; // superseded by a newer refresh (manual + interval overlap)
+    }
+    let anyTruncated = false;
+    for (const { category, result } of batches) {
+      for (const event of result.events) {
+        const row = toRow(event);
+        rowsRef.current.set(row.key, row);
+      }
+      if (!result.failed && result.events.length > 0) {
+        const newest = result.events.reduce((acc, event) =>
+          (event['@timestamp'] ?? '') > (acc['@timestamp'] ?? '') ? event : acc,
+        );
+        sinceRef.current[category] = newest['@timestamp'];
+      }
+      if (!result.atEnd) {
+        anyTruncated = true;
+      }
+    }
+    setTruncated(anyTruncated);
+    const merged = [...rowsRef.current.values()].sort((a, b) => {
+      if (a.timestamp > b.timestamp) return -1;
+      if (a.timestamp < b.timestamp) return 1;
+      return 0;
+    });
     setRows(merged.slice(0, MAX_ROWS));
     setLoading(false);
   }, []);
@@ -138,6 +185,9 @@ export default function Monitor() {
       </header>
 
       <div className="flex-1 overflow-auto px-6 py-4">
+        {truncated && (
+          <p className="mb-3 text-xs text-amber-500">{t('monitor.truncated')}</p>
+        )}
         {loading && rows.length === 0 ? (
           <p className="text-sm text-pc-text-muted">{t('monitor.loading')}</p>
         ) : rows.length === 0 ? (
