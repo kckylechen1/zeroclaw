@@ -452,8 +452,8 @@ mod tests {
         assert!(delegation_rows(&tmp).is_empty());
 
         // A later, different outcome on the same request is a new event.
-        let fetch_failed = |agent: &str, dispatch: &str| {
-            let (agent, dispatch) = (agent.to_string(), dispatch.to_string());
+        let fetch_failed = |_agent: &str, dispatch: &str| {
+            let dispatch = dispatch.to_string();
             async move {
                 if dispatch == "disp-1" {
                     Ok(status(RunState::Failed))
