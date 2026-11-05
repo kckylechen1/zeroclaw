@@ -99,14 +99,25 @@ fn owning_agent(source_id: &str) -> &str {
 pub(crate) struct Rotation {
     pub cursor: i64,
     pub page_size: usize,
-    /// Full pages seen since the last wrap. Even under sustained churn (a
-    /// full page of new bindings every pass), a forced rewind every
-    /// REWIND_PASSES guarantees rows near the head are RE-observed — a
-    /// binding first seen Working must be asked again after it completes.
+    /// Full pages seen since the last wrap.
     pub full_pages_since_wrap: usize,
+    /// The table's highest rowid at sweep start (0 = new sweep). A forced
+    /// rewind fires only when a page contains rows BEYOND this extent —
+    /// churn is outrunning the sweep — so a finite static table always
+    /// walks to its natural end at ANY depth, while sustained insertion
+    /// still guarantees head re-observation every REWIND_PASSES pages.
+    pub sweep_max_rowid: i64,
 }
 
 const REWIND_PASSES: usize = 8;
+
+impl Rotation {
+    fn wrap(&mut self) {
+        self.cursor = 0;
+        self.full_pages_since_wrap = 0;
+        self.sweep_max_rowid = 0;
+    }
+}
 
 impl Default for Rotation {
     fn default() -> Self {
@@ -114,6 +125,7 @@ impl Default for Rotation {
             cursor: 0,
             page_size: PAGE_SIZE,
             full_pages_since_wrap: 0,
+            sweep_max_rowid: 0,
         }
     }
 }
@@ -171,21 +183,28 @@ pub(crate) async fn reconcile(
     // below (keeps this future Send). The bounded page is fully owned; the
     // notified markers are written through one short-lived handle AFTER the
     // loop (batched, once per pass).
-    let page = {
+    let (page, table_extent) = {
         let sessions = SqliteSessionBackend::new(data_dir)?;
-        sessions.list_dispatch_bindings_page(rotation.cursor, rotation.page_size)?
+        let page = sessions.list_dispatch_bindings_page(rotation.cursor, rotation.page_size)?;
+        (page, sessions.max_binding_rowid()?)
     };
     if page.len() < rotation.page_size {
-        rotation.cursor = 0;
-        rotation.full_pages_since_wrap = 0;
-    } else if rotation.full_pages_since_wrap >= REWIND_PASSES {
-        // Forced rewind: sustained full pages would otherwise postpone the
-        // natural wrap forever, and head rows would never be RE-observed.
-        rotation.cursor = 0;
-        rotation.full_pages_since_wrap = 0;
+        rotation.wrap();
     } else {
-        rotation.cursor = page.last().expect("full page is nonempty").rowid;
-        rotation.full_pages_since_wrap += 1;
+        if rotation.sweep_max_rowid == 0 {
+            rotation.sweep_max_rowid = table_extent;
+        }
+        let churn_outran_sweep =
+            page.last().expect("full page is nonempty").rowid > rotation.sweep_max_rowid;
+        if churn_outran_sweep && rotation.full_pages_since_wrap >= REWIND_PASSES {
+            // Forced rewind: insertions beyond the sweep's original extent
+            // would otherwise postpone the natural wrap forever, and head
+            // rows would never be RE-observed after completing.
+            rotation.wrap();
+        } else {
+            rotation.cursor = page.last().expect("full page is nonempty").rowid;
+            rotation.full_pages_since_wrap += 1;
+        }
     }
     let outbox = BridgeOutbox::shared(data_dir)?;
     let mut notified = 0;
@@ -291,11 +310,9 @@ pub(crate) async fn reconcile(
     if !marks.is_empty() {
         let sessions = SqliteSessionBackend::new(data_dir)?;
         for (rowid, entry) in &marks {
-            let existing = sessions
-                .list_dispatch_bindings_page(0, i64::MAX as usize)
-                .ok()
-                .and_then(|rows| rows.into_iter().find(|candidate| candidate.rowid == *rowid))
-                .and_then(|candidate| candidate.notified_outcome);
+            // Per-row read with a propagated error: treating a read failure
+            // as empty history would silently drop remembered destinations.
+            let existing = sessions.binding_notified_marker(*rowid)?;
             let merged = marker_push(existing.as_deref().unwrap_or(""), entry);
             sessions.mark_binding_notified(*rowid, &merged)?;
         }
@@ -619,6 +636,7 @@ mod tests {
             cursor: 0,
             page_size: 2,
             full_pages_since_wrap: 0,
+            sweep_max_rowid: 0,
         };
         let counter = std::sync::Arc::clone(&queried);
         let fetch =
@@ -667,12 +685,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forced_rewind_reobserves_head_rows_under_sustained_full_pages() {
+    async fn static_table_walks_to_full_depth_and_churn_forces_the_rewind() {
         let (tmp, config) = fixture_config();
         let shared = RwLock::new(config);
         let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
-        // 18 bindings with page_size 2 = 9 full pages, never a short page
-        // until past the end — the forced rewind must fire first.
         for index in 0..18 {
             seed_binding(
                 &backend,
@@ -689,40 +705,71 @@ mod tests {
             cursor: 0,
             page_size: 2,
             full_pages_since_wrap: 0,
+            sweep_max_rowid: 0,
         };
-        // Every dispatch reports terminal — one notification per row.
         let counter = std::sync::Arc::clone(&queries);
         let fetch =
             move |_agent: &str, _dispatch: &str, _route: &zeroclaw_config::tachi::TachiConfig| {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 async { Ok(status(RunState::Completed)) }.boxed()
             };
-        // Nine full pages: pages 1-8 advance (counter 1..8), page 9 is full
-        // AND the counter is at the rewind threshold → forced wrap.
-        for pass in 0..9 {
+
+        // STATIC table, 9 full pages: the rewind must NOT fire — the sweep
+        // walks every page to its natural end regardless of depth.
+        for _ in 0..9 {
             reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
                 .await
                 .unwrap();
-            if pass < 8 {
-                assert!(rotation.cursor > 0, "pages 1-8 advance");
-            }
+            assert!(rotation.cursor > 0, "static pages always advance");
         }
-        assert_eq!(rotation.cursor, 0, "the 9th full page forces a rewind");
-        assert_eq!(rotation.full_pages_since_wrap, 0);
         assert_eq!(
             queries.load(std::sync::atomic::Ordering::SeqCst),
             18,
-            "every row covered exactly once before the rewind"
+            "all 18 rows covered — the tail is reachable at any depth"
         );
-        // The next pass re-observes from the top — head rows are asked again.
+        let _ = reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch).await;
+        assert_eq!(rotation.cursor, 0, "the empty page wraps naturally");
+
+        // CHURN: with the counter already high, insert rows BEYOND the
+        // sweep's original extent — the next full page must force the wrap.
+        for index in 18..22 {
+            seed_binding(
+                &backend,
+                &shared.read(),
+                "butler",
+                &format!("req-c{index:02}"),
+                &format!("disp-c{index:02}"),
+                None,
+            );
+        }
+        // One pass re-walks from the top (fresh sweep, extent 22).
+        reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+            .await
+            .unwrap();
+        assert!(rotation.sweep_max_rowid > 0);
+        // Simulate the sweep being outrun: park the cursor AT the sweep's
+        // original extent, set the counter at the threshold, and insert
+        // beyond it — the next page is entirely churn.
+        rotation.cursor = rotation.sweep_max_rowid;
+        rotation.full_pages_since_wrap = REWIND_PASSES;
+        for index in 22..26 {
+            seed_binding(
+                &backend,
+                &shared.read(),
+                "butler",
+                &format!("req-x{index:02}"),
+                &format!("disp-x{index:02}"),
+                None,
+            );
+        }
         reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
             .await
             .unwrap();
         assert_eq!(
-            queries.load(std::sync::atomic::Ordering::SeqCst),
-            20,
-            "the first two rows are RE-observed after the rewind"
+            rotation.cursor, 0,
+            "a full page beyond the sweep extent forces the rewind"
         );
+        assert_eq!(rotation.full_pages_since_wrap, 0);
     }
 
     #[tokio::test]

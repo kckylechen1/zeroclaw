@@ -282,10 +282,25 @@ impl SqliteSessionBackend {
         conn.query_row(
             "SELECT notified_outcome FROM session_delegations WHERE rowid = ?1",
             params![rowid],
-            |row| row.get(0),
+            // SQL NULL (never notified) must read as None, not error.
+            |row| row.get::<_, Option<String>>(0),
         )
         .optional()
         .context("reading a delegation notification marker")
+        .map(|value| value.flatten())
+    }
+
+    /// The highest binding rowid, or 0 for an empty table. The observer uses
+    /// this at sweep start to distinguish churn (rows appearing beyond the
+    /// sweep's original extent) from a finite table it is simply walking.
+    pub fn max_binding_rowid(&self) -> Result<i64> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM session_delegations",
+            [],
+            |row| row.get(0),
+        )
+        .context("reading the max delegation rowid")
     }
 
     /// Persist the outcome this binding's owner was already notified about.
