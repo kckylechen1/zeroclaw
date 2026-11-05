@@ -922,3 +922,162 @@ async fn s2_wire_attachments_reuse_scoped_handles_with_legacy_denials() {
         "owner and device plain turns ran; attachment turns did not"
     );
 }
+
+/// #564 brain monitor: S2 wire events land in the structured log with full
+/// identities and NO content (canary privacy proof). The in-process log
+/// broadcast is the capture seam — the same feed `/api/logs` persists.
+#[tokio::test]
+async fn s2_wire_events_land_in_structured_log_without_content() {
+    // record! fans out through the global tracing subscriber; tests must
+    // install the capture layer (idempotent across parallel tests) before
+    // subscribing the broadcast, or every event drops into the no-op default.
+    zeroclaw_log::try_install_capture_subscriber();
+    let mut rx = zeroclaw_log::subscribe_or_install();
+    let fixture = DeviceFixture::new(&["chat", "cancel"]).await;
+    let mut owner = fixture.socket(OWNER_TOKEN).await;
+    let epoch = negotiate(&mut owner).await;
+
+    let scope = s2_attachment_scope(OWNER_TOKEN);
+    let handle = fixture
+        .state
+        .ws_conversations
+        .attachments
+        .insert(
+            scope,
+            "canary.txt".into(),
+            "text/plain".into(),
+            axum::body::Bytes::from_static(b"canary-attachment-bytes"),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Canary-bearing admission with an attachment.
+    let first = uuid::Uuid::new_v4().to_string();
+    let content = "monitor-canary-content";
+    owner
+        .send(attachment_request(
+            &epoch,
+            &first,
+            content,
+            std::slice::from_ref(&handle),
+        ))
+        .await;
+    let ack = owner.until("turn_ack").await;
+    assert_eq!(ack["status"], "accepted");
+    let first_turn = ack["turn_id"].as_str().unwrap().to_string();
+    let events = terminal(&mut owner, &first, &first_turn).await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "done");
+
+    // A second, cancelled turn exercises the cancel + aborted-terminal path.
+    let second = uuid::Uuid::new_v4().to_string();
+    owner.send(request(&epoch, &second, "s2-held-provider")).await;
+    let second_ack = owner.until("turn_ack").await;
+    let second_turn = second_ack["turn_id"].as_str().unwrap().to_string();
+    wait_provider(&fixture, 2).await;
+    owner
+        .send(json!({"type":"turn_control","version":1,"op":"cancel","epoch":epoch,
+            "request_id":second,"turn_id":second_turn}))
+        .await;
+    assert_eq!(
+        owner.until("turn_cancel_ack").await["status"],
+        "requested"
+    );
+    let events = terminal(&mut owner, &second, &second_turn).await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "aborted");
+
+    // Drain the broadcast until both terminals for our session are seen.
+    let mut collected: Vec<Value> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            panic!("timed out collecting log events; got {} frames", collected.len());
+        }
+        match tokio::time::timeout(Duration::from_millis(50).min(remaining), rx.recv()).await {
+            Ok(Ok(event)) => collected.push(event),
+            Err(_elapsed) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                panic!("broadcast hook replaced mid-test")
+            }
+        }
+        let terminals = collected
+            .iter()
+            .filter(|event| {
+                event["event"]["action"] == "complete"
+                    && event["attributes"]["request_id"] == json!(second)
+            })
+            .count();
+        if terminals >= 1
+            && collected.iter().any(|event| {
+                event["event"]["action"] == "cancel"
+                    && event["attributes"]["request_id"] == json!(second)
+            })
+        {
+            break;
+        }
+    }
+
+    let admission = collected
+        .iter()
+        .find(|event| {
+            event["event"]["action"] == "inbound"
+                && event["attributes"]["request_id"] == json!(first)
+        })
+        .expect("admission event with the client request id must be logged");
+    assert_eq!(admission["event"]["category"], "session");
+    assert_eq!(admission["attributes"]["status"], "accepted");
+    assert_eq!(admission["attributes"]["session_id"], SESSION);
+    assert_eq!(admission["attributes"]["agent"], "device-agent");
+    assert_eq!(admission["attributes"]["turn_id"], first_turn.as_str());
+    assert_eq!(
+        admission["attributes"]["content_bytes"],
+        json!(content.len()),
+        "size only — never the content itself"
+    );
+    assert_eq!(admission["attributes"]["attachments"], 1);
+
+    let cancel = collected
+        .iter()
+        .find(|event| {
+            event["event"]["action"] == "cancel"
+                && event["attributes"]["request_id"] == json!(second)
+        })
+        .expect("cancel event must be logged");
+    assert_eq!(cancel["attributes"]["status"], "requested");
+    assert_eq!(cancel["attributes"]["turn_id"], second_turn.as_str());
+
+    let terminal = collected
+        .iter()
+        .find(|event| {
+            event["event"]["action"] == "complete"
+                && event["attributes"]["request_id"] == json!(second)
+        })
+        .expect("terminal event must be logged");
+    assert_eq!(terminal["attributes"]["outcome"], "aborted");
+    assert_eq!(terminal["attributes"]["turn_id"], second_turn.as_str());
+
+    let negotiated = collected
+        .iter()
+        .any(|event| {
+            event["event"]["action"] == "connect"
+                && event["attributes"]["session_id"] == SESSION
+                && event["attributes"]["epoch"] == epoch.as_str()
+        });
+    assert!(negotiated, "negotiation event must be logged");
+
+    // Privacy with teeth: neither canary appears in ANY captured event.
+    for event in &collected {
+        let text = event.to_string();
+        assert!(
+            !text.contains("monitor-canary-content"),
+            "message content leaked into the log: {text}"
+        );
+        assert!(
+            !text.contains("canary-attachment-bytes"),
+            "attachment bytes leaked into the log: {text}"
+        );
+    }
+}

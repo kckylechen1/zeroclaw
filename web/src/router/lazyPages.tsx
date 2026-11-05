@@ -10,3 +10,4 @@ export const Pairing = lazy(() => import('../pages/Pairing'));
 export const Skills = lazy(() => import('../pages/Skills'));
 
 export const Review = lazy(() => import('../pages/Review'));
+export const Monitor = lazy(() => import('../pages/Monitor'));

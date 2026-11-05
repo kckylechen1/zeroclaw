@@ -2,6 +2,7 @@ import { NavLink } from 'react-router-dom';
 import { basePath } from '../../lib/basePath';
 import {
   Activity,
+  Radar,
   Inbox,
   Bot,
   Clock,
@@ -54,6 +55,7 @@ const navGroups: NavGroup[] = [
     headingKey: 'nav.group.operations',
     items: [
       { to: '/logs', icon: Activity, labelKey: 'nav.logs' },
+      { to: '/monitor', icon: Radar, labelKey: 'nav.monitor' },
       { to: '/pairing', icon: Smartphone, labelKey: 'nav.pairing' },
     ],
   },

@@ -47,6 +47,58 @@ fn error(code: &str) -> Value {
     json!({"type":"turn_error", "version":VERSION, "code":code})
 }
 
+/// Brain-monitor wire events (#564): every S2 admission lands in the
+/// structured log with identities and SIZES ONLY — message content and
+/// attachment bytes are never logged. This is the S5 switch timeline's
+/// authoritative feed (viewed via `/api/logs`, category `session`).
+fn log_admission(
+    scope: &WsTurnScope,
+    alias: &str,
+    request: &str,
+    status: &str,
+    content_bytes: usize,
+    attachments: usize,
+    turn: Option<&str>,
+) {
+    ::zeroclaw_log::record!(
+        INFO,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Inbound)
+            .with_category(::zeroclaw_log::EventCategory::Session)
+            .with_outcome(if matches!(status, "accepted" | "duplicate") {
+                ::zeroclaw_log::EventOutcome::Success
+            } else {
+                ::zeroclaw_log::EventOutcome::Failure
+            })
+            .with_attrs(::serde_json::json!({
+                "session_id": scope.session_id,
+                "agent": alias,
+                "request_id": request,
+                "status": status,
+                "content_bytes": content_bytes,
+                "attachments": attachments,
+                "turn_id": turn,
+            })),
+        "S2 turn admission"
+    );
+}
+
+fn log_refusal(scope: &WsTurnScope, alias: &str, request: &str, code: &str, attachments: usize) {
+    ::zeroclaw_log::record!(
+        INFO,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+            .with_category(::zeroclaw_log::EventCategory::Session)
+            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+            .with_attrs(::serde_json::json!({
+                "session_id": scope.session_id,
+                "agent": alias,
+                "request_id": request,
+                "code": code,
+                "attachments": attachments,
+            })),
+        "S2 turn admission refused"
+    );
+}
+
 fn key(conversation: &str, subject: &str, epoch: &str, request: &str) -> String {
     // Length-delimited identity cannot collide with another principal or with
     // the legacy caller-chosen request namespace by accidental concatenation.
@@ -127,6 +179,19 @@ pub(super) fn handle(
     let store = &state.ws_conversations.turn_control;
     if operation == "negotiate" {
         *negotiated = true;
+        ::zeroclaw_log::record!(
+            DEBUG,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Connect)
+                .with_category(::zeroclaw_log::EventCategory::Session)
+                .with_outcome(::zeroclaw_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "session_id": scope.session_id,
+                    "agent": alias,
+                    "epoch": store.epoch,
+                    "surface": scope.surface,
+                })),
+            "S2 turn-control negotiated"
+        );
         return (
             Some(
                 json!({"type":"turn_ready", "version":VERSION, "epoch":store.epoch,
@@ -156,6 +221,19 @@ pub(super) fn handle(
         let Some(after) = parsed["after_seq"].as_u64() else {
             return (Some(error_op("INVALID_SEQUENCE")), None);
         };
+        ::zeroclaw_log::record!(
+            DEBUG,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Query)
+                .with_category(::zeroclaw_log::EventCategory::Session)
+                .with_outcome(::zeroclaw_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "session_id": scope.session_id,
+                    "agent": alias,
+                    "request_id": request,
+                    "after_seq": after,
+                })),
+            "S2 turn replay requested"
+        );
         return (
             Some(match entries.get(&receipt_key) {
                 None => ack(store, request, None, "unknown"),
@@ -194,6 +272,20 @@ pub(super) fn handle(
             Some(entry) if entry.turn != target => "stale",
             Some(_) => conversation.cancel_turn(target),
         };
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Cancel)
+                .with_category(::zeroclaw_log::EventCategory::Session)
+                .with_outcome(::zeroclaw_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "session_id": scope.session_id,
+                    "agent": alias,
+                    "request_id": request,
+                    "turn_id": target,
+                    "status": status,
+                })),
+            "S2 turn cancellation"
+        );
         return (
             Some(
                 json!({"type":"turn_cancel_ack", "version":VERSION,"epoch":store.epoch,
@@ -226,15 +318,20 @@ pub(super) fn handle(
                 })
                 .collect::<Option<Vec<_>>>()
             else {
+                log_refusal(scope, alias, request, "INVALID_ATTACHMENTS", 0);
                 return (Some(error_op("INVALID_ATTACHMENTS")), None);
             };
             let unique: std::collections::HashSet<_> = ids.iter().collect();
             if unique.len() != ids.len() {
+                log_refusal(scope, alias, request, "INVALID_ATTACHMENTS", ids.len());
                 return (Some(error_op("INVALID_ATTACHMENTS")), None);
             }
             ids
         }
-        Some(_) => return (Some(error_op("INVALID_ATTACHMENTS")), None),
+        Some(_) => {
+            log_refusal(scope, alias, request, "INVALID_ATTACHMENTS", 0);
+            return (Some(error_op("INVALID_ATTACHMENTS")), None);
+        }
     };
     if content.is_empty() && attachments.is_empty() {
         return (Some(error_op("INVALID_CONTENT")), None);
@@ -252,21 +349,32 @@ pub(super) fn handle(
     }
     if let Some(entry) = entries.get(&receipt_key) {
         if entry.redacted {
+            log_admission(
+                scope,
+                alias,
+                request,
+                "unknown",
+                content.len(),
+                attachments.len(),
+                None,
+            );
             return (Some(ack(store, request, None, "unknown")), None);
         }
-        return (
-            Some(ack(
-                store,
-                request,
-                Some(&entry.turn),
-                if entry.content == content && entry.attachments == attachments {
-                    "duplicate"
-                } else {
-                    "conflict"
-                },
-            )),
-            None,
+        let status = if entry.content == content && entry.attachments == attachments {
+            "duplicate"
+        } else {
+            "conflict"
+        };
+        log_admission(
+            scope,
+            alias,
+            request,
+            status,
+            content.len(),
+            attachments.len(),
+            Some(&entry.turn),
         );
+        return (Some(ack(store, request, Some(&entry.turn), status)), None);
     }
     // No eviction: forgetting accepted identities would permit an old request
     // to run again once a session backend's finite receipt window expires.
@@ -281,6 +389,13 @@ pub(super) fn handle(
     let mut input = content.to_string();
     if !attachments.is_empty() {
         if alias.is_empty() {
+            log_refusal(
+                scope,
+                alias,
+                request,
+                "ATTACHMENT_UNAVAILABLE",
+                attachments.len(),
+            );
             return (Some(error_op("ATTACHMENT_UNAVAILABLE")), None);
         }
         let payload_scope = crate::api_attachments::Scope {
@@ -289,6 +404,13 @@ pub(super) fn handle(
             agent: alias.to_string(),
         };
         if !crate::api_attachments::scope_authorized(state, &payload_scope) {
+            log_refusal(
+                scope,
+                alias,
+                request,
+                "UNAUTHORIZED_ATTACHMENTS",
+                attachments.len(),
+            );
             return (Some(error_op("UNAUTHORIZED_ATTACHMENTS")), None);
         }
         input = match state.ws_conversations.attachments.materialize(
@@ -297,13 +419,38 @@ pub(super) fn handle(
             content,
         ) {
             Ok(materialized) => materialized,
-            Err(_) => return (Some(error_op("ATTACHMENT_UNAVAILABLE")), None),
+            Err(_) => {
+                log_refusal(
+                    scope,
+                    alias,
+                    request,
+                    "ATTACHMENT_UNAVAILABLE",
+                    attachments.len(),
+                );
+                return (Some(error_op("ATTACHMENT_UNAVAILABLE")), None);
+            }
         };
         if !crate::api_attachments::scope_authorized(state, &payload_scope) {
+            log_refusal(
+                scope,
+                alias,
+                request,
+                "UNAUTHORIZED_ATTACHMENTS",
+                attachments.len(),
+            );
             return (Some(error_op("UNAUTHORIZED_ATTACHMENTS")), None);
         }
     }
     let Some(mut claim) = conversation.start_if_idle(input) else {
+        log_admission(
+            scope,
+            alias,
+            request,
+            "busy",
+            content.len(),
+            attachments.len(),
+            None,
+        );
         return (Some(ack(store, request, None, "busy")), None);
     };
     // Holding the journal lock serializes reserve/record/map versus other
@@ -312,14 +459,41 @@ pub(super) fn handle(
         Ok((RequestReceipt::Recorded, _)) => {}
         Ok((RequestReceipt::Duplicate { .. }, _)) => {
             conversation.finish_turn(claim.generation);
+            log_admission(
+                scope,
+                alias,
+                request,
+                "unknown",
+                content.len(),
+                attachments.len(),
+                None,
+            );
             return (Some(ack(store, request, None, "unknown")), None);
         }
         Err(_) => {
             conversation.finish_turn(claim.generation);
+            log_admission(
+                scope,
+                alias,
+                request,
+                "refused",
+                content.len(),
+                attachments.len(),
+                None,
+            );
             return (Some(error_op("REQUEST_NOT_RECORDED")), None);
         }
     }
     let turn = claim.turn_id.clone();
+    log_admission(
+        scope,
+        alias,
+        request,
+        "accepted",
+        content.len(),
+        attachments.len(),
+        Some(&turn),
+    );
     entries.insert(
         receipt_key.clone(),
         Entry {
@@ -401,6 +575,34 @@ impl Store {
         if terminal {
             event["stream_complete"] = (!entry.gap).into();
             entry.terminal = Some(event.clone());
+            // Brain-monitor terminal event (#564): the one turn-lifecycle
+            // signal that covers BOTH the S2 and legacy paths (finish() funnels
+            // here). Identities and outcome only — never payload content.
+            let outcome = payload["outcome"].as_str().unwrap_or("unknown");
+            ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Complete)
+                    .with_category(::zeroclaw_log::EventCategory::Session)
+                    .with_outcome(if outcome == "error" {
+                        ::zeroclaw_log::EventOutcome::Failure
+                    } else {
+                        ::zeroclaw_log::EventOutcome::Success
+                    })
+                    .with_attrs(::serde_json::json!({
+                        "session_id": entry.conversation.rsplit_once('\u{1f}').map_or(
+                            entry.conversation.as_str(),
+                            |(session, _)| session,
+                        ),
+                        "agent": entry.conversation.rsplit_once('\u{1f}').map_or(
+                            "",
+                            |(_, agent)| agent,
+                        ),
+                        "request_id": entry.request,
+                        "turn_id": turn,
+                        "outcome": outcome,
+                    })),
+                "turn terminal"
+            );
         } else {
             let bytes = event.to_string().len();
             if bytes > MAX_REPLAY_BYTES {
