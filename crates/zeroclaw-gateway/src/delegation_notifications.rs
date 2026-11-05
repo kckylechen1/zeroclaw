@@ -28,9 +28,24 @@ use zeroclaw_config::schema::Config;
 use zeroclaw_infra::bridge_outbox::BridgeOutbox;
 use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
 
+/// Status fetcher: (agent, dispatch, validated route snapshot) → status.
+pub(crate) type StatusFetch<'a> = &'a (
+        dyn Fn(
+    &str,
+    &str,
+    &zeroclaw_config::tachi::TachiConfig,
+) -> BoxFuture<'static, anyhow::Result<RunStatus>>
+            + Send
+            + Sync
+    );
+
 const DELEGATION: &str = "delegation";
 const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 const PAGE_SIZE: usize = 500;
+/// Hard bound on rows walked per sweep before the rotation wraps, so
+/// sustained full pages above the cursor still guarantee every row a visit
+/// within a bounded number of passes.
+const SWEEP_ROW_BOUND: usize = 2_000;
 
 /// Destination configuration owns the target; the startup data root owns this
 /// gateway's stores (a changed root waits for the owning gateway to restart).
@@ -78,21 +93,48 @@ fn owning_agent(source_id: &str) -> &str {
         .map_or("", |(agent, _)| agent)
 }
 
+/// Scan position across passes: `cursor` is the last rowid examined, and
+/// `budget` bounds how many more rows THIS sweep may walk before wrapping —
+/// a wrap happens on a short page (natural end) OR on budget exhaustion, so
+/// sustained full pages above the cursor can never starve earlier rows
+/// forever. Tests shrink `page_size` to exercise pagination directly.
+pub(crate) struct Rotation {
+    pub cursor: i64,
+    pub budget: usize,
+    pub page_size: usize,
+}
+
+impl Default for Rotation {
+    fn default() -> Self {
+        Self {
+            cursor: 0,
+            budget: SWEEP_ROW_BOUND,
+            page_size: PAGE_SIZE,
+        }
+    }
+}
+
+/// The persistent notified marker: `outcome \x1f bridge \x1f recipient`.
+/// Destination-scoped, so changing the target legitimately re-notifies the
+/// new destination (the documented contract) while an unchanged destination
+/// is suppressed past the outbox's own retention.
+fn marker_for(outcome: &str, bridge: &str, recipient: &str) -> String {
+    format!("{outcome}\u{1f}{bridge}\u{1f}{recipient}")
+}
+
 /// One reconcile pass: walk ONE bounded page of dispatch bindings past the
-/// rotation cursor (a short page resets the cursor for the next pass), and
-/// for each binding whose agent is enabled and whose route provenance matches
-/// the current `[tachi]` route, ask the dispatch for its status and enqueue a
-/// notice for a terminal outcome unless that outcome was already notified.
-/// `fetch_status` is injected so tests drive terminal, non-terminal and
-/// failing queries without a daemon.
+/// rotation cursor, and for each binding whose agent is enabled and whose
+/// route provenance matches, ask the dispatch for its status (through the
+/// SAME owned route snapshot the fingerprint was validated against — no
+/// TOCTOU between validation and request) and enqueue a notice for a new
+/// terminal outcome. `fetch_status` is injected so tests drive terminal,
+/// non-terminal and failing queries without a daemon.
 pub(crate) async fn reconcile(
     config: &RwLock<Config>,
     data_dir: &Path,
     stop: &tokio_util::sync::CancellationToken,
-    rotation: &mut i64,
-    fetch_status: &(
-         dyn Fn(&str, &str) -> BoxFuture<'static, anyhow::Result<RunStatus>> + Send + Sync
-     ),
+    rotation: &mut Rotation,
+    fetch_status: StatusFetch<'_>,
 ) -> anyhow::Result<usize> {
     if stop.is_cancelled() {
         return Ok(0);
@@ -102,71 +144,64 @@ pub(crate) async fn reconcile(
     }
     // Scope the session handle: it must not live across the status awaits
     // below (keeps this future Send). The bounded page is fully owned; the
-    // notified marker is written through a fresh short-lived handle.
+    // notified markers are written through one short-lived handle AFTER the
+    // loop (batched, once per pass).
     let page = {
         let sessions = SqliteSessionBackend::new(data_dir)?;
-        sessions.list_dispatch_bindings_page(*rotation, PAGE_SIZE)?
+        sessions.list_dispatch_bindings_page(rotation.cursor, rotation.page_size)?
     };
-    if page.len() < PAGE_SIZE {
-        *rotation = 0;
+    if page.len() < rotation.page_size || rotation.budget <= page.len() {
+        rotation.cursor = 0;
+        rotation.budget = SWEEP_ROW_BOUND;
     } else {
-        *rotation = page.last().expect("full page is nonempty").rowid;
+        rotation.cursor = page.last().expect("full page is nonempty").rowid;
+        rotation.budget -= page.len();
     }
     let outbox = BridgeOutbox::shared(data_dir)?;
     let mut notified = 0;
+    let mut marks: Vec<(i64, String)> = Vec::new();
     for row in &page {
         if stop.is_cancelled() {
-            return Ok(notified);
+            break;
         }
-        if !config
-            .read()
-            .agents
-            .get(&row.agent_alias)
-            .is_some_and(|a| a.enabled)
-        {
-            continue;
-        }
-        // Route provenance: refuse to query a dispatch whose stored route
-        // fingerprint does not match the CURRENT [tachi] route — the same
-        // protection as the interactive tools' `route_conflict`. The config
-        // read guard is scoped so it never crosses the status await.
-        let route_matches = {
+        // Route provenance AND the request snapshot come from ONE owned
+        // config read: the fingerprint is validated against this snapshot and
+        // the same snapshot is handed to the fetcher, so a config swap mid-row
+        // cannot validate on route A and query through route B.
+        let (agent_enabled, route_snapshot, route_matches) = {
             let current = config.read();
-            let fingerprint = zeroclaw_tools::tachi_delegation::route_fingerprint(
-                &current.tachi,
-                &row.agent_alias,
-            );
-            row.route_digest.as_deref() == Some(fingerprint.as_str())
+            let enabled = current
+                .agents
+                .get(&row.agent_alias)
+                .is_some_and(|a| a.enabled);
+            let snapshot = current.tachi.clone();
+            let fingerprint =
+                zeroclaw_tools::tachi_delegation::route_fingerprint(&snapshot, &row.agent_alias);
+            (
+                enabled,
+                snapshot,
+                row.route_digest.as_deref() == Some(fingerprint.as_str()),
+            )
         };
-        if !route_matches {
+        if !agent_enabled || !route_matches {
             continue;
         }
         // A failing status query is an UNKNOWN outcome, not a notification:
         // the next pass retries and only a terminal receipt ever enqueues.
-        let Ok(status) = fetch_status(&row.agent_alias, &row.dispatch_id).await else {
+        let Ok(status) = fetch_status(&row.agent_alias, &row.dispatch_id, &route_snapshot).await
+        else {
             continue;
         };
         let Some(outcome) = terminal_outcome(&status) else {
             continue;
         };
-        if row.notified_outcome.as_deref() == Some(outcome) {
-            continue;
-        }
-        let content = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
-            "delegation-result-notice",
-            &[
-                ("request", short(&row.request_id)),
-                ("outcome", outcome),
-                ("dispatch", short(&row.dispatch_id)),
-            ],
-        );
         // Hold the current destination through enqueue: a simultaneous config
         // swap cannot send to a superseded target. The owning agent's
         // eligibility is re-read AFTER the await so a mid-flight disable
         // withholds too.
         let current = config.read();
         if stop.is_cancelled() || !eligible(&current, data_dir) {
-            return Ok(notified);
+            break;
         }
         if !current
             .agents
@@ -180,6 +215,20 @@ pub(crate) async fn reconcile(
             .result_notification
             .as_ref()
             .expect("eligible() checked the target");
+        // Destination-scoped suppression: only skip when THIS destination was
+        // already notified of THIS outcome.
+        let marker = marker_for(outcome, &target.bridge, &target.recipient);
+        if row.notified_outcome.as_deref() == Some(marker.as_str()) {
+            continue;
+        }
+        let content = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+            "delegation-result-notice",
+            &[
+                ("request", short(&row.request_id)),
+                ("outcome", outcome),
+                ("dispatch", short(&row.dispatch_id)),
+            ],
+        );
         outbox.enqueue_source(
             &target.bridge,
             &target.recipient,
@@ -189,11 +238,18 @@ pub(crate) async fn reconcile(
             &source_identity(&row.agent_alias, &row.request_id),
             outcome,
         )?;
-        // Persist the notified marker on the permanent claim BEFORE the next
-        // binding: it outlives the outbox's dedup retention, so an evicted
-        // receipt can never resurrect this notification on a later pass.
-        SqliteSessionBackend::new(data_dir)?.mark_binding_notified(row.rowid, outcome)?;
+        marks.push((row.rowid, marker));
         notified += 1;
+    }
+    // Batched marker persistence: one short-lived handle per pass, after the
+    // awaits. A crash between enqueue and this write is bounded by the outbox
+    // dedup window (documented residual: at most one re-notification per
+    // outcome after retention eviction, requiring a crash in that window).
+    if !marks.is_empty() {
+        let sessions = SqliteSessionBackend::new(data_dir)?;
+        for (rowid, marker) in marks {
+            sessions.mark_binding_notified(rowid, &marker)?;
+        }
     }
     Ok(notified)
 }
@@ -250,22 +306,24 @@ pub(crate) fn start(
     let task = ::zeroclaw_spawn::spawn!(async move {
         let mut interval = tokio::time::interval(CHECK_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut rotation: i64 = 0;
+        let mut rotation = Rotation::default();
         loop {
             if *shutdown.borrow() {
                 break;
             }
-            // The live status adapter: a client per agent from the current
-            // [tachi] section; no network traffic until a call, and failures
-            // inside reconcile are skipped, never fatal.
-            let config_for_fetch = Arc::clone(&config);
-            let fetch = move |agent: &str, dispatch: &str| {
-                let tachi = config_for_fetch.read().tachi.clone();
+            // The live status adapter: a client per agent built from the
+            // VALIDATED route snapshot handed in by reconcile (never a fresh
+            // config read — that would reintroduce the validate/query race).
+            // No network traffic until a call; failures are skipped, never fatal.
+            let fetch = move |agent: &str,
+                              dispatch: &str,
+                              route: &zeroclaw_config::tachi::TachiConfig| {
+                let route = route.clone();
                 let agent = agent.to_string();
                 let dispatch = dispatch.to_string();
                 Box::pin(async move {
                     let client =
-                        zeroclaw_tools::tachi_staff::TachiStaffClient::from_config(&tachi, &agent)?;
+                        zeroclaw_tools::tachi_staff::TachiStaffClient::from_config(&route, &agent)?;
                     client.status(&dispatch).await.map_err(anyhow::Error::from)
                 }) as BoxFuture<'static, anyhow::Result<RunStatus>>
             };
@@ -363,10 +421,10 @@ mod tests {
     }
 
     fn completed_fetch(
-        agent: &str,
-        dispatch: &str,
+        _agent: &str,
+        _dispatch: &str,
+        _route: &zeroclaw_config::tachi::TachiConfig,
     ) -> BoxFuture<'static, anyhow::Result<RunStatus>> {
-        let _ = (agent, dispatch);
         async { Ok(status(RunState::Completed)) }.boxed()
     }
 
@@ -411,14 +469,14 @@ mod tests {
             None,
         );
         let stop = tokio_util::sync::CancellationToken::new();
-        let mut rotation = 0;
+        let mut rotation = Rotation::default();
 
-        let fetch = |agent: &str, dispatch: &str| {
-            let (agent, dispatch) = (agent.to_string(), dispatch.to_string());
+        let fetch = |_agent: &str, dispatch: &str, _route: &zeroclaw_config::tachi::TachiConfig| {
+            let dispatch = dispatch.to_string();
             async move {
-                match (agent.as_str(), dispatch.as_str()) {
-                    (_, "disp-4") => Err(anyhow::Error::msg("daemon unreachable")),
-                    (_, "disp-3") => Ok(status(RunState::Working)),
+                match dispatch.as_str() {
+                    "disp-4" => Err(anyhow::Error::msg("daemon unreachable")),
+                    "disp-3" => Ok(status(RunState::Working)),
                     _ => Ok(status(RunState::Completed)),
                 }
             }
@@ -452,17 +510,18 @@ mod tests {
         assert!(delegation_rows(&tmp).is_empty());
 
         // A later, different outcome on the same request is a new event.
-        let fetch_failed = |_agent: &str, dispatch: &str| {
-            let dispatch = dispatch.to_string();
-            async move {
-                if dispatch == "disp-1" {
-                    Ok(status(RunState::Failed))
-                } else {
-                    Err(anyhow::Error::msg("skip others"))
+        let fetch_failed =
+            |_agent: &str, dispatch: &str, _route: &zeroclaw_config::tachi::TachiConfig| {
+                let dispatch = dispatch.to_string();
+                async move {
+                    if dispatch == "disp-1" {
+                        Ok(status(RunState::Failed))
+                    } else {
+                        Err(anyhow::Error::msg("skip others"))
+                    }
                 }
-            }
-            .boxed()
-        };
+                .boxed()
+            };
         reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch_failed)
             .await
             .unwrap();
@@ -477,11 +536,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_provenance_mismatch_and_pagination() {
+    async fn stale_route_is_never_queried_and_pagination_wraps() {
         let (tmp, config) = fixture_config();
         let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
-        // Stale route: the observer must refuse to query this dispatch even
-        // though the fetcher would report it completed.
+        // Stale route: the observer must refuse to QUERY this dispatch at
+        // all (not merely skip the enqueue) — proven by a fetch counter.
         seed_binding(
             &backend,
             &config,
@@ -490,28 +549,152 @@ mod tests {
             "disp-stale",
             Some("stale"),
         );
-        // Fresh bindings for pagination.
-        seed_binding(&backend, &config, "butler", "req-p1", "disp-p1", None);
-        seed_binding(&backend, &config, "butler", "req-p2", "disp-p2", None);
+        // Fresh bindings; page size 2 forces multi-page coverage.
+        for index in 1..=3 {
+            seed_binding(
+                &backend,
+                &config,
+                "butler",
+                &format!("req-p{index}"),
+                &format!("disp-p{index}"),
+                None,
+            );
+        }
         let shared = RwLock::new(config);
         let stop = tokio_util::sync::CancellationToken::new();
-        let mut rotation = 0;
-        let notified = reconcile(&shared, tmp.path(), &stop, &mut rotation, &|a, d| {
-            completed_fetch(a, d)
-        })
-        .await
-        .unwrap();
-        assert_eq!(notified, 2, "stale route skipped, both fresh notified");
+        let queried = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut rotation = Rotation {
+            cursor: 0,
+            budget: 2_000,
+            page_size: 2,
+        };
+        let counter = std::sync::Arc::clone(&queried);
+        let fetch =
+            move |_agent: &str, _dispatch: &str, _route: &zeroclaw_config::tachi::TachiConfig| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { Ok(status(RunState::Completed)) }.boxed()
+            };
+        // First page: rows 1-2 (stale first, then p1). The stale dispatch
+        // must not be counted.
+        let notified = reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+            .await
+            .unwrap();
+        assert_eq!(notified, 1);
+        assert_eq!(queried.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(rotation.cursor > 0, "full page advances the cursor");
+
+        // Second page: p2 AND p3 (page size 2) — both terminal, both notified.
+        let notified = reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+            .await
+            .unwrap();
+        assert_eq!(notified, 2, "p2 and p3 terminal on the second page");
+        assert!(rotation.cursor > 0);
+        // Third pass: page past the end is short → wraps to 0, nothing new.
+        let notified = reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+            .await
+            .unwrap();
+        assert_eq!(notified, 0, "short page wraps with nothing left");
+        assert_eq!(rotation.cursor, 0, "short page resets the cursor");
+        // Fourth pass from 0: (stale, p1) — stale is NEVER queried; p1 is
+        // queried but marker-suppressed.
+        let notified = reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+            .await
+            .unwrap();
+        assert_eq!(notified, 0, "stale row never notifies; p1 already marked");
+        // Total queries: p1 once per sweep-window visit + p2 + p3 — never stale.
+        assert_eq!(queried.load(std::sync::atomic::Ordering::SeqCst), 4);
+        // Wait: p3's second pass queried p3 only (rows after cursor 4 = stale? no:
+        // rows are (stale, p1, p2, p3) by rowid; page from cursor>0 picks the rest.
         let rows = delegation_rows(&tmp);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3, "three fresh terminals, stale absent");
         assert!(
             !rows
                 .iter()
                 .any(|row| row["source_id"].as_str().unwrap().contains("req-stale"))
         );
 
-        // Rotation cursor advanced and wrapped (page shorter than PAGE_SIZE).
-        assert_eq!(rotation, 0, "short page resets the rotation cursor");
+        // Budget exhaustion wraps even on sustained full pages.
+        let mut rotation = Rotation {
+            cursor: 0,
+            budget: 1,
+            page_size: 2,
+        };
+        // Mark everything already notified so enqueues stop; only rotation matters.
+        reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+            .await
+            .unwrap();
+        assert_eq!(
+            rotation.cursor, 0,
+            "budget exhaustion wraps despite a full page"
+        );
+        assert_eq!(rotation.budget, 2_000, "budget resets on wrap");
+    }
+
+    #[tokio::test]
+    async fn target_change_re_notifies_the_new_destination() {
+        let (tmp, config) = fixture_config();
+        let shared = RwLock::new(config.clone());
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        seed_binding(
+            &backend,
+            &shared.read(),
+            "butler",
+            "req-t1",
+            "disp-t1",
+            None,
+        );
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut rotation = Rotation::default();
+        // First destination notified + marked.
+        reconcile(&shared, tmp.path(), &stop, &mut rotation, &|a, d, r| {
+            completed_fetch(a, d, r)
+        })
+        .await
+        .unwrap();
+        assert_eq!(delegation_rows(&tmp).len(), 1);
+
+        // Evict the outbox entirely (retention loss) AND change the target:
+        // the destination-scoped marker must let the new target be notified.
+        {
+            let path = tmp.path().join("sessions").join("bridge_outbox.db");
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("DELETE FROM bridge_outbox", []).unwrap();
+        }
+        let mut retargeted = config;
+        retargeted
+            .tachi
+            .result_notification
+            .as_mut()
+            .expect("target")
+            .recipient = "owner-new".into();
+        let shared = RwLock::new(retargeted);
+        let notified = reconcile(&shared, tmp.path(), &stop, &mut rotation, &|a, d, r| {
+            completed_fetch(a, d, r)
+        })
+        .await
+        .unwrap();
+        assert_eq!(notified, 1, "a new destination is a new notification");
+        let rows = delegation_rows(&tmp);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["recipient"], "owner-new");
+
+        // Same destination again after another eviction: suppressed by the
+        // now-destination-scoped marker.
+        {
+            let path = tmp.path().join("sessions").join("bridge_outbox.db");
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute("DELETE FROM bridge_outbox", []).unwrap();
+        }
+        let notified = reconcile(&shared, tmp.path(), &stop, &mut rotation, &|a, d, r| {
+            completed_fetch(a, d, r)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            notified, 0,
+            "same destination stays suppressed past eviction"
+        );
+        assert!(delegation_rows(&tmp).is_empty());
     }
 
     #[tokio::test]
@@ -528,7 +711,7 @@ mod tests {
             None,
         );
         let stop = tokio_util::sync::CancellationToken::new();
-        let mut rotation = 0;
+        let mut rotation = Rotation::default();
 
         // Agent disabled, section still eligible: zero enqueues.
         config.agents.insert(
@@ -540,8 +723,8 @@ mod tests {
         );
         let shared = RwLock::new(config.clone());
         assert_eq!(
-            reconcile(&shared, tmp.path(), &stop, &mut rotation, &|a, d| {
-                completed_fetch(a, d)
+            reconcile(&shared, tmp.path(), &stop, &mut rotation, &|a, d, r| {
+                completed_fetch(a, d, r)
             })
             .await
             .unwrap(),
@@ -553,8 +736,8 @@ mod tests {
         config.tachi.enabled = false;
         let shared = RwLock::new(config);
         assert_eq!(
-            reconcile(&shared, tmp.path(), &stop, &mut rotation, &|a, d| {
-                completed_fetch(a, d)
+            reconcile(&shared, tmp.path(), &stop, &mut rotation, &|a, d, r| {
+                completed_fetch(a, d, r)
             })
             .await
             .unwrap(),

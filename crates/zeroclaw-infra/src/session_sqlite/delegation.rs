@@ -241,22 +241,30 @@ impl SqliteSessionBackend {
         let rows = query
             .query_map(params![after_rowid, limit as i64], |row| {
                 let scope: String = row.get(1)?;
-                // Legacy route scope (`alias:<64-hex>`): report the owner.
-                let owner = scope
-                    .split_once(':')
-                    .filter(|(_, suffix)| {
-                        suffix.len() == 64
-                            && suffix
-                                .bytes()
-                                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-                    })
-                    .map_or(scope.as_str(), |(alias, _)| alias);
+                let stored_digest: Option<String> = row.get(4)?;
+                // Legacy route scope (`alias:<64-hex>`): report the owner AND
+                // recover the route fact from the suffix — legacy rows carry
+                // a NULL route_digest column (the same recovery find_binding
+                // performs for the interactive tools).
+                let legacy = scope.split_once(':').filter(|(_, suffix)| {
+                    suffix.len() == 64
+                        && suffix
+                            .bytes()
+                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                });
+                let (owner, route_digest) = match legacy {
+                    Some((alias, suffix)) => (
+                        alias.to_string(),
+                        stored_digest.or_else(|| Some(suffix.to_string())),
+                    ),
+                    None => (scope.clone(), stored_digest),
+                };
                 Ok(DispatchBindingRow {
                     rowid: row.get(0)?,
-                    agent_alias: owner.to_string(),
+                    agent_alias: owner,
                     request_id: row.get(2)?,
                     dispatch_id: row.get(3)?,
-                    route_digest: row.get(4)?,
+                    route_digest,
                     notified_outcome: row.get(5)?,
                 })
             })
