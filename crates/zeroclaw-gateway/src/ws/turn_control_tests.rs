@@ -922,3 +922,273 @@ async fn s2_wire_attachments_reuse_scoped_handles_with_legacy_denials() {
         "owner and device plain turns ran; attachment turns did not"
     );
 }
+
+/// #564 brain monitor: S2 wire events land in the structured log with full
+/// identities and NO content (canary privacy proof). The in-process log
+/// broadcast is the capture seam — the same feed `/api/logs` persists.
+/// Holding the gateway-start lock across the test's awaits is the point —
+/// it serializes this whole test against any full-gateway start's hook swap.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn s2_wire_events_land_in_structured_log_without_content() {
+    // Serialize against the global log plumbing: other tests in this binary
+    // take the same guards and one of them clears the broadcast hook, which
+    // would Close this receiver mid-collection. The gateway-start lock also
+    // covers full `run_gateway` tests, whose hook swap takes no log locks.
+    let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+    let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+    let _gateway_start_guard = crate::TEST_GATEWAY_START_LOCK.lock();
+    // record! fans out through the global tracing subscriber; tests must
+    // install the capture layer (idempotent across parallel tests) before
+    // subscribing the broadcast, or every event drops into the no-op default.
+    zeroclaw_log::try_install_capture_subscriber();
+    let mut rx = zeroclaw_log::subscribe_or_install();
+    let fixture = DeviceFixture::new(&["chat", "cancel"]).await;
+    let mut owner = fixture.socket(OWNER_TOKEN).await;
+    let epoch = negotiate(&mut owner).await;
+
+    let scope = s2_attachment_scope(OWNER_TOKEN);
+    let handle = fixture
+        .state
+        .ws_conversations
+        .attachments
+        .insert(
+            scope,
+            "canary.txt".into(),
+            "text/plain".into(),
+            axum::body::Bytes::from_static(b"canary-attachment-bytes"),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Canary-bearing admission with an attachment.
+    let first = uuid::Uuid::new_v4().to_string();
+    let content = "monitor-canary-content";
+    owner
+        .send(attachment_request(
+            &epoch,
+            &first,
+            content,
+            std::slice::from_ref(&handle),
+        ))
+        .await;
+    let ack = owner.until("turn_ack").await;
+    assert_eq!(ack["status"], "accepted");
+    let first_turn = ack["turn_id"].as_str().unwrap().to_string();
+    let events = terminal(&mut owner, &first, &first_turn).await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "done");
+
+    // A second, cancelled turn exercises the cancel + aborted-terminal path.
+    let second = uuid::Uuid::new_v4().to_string();
+    owner.send(request(&epoch, &second, "s2-held-provider")).await;
+    let second_ack = owner.until("turn_ack").await;
+    let second_turn = second_ack["turn_id"].as_str().unwrap().to_string();
+    wait_provider(&fixture, 2).await;
+    owner
+        .send(json!({"type":"turn_control","version":1,"op":"cancel","epoch":epoch,
+            "request_id":second,"turn_id":second_turn}))
+        .await;
+    assert_eq!(
+        owner.until("turn_cancel_ack").await["status"],
+        "requested"
+    );
+    let events = terminal(&mut owner, &second, &second_turn).await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "aborted");
+
+    // A LEGACY turn (unnegotiated socket, caller-chosen id) must terminal-log
+    // too — finish() records it when no S2 journal entry exists. Its id
+    // deliberately equals the FIRST S2 admission's journal receipt key,
+    // computable by any caller (all hash inputs are client-known): ownership
+    // must key on the TURN match, so this different turn keeps its id.
+    let receipt_key = super::super::super::turn_control::key(
+        &format!(
+            "{}{SESSION}\u{1f}device-agent",
+            super::super::super::GW_SESSION_PREFIX
+        ),
+        &zeroclaw_config::tokens::hash_token(OWNER_TOKEN),
+        &epoch,
+        &first,
+    );
+    let legacy_id = receipt_key;
+    // Different session: the S2 admission recorded a session-scoped receipt
+    // under this key in SESSION, which would otherwise answer "duplicate".
+    // The owner (pairing) token is not bridge-session-bound, so a second
+    // session is admissible.
+    let (status, mut legacy_socket) = DeviceWire::upgrade(
+        fixture.address,
+        "agent=device-agent&session_id=monitor-cross-session",
+        OWNER_TOKEN,
+    )
+    .await;
+    assert_eq!(status, 101);
+    legacy_socket
+        .send(json!({"type":"connect"}))
+        .await;
+    legacy_socket.until("connected").await;
+    legacy_socket
+        .send(json!({"type":"message", "id": legacy_id, "content":"legacy-canary-content"}))
+        .await;
+    assert_eq!(legacy_socket.until("ack").await["status"], "accepted");
+    legacy_socket.until("done").await;
+
+    // Drain the broadcast until both S2 terminals AND the legacy terminal are
+    // seen for our session.
+    let mut collected: Vec<Value> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            panic!("timed out collecting log events; got {} frames", collected.len());
+        }
+        match tokio::time::timeout(Duration::from_millis(50).min(remaining), rx.recv()).await {
+            Ok(Ok(event)) => collected.push(event),
+            Err(_elapsed) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                // The hook locks cover the api.rs broadcast tests, but
+                // `run_gateway`-based tests install the hook without them.
+                // Resubscribe and keep draining; events buffered on the old
+                // sender are lost, which the deadline treats as a failure.
+                rx = zeroclaw_log::subscribe_or_install();
+            }
+        }
+        let terminals = collected
+            .iter()
+            .filter(|event| {
+                event["event"]["action"] == "complete"
+                    && event["attributes"]["request_id"] == json!(second)
+            })
+            .count();
+        let legacy_terminal = collected
+            .iter()
+            .any(|event| {
+                event["event"]["action"] == "complete"
+                    && event["attributes"]["request_id"] == json!(legacy_id)
+            });
+        if terminals >= 1
+            && legacy_terminal
+            && collected.iter().any(|event| {
+                event["event"]["action"] == "cancel"
+                    && event["attributes"]["request_id"] == json!(second)
+            })
+        {
+            break;
+        }
+    }
+
+    let admission = collected
+        .iter()
+        .find(|event| {
+            event["event"]["action"] == "inbound"
+                && event["attributes"]["request_id"] == json!(first)
+        })
+        .expect("admission event with the client request id must be logged");
+    assert_eq!(admission["event"]["category"], "session");
+    assert_eq!(admission["attributes"]["status"], "accepted");
+    assert_eq!(admission["attributes"]["session_id"], SESSION);
+    assert_eq!(admission["attributes"]["agent"], "device-agent");
+    assert_eq!(admission["attributes"]["turn_id"], first_turn.as_str());
+    assert_eq!(
+        admission["attributes"]["content_bytes"],
+        json!(content.len()),
+        "size only — never the content itself"
+    );
+    assert_eq!(admission["attributes"]["attachments"], 1);
+
+    let cancel = collected
+        .iter()
+        .find(|event| {
+            event["event"]["action"] == "cancel"
+                && event["attributes"]["request_id"] == json!(second)
+        })
+        .expect("cancel event must be logged");
+    assert_eq!(cancel["attributes"]["status"], "requested");
+    assert_eq!(cancel["attributes"]["turn_id"], second_turn.as_str());
+
+    let terminal = collected
+        .iter()
+        .find(|event| {
+            event["event"]["action"] == "complete"
+                && event["attributes"]["request_id"] == json!(second)
+        })
+        .expect("terminal event must be logged");
+    assert_eq!(terminal["attributes"]["outcome"], "aborted");
+    assert_eq!(terminal["attributes"]["turn_id"], second_turn.as_str());
+    // A cancelled turn is a failure outcome, never a silent success.
+    assert_eq!(terminal["event"]["outcome"], "failure");
+    // Exactly one terminal per turn — no double logging on either path.
+    for request in [&first, &second, &legacy_id] {
+        let count = collected
+            .iter()
+            .filter(|event| {
+                event["event"]["action"] == "complete"
+                    && event["attributes"]["request_id"] == json!(request)
+            })
+            .count();
+        assert_eq!(count, 1, "exactly one terminal event for {request}");
+    }
+
+    // Session identity is the SAME field across admission and terminal (the
+    // conversation key's gw_ prefix stripped), so one turn's rows correlate.
+    let first_terminal = collected
+        .iter()
+        .find(|event| {
+            event["event"]["action"] == "complete"
+                && event["attributes"]["request_id"] == json!(first)
+        })
+        .expect("first turn terminal event must be logged");
+    assert_eq!(first_terminal["attributes"]["outcome"], "done");
+    assert_eq!(first_terminal["attributes"]["session_id"], SESSION);
+    assert_eq!(first_terminal["attributes"]["turn_id"], first_turn.as_str());
+
+    // The legacy turn terminal carries the caller-chosen id and session.
+    let legacy_terminal = collected
+        .iter()
+        .find(|event| {
+            event["event"]["action"] == "complete"
+                && event["attributes"]["request_id"] == json!(legacy_id)
+        })
+        .expect("legacy terminal event must be logged");
+    assert_eq!(legacy_terminal["attributes"]["outcome"], "done");
+    // The cross-session legacy turn keeps its caller-chosen id — even though
+    // that id is byte-identical to the FIRST admission's journal receipt key
+    // — because ownership is turn-scoped, and logs its own session id.
+    assert_eq!(
+        legacy_terminal["attributes"]["request_id"],
+        legacy_id.as_str()
+    );
+    assert_eq!(
+        legacy_terminal["attributes"]["session_id"],
+        "monitor-cross-session"
+    );
+    assert_eq!(legacy_terminal["attributes"]["agent"], "device-agent");
+
+    let negotiated = collected
+        .iter()
+        .any(|event| {
+            event["event"]["action"] == "connect"
+                && event["attributes"]["session_id"] == SESSION
+                && event["attributes"]["epoch"] == epoch.as_str()
+        });
+    assert!(negotiated, "negotiation event must be logged");
+
+    // Privacy with teeth: no canary appears in ANY captured event — including
+    // the legacy turn's content.
+    for event in &collected {
+        let text = event.to_string();
+        assert!(
+            !text.contains("monitor-canary-content"),
+            "message content leaked into the log: {text}"
+        );
+        assert!(
+            !text.contains("canary-attachment-bytes"),
+            "attachment bytes leaked into the log: {text}"
+        );
+        assert!(
+            !text.contains("legacy-canary-content"),
+            "legacy message content leaked into the log: {text}"
+        );
+    }
+}

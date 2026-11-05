@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Activity,
+  Radar,
   Bot,
   Clock,
   CornerDownLeft,
@@ -35,6 +36,7 @@ const DESTINATIONS: Destination[] = [
   { to: '/skills', icon: Sparkles, labelKey: 'nav.skills', groupKey: 'nav.group.configure' },
   { to: '/cron', icon: Clock, labelKey: 'nav.cron', groupKey: 'nav.group.configure' },
   { to: '/logs', icon: Activity, labelKey: 'nav.logs', groupKey: 'nav.group.operations' },
+  { to: '/monitor', icon: Radar, labelKey: 'nav.monitor', groupKey: 'nav.group.operations' },
 ];
 
 // The three result buckets, rendered in this order with their own headers.

@@ -1,7 +1,7 @@
 import { Suspense } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
-import { AgentChat, AgentsList, Config, Cron, Dashboard, Logs, Pairing, Skills, Review } from './lazyPages';
+import { AgentChat, AgentsList, Config, Cron, Dashboard, Logs, Monitor, Pairing, Skills, Review } from './lazyPages';
 
 function RouteFallback() {
   return (
@@ -32,6 +32,7 @@ export const Router = () => (
         <Route path="/config/:section/:type/:alias" element={<Config />} />
         <Route path="/setup/:section" element={<Config />} />
         <Route path="/logs" element={<Logs />} />
+        <Route path="/monitor" element={<Monitor />} />
         <Route path="/pairing" element={<Pairing />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

@@ -1261,7 +1261,7 @@ pub async fn run_gateway(
     let broadcast_hook_guard =
         zeroclaw_runtime::observability::set_scoped_broadcast_hook(broadcast_layer);
 
-    zeroclaw_log::set_broadcast_hook(event_tx.clone());
+    install_log_broadcast_hook(event_tx.clone());
 
     // Bound into AppState. Not a broadcaster — the broadcaster is the
     // `broadcast_layer` installed above as the global hook. This is the
@@ -2944,6 +2944,31 @@ async fn handle_pair_code(State(state): State<AppState>) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests;
+
+/// Test-only: a full `run_gateway` start replaces the process-global log
+/// broadcast hook. Unit tests that subscribe the broadcast and drive turns
+/// (see ws::device_tests::turn_control_tests) take this lock so a concurrent
+/// gateway start cannot swap the sender under them. Compiled out of
+/// production builds.
+#[cfg(test)]
+pub(crate) static TEST_GATEWAY_START_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Install the gateway's log broadcast sender. In TEST builds the swap is
+/// serialized by TEST_GATEWAY_START_LOCK (scoped: the parking_lot guard never
+/// crosses an await, keeping run_gateway's future Send). Defined here — after
+/// the file's first `#[cfg(test)]` region — so the config-save-isolation
+/// architecture guard still starts its scan region at the original marker,
+/// not at an earlier inline `cfg(test)` block near production code.
+#[cfg(test)]
+fn install_log_broadcast_hook(sender: zeroclaw_log::LogBroadcastSender) {
+    let _guard = TEST_GATEWAY_START_LOCK.lock();
+    zeroclaw_log::set_broadcast_hook(sender);
+}
+
+#[cfg(not(test))]
+fn install_log_broadcast_hook(sender: zeroclaw_log::LogBroadcastSender) {
+    zeroclaw_log::set_broadcast_hook(sender);
+}
 
 #[cfg(test)]
 mod accept_error_tests {
