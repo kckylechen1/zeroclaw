@@ -1391,6 +1391,25 @@ pub async fn handle_map_key(
         };
 
     if created {
+        // A newly CREATED agent must not silently inherit a preserved
+        // rename mapping's identity (a→b keeps `a`; a fresh `a` would then
+        // share b's durable task list). Drop any stale mapping so the next
+        // resolution mints fresh. Best-effort: a failure logs, not blocks.
+        if path == "agents" {
+            let store_dir = working
+                .companion_memory
+                .resolved_store_dir(&working.data_dir);
+            if let Err(e) = zeroclaw_memory::companion::invalidate_alias_identity(&store_dir, &key)
+            {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"alias": key, "error": e.to_string()})),
+                    "stale companion identity mapping could not be invalidated at agent create"
+                );
+            }
+        }
         // skill-bundles: materialize the bundle's resolved directory so
         // skills have a home immediately. Run before persist so a failed
         // mkdir surfaces in logs alongside the config write.

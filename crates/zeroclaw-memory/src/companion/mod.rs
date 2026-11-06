@@ -28,8 +28,8 @@ mod soul_profile;
 mod user_model;
 mod user_model_scope;
 pub use identity::{
-    peek as peek_agent_identity, rename_alias as rename_alias_identity,
-    resolve_or_mint as resolve_or_mint_agent_identity,
+    invalidate_alias as invalidate_alias_identity, peek as peek_agent_identity,
+    rename_alias as rename_alias_identity, resolve_or_mint as resolve_or_mint_agent_identity,
 };
 pub use outbox::{
     OUTBOX_OBSERVE_INTERVAL_SECS, OUTBOX_PENDING_AGE_WARN_SECS, companion_outbox_health,

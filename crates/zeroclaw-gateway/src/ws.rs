@@ -1560,6 +1560,11 @@ async fn run_ws_turns(
         .map_or(String::new(), |(_, alias)| alias.to_string());
     let render: std::sync::Arc<dyn Fn() -> String + Send + Sync> = std::sync::Arc::new(move || {
         let config = tasks_state.config.read().clone();
+        // Same gate as the initial section attach: a non-SQLite session
+        // backend must render unavailable, never open a stale SQLite list.
+        if config.channels.session_backend != "sqlite" {
+            return "## Tasks\n\nTask list unavailable.".to_string();
+        }
         let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
         match zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, &tasks_alias) {
             Ok(identity) => {

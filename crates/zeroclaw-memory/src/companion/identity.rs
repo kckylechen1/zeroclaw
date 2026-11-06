@@ -83,6 +83,24 @@ pub fn rename_alias(store_dir: &Path, from: &str, to: &str) -> anyhow::Result<bo
     Ok(true)
 }
 
+/// Drop any mapping for `alias` so the next resolution mints a FRESH
+/// identity. Called at the config agent-CREATE boundary: a preserved rename
+/// mapping (a→b kept `a` pointing at the old identity) must not silently
+/// hand a genuinely new agent `a` the old identity — and with it the old
+/// agent's identity-keyed state (e.g. the durable task list). Returns
+/// whether a mapping was dropped.
+pub fn invalidate_alias(store_dir: &Path, alias: &str) -> anyhow::Result<bool> {
+    let _guard = IDENTITY_FILE_LOCK.lock();
+    let path = identity_path(store_dir);
+    let mut file = load_identity_file(&path)?;
+    if file.agents.remove(alias).is_some() {
+        persist_identity_file(&path, &file)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 pub fn peek(store_dir: &Path, alias: &str) -> Option<AgentIdentityId> {
     let alias = alias.trim();
     if alias.is_empty() {
