@@ -11,6 +11,7 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use zeroclaw_api::model_provider::ChatMessage;
 
+pub mod agent_tasks;
 mod bridge_intake;
 mod delegation;
 #[cfg(test)]
@@ -234,6 +235,8 @@ impl SqliteSessionBackend {
         // transaction rather than inside it; idempotent for late openers.
         delegation::migrate_route_provenance(&mut conn)
             .context("Failed to migrate session schema")?;
+        agent_tasks::migrate_agent_tasks(&mut conn)
+            .context("Failed to migrate agent task schema")?;
 
         crate::sqlite_perms::harden_sqlite_owner_only(&db_path);
         Ok(Self {

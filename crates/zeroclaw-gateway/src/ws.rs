@@ -818,6 +818,29 @@ async fn build_ws_session(
         )
         .await?;
     agent.add_prompt_section(Box::new(surface::Section));
+    // Durable task-list projection (#567): same owner resolution as the
+    // registered tool (mint-once identity); read failures render
+    // `unavailable`, never an empty list.
+    {
+        let tasks_config = state.config.read().clone();
+        let tasks_agent = agent_alias.to_string();
+        agent.add_prompt_section(Box::new(zeroclaw_runtime::tools::TaskListSection {
+            resolve: std::sync::Arc::new(move || {
+                let store_dir = tasks_config
+                    .companion_memory
+                    .resolved_store_dir(&tasks_config.data_dir);
+                let identity = zeroclaw_memory::companion::resolve_or_mint_agent_identity(
+                    &store_dir,
+                    &tasks_agent,
+                )
+                .map_err(|error| format!("agent identity unavailable: {error}"))?;
+                if tasks_config.channels.session_backend != "sqlite" {
+                    return Err("task list unavailable".to_string());
+                }
+                Ok((identity.as_str().to_string(), tasks_config.data_dir.clone()))
+            }),
+        }));
+    }
     // Keep ONE ingress identity for the WebSocket turn: the turn span records
     // `channel = "wss"`, and observer events derive from `Agent.channel_name`,
     // so this must stay `wss` or a single turn is split across two names.
@@ -3234,6 +3257,29 @@ mod tests {
                         }
                         let mut agent = builder.build()?;
                         agent.add_prompt_section(Box::new(surface::Section));
+    // Durable task-list projection (#567): same owner resolution as the
+    // registered tool (mint-once identity); read failures render
+    // `unavailable`, never an empty list.
+    {
+        let tasks_config = state.config.read().clone();
+        let tasks_agent = agent_alias.to_string();
+        agent.add_prompt_section(Box::new(zeroclaw_runtime::tools::TaskListSection {
+            resolve: std::sync::Arc::new(move || {
+                let store_dir = tasks_config
+                    .companion_memory
+                    .resolved_store_dir(&tasks_config.data_dir);
+                let identity = zeroclaw_memory::companion::resolve_or_mint_agent_identity(
+                    &store_dir,
+                    &tasks_agent,
+                )
+                .map_err(|error| format!("agent identity unavailable: {error}"))?;
+                if tasks_config.channels.session_backend != "sqlite" {
+                    return Err("task list unavailable".to_string());
+                }
+                Ok((identity.as_str().to_string(), tasks_config.data_dir.clone()))
+            }),
+        }));
+    }
                         Ok::<_, anyhow::Error>((
                             WsSession {
                                 agent,

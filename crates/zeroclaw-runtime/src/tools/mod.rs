@@ -23,6 +23,8 @@ pub mod shell;
 pub mod skill_http;
 pub mod skill_manage;
 pub mod skill_tool;
+pub mod task_list;
+pub mod task_section;
 pub mod todo_write;
 
 // Tool types from zeroclaw-tools (direct imports, no shims)
@@ -108,6 +110,8 @@ pub use send_message_to_peer::SendMessageToPeerTool;
 pub use shell::ShellTool;
 pub use skill_http::SkillHttpTool;
 pub use skill_tool::{SkillBuiltinTool, SkillShellTool};
+pub use task_list::TaskListTool;
+pub use task_section::TaskListSection;
 pub use todo_write::TodoWriteTool;
 
 /// Re-entrant agent-spawning tools that must never be collapsed by the
@@ -826,6 +830,31 @@ pub fn all_tools_with_runtime(
     tool_arcs.push(Arc::new(CalculatorTool::new()));
     tool_arcs.push(Arc::new(WeatherTool::new()));
     tool_arcs.push(Arc::new(TodoWriteTool::new()));
+
+    // Durable cross-session commitment list (#567). Owner identity is the
+    // mint-once companion UUID (alias renames keep the list); the model
+    // never chooses the owner. Requires the SQLite session backend.
+    {
+        let tasks_config = config.clone();
+        let tasks_agent = agent_alias.to_string();
+        tool_arcs.push(Arc::new(TaskListTool::new(std::sync::Arc::new(
+            move || {
+                let config = tasks_config.clone();
+                let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+                let identity = zeroclaw_memory::companion::resolve_or_mint_agent_identity(
+                    &store_dir,
+                    &tasks_agent,
+                )
+                .map_err(|error| format!("agent identity unavailable: {error}"))?;
+                if config.channels.session_backend != "sqlite" {
+                    return Err(
+                        "the durable task list requires the SQLite session backend".to_string()
+                    );
+                }
+                Ok((identity.as_str().to_string(), config.data_dir.clone()))
+            },
+        ))));
+    }
 
     // Register discord_search if any configured Discord alias has
     // archive enabled. Multiple Discord aliases are supported (one per
