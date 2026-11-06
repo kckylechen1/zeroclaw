@@ -66,12 +66,16 @@ pub fn resolve_or_mint(store_dir: &Path, alias: &str) -> anyhow::Result<AgentIde
 
 /// Read a stored mapping without minting.
 /// Re-point `to` at the identity currently held by `from` (alias rename).
-/// The old mapping is preserved so both names resolve to one identity until
-/// `from` is itself renamed away. Returns whether a mapping was moved.
+/// The `from` mapping is PRESERVED (both names resolve to one identity, so a
+/// rename back and in-flight `from` resolutions stay continuous). Renaming
+/// onto a `to` that already holds a different identity overwrites it
+/// (last-write-wins); the config-level collision guard is the outer
+/// protection against that case. Returns whether `from` had a mapping.
 pub fn rename_alias(store_dir: &Path, from: &str, to: &str) -> anyhow::Result<bool> {
+    let _guard = IDENTITY_FILE_LOCK.lock();
     let path = identity_path(store_dir);
     let mut file = load_identity_file(&path)?;
-    let Some(identity) = file.agents.remove(from) else {
+    let Some(identity) = file.agents.get(from).cloned() else {
         return Ok(false);
     };
     file.agents.insert(to.to_string(), identity);

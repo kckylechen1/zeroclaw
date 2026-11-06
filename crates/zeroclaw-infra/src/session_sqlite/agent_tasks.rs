@@ -189,13 +189,17 @@ impl SqliteSessionBackend {
                 items: list,
             }));
         }
-        if list.len()
-            + ops
-                .iter()
-                .filter(|op| matches!(op, TaskOp::Add { .. }))
-                .count()
-            > MAX_ITEMS
-        {
+        // The cap applies to the POST-BATCH size: removes in the same batch
+        // free room for adds (a legal replacement stays one transaction).
+        let adds = ops
+            .iter()
+            .filter(|op| matches!(op, TaskOp::Add { .. }))
+            .count();
+        let removes = ops
+            .iter()
+            .filter(|op| matches!(op, TaskOp::Remove { .. }))
+            .count();
+        if list.len() + adds > MAX_ITEMS + removes {
             bail!("the list is capped at {MAX_ITEMS} items");
         }
         let now = std::time::SystemTime::now()

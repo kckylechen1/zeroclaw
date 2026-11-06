@@ -63,13 +63,30 @@ fn parse_ops(args: &Value) -> anyhow::Result<Vec<TaskOp>> {
                 }
             }
         }
+        // Presence-vs-type discipline: a field present but not a string is a
+        // TYPE error, never "absent" (silent defaulting loses caller intent).
+        let required_str = |field: &str| -> anyhow::Result<String> {
+            match op.get(field) {
+                Some(Value::String(value)) => Ok(value.clone()),
+                Some(other) => anyhow::bail!("ops[{index}].{field} must be a string, got {other}"),
+                None => anyhow::bail!("ops[{index}].{field} is required"),
+            }
+        };
+        let optional_str = |field: &str| -> anyhow::Result<Option<String>> {
+            match op.get(field) {
+                Some(Value::String(value)) => Ok(Some(value.clone())),
+                Some(other) => anyhow::bail!("ops[{index}].{field} must be a string, got {other}"),
+                None => Ok(None),
+            }
+        };
         let status_for_add = || -> anyhow::Result<String> {
-            match op.get("status").and_then(Value::as_str) {
+            match optional_str("status")? {
                 None => Ok(STATUS_PENDING.to_string()),
                 Some(status)
-                    if [STATUS_PENDING, STATUS_IN_PROGRESS, STATUS_COMPLETED].contains(&status) =>
+                    if [STATUS_PENDING, STATUS_IN_PROGRESS, STATUS_COMPLETED]
+                        .contains(&status.as_str()) =>
                 {
-                    Ok(status.to_string())
+                    Ok(status)
                 }
                 Some(other) => {
                     anyhow::bail!(
@@ -80,33 +97,16 @@ fn parse_ops(args: &Value) -> anyhow::Result<Vec<TaskOp>> {
         };
         let parsed_op = match kind {
             "add" => TaskOp::Add {
-                description: op
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        anyhow::Error::msg(format!("ops[{index}].description is required"))
-                    })?
-                    .to_string(),
+                description: required_str("description")?,
                 status: status_for_add()?,
             },
             "update" => TaskOp::Update {
-                task_id: op
-                    .get("task_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::Error::msg(format!("ops[{index}].task_id is required")))?
-                    .to_string(),
-                description: op
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                status: op.get("status").and_then(Value::as_str).map(str::to_string),
+                task_id: required_str("task_id")?,
+                description: optional_str("description")?,
+                status: optional_str("status")?,
             },
             "remove" => TaskOp::Remove {
-                task_id: op
-                    .get("task_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::Error::msg(format!("ops[{index}].task_id is required")))?
-                    .to_string(),
+                task_id: required_str("task_id")?,
             },
             _ => unreachable!("kind validated above"),
         };
