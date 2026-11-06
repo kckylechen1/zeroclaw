@@ -32,6 +32,26 @@ pub struct PromptContext<'a> {
     pub autonomy_level: AutonomyLevel,
 }
 
+impl<'a> PromptContext<'a> {
+    /// A minimal context for on-demand section renders (e.g. the per-request
+    /// tasks refresh). Sections that read real fields must not use this.
+    pub fn placeholder() -> PromptContext<'static> {
+        PromptContext {
+            workspace_dir: Path::new(""),
+            agent_workspace_dir: Path::new(""),
+            model_name: "",
+            tools: &[],
+            skills: &[],
+            skills_prompt_mode: Default::default(),
+            identity_config: None,
+            dispatcher_instructions: "",
+            sends_native_tool_specs: false,
+            security_summary: None,
+            autonomy_level: Default::default(),
+        }
+    }
+}
+
 pub trait PromptSection: Send + Sync {
     fn name(&self) -> &str;
     fn build(&self, ctx: &PromptContext<'_>) -> Result<String>;

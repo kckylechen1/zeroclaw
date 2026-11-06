@@ -100,7 +100,7 @@ fn list_section(config: &Config, section: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_entry(config: &mut Config, section: &str, alias: &str) -> Result<()> {
+fn create_entry(config: &mut Config, section: &str, alias: &str) -> Result<bool> {
     // Shared guarded boundary: refuses the reserved `default` agent here too (an
     // operator create surface), and delegates unchanged for every other section.
     // The Reserved rejection is localized via Fluent like the delete/rename guards
@@ -136,7 +136,7 @@ fn create_entry(config: &mut Config, section: &str, alias: &str) -> Result<()> {
             )
         );
     }
-    Ok(())
+    Ok(created)
 }
 
 /// Print the dry-run impact (blockers + scrubs) for a delete.
@@ -359,8 +359,19 @@ pub async fn handle_agents(cmd: AgentsCommands, config: &mut Config) -> Result<(
     match cmd {
         AgentsCommands::List => list_section(config, "agents"),
         AgentsCommands::Create { alias } => {
-            create_entry(config, "agents", &alias)?;
-            save(config).await
+            let created = create_entry(config, "agents", &alias)?;
+            save(config).await?;
+            // Same lifecycle rule as the HTTP create paths (#567): a
+            // persisted NEW agent drops any stale preserved-rename identity
+            // mapping so it mints fresh instead of inheriting the old
+            // identity's durable task list. A duplicate create is a no-op on
+            // the existing agent's identity — `created` is false there.
+            if created {
+                let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+                zeroclaw_memory::companion::invalidate_alias_identity(&store_dir, &alias)
+                    .context("failed to clear a stale companion identity mapping")?;
+            }
+            Ok(())
         }
         AgentsCommands::Rename { from, to } => {
             // Capture the workspace path while the `from` entry still exists

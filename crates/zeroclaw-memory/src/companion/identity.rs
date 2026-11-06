@@ -65,7 +65,42 @@ pub fn resolve_or_mint(store_dir: &Path, alias: &str) -> anyhow::Result<AgentIde
 }
 
 /// Read a stored mapping without minting.
-#[must_use]
+/// Re-point `to` at the identity currently held by `from` (alias rename).
+/// The `from` mapping is PRESERVED (both names resolve to one identity, so a
+/// rename back and in-flight `from` resolutions stay continuous). Renaming
+/// onto a `to` that already holds a different identity overwrites it
+/// (last-write-wins); the config-level collision guard is the outer
+/// protection against that case. Returns whether `from` had a mapping.
+pub fn rename_alias(store_dir: &Path, from: &str, to: &str) -> anyhow::Result<bool> {
+    let _guard = IDENTITY_FILE_LOCK.lock();
+    let path = identity_path(store_dir);
+    let mut file = load_identity_file(&path)?;
+    let Some(identity) = file.agents.get(from).cloned() else {
+        return Ok(false);
+    };
+    file.agents.insert(to.to_string(), identity);
+    persist_identity_file(&path, &file)?;
+    Ok(true)
+}
+
+/// Drop any mapping for `alias` so the next resolution mints a FRESH
+/// identity. Called at the config agent-CREATE boundary: a preserved rename
+/// mapping (a→b kept `a` pointing at the old identity) must not silently
+/// hand a genuinely new agent `a` the old identity — and with it the old
+/// agent's identity-keyed state (e.g. the durable task list). Returns
+/// whether a mapping was dropped.
+pub fn invalidate_alias(store_dir: &Path, alias: &str) -> anyhow::Result<bool> {
+    let _guard = IDENTITY_FILE_LOCK.lock();
+    let path = identity_path(store_dir);
+    let mut file = load_identity_file(&path)?;
+    if file.agents.remove(alias).is_some() {
+        persist_identity_file(&path, &file)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 pub fn peek(store_dir: &Path, alias: &str) -> Option<AgentIdentityId> {
     let alias = alias.trim();
     if alias.is_empty() {

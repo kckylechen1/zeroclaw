@@ -80,7 +80,7 @@ impl Tool for TodoWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Render a live task tracker for the current work. Call this with the COMPLETE \
+        "Current-step plan for the work at hand (durable multi-day commitments \nbelong to task_list instead). Render a live task tracker for the current work. Call this with the COMPLETE \
          current todo list every time — the new list wholly replaces the previous one. \
          Each todo has `content` (imperative description), `status` (pending, in_progress, \
          or completed), and optionally `priority` (high, medium, low) and `activeForm` \

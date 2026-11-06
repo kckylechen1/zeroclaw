@@ -1361,6 +1361,9 @@ pub async fn handle_map_key(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+    // Stale companion identity mappings to drop AFTER the create persists
+    // (#567): a rejected create must leave the old mapping untouched.
+    let mut pending_identity_invalidations: Vec<(std::path::PathBuf, String)> = Vec::new();
 
     let _cfg_guard = Arc::clone(&state.config_write_lock).lock_owned().await;
     let mut working = state.config.read().clone();
@@ -1391,6 +1394,17 @@ pub async fn handle_map_key(
         };
 
     if created {
+        // A newly CREATED agent must not silently inherit a preserved
+        // rename mapping's identity (a→b keeps `a`; a fresh `a` would then
+        // share b's durable task list). The stale mapping is invalidated
+        // only AFTER the config write persisted, so a FAILED create leaves
+        // the old identity mapping untouched.
+        if path == "agents" {
+            let store_dir = working
+                .companion_memory
+                .resolved_store_dir(&working.data_dir);
+            pending_identity_invalidations.push((store_dir, key.clone()));
+        }
         // skill-bundles: materialize the bundle's resolved directory so
         // skills have a home immediately. Run before persist so a failed
         // mkdir surfaces in logs alongside the config write.
@@ -1416,6 +1430,38 @@ pub async fn handle_map_key(
         if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some((peer, &headers))).await
         {
             return e;
+        }
+        // The create persisted: NOW drop any stale companion identity
+        // mapping for the alias (a failed create above never reaches here,
+        // so the old mapping survives a rejected request).
+        let mut warnings = Vec::new();
+        for (store_dir, alias) in pending_identity_invalidations {
+            match zeroclaw_memory::companion::invalidate_alias_identity(&store_dir, &alias) {
+                Ok(_) => {}
+                Err(e) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(
+                                ::serde_json::json!({"alias": alias, "error": e.to_string()})
+                            ),
+                        "stale companion identity mapping could not be invalidated at agent create"
+                    );
+                    warnings.push(format!(
+                        "agent created, but a stale identity mapping for `{alias}` could not be cleared: {e}"
+                    ));
+                }
+            }
+        }
+        if !warnings.is_empty() {
+            return axum::Json(MapKeyResponse {
+                path,
+                key,
+                created,
+                warnings: Some(warnings),
+            })
+            .into_response();
         }
     }
 
