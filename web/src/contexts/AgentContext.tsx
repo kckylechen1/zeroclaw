@@ -7,6 +7,7 @@ import { getProp, putProp, listProps, getStatus, getSessionMessages, abortSessio
 import { primeModelProviderCatalog, modelProviderDisplayName } from '@/lib/modelProviders';
 import type { ToolCallInfo } from '@/components/ToolCallCard';
 import { resolveToolResultIndex } from '@/lib/toolCardMatch';
+import { TurnSequencer, type SequencedRelease } from '@/lib/turnSequencer';
 import {
   loadChatHistory,
   mapServerMessagesToPersisted,
@@ -42,31 +43,29 @@ export interface ChatMessage {
 
 /** S2 correlation state for the one in-flight request this surface tracks
  *  (#549). `turnId` binds after `turn_ack: accepted` (or the first event /
- *  replay, when the ACK was lost). Display dedup is by APPLIED sequence set:
- *  the live ring and a resume snapshot can interleave (live seq N+1 may
- *  arrive before the replay carrying N), so a max-watermark check would drop
- *  never-displayed events. `resumeSeq` is the contiguous watermark — resume
- *  asks for everything after it, so events displayed out of order still get
- *  replayed to their consumer rather than silently skipped. */
+ *  replay, when the ACK was lost). Sequenced events are applied STRICTLY in
+ *  seq order through `sequencer` (#563 review): the live ring and a resume
+ *  snapshot can interleave (live seq N+1 may arrive before the replay
+ *  carrying N), so N+1 is held until N is applied or declared unrecoverable.
+ *  `sequencer.resumeSeq` is the contiguous anchor resume asks after. */
 interface ActiveTurn {
   requestId: string;
   turnId: string | null;
-  /** Highest sequence observed (informational). */
-  lastSeq: number;
-  /** Highest sequence with all of 1..N applied — the resume anchor. */
-  resumeSeq: number;
-  appliedSeqs: Set<number>;
+  sequencer: TurnSequencer<WsMessage>;
+  /** The terminal marker was RECEIVED (it may still be buffered behind a
+   * hole); the outcome is known even before it is applied. */
   terminalSeen: boolean;
-  /** The terminal marker's own seq — it is re-delivered by replay even
-   * beyond the replay-cache bound, so it is exempt from pruning. */
-  terminalSeq: number | null;
   /** A replay declared a server-side gap: missing middle events can never be
-   * filled, so a later live terminal must settle immediately. */
+   * filled, so a buffered terminal must settle immediately. */
   gapSeen: boolean;
-  /** Grace timer armed when a live terminal outruns the replay that may
-   * still fill the holes below it. */
-  terminalTimer: ReturnType<typeof setTimeout> | null;
+  /** Grace timer armed while a hole holds events back. First expiry asks
+   * for a resume; the second declares the hole unrecoverable and flushes. */
+  holeTimer: ReturnType<typeof setTimeout> | null;
+  holeTimerStage: 0 | 1;
 }
+
+/** Grace for a hole to be filled by an in-flight / requested replay. */
+const HOLE_GRACE_MS = 3_000;
 
 interface AgentContextValue {
   messages: ChatMessage[];
@@ -266,8 +265,8 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   }, []);
 
   const finalizeActiveTurn = useCallback(() => {
-    if (activeTurnRef.current?.terminalTimer) {
-      clearTimeout(activeTurnRef.current.terminalTimer);
+    if (activeTurnRef.current?.holeTimer) {
+      clearTimeout(activeTurnRef.current.holeTimer);
     }
     activeTurnRef.current = null;
     setStopRequested(false);
@@ -298,6 +297,88 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   // `turn_event.event` payload is an ordinary display frame, so it recurses
   // through this same handler rather than a parallel display path.
   const handleWsMessage = useCallback(function handleWsMessage(msg: WsMessage) {
+    /** Apply ONE ordered `turn_event` wrapper (its seq is next in order). */
+    const applyTurnEvent = (active: ActiveTurn, wrapper: WsMessage) => {
+      const inner = wrapper.event;
+      if (!inner) return;
+      if (inner.type === 'turn_terminal') {
+        if (inner.outcome === 'aborted') {
+          // Mirror the legacy `aborted` cleanup; the server publishes the
+          // legacy frame too, but the marker can arrive as the sole witness
+          // on a replayed terminal.
+          pendingContentRef.current = '';
+          pendingThinkingRef.current = '';
+          capturedThinkingRef.current = '';
+          setStreamingContent('');
+          setStreamingThinking('');
+          setPendingApproval(null);
+        }
+        releaseTerminalWaiter(wrapper.turn_id ?? active.turnId ?? '');
+        // Ordered delivery guarantees every lower seq was applied (or
+        // declared lost) before the terminal: settling now drops nothing.
+        finalizeActiveTurn();
+        return;
+      }
+      handleWsMessage(inner);
+    };
+
+    /** Apply a sequencer release in order, then re-evaluate the hole timer. */
+    const applyRelease = (active: ActiveTurn, release: SequencedRelease<WsMessage>) => {
+      if (release.skipped.length > 0) {
+        addNotice(t('agent.replay_gap'));
+      }
+      for (const { event } of release.ready) {
+        if (activeTurnRef.current !== active) return; // settled mid-release
+        applyTurnEvent(active, event);
+      }
+      if (activeTurnRef.current !== active) return;
+      if (!active.sequencer.hasHole) {
+        if (active.holeTimer) clearTimeout(active.holeTimer);
+        active.holeTimer = null;
+        active.holeTimerStage = 0;
+        return;
+      }
+      // A buffered terminal behind a hole that a declared server-side gap
+      // makes unfillable settles immediately (nothing can still arrive).
+      if (active.terminalSeen && active.gapSeen) {
+        applyRelease(active, active.sequencer.flush());
+        return;
+      }
+      if (active.holeTimer) return;
+      const arm = () => {
+        active.holeTimer = setTimeout(() => {
+          active.holeTimer = null;
+          if (activeTurnRef.current !== active || !active.sequencer.hasHole) return;
+          if (active.holeTimerStage === 0) {
+            // First expiry: the replay that fills the hole may never have
+            // been requested (e.g. a silently dropped live frame) — ask.
+            active.holeTimerStage = 1;
+            wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
+            arm();
+            return;
+          }
+          // Second expiry: declare the hole unrecoverable, apply the rest
+          // in order (a buffered terminal settles the turn).
+          active.holeTimerStage = 0;
+          applyRelease(active, active.sequencer.flush());
+        }, HOLE_GRACE_MS);
+      };
+      arm();
+    };
+
+    /** Route one sequenced `turn_event` wrapper (live or replayed). */
+    const offerTurnEvent = (active: ActiveTurn, wrapper: WsMessage) => {
+      if (wrapper.event?.type === 'turn_terminal') {
+        active.terminalSeen = true;
+      }
+      if (typeof wrapper.seq !== 'number') {
+        // Unsequenced (legacy) frame: no ordering contract to honour.
+        applyTurnEvent(active, wrapper);
+        return;
+      }
+      applyRelease(active, active.sequencer.offer(wrapper.seq, wrapper));
+    };
+
     switch (msg.type) {
       case 'session_start':
       case 'connected':
@@ -321,7 +402,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         lastEpochRef.current = epoch;
         const active = activeTurnRef.current;
         if (epoch && previous === epoch && active) {
-          wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
+          wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
         } else if (epoch && previous && previous !== epoch && active) {
           if (!active.terminalSeen) {
             addNotice(t('agent.turn_outcome_unknown'));
@@ -341,7 +422,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
           case 'duplicate':
             // The request already ran (or is running) under this identity;
             // reconcile by replaying everything past our applied sequence.
-            wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
+            wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
             break;
           case 'conflict':
             addNotice(t('agent.turn_conflict'));
@@ -363,81 +444,12 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       case 'turn_event': {
         const active = activeTurnRef.current;
         if (!active || msg.request_id !== active.requestId) break;
-        const inner = msg.event;
         // Late-ACK recovery: events and replays carry the authoritative turn
         // identity even when the accepted ACK was never observed.
         if (active.turnId === null && typeof msg.turn_id === 'string') {
           active.turnId = msg.turn_id;
         }
-        // Record the terminal's own seq BEFORE any pruning in this handler:
-        // the marker is re-delivered by replay even beyond the replay-cache
-        // bound, so it must survive the dedup-set trim (round-5 review P3).
-        if (inner?.type === 'turn_terminal' && typeof msg.seq === 'number') {
-          active.terminalSeq = msg.seq;
-        }
-        // Dedup by applied sequence, not a watermark: the live ring can
-        // deliver seq N+1 before the replay carrying N, and both must display.
-        if (typeof msg.seq === 'number') {
-          if (active.appliedSeqs.has(msg.seq)) break;
-          active.appliedSeqs.add(msg.seq);
-          active.lastSeq = Math.max(active.lastSeq, msg.seq);
-          while (active.appliedSeqs.has(active.resumeSeq + 1)) {
-            active.resumeSeq += 1;
-          }
-          // Bounded by the re-deliverable domain: the server replays only its
-          // cached prefix (first `replay_events` events — not a rolling
-          // window) plus the terminal marker, so sequence numbers beyond that
-          // bound can only ever arrive live-once and need no dedup entry.
-          const replayLimit = wsRef.current?.replayLimit ?? 128;
-          if (active.appliedSeqs.size > replayLimit + 32) {
-            for (const seq of active.appliedSeqs) {
-              if (seq > replayLimit && seq !== active.terminalSeq) {
-                active.appliedSeqs.delete(seq);
-              }
-            }
-          }
-        }
-        if (!inner) break;
-        if (inner.type === 'turn_terminal') {
-          active.terminalSeen = true;
-          if (inner.outcome === 'aborted') {
-            // Mirror the legacy `aborted` cleanup; the server publishes the
-            // legacy frame too, but the marker can arrive as the sole witness
-            // on a replayed terminal.
-            pendingContentRef.current = '';
-            pendingThinkingRef.current = '';
-            capturedThinkingRef.current = '';
-            setStreamingContent('');
-            setStreamingThinking('');
-            setPendingApproval(null);
-          }
-          releaseTerminalWaiter(msg.turn_id ?? '');
-          // A live terminal can outrun the replay that fills the holes below
-          // it (live seq 11 before replay 6-11). Settling now would drop the
-          // never-displayed middle forever — but holes do NOT prove a replay
-          // is still in flight (a server-side gap already declared the middle
-          // lost). Hold only when the middle is still fillable, with a
-          // bounded grace; the replay (or the timer) settles the turn.
-          const holesBelowTerminal =
-            typeof msg.seq === 'number' && active.resumeSeq < msg.seq - 1;
-          if (holesBelowTerminal && !active.gapSeen) {
-            const requestId = active.requestId;
-            active.terminalTimer = setTimeout(() => {
-              const current = activeTurnRef.current;
-              if (current?.requestId === requestId) {
-                addNotice(t('agent.replay_gap'));
-                finalizeActiveTurn();
-              }
-            }, 3_000);
-          } else {
-            if (holesBelowTerminal && active.gapSeen) {
-              addNotice(t('agent.replay_gap'));
-            }
-            finalizeActiveTurn();
-          }
-          break;
-        }
-        handleWsMessage(inner);
+        offerTurnEvent(active, msg);
         break;
       }
 
@@ -452,15 +464,30 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
           addNotice(t('agent.replay_gap'));
         }
         for (const event of msg.events ?? []) {
-          handleWsMessage(event);
+          if (activeTurnRef.current !== active) break;
+          if (event.type === 'turn_event') {
+            offerTurnEvent(active, event);
+          } else {
+            handleWsMessage(event);
+          }
         }
-        if (msg.terminal === true || active.terminalSeen) {
-          // Either the replay itself says the request finished, or its
-          // terminal marker already arrived live and was held open for
-          // exactly this replay (or its grace timer is pending — the first
-          // path to reach here wins; finalize clears the timer).
-          releaseTerminalWaiter(active.turnId ?? '');
-          finalizeActiveTurn();
+        if (activeTurnRef.current !== active) break;
+        // The replay carried everything the server still holds after our
+        // anchor: any seq <= last_seq it did not carry is unrecoverable, so
+        // skip those holes and release what is buffered above them in order.
+        if (typeof msg.last_seq === 'number') {
+          const release = active.sequencer.settleThrough(msg.last_seq);
+          // The gap notice was already shown for a declared gap.
+          applyRelease(active, msg.gap ? { ...release, skipped: [] } : release);
+        }
+        if (activeTurnRef.current === active && msg.terminal === true) {
+          // Defensive: the replay says the request finished but its marker
+          // was not (re)delivered past our anchor — settle anyway.
+          applyRelease(active, active.sequencer.flush());
+          if (activeTurnRef.current === active) {
+            releaseTerminalWaiter(active.turnId ?? '');
+            finalizeActiveTurn();
+          }
         }
         break;
       }
@@ -512,7 +539,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         const active = activeTurnRef.current;
         addNotice(t('agent.replay_gap'));
         if (active) {
-          wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
+          wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
         }
         break;
       }
@@ -898,13 +925,11 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       activeTurnRef.current = {
         requestId,
         turnId: null,
-        lastSeq: 0,
-        resumeSeq: 0,
-        appliedSeqs: new Set(),
+        sequencer: new TurnSequencer<WsMessage>(),
         terminalSeen: false,
-        terminalSeq: null,
         gapSeen: false,
-        terminalTimer: null,
+        holeTimer: null,
+        holeTimerStage: 0,
       };
       setStopRequested(false);
       setTyping(true);
