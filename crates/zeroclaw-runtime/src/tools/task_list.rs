@@ -42,10 +42,13 @@ fn parse_ops(args: &Value) -> anyhow::Result<Vec<TaskOp>> {
     }
     let mut parsed = Vec::with_capacity(ops.len());
     for (index, op) in ops.iter().enumerate() {
-        let kind = op
-            .get("op")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::Error::msg(format!("ops[{index}].op is required")))?;
+        let kind = match op.get("op") {
+            Some(Value::String(kind)) => kind.as_str(),
+            Some(other) => {
+                anyhow::bail!("ops[{index}].op must be a string, got {other}")
+            }
+            None => anyhow::bail!("ops[{index}].op is required"),
+        };
         // Strict schema: unknown fields are rejected, never silently dropped.
         let allowed: &[&str] = match kind {
             "add" => &["op", "description", "status"],
@@ -202,6 +205,17 @@ re-judge and retry with its revision. Statuses: pending, in_progress \
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        // Strict execution-side validation mirrors the published schema:
+        // unknown top-level fields and mistyped values are rejected rather
+        // than silently ignored (`and_then(as_str)` cannot distinguish
+        // "missing" from "wrong type").
+        if let Some(fields) = args.as_object() {
+            for field in fields.keys() {
+                if !matches!(field.as_str(), "expected_revision" | "ops") {
+                    return Ok(ToolResult::err(format!("unsupported field {field:?}")));
+                }
+            }
+        }
         let expected_revision = match args.get("expected_revision").and_then(Value::as_i64) {
             Some(revision) if revision >= 0 => revision,
             Some(_) => {

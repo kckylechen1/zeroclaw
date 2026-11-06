@@ -65,7 +65,20 @@ pub fn resolve_or_mint(store_dir: &Path, alias: &str) -> anyhow::Result<AgentIde
 }
 
 /// Read a stored mapping without minting.
-#[must_use]
+/// Re-point `to` at the identity currently held by `from` (alias rename).
+/// The old mapping is preserved so both names resolve to one identity until
+/// `from` is itself renamed away. Returns whether a mapping was moved.
+pub fn rename_alias(store_dir: &Path, from: &str, to: &str) -> anyhow::Result<bool> {
+    let path = identity_path(store_dir);
+    let mut file = load_identity_file(&path)?;
+    let Some(identity) = file.agents.remove(from) else {
+        return Ok(false);
+    };
+    file.agents.insert(to.to_string(), identity);
+    persist_identity_file(&path, &file)?;
+    Ok(true)
+}
+
 pub fn peek(store_dir: &Path, alias: &str) -> Option<AgentIdentityId> {
     let alias = alias.trim();
     if alias.is_empty() {

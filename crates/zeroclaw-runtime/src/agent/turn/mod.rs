@@ -674,6 +674,12 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
         } = iteration_tool_specs;
 
         refresh_prompt_anchor(turn_state.history, use_native_tools);
+        // Per-model-request durable-task refresh (#567): swap the `## Tasks`
+        // region via the scoped register (set by the owning Agent for this
+        // turn) so cross-session commits are visible on the next request.
+        if let Some(first) = turn_state.history.first_mut() {
+            crate::tools::task_section::refresh_tasks_region(&mut first.content);
+        }
 
         let prepared_messages = prepare_messages_for_iteration(
             turn_state.history,

@@ -224,6 +224,17 @@ pub async fn cascade_rename_agent(
         }
     };
 
+    // Companion identity continuity (#567): the durable task list (and any
+    // future identity-keyed store) follows the alias rename, so the new
+    // alias resolves to the SAME mint-once UUID instead of minting a new
+    // one and stranding the old list.
+    let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+    match zeroclaw_memory::companion::rename_alias_identity(&store_dir, from, to) {
+        Ok(true) => {}
+        Ok(false) => {}
+        Err(e) => warnings.push(format!("companion identity rename: {e}")),
+    }
+
     let sessions_repointed = match session_backend {
         Some(b) => match b.rename_agent_attribution(from, to) {
             Ok(n) => n,

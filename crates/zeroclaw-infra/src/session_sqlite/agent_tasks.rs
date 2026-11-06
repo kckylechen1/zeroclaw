@@ -109,17 +109,33 @@ fn validate_status(status: &str) -> Result<()> {
 }
 
 impl SqliteSessionBackend {
-    /// The committed list for an owner, ordered by ordinal.
+    /// The committed list for an owner, ordered by ordinal. The revision
+    /// and items are read inside ONE read transaction so a concurrent
+    /// writer cannot split them.
     pub fn task_list(&self, agent_identity: &str) -> Result<TaskList> {
-        let conn = self.conn.lock();
-        let revision: i64 = conn
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .context("opening a task list read")?;
+        // Missing row = revision 0; anything else is a real error.
+        let revision: i64 = tx
             .query_row(
                 "SELECT revision FROM agent_task_revisions WHERE agent_identity = ?1",
                 params![agent_identity],
                 |row| row.get(0),
             )
-            .unwrap_or(0);
-        let mut query = conn.prepare(
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => anyhow::Error::msg("no revision row"),
+                other => anyhow::Error::from(other),
+            })
+            .or_else(|error| {
+                if error.to_string().contains("no revision row") {
+                    Ok(0)
+                } else {
+                    Err(error)
+                }
+            })?;
+        let mut query = tx.prepare(
             "SELECT task_id, ordinal, description, status FROM agent_tasks
              WHERE agent_identity = ?1 ORDER BY ordinal, rowid",
         )?;
@@ -133,6 +149,8 @@ impl SqliteSessionBackend {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(query);
+        tx.commit().context("closing a task list read")?;
         Ok(TaskList { revision, items })
     }
 
@@ -146,6 +164,10 @@ impl SqliteSessionBackend {
         expected_revision: i64,
         ops: &[TaskOp],
     ) -> Result<ApplyOutcome> {
+        anyhow::ensure!(
+            expected_revision >= 0,
+            "expected_revision must be non-negative"
+        );
         if ops.len() > MAX_ITEMS {
             bail!("a batch may carry at most {MAX_ITEMS} operations");
         }

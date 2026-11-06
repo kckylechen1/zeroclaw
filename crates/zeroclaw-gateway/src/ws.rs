@@ -1547,6 +1547,44 @@ fn start_ws_turns(
 async fn run_ws_turns(
     state: AppState,
     conversation: Arc<Conversation<WsSession>>,
+    scope: WsTurnScope,
+    claim: TurnClaim,
+) {
+    // Per-request durable-task refresh scope (#567): each model request in
+    // this turn re-renders the `## Tasks` region from the committed store,
+    // so another session's update is visible mid-turn.
+    let tasks_state = state.clone();
+    let tasks_alias = conversation
+        .key()
+        .rsplit_once('\u{1f}')
+        .map_or(String::new(), |(_, alias)| alias.to_string());
+    let render: std::sync::Arc<dyn Fn() -> String + Send + Sync> = std::sync::Arc::new(move || {
+        let config = tasks_state.config.read().clone();
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        match zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, &tasks_alias) {
+            Ok(identity) => {
+                let section = zeroclaw_runtime::tools::TaskListSection {
+                    resolve: std::sync::Arc::new(move || {
+                        Ok((identity.as_str().to_string(), config.data_dir.clone()))
+                    }),
+                };
+                use zeroclaw_runtime::agent::prompt::PromptSection;
+                section
+                    .build(&zeroclaw_runtime::agent::prompt::PromptContext::placeholder())
+                    .unwrap_or_else(|_| "## Tasks\n\nTask list unavailable.".to_string())
+            }
+            Err(_) => "## Tasks\n\nTask list unavailable.".to_string(),
+        }
+    });
+    zeroclaw_runtime::tools::task_section::with_tasks_refresh_scope(render, async move {
+        run_ws_turns_inner(state, conversation, scope, claim).await
+    })
+    .await
+}
+
+async fn run_ws_turns_inner(
+    state: AppState,
+    conversation: Arc<Conversation<WsSession>>,
     mut scope: WsTurnScope,
     claim: TurnClaim,
 ) {
