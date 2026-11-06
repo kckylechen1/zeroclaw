@@ -3,6 +3,7 @@ import { RefreshCw, Pause, Play } from 'lucide-react';
 import type { LogEvent } from '@/lib/api';
 import { getLogs } from '@/lib/api';
 import { t } from '@/lib/i18n';
+import { usePolling } from '@/hooks/usePolling';
 
 /**
  * Brain monitor (#564): the S5 switch timeline. A read-only view over the
@@ -21,6 +22,7 @@ interface CategoryFetch {
   events: LogEvent[];
   atEnd: boolean;
   failed: boolean;
+  daemonStartedAt: string | null;
 }
 
 /**
@@ -35,8 +37,13 @@ function fetchCategory(category: string, sinceTs?: string): Promise<CategoryFetc
     hide_internal: true,
     ...(sinceTs ? { since_ts: sinceTs } : {}),
   })
-    .then((res) => ({ events: res.events, atEnd: res.at_end !== false, failed: false }))
-    .catch(() => ({ events: [] as LogEvent[], atEnd: true, failed: true }));
+    .then((res) => ({
+      events: res.events,
+      atEnd: res.at_end !== false,
+      failed: false,
+      daemonStartedAt: res.daemon_started_at || null,
+    }))
+    .catch(() => ({ events: [], atEnd: true, failed: true, daemonStartedAt: null }));
 }
 
 interface TimelineRow {
@@ -96,6 +103,8 @@ export default function Monitor() {
   const [loading, setLoading] = useState(true);
   const [auto, setAuto] = useState(true);
   const [truncated, setTruncated] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const daemonStartedAtRef = useRef<string | null>(null);
   /** Per-category incremental cursors (newest timestamp fetched). */
   const sinceRef = useRef<Record<string, string | undefined>>({});
   /** Accumulated timeline keyed by event id — incremental refreshes MERGE,
@@ -107,6 +116,11 @@ export default function Monitor() {
    * superseded-and-dropped by the next interval tick (starvation) — a tick
    * that fires while a refresh runs is simply skipped. */
   const busyRef = useRef(false);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const refresh = useCallback(async () => {
     if (busyRef.current) {
@@ -116,28 +130,61 @@ export default function Monitor() {
     try {
       const batches = await Promise.all(
         TIMELINE_CATEGORIES.map((category) =>
-          fetchCategory(category, sinceRef.current[category]).then((result) => ({
+          fetchCategory(category, sinceRef.current[category] ?? daemonStartedAtRef.current ?? undefined).then((result) => ({
             category,
             result,
           })),
         ),
       );
+      // Pausing disables future polls, but the current read is still useful.
+      // Only unmount invalidates it (including reads started by Refresh).
+      if (!mountedRef.current) return;
+
+      // A restart can happen between category requests. Keep only the newest
+      // daemon's batches; an older response must not restore the previous run.
+      let daemonStartedAt = daemonStartedAtRef.current;
+      for (const { result } of batches) {
+        const start = result.daemonStartedAt;
+        if (start && Number.isFinite(Date.parse(start)) &&
+            (!daemonStartedAt || Date.parse(start) > Date.parse(daemonStartedAt))) {
+          daemonStartedAt = start;
+        }
+      }
+      if (daemonStartedAt !== daemonStartedAtRef.current) {
+        rowsRef.current.clear();
+        sinceRef.current = {};
+        setTruncated(false);
+        daemonStartedAtRef.current = daemonStartedAt;
+      }
+      let anyFailed = false;
       let anyTruncated = false;
       for (const { category, result } of batches) {
-        for (const event of result.events) {
+        if (result.failed || !daemonStartedAt || result.daemonStartedAt !== daemonStartedAt) {
+          anyFailed = true;
+          continue;
+        }
+        // The first fetch has no cursor yet, so it can include persisted rows
+        // from before this daemon started. They do not belong in this timeline.
+        const events = result.events.filter((event) =>
+          Date.parse(event['@timestamp']) >= Date.parse(daemonStartedAt),
+        );
+        for (const event of events) {
           const row = toRow(event);
           rowsRef.current.set(row.key, row);
         }
-        if (!result.failed && result.events.length > 0) {
-          const newest = result.events.reduce((acc, event) =>
+        if (events.length > 0) {
+          const newest = events.reduce((acc, event) =>
             (event['@timestamp'] ?? '') > (acc['@timestamp'] ?? '') ? event : acc,
           );
           sinceRef.current[category] = newest['@timestamp'];
+        } else {
+          sinceRef.current[category] ??= daemonStartedAt;
         }
-        if (!result.atEnd) {
+        if (!result.atEnd && events.length === result.events.length) {
           anyTruncated = true;
         }
       }
+      setFailed(anyFailed);
       // Latch: once a page was truncated, older skipped events can never
       // arrive on later polls — the notice must not clear on a quiet one.
       setTruncated((prev) => prev || anyTruncated);
@@ -162,15 +209,7 @@ export default function Monitor() {
     }
   }, []);
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    if (!auto) return;
-    const timer = setInterval(() => void refresh(), POLL_MS);
-    return () => clearInterval(timer);
-  }, [auto, refresh]);
+  usePolling(refresh, POLL_MS, [], auto);
 
   return (
     <div className="flex flex-col h-full">
@@ -203,14 +242,17 @@ export default function Monitor() {
       </header>
 
       <div className="flex-1 overflow-auto px-6 py-4">
+        {failed && (
+          <p role="alert" className="mb-3 text-sm text-amber-500">{t('monitor.load_error')}</p>
+        )}
         {truncated && (
           <p className="mb-3 text-xs text-amber-500">{t('monitor.truncated')}</p>
         )}
         {loading && rows.length === 0 ? (
           <p className="text-sm text-pc-text-muted">{t('monitor.loading')}</p>
-        ) : rows.length === 0 ? (
+        ) : rows.length === 0 && !failed ? (
           <p className="text-sm text-pc-text-muted">{t('monitor.no_events')}</p>
-        ) : (
+        ) : rows.length > 0 ? (
           <table className="w-full text-xs">
             <thead>
               <tr className="text-left text-pc-text-muted border-b border-pc-border">
@@ -253,7 +295,7 @@ export default function Monitor() {
               ))}
             </tbody>
           </table>
-        )}
+        ) : null}
       </div>
     </div>
   );
