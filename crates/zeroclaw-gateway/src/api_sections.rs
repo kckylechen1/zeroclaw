@@ -1155,6 +1155,24 @@ pub async fn handle_section_select(
             format!("save after select failed: {e}"),
         ));
     }
+    // The create persisted: drop any stale companion identity mapping for a
+    // newly created AGENT alias (same lifecycle rule as handle_map_key —
+    // a preserved rename mapping must not hand a fresh agent the old
+    // identity and its durable task list).
+    if created && matches!(section_enum, Section::Agents) {
+        let store_dir = working
+            .companion_memory
+            .resolved_store_dir(&working.data_dir);
+        if let Err(e) = zeroclaw_memory::companion::invalidate_alias_identity(&store_dir, &key) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"alias": key, "error": e.to_string()})),
+                "stale companion identity mapping could not be invalidated at agent select-create"
+            );
+        }
+    }
     *state.config.write() = working;
 
     axum::Json(SelectItemResponse {
