@@ -256,7 +256,6 @@ zeroclaw_api::tool_attribution!(TaskListTool, zeroclaw_api::attribution::ToolKin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
 
     fn fixture() -> (tempfile::TempDir, (), TaskListTool) {
         let tmp = tempfile::tempdir().unwrap();

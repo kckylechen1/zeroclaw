@@ -49,8 +49,7 @@ impl PromptSection for TaskListSection {
             "## Tasks\n\nDurable commitments (revision {revision}; update via task_list with expected_revision={revision}):"
         ));
         // Total render length is bounded by the item cap and description cap.
-        let mut shown = 0;
-        for item in &items {
+        for (shown, item) in items.iter().enumerate() {
             if shown >= MAX_ITEMS {
                 lines.push(format!("… {} more items omitted", items.len() - shown));
                 break;
@@ -59,7 +58,6 @@ impl PromptSection for TaskListSection {
                 "- [{}] {} ({})",
                 item.status, item.description, item.task_id
             ));
-            shown += 1;
         }
         Ok(lines.join("\n"))
     }

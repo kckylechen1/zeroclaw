@@ -3242,7 +3242,7 @@ mod tests {
                             .tool_dispatcher(Box::new(
                                 zeroclaw_runtime::agent::dispatcher::NativeToolDispatcher,
                             ))
-                            .workspace_dir(workspace)
+                            .workspace_dir(workspace.clone())
                             .model_name("test-model".into())
                             .model_provider_name("scripted".into())
                             .agent_alias("web".into());
@@ -3257,12 +3257,15 @@ mod tests {
                         }
                         let mut agent = builder.build()?;
                         agent.add_prompt_section(Box::new(surface::Section));
-    // Durable task-list projection (#567): same owner resolution as the
-    // registered tool (mint-once identity); read failures render
-    // `unavailable`, never an empty list.
+    // Durable task-list projection (#567) — test-harness attachment: this
+    // site builds agents without AppState, so resolve against the harness
+    // temp dir's default config (production attaches at the main build site).
     {
-        let tasks_config = state.config.read().clone();
-        let tasks_agent = agent_alias.to_string();
+        let tasks_config = zeroclaw_config::schema::Config {
+            data_dir: workspace.clone(),
+            ..zeroclaw_config::schema::Config::default()
+        };
+        let tasks_agent = "web".to_string();
         agent.add_prompt_section(Box::new(zeroclaw_runtime::tools::TaskListSection {
             resolve: std::sync::Arc::new(move || {
                 let store_dir = tasks_config
