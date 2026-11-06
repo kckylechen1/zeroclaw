@@ -15,6 +15,11 @@
 //!   `route_conflict` protection the interactive tools apply.
 //! - The binding's `notified_outcome` marker outlives the outbox's dedup
 //!   retention, so an evicted receipt can never resurrect a notification.
+//! - A destination is `(bridge, recipient, thread_id)` in BOTH the notified
+//!   marker and the outbox `event_id`, matching what `permits_delivery`
+//!   gates on, so retargeting a queued notice to another thread of the same
+//!   recipient enqueues a fresh notice instead of being suppressed (#566
+//!   review).
 //! - Pagination rotates a rowid cursor across passes: bounded pages, no
 //!   starvation of later rows.
 
@@ -133,16 +138,68 @@ impl Default for Rotation {
 }
 
 /// The persistent notified marker: a bounded, `\x1e`-separated list of
-/// `outcome \x1f bridge \x1f recipient` entries (most recent last). Every
-/// destination this outcome was already notified to is remembered, so a
-/// target flip A→B→A does not re-notify A after outbox retention evicted A's
-/// receipt — while a genuinely new destination still gets its notice. The
-/// list is capped (oldest entries dropped) so a lifetime of target churn
-/// cannot grow it unboundedly.
+/// destination-scoped entries (most recent last). Every destination this
+/// outcome was already notified to is remembered, so a target flip A→B→A
+/// does not re-notify A after outbox retention evicted A's receipt — while a
+/// genuinely new destination still gets its notice. The list is capped
+/// (oldest entries dropped) so a lifetime of target churn cannot grow it
+/// unboundedly.
+///
+/// A destination is `(bridge, recipient, thread_id)` — the SAME triple
+/// [`permits_delivery`] gates on. Entries written before the thread became
+/// part of the identity carry only `outcome \x1f bridge \x1f recipient`;
+/// such a legacy entry is treated as covering EVERY thread of that
+/// recipient (conservative: an outcome notified before the upgrade is never
+/// re-sent because of the format change).
 const MARKER_LIST_CAP: usize = 8;
 
-fn marker_entry(outcome: &str, bridge: &str, recipient: &str) -> String {
+/// Encode an optional thread so `None` and every `Some(_)` are distinct and
+/// no thread value can collide with another (the `=` prefix keeps an empty
+/// thread distinct from "no thread").
+fn thread_token(thread_id: Option<&str>) -> String {
+    match thread_id {
+        None => "-".to_string(),
+        Some(thread) => format!("={thread}"),
+    }
+}
+
+fn marker_entry(outcome: &str, bridge: &str, recipient: &str, thread_id: Option<&str>) -> String {
+    format!(
+        "{outcome}\u{1f}{bridge}\u{1f}{recipient}\u{1f}{}",
+        thread_token(thread_id)
+    )
+}
+
+/// The pre-thread (legacy) form of an entry, matched for compatibility.
+fn legacy_marker_entry(outcome: &str, bridge: &str, recipient: &str) -> String {
     format!("{outcome}\u{1f}{bridge}\u{1f}{recipient}")
+}
+
+/// The outbox `event_id` for one outcome at one destination. The outbox
+/// dedupes on `(bridge, recipient, source_kind, source_id, event_id)`, which
+/// has no thread column, so the thread is folded into the event id: a notice
+/// queued for thread A and a retarget to thread B of the SAME recipient are
+/// two rows, each gated by [`permits_delivery`] on its own thread. The
+/// thread-less destination keeps the bare outcome (unchanged identity for
+/// existing rows and consumers).
+fn destination_event_id(outcome: &str, thread_id: Option<&str>) -> String {
+    match thread_id {
+        None => outcome.to_string(),
+        Some(_) => format!("{outcome}\u{1f}thread\u{1f}{}", thread_token(thread_id)),
+    }
+}
+
+/// True when this outcome was already notified to this exact destination
+/// (or recorded by a legacy, thread-less entry for the same recipient).
+fn already_notified(
+    list: &str,
+    outcome: &str,
+    bridge: &str,
+    recipient: &str,
+    thread_id: Option<&str>,
+) -> bool {
+    marker_contains(list, &marker_entry(outcome, bridge, recipient, thread_id))
+        || marker_contains(list, &legacy_marker_entry(outcome, bridge, recipient))
 }
 
 /// True when the marker list already contains `entry`.
@@ -268,14 +325,14 @@ pub(crate) async fn reconcile(
             .as_ref()
             .expect("eligible() checked the target");
         // Destination-scoped suppression: skip only when THIS outcome was
-        // already notified to THIS destination (across the whole remembered
+        // already notified to THIS destination — bridge, recipient AND
+        // thread, the same triple permits_delivery gates on (across the whole remembered
         // target history, so A→B→A stays silent after retention eviction).
-        let entry = marker_entry(outcome, &target.bridge, &target.recipient);
-        if row
-            .notified_outcome
-            .as_deref()
-            .is_some_and(|list| marker_contains(list, &entry))
-        {
+        let thread = target.thread_id.as_deref();
+        let entry = marker_entry(outcome, &target.bridge, &target.recipient, thread);
+        if row.notified_outcome.as_deref().is_some_and(|list| {
+            already_notified(list, outcome, &target.bridge, &target.recipient, thread)
+        }) {
             continue;
         }
         let content = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
@@ -296,7 +353,7 @@ pub(crate) async fn reconcile(
             &content,
             DELEGATION,
             &source_identity(&row.agent_alias, &row.request_id),
-            outcome,
+            &destination_event_id(outcome, thread),
         ) {
             enqueue_failure = Some(error);
             break;
@@ -900,6 +957,153 @@ mod tests {
             "same destination stays suppressed past eviction"
         );
         assert!(delegation_rows(&tmp).is_empty());
+    }
+
+    fn with_thread(config: &Config, thread: Option<&str>) -> Config {
+        let mut next = config.clone();
+        next.tachi
+            .result_notification
+            .as_mut()
+            .expect("target")
+            .thread_id = thread.map(str::to_string);
+        next
+    }
+
+    fn deliverable(config: &Config, tmp: &tempfile::TempDir) -> Vec<Option<String>> {
+        let outbox = BridgeOutbox::shared(tmp.path()).unwrap();
+        outbox
+            .pending("tg", 0, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.source_kind == DELEGATION && permits_delivery(config, &outbox, row))
+            .map(|row| row.thread_id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn queued_notice_retargeted_to_another_thread_same_recipient_is_not_lost() {
+        // Regression (#566 review): notice queued for thread A, NOT yet
+        // delivered; the target moves to thread B of the SAME recipient.
+        // A is withheld by permits_delivery, so B must get its own row —
+        // neither the notified marker nor the outbox dedup may suppress it.
+        let (tmp, base) = fixture_config();
+        let thread_a = with_thread(&base, Some("thread-a"));
+        let thread_b = with_thread(&base, Some("thread-b"));
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        seed_binding(&backend, &thread_a, "butler", "req-th", "disp-th", None);
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut rotation = Rotation::default();
+        let fetch =
+            |a: &str, d: &str, r: &zeroclaw_config::tachi::TachiConfig| completed_fetch(a, d, r);
+
+        let shared = RwLock::new(thread_a.clone());
+        assert_eq!(
+            reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(deliverable(&thread_a, &tmp), vec![Some("thread-a".into())]);
+
+        // Retarget to thread B before A was delivered.
+        let shared = RwLock::new(thread_b.clone());
+        assert_eq!(
+            reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+                .await
+                .unwrap(),
+            1,
+            "thread B is a new destination"
+        );
+        assert_eq!(
+            deliverable(&thread_b, &tmp),
+            vec![Some("thread-b".into())],
+            "exactly the B notice is deliverable under the B target"
+        );
+        let rows = delegation_rows(&tmp);
+        assert_eq!(rows.len(), 2, "A and B rows coexist");
+        assert_ne!(rows[0]["event_id"], rows[1]["event_id"]);
+
+        // Steady state at B: no further rows.
+        assert_eq!(
+            reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+                .await
+                .unwrap(),
+            0
+        );
+        // Flip back to A: already marked → no new row, and the still-queued
+        // A row becomes deliverable again (exactly one A notice).
+        let shared = RwLock::new(thread_a.clone());
+        assert_eq!(
+            reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(deliverable(&thread_a, &tmp), vec![Some("thread-a".into())]);
+        assert_eq!(delegation_rows(&tmp).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn thread_less_and_threaded_targets_are_distinct_destinations() {
+        let (tmp, base) = fixture_config();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        seed_binding(&backend, &base, "butler", "req-nt", "disp-nt", None);
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut rotation = Rotation::default();
+        let fetch =
+            |a: &str, d: &str, r: &zeroclaw_config::tachi::TachiConfig| completed_fetch(a, d, r);
+        let shared = RwLock::new(base.clone());
+        reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+            .await
+            .unwrap();
+        // Thread-less identity is unchanged: bare outcome event id.
+        assert_eq!(delegation_rows(&tmp)[0]["event_id"], "completed");
+        let shared = RwLock::new(with_thread(&base, Some("t")));
+        assert_eq!(
+            reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_thread_less_marker_suppresses_every_thread() {
+        // A marker written before thread identity existed must not cause a
+        // re-notification after upgrade, whatever the current thread.
+        let legacy = "completed\u{1f}tg\u{1f}owner";
+        assert!(already_notified(legacy, "completed", "tg", "owner", None));
+        assert!(already_notified(
+            legacy,
+            "completed",
+            "tg",
+            "owner",
+            Some("t")
+        ));
+        assert!(!already_notified(legacy, "failed", "tg", "owner", None));
+        assert!(!already_notified(legacy, "completed", "tg", "other", None));
+        // New-format entries are thread-exact.
+        let list = marker_push("", &marker_entry("completed", "tg", "owner", Some("a")));
+        assert!(already_notified(
+            &list,
+            "completed",
+            "tg",
+            "owner",
+            Some("a")
+        ));
+        assert!(!already_notified(
+            &list,
+            "completed",
+            "tg",
+            "owner",
+            Some("b")
+        ));
+        assert!(!already_notified(&list, "completed", "tg", "owner", None));
+        // Empty thread is distinct from no thread.
+        assert_ne!(
+            marker_entry("completed", "tg", "owner", Some("")),
+            marker_entry("completed", "tg", "owner", None)
+        );
     }
 
     #[tokio::test]
