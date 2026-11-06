@@ -55,9 +55,8 @@ interface ActiveTurn {
   /** The terminal marker was RECEIVED (it may still be buffered behind a
    * hole); the outcome is known even before it is applied. */
   terminalSeen: boolean;
-  /** A replay declared a server-side gap: missing middle events can never be
-   * filled, so a buffered terminal must settle immediately. */
-  gapSeen: boolean;
+  /** Stop remains pending until the authoritative turn id can bind it. */
+  cancelRequested: boolean;
   /** Grace timer armed while a hole holds events back. First expiry asks
    * for a resume; the second declares the hole unrecoverable and flushes. */
   holeTimer: ReturnType<typeof setTimeout> | null;
@@ -338,12 +337,6 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         active.holeTimerStage = 0;
         return;
       }
-      // A buffered terminal behind a hole that a declared server-side gap
-      // makes unfillable settles immediately (nothing can still arrive).
-      if (active.terminalSeen && active.gapSeen) {
-        applyRelease(active, active.sequencer.flush());
-        return;
-      }
       if (active.holeTimer) return;
       const arm = () => {
         active.holeTimer = setTimeout(() => {
@@ -379,6 +372,14 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       applyRelease(active, active.sequencer.offer(wrapper.seq, wrapper));
     };
 
+    const bindTurn = (active: ActiveTurn, turnId: string | null | undefined) => {
+      if (active.turnId !== null || typeof turnId !== 'string') return;
+      active.turnId = turnId;
+      if (active.cancelRequested) {
+        wsRef.current?.cancelTurn(active.requestId, turnId);
+      }
+    };
+
     switch (msg.type) {
       case 'session_start':
       case 'connected':
@@ -401,7 +402,13 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         const previous = lastEpochRef.current;
         lastEpochRef.current = epoch;
         const active = activeTurnRef.current;
+        // The transport calls us before flushing unsent messages. A request
+        // queued on this attachment has no outcome in the previous epoch.
+        if (active && wsRef.current?.isMessageQueued(active.requestId)) break;
         if (epoch && previous === epoch && active) {
+          if (active.cancelRequested && active.turnId) {
+            wsRef.current?.cancelTurn(active.requestId, active.turnId);
+          }
           wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
         } else if (epoch && previous && previous !== epoch && active) {
           if (!active.terminalSeen) {
@@ -417,11 +424,12 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         if (!active || msg.request_id !== active.requestId) break;
         switch (msg.status) {
           case 'accepted':
-            active.turnId = msg.turn_id ?? null;
+            bindTurn(active, msg.turn_id);
             break;
           case 'duplicate':
             // The request already ran (or is running) under this identity;
             // reconcile by replaying everything past our applied sequence.
+            bindTurn(active, msg.turn_id);
             wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
             break;
           case 'conflict':
@@ -446,9 +454,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         if (!active || msg.request_id !== active.requestId) break;
         // Late-ACK recovery: events and replays carry the authoritative turn
         // identity even when the accepted ACK was never observed.
-        if (active.turnId === null && typeof msg.turn_id === 'string') {
-          active.turnId = msg.turn_id;
-        }
+        bindTurn(active, msg.turn_id);
         offerTurnEvent(active, msg);
         break;
       }
@@ -456,11 +462,8 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       case 'turn_replay': {
         const active = activeTurnRef.current;
         if (!active || msg.request_id !== active.requestId) break;
-        if (active.turnId === null && typeof msg.turn_id === 'string') {
-          active.turnId = msg.turn_id;
-        }
+        bindTurn(active, msg.turn_id);
         if (msg.gap) {
-          active.gapSeen = true;
           addNotice(t('agent.replay_gap'));
         }
         for (const event of msg.events ?? []) {
@@ -472,6 +475,8 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
           }
         }
         if (activeTurnRef.current !== active) break;
+        // Only after feeding the entire batch can missing events be declared
+        // lost. A gap in this snapshot says nothing about later live holes.
         // The replay carried everything the server still holds after our
         // anchor: any seq <= last_seq it did not carry is unrecoverable, so
         // skip those holes and release what is buffered above them in order.
@@ -496,7 +501,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         // Correlate to the observed turn: a late ack for an old turn must not
         // rewrite the current turn's Stop state.
         const active = activeTurnRef.current;
-        if (active && typeof msg.turn_id === 'string' && msg.turn_id !== active.turnId) {
+        if (!active || msg.request_id !== active.requestId || msg.turn_id !== active.turnId) {
           break;
         }
         if (msg.status === 'requested') {
@@ -830,11 +835,22 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       }
     };
 
+    ws.onNegotiationError = (code, unsentRequestIds) => {
+      if (version !== wsVersionRef.current) return;
+      const active = activeTurnRef.current;
+      if (active && !unsentRequestIds.includes(active.requestId) && !active.terminalSeen) {
+        addNotice(t('agent.turn_outcome_unknown'));
+      }
+      finalizeActiveTurn();
+      setConnected(false);
+      setError(t('agent.turn_refused').replace('{code}', code));
+    };
+
     ws.onMessage = (msg: WsMessage) => {
       if (version !== wsVersionRef.current) return;
       handleWsMessage(msg);
     };
-  }, [handleWsMessage]);
+  }, [handleWsMessage, addNotice, finalizeActiveTurn]);
 
   // WebSocket bound to the configured agent. Re-keys (via the outer
   // <AgentProvider key={alias}>) when the alias changes.
@@ -922,12 +938,12 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       // S2 (#549): admission carries a client-minted request_id; every later
       // turn frame for this bubble correlates against it.
       const requestId = wsRef.current.sendTurnMessage(content, attachments);
-      activeTurnRef.current = {
+      activeTurnRef.current = wsRef.current.isLegacy ? null : {
         requestId,
         turnId: null,
         sequencer: new TurnSequencer<WsMessage>(),
         terminalSeen: false,
-        gapSeen: false,
+        cancelRequested: false,
         holeTimer: null,
         holeTimerStage: 0,
       };
@@ -1001,25 +1017,30 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       // turn so a late/duplicate control can never reach a newer turn. On a
       // negotiated socket there is no REST fallback (a session-level abort
       // cancels whatever turn is current server-side); the legacy fallback
-      // only exists for a socket that never negotiated.
+      // only exists for an explicitly legacy attachment.
       if (typing) {
         try {
-          const negotiated = wsRef.current?.hasNegotiated ?? false;
-          if (negotiated && switchTarget?.turnId) {
-            wsRef.current?.cancelTurn(switchTarget.requestId, switchTarget.turnId);
-            await Promise.race([
-              waitForTerminal(switchTarget.turnId, 1_500),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('abort-timeout')), 1_500),
-              ),
-            ]);
-          } else if (!negotiated) {
+          const ws = wsRef.current;
+          if (switchTarget && ws?.cancelQueuedMessage(switchTarget.requestId)) {
+            if (activeTurnRef.current === switchTarget) finalizeActiveTurn();
+          } else if (ws?.isLegacy) {
             await Promise.race([
               abortSession(sessionIdRef.current),
               new Promise((_, reject) =>
                 setTimeout(() => reject(new Error('abort-timeout')), 1_500),
               ),
             ]);
+          } else if (switchTarget) {
+            switchTarget.cancelRequested = true;
+            if (switchTarget.turnId) {
+              ws?.cancelTurn(switchTarget.requestId, switchTarget.turnId);
+              await Promise.race([
+                waitForTerminal(switchTarget.turnId, 1_500),
+                new Promise((_, reject) =>
+                  setTimeout(() => reject(new Error('abort-timeout')), 1_500),
+                ),
+              ]);
+            }
           }
         } catch {
           // Best-effort: if cancel fails or times out we still proceed with the
@@ -1055,10 +1076,11 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         oldWs.onClose = null;
         oldWs.onError = null;
         oldWs.onMessage = null;
+        oldWs.onNegotiationError = null;
         oldWs.disconnect();
       }
 
-      const ws = new WebSocketClient({ agentAlias });
+      const ws = new WebSocketClient({ agentAlias, requireTurnControl: oldWs?.requiresTurnControl });
       // Point wsRef at the NEW client before connect(), so a synchronous
       // connect() throw (e.g. an invalid WebSocket URL/protocol token) still
       // leaves a live, reconnect-capable socket in the ref instead of the old
@@ -1081,7 +1103,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setModelLoading(false);
       setError(err instanceof Error ? err.message : t('agent.failed_switch_model'));
     }
-  }, [attachSocketCallbacks, modelLoading, typing, agentAlias, waitForTerminal]);
+  }, [attachSocketCallbacks, modelLoading, typing, agentAlias, waitForTerminal, finalizeActiveTurn]);
 
   const deleteMessage = useCallback((id: string) => {
     localMessageMutationVersionRef.current += 1;
@@ -1134,9 +1156,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         oldWs.onClose = null;
         oldWs.onError = null;
         oldWs.onMessage = null;
+        oldWs.onNegotiationError = null;
         oldWs.disconnect();
 
-        const ws = new WebSocketClient({ agentAlias });
+        const ws = new WebSocketClient({ agentAlias, requireTurnControl: oldWs.requiresTurnControl });
         // Assign wsRef before connect() so a synchronous throw can't strand the
         // page on the old intentionally-closed socket (see switchModel).
         wsRef.current = ws;
@@ -1197,14 +1220,18 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setPendingApproval(null);
       // S2 (#549): scoped cancellation of the observed turn; "requested" is
       // shown until the terminal marker confirms aborted. Once ANY socket of
-      // this client has negotiated S2 there is deliberately NO fallback —
+      // this client has selected S2 there is deliberately NO fallback —
       // including during a reconnect window (epoch is null there, but a
       // session-level REST abort cancels whatever turn is current server-side
-      // and could kill a newer turn). Without an observed turn id there is
-      // nothing scoped to stop; the identity binds on the first event/ack.
+      // and could kill a newer turn). A sent request without a turn id keeps
+      // its cancellation intent until an ACK/event binds the scoped target.
       const active = activeTurnRef.current;
       const ws = wsRef.current;
-      if (!ws?.hasNegotiated) {
+      if (active && ws?.cancelQueuedMessage(active.requestId)) {
+        finalizeActiveTurn();
+        return;
+      }
+      if (ws?.isLegacy) {
         try {
           await abortSession(sessionIdRef.current);
         } catch {
@@ -1212,8 +1239,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         }
         return;
       }
-      if (active?.turnId) {
-        ws.cancelTurn(active.requestId, active.turnId);
+      if (active) {
+        active.cancelRequested = true;
+        setStopRequested(true);
+        if (active.turnId) ws?.cancelTurn(active.requestId, active.turnId);
       }
     },
     stopRequested,
