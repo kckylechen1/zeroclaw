@@ -185,15 +185,15 @@ export default function Monitor() {
         }
       }
       setFailed(anyFailed);
-      // Latch: once a page was truncated, older skipped events can never
-      // arrive on later polls — the notice must not clear on a quiet one.
-      setTruncated((prev) => prev || anyTruncated);
       const merged = [...rowsRef.current.values()].sort((a, b) => {
         if (a.timestamp > b.timestamp) return -1;
         if (a.timestamp < b.timestamp) return 1;
         return 0;
       });
       const kept = merged.slice(0, MAX_ROWS);
+      // Latch API-page and merged-timeline truncation: older skipped or
+      // pruned events cannot return on a quiet incremental poll.
+      setTruncated((prev) => prev || anyTruncated || merged.length > kept.length);
       if (merged.length > kept.length) {
         const keepKeys = new Set(kept.map((row) => row.key));
         for (const key of rowsRef.current.keys()) {

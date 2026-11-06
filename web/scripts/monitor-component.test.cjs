@@ -18,6 +18,7 @@ const Monitor = jiti('../src/pages/Monitor.tsx').default;
 const categories = ['session', 'tool', 'agent'];
 const firstStart = '2026-01-01T10:00:00Z';
 const nextStart = '2026-01-01T11:00:00Z';
+const truncatedNotice = 'Some older events are beyond the page limit; open Logs for the full history.';
 const event = (id, timestamp) => ({ id, '@timestamp': timestamp, event: { action: id }, attributes: { request_id: `request-${id}` } });
 const timers = new Map();
 let timerId = 0;
@@ -84,6 +85,25 @@ async function click(name) {
   assert.ok(has('recovered-tool'), 'outage preserves prior rows with a stale warning');
 
   failures.clear();
+  // Each category fits its API page and reports at_end=true, but their
+  // combined timeline exceeds the page's 240-row retention limit.
+  events = Object.fromEntries(categories.map((category, categoryIndex) => [
+    category,
+    Array.from({ length: 100 }, (_, index) => event(
+      `cap-${category}-${index}`,
+      new Date(Date.parse(firstStart) + 120_000 + (categoryIndex * 100 + index) * 1_000).toISOString(),
+    )),
+  ]));
+  await click('Refresh');
+  assert.equal(document.querySelectorAll('tbody tr').length, 240, 'combined rows stay bounded');
+  assert.ok(has(truncatedNotice), 'client-side truncation is visible even when every API page is complete');
+  assert.equal(alert(), null);
+  events = {};
+  await click('Refresh');
+  assert.equal(document.querySelectorAll('tbody tr').length, 240, 'quiet poll retains bounded history');
+  assert.ok(has(truncatedNotice), 'quiet poll retains the truncation notice');
+
+  failures.clear();
   start = nextStart;
   // Restart between category responses: an old batch cannot restore rows or
   // advance the new daemon's per-category cursor.
@@ -94,6 +114,8 @@ async function click(name) {
   for (const old of ['current-event', 'recovered-tool', 'late-old-daemon']) {
     assert.equal(has(old), false, 'restart discards prior daemon rows');
   }
+  assert.equal(document.querySelectorAll('tbody tr').length, 1, 'restart clears capped prior history');
+  assert.equal(has(truncatedNotice), false, 'restart clears the prior daemon truncation notice');
   assert.ok(alert(), 'mixed daemon batch remains incomplete until retry');
   starts = {};
   events = {};
@@ -123,7 +145,7 @@ async function click(name) {
   assert.equal(reads.length, beforeHidden + 3, 'visible tab catches up immediately');
   await update(() => root.unmount());
   assert.equal(timers.size, 0, 'unmount cancels polling');
-  console.log('Monitor component regressions passed: failures, recovery, cursors, daemon restarts, visibility.');
+  console.log('Monitor component regressions passed: failures, recovery, cursors, retention, daemon restarts, visibility.');
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
