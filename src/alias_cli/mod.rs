@@ -360,18 +360,19 @@ pub async fn handle_agents(cmd: AgentsCommands, config: &mut Config) -> Result<(
         AgentsCommands::List => list_section(config, "agents"),
         AgentsCommands::Create { alias } => {
             let created = create_entry(config, "agents", &alias)?;
-            save(config).await?;
-            // Same lifecycle rule as the HTTP create paths (#567): a
-            // persisted NEW agent drops any stale preserved-rename identity
-            // mapping so it mints fresh instead of inheriting the old
-            // identity's durable task list. A duplicate create is a no-op on
-            // the existing agent's identity — `created` is false there.
+            // Same fail-closed lifecycle rule as the HTTP create paths
+            // (#567/#569): a NEW agent drops any stale preserved-rename
+            // identity mapping BEFORE the config is saved, so a failure
+            // aborts the create with nothing persisted instead of leaving a
+            // saved agent bound to the old identity's durable task list. A
+            // duplicate create is a no-op on the existing agent's identity —
+            // `created` is false there.
             if created {
                 let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
                 zeroclaw_memory::companion::invalidate_alias_identity(&store_dir, &alias)
-                    .context("failed to clear a stale companion identity mapping")?;
+                    .context("agent not created: failed to clear a stale companion identity mapping (repair or remove the companion identity file and retry)")?;
             }
-            Ok(())
+            save(config).await
         }
         AgentsCommands::Rename { from, to } => {
             // Capture the workspace path while the `from` entry still exists

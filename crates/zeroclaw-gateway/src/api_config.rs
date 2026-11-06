@@ -1361,10 +1361,6 @@ pub async fn handle_map_key(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    // Stale companion identity mappings to drop AFTER the create persists
-    // (#567): a rejected create must leave the old mapping untouched.
-    let mut pending_identity_invalidations: Vec<(std::path::PathBuf, String)> = Vec::new();
-
     let _cfg_guard = Arc::clone(&state.config_write_lock).lock_owned().await;
     let mut working = state.config.read().clone();
     let path = q.path.clone();
@@ -1396,14 +1392,37 @@ pub async fn handle_map_key(
     if created {
         // A newly CREATED agent must not silently inherit a preserved
         // rename mapping's identity (a→b keeps `a`; a fresh `a` would then
-        // share b's durable task list). The stale mapping is invalidated
-        // only AFTER the config write persisted, so a FAILED create leaves
-        // the old identity mapping untouched.
+        // share b's durable task list). FAIL-CLOSED (#569 review): the
+        // stale mapping is dropped BEFORE the config write, and a failed
+        // invalidation rejects the create with nothing persisted — so an
+        // agent can never come into existence still bound to the old UUID.
+        // Dropping first is safe: `created` means the alias is not a
+        // configured agent, and the renamed agent `b` keeps its own mapping
+        // to the identity; if the persist below then fails, the only effect
+        // is that a later create of `a` mints fresh (the desired outcome).
         if path == "agents" {
             let store_dir = working
                 .companion_memory
                 .resolved_store_dir(&working.data_dir);
-            pending_identity_invalidations.push((store_dir, key.clone()));
+            if let Err(e) = zeroclaw_memory::companion::invalidate_alias_identity(&store_dir, &key)
+            {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"alias": key, "error": e.to_string()})),
+                    "agent create refused: stale companion identity mapping could not be invalidated"
+                );
+                return error_response(
+                    ConfigApiError::new(
+                        ConfigApiCode::InternalError,
+                        format!(
+                            "agent `{key}` was not created: a stale identity mapping could not be cleared ({e}); repair or remove the companion identity file and retry"
+                        ),
+                    )
+                    .with_path(format!("{path}.{key}")),
+                );
+            }
         }
         // skill-bundles: materialize the bundle's resolved directory so
         // skills have a home immediately. Run before persist so a failed
@@ -1430,38 +1449,6 @@ pub async fn handle_map_key(
         if let Err(e) = persist_and_swap(&state, working, &_cfg_guard, Some((peer, &headers))).await
         {
             return e;
-        }
-        // The create persisted: NOW drop any stale companion identity
-        // mapping for the alias (a failed create above never reaches here,
-        // so the old mapping survives a rejected request).
-        let mut warnings = Vec::new();
-        for (store_dir, alias) in pending_identity_invalidations {
-            match zeroclaw_memory::companion::invalidate_alias_identity(&store_dir, &alias) {
-                Ok(_) => {}
-                Err(e) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(
-                                ::serde_json::json!({"alias": alias, "error": e.to_string()})
-                            ),
-                        "stale companion identity mapping could not be invalidated at agent create"
-                    );
-                    warnings.push(format!(
-                        "agent created, but a stale identity mapping for `{alias}` could not be cleared: {e}"
-                    ));
-                }
-            }
-        }
-        if !warnings.is_empty() {
-            return axum::Json(MapKeyResponse {
-                path,
-                key,
-                created,
-                warnings: Some(warnings),
-            })
-            .into_response();
         }
     }
 
@@ -3409,6 +3396,83 @@ mod tests {
                 .openai
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn agent_create_drops_stale_rename_identity_before_persisting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = temp_config(&tmp);
+        config.save().await.unwrap();
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        // a -> b rename preserved `a`'s mapping to the old identity.
+        let old =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "a").unwrap();
+        zeroclaw_memory::companion::rename_alias_identity(&store_dir, "a", "b").unwrap();
+
+        let state = test_state(config);
+        let (status, json) = response_json(
+            handle_map_key(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                State(state.clone()),
+                HeaderMap::new(),
+                axum::extract::Query(MapKeyQuery {
+                    path: "agents".to_string(),
+                    key: "a".to_string(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["created"], true);
+        assert!(state.config.read().agents.contains_key("a"));
+        assert!(zeroclaw_memory::companion::peek_agent_identity(&store_dir, "a").is_none());
+        let fresh =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "a").unwrap();
+        assert_ne!(fresh.as_str(), old.as_str(), "new agent must not inherit");
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "b")
+                .unwrap()
+                .as_str(),
+            old.as_str(),
+            "renamed agent keeps its identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_create_fails_closed_when_identity_invalidation_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = temp_config(&tmp);
+        config.save().await.unwrap();
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        std::fs::create_dir_all(&store_dir).unwrap();
+        // An unreadable identity file makes invalidation fail.
+        std::fs::write(
+            store_dir.join(zeroclaw_config::companion::COMPANION_AGENT_IDENTITY_FILE),
+            b"{ not json",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+
+        let state = test_state(config);
+        let (status, json) = response_json(
+            handle_map_key(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                State(state.clone()),
+                HeaderMap::new(),
+                axum::extract::Query(MapKeyQuery {
+                    path: "agents".to_string(),
+                    key: "a".to_string(),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert!(!status.is_success(), "create must be refused: {json}");
+        assert!(json.to_string().contains("not created"), "{json}");
+        assert!(!state.config.read().agents.contains_key("a"));
+        let after = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+        assert_eq!(before, after, "nothing persisted");
     }
 
     #[tokio::test]
