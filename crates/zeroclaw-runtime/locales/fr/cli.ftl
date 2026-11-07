@@ -910,3 +910,4 @@ turn-max-iterations-reached = *Tour arrêté : nombre maximal d'itérations d'ou
 acp-bridge-allow-once = Autoriser une fois
 acp-bridge-reject-once = Refuser une fois
 delegation-result-notice = La tâche déléguée {$request} est terminée avec le résultat {$outcome}. Demandez à l'agent ou interrogez tachi_result pour le dispatch {$dispatch}.
+task-reminder-notice = Rappel : {$task}

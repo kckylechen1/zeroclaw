@@ -2038,6 +2038,7 @@ async fn config_toml_roundtrip() {
     let config = Config {
         eval: crate::scattered_types::EvalHarnessConfig::default(),
         composition: None,
+        tasks: crate::tasks::TasksConfig::default(),
         degraded_security: Vec::new(),
         degraded_sections: Vec::new(),
         retired_surface_warnings: Vec::new(),
@@ -2974,6 +2975,7 @@ async fn config_save_and_load_tmpdir() {
     let config = Config {
         eval: crate::scattered_types::EvalHarnessConfig::default(),
         composition: None,
+        tasks: crate::tasks::TasksConfig::default(),
         degraded_security: Vec::new(),
         degraded_sections: Vec::new(),
         retired_surface_warnings: Vec::new(),

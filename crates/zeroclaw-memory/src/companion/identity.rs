@@ -125,6 +125,30 @@ pub fn peek(store_dir: &Path, alias: &str) -> Option<AgentIdentityId> {
         .and_then(|raw| parse_stored_uuid(alias, raw).ok())
 }
 
+/// Every alias whose recorded identity matches `identity` (both current and
+/// rename-preserved source entries). Used by the reminder delivery gate so an
+/// agent renamed via the config editor while a reminder is pending still
+/// passes the live-agent check when the target matches its new alias.
+pub fn aliases_for_identity(store_dir: &Path, identity: &str) -> Vec<String> {
+    let identity = identity.trim();
+    if identity.is_empty() {
+        return Vec::new();
+    }
+    let _guard = IDENTITY_FILE_LOCK.lock();
+    let Ok(file) = load_identity_file(&identity_path(store_dir)) else {
+        return Vec::new();
+    };
+    file.agents
+        .into_iter()
+        .filter_map(|(alias, raw)| {
+            parse_stored_uuid(&alias, &raw)
+                .ok()
+                .filter(|id| id.as_str() == identity)
+                .map(|_| alias)
+        })
+        .collect()
+}
+
 fn identity_path(store_dir: &Path) -> PathBuf {
     store_dir.join(COMPANION_AGENT_IDENTITY_FILE)
 }
@@ -330,5 +354,19 @@ mod tests {
         let err = resolve_or_mint(tmp.path(), "blocked").expect_err("dir in the way");
         assert!(peek(tmp.path(), "blocked").is_none());
         let _ = err;
+    }
+
+    #[test]
+    fn reverse_lookup_returns_every_holder_including_preserved_renames() {
+        let tmp = TempDir::new().unwrap();
+        let id = resolve_or_mint(tmp.path(), "a").unwrap();
+        let _ = resolve_or_mint(tmp.path(), "other").unwrap();
+        rename_alias(tmp.path(), "a", "b").unwrap();
+
+        let holders = aliases_for_identity(tmp.path(), id.as_str());
+        assert_eq!(holders, vec!["a".to_string(), "b".to_string()]);
+        assert!(
+            aliases_for_identity(tmp.path(), "00000000-0000-0000-0000-000000000000").is_empty()
+        );
     }
 }

@@ -14,6 +14,7 @@ use zeroclaw_api::model_provider::ChatMessage;
 pub mod agent_tasks;
 mod bridge_intake;
 mod delegation;
+pub mod reminder_occurrences;
 #[cfg(test)]
 mod review_source_tests;
 
@@ -237,6 +238,8 @@ impl SqliteSessionBackend {
             .context("Failed to migrate session schema")?;
         agent_tasks::migrate_agent_tasks(&mut conn)
             .context("Failed to migrate agent task schema")?;
+        reminder_occurrences::migrate_reminder_occurrences(&mut conn)
+            .context("Failed to migrate reminder occurrence schema")?;
 
         crate::sqlite_perms::harden_sqlite_owner_only(&db_path);
         Ok(Self {

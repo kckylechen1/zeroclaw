@@ -403,12 +403,24 @@ async fn persist_and_swap(
         state.config_write_lock.try_lock().is_err(),
         "persist_and_swap caller must hold state.config_write_lock"
     );
-    // Operator credentials, attention policy, review destinations and their bridge credentials are
-    // owner-authored even on an unpaired gateway.
+    // Operator credentials, attention policy, review/reminder destinations and their bridge
+    // credentials are owner-authored even on an unpaired gateway.
     // Compare canonical typed values so parent replacement and nested edits
     // cannot bypass a string-prefix path check.
-    let (attention_changed, review_target_changed, operator_changed) = {
+    let (attention_changed, review_target_changed, reminder_target_changed, operator_changed) = {
         let current = state.config.read();
+        let bridge_credential_changed = |bridge_name: &str| {
+            // /ws/bridge authenticates by this hash (case-insensitive).
+            // Chat session scope does not select the delivery socket.
+            let credential = |config: &zeroclaw_config::schema::Config| {
+                config
+                    .gateway
+                    .bridges
+                    .get(bridge_name)
+                    .map(|bridge| bridge.token_hash.to_ascii_lowercase())
+            };
+            credential(&current) != credential(&new_config)
+        };
         (
             current.gateway.attention != new_config.gateway.attention,
             current.companion_memory.review_notification
@@ -419,27 +431,26 @@ async fn persist_and_swap(
                 ]
                 .into_iter()
                 .flatten()
-                .any(|target| {
-                    // /ws/bridge authenticates by this hash (case-insensitive).
-                    // Chat session scope does not select the delivery socket.
-                    let credential = |config: &zeroclaw_config::schema::Config| {
-                        config
-                            .gateway
-                            .bridges
-                            .get(&target.bridge)
-                            .map(|bridge| bridge.token_hash.to_ascii_lowercase())
-                    };
-                    credential(&current) != credential(&new_config)
-                }),
+                .any(|target| bridge_credential_changed(&target.bridge)),
+            current.tasks.reminder_target != new_config.tasks.reminder_target
+                || [
+                    current.tasks.reminder_target.as_ref(),
+                    new_config.tasks.reminder_target.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|target| bridge_credential_changed(&target.bridge)),
             current.gateway.operator != new_config.gateway.operator,
         )
     };
-    if attention_changed || review_target_changed || operator_changed {
+    if attention_changed || review_target_changed || reminder_target_changed || operator_changed {
         let Some((peer, headers)) = operator_request else {
             let code = if operator_changed {
                 "operator_credentials_operator_required"
             } else if review_target_changed {
                 "review_notification_operator_required"
+            } else if reminder_target_changed {
+                "reminder_target_operator_required"
             } else {
                 "attention_operator_required"
             };
@@ -5163,5 +5174,138 @@ mod tests {
                 .unwrap(),
             "Bearer test-api-key-123"
         );
+    }
+
+    #[tokio::test]
+    async fn reminder_target_changes_require_operator_including_parent_removal() {
+        use zeroclaw_config::tasks::ReminderTargetConfig;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = test_state(temp_config(&tmp));
+        state.pairing = Arc::new(PairingGuard::new(
+            false,
+            &[PairingGuard::token_hash("review-owner-fixture")],
+        ));
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let guard = Arc::clone(&state.config_write_lock).lock_owned().await;
+        let target = ReminderTargetConfig {
+            bridge: "tg".into(),
+            recipient: "42".into(),
+            thread_id: None,
+        };
+        for token in [None, Some("bridge-token")] {
+            let mut working = state.config.read().clone();
+            working.tasks.reminder_target = Some(target.clone());
+            let mut headers = HeaderMap::new();
+            if let Some(token) = token {
+                headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+            }
+            let response = persist_and_swap(&state, working, &guard, Some((peer, &headers)))
+                .await
+                .unwrap_err();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(state.config.read().tasks.reminder_target.is_none());
+        }
+        let attacker: SocketAddr = "127.0.0.2:12345".parse().unwrap();
+        let mut bad = HeaderMap::new();
+        bad.insert("authorization", "Bearer wrong-fixture".parse().unwrap());
+        let mut limited = false;
+        for _ in 0..100 {
+            let mut working = state.config.read().clone();
+            working.tasks.reminder_target = Some(target.clone());
+            let response = persist_and_swap(&state, working, &guard, Some((attacker, &bad)))
+                .await
+                .unwrap_err();
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                limited = true;
+                break;
+            }
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert!(limited);
+        let mut owner = HeaderMap::new();
+        owner.insert(
+            "authorization",
+            "Bearer review-owner-fixture".parse().unwrap(),
+        );
+        let mut working = state.config.read().clone();
+        working.gateway.bridges.insert(
+            "tg".into(),
+            zeroclaw_config::schema::GatewayBridgeConfig {
+                token_hash: "a".repeat(64),
+                ..Default::default()
+            },
+        );
+        working.tasks.reminder_target = Some(target);
+        working.mark_dirty("tasks");
+        working.mark_dirty("gateway.bridges");
+        persist_and_swap(&state, working, &guard, Some((peer, &owner)))
+            .await
+            .unwrap();
+        // Changing the selected bridge credential diverts the destination even
+        // when the reminder target itself is byte-for-byte unchanged.
+        let mut rotated = state.config.read().clone();
+        rotated.gateway.bridges.get_mut("tg").unwrap().token_hash = "b".repeat(64);
+        rotated.mark_dirty("gateway.bridges");
+        let anonymous = HeaderMap::new();
+        assert_eq!(
+            persist_and_swap(&state, rotated.clone(), &guard, Some((peer, &anonymous)))
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let mut removed = state.config.read().clone();
+        removed.gateway.bridges.clear();
+        assert_eq!(
+            persist_and_swap(&state, removed, &guard, Some((peer, &anonymous)))
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            state.config.read().gateway.bridges["tg"].token_hash,
+            "a".repeat(64)
+        );
+        persist_and_swap(&state, rotated, &guard, Some((peer, &owner)))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.config.read().gateway.bridges["tg"].token_hash,
+            "b".repeat(64)
+        );
+        // Unrelated bridge credentials and the selected bridge's chat scope do
+        // not change its effective /ws/bridge authentication projection.
+        let mut unrelated = state.config.read().clone();
+        unrelated.gateway.bridges.insert(
+            "other".into(),
+            zeroclaw_config::schema::GatewayBridgeConfig {
+                token_hash: "c".repeat(64),
+                ..Default::default()
+            },
+        );
+        let bridge = unrelated.gateway.bridges.get_mut("tg").unwrap();
+        bridge.token_hash = bridge.token_hash.to_ascii_uppercase();
+        bridge.sessions.push("fixture-session".into());
+        unrelated.mark_dirty("gateway.bridges");
+        persist_and_swap(&state, unrelated, &guard, Some((peer, &anonymous)))
+            .await
+            .unwrap();
+        assert!(state.config.read().gateway.bridges.contains_key("other"));
+        // Full parent replacement/deletion is compared as typed payload, not path prefixes.
+        let mut replacement = state.config.read().clone();
+        replacement.tasks = Default::default();
+        assert_eq!(
+            persist_and_swap(&state, replacement.clone(), &guard, None)
+                .await
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        replacement.mark_dirty("tasks");
+        persist_and_swap(&state, replacement, &guard, Some((peer, &owner)))
+            .await
+            .unwrap();
+        assert!(state.config.read().tasks.reminder_target.is_none());
     }
 }
