@@ -10864,9 +10864,7 @@ impl ChannelsConfig {
     ///
     /// Always returns the full set of channel types regardless of compile-time
     /// feature flags — the `configured` flag reflects whether the operator has
-    /// populated that channel's config section. For a list restricted to only
-    /// the channels compiled into this binary use
-    /// `zeroclaw_channels::listing::compiled_channels` instead.
+    /// populated that channel's config section.
     pub fn channels(&self) -> Vec<super::traits::ChannelInfo> {
         use super::traits::ChannelInfo;
         vec![

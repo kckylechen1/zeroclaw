@@ -26,7 +26,7 @@ export ZEROCLAW_STRICT_LINT=0 ZEROCLAW_DOCS_LINT=0 ZEROCLAW_DOCS_LINKS=0 FAIL_EV
 cd "$tmp/repo"
 
 fmt='cargo fmt --all -- --check'
-correctness='cargo clippy --locked --workspace --all-targets --features zeroclaw-channels/heavy-tests,zeroclaw-runtime/heavy-tests -- -D clippy::correctness'
+correctness='cargo clippy --locked --workspace --all-targets --features zeroclaw-runtime/heavy-tests -- -D clippy::correctness'
 strict='cargo clippy --locked --workspace --all-targets --features ci-all -- -D warnings'
 base=(toolchain_gate.sh "$fmt")
 normal=("${base[@]}" "$correctness" provider_dispatch_gate.sh)

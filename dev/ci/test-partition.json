@@ -4,7 +4,6 @@
       "zeroclaw-runtime"
     ],
     "channels": [
-      "zeroclaw-channels",
       "zeroclaw-gateway"
     ],
     "app": [
@@ -41,7 +40,6 @@
       "zeroclaw-runtime/heavy-tests"
     ],
     "channels": [
-      "zeroclaw-channels/heavy-tests",
       "zeroclaw-gateway/nodes"
     ],
     "app": [
@@ -71,13 +69,6 @@
       }
     ],
     "channels": [
-      {
-        "name": "lark-webhook",
-        "features": [
-          "zeroclaw-channels/channel-lark"
-        ],
-        "filter": "lark::tests::"
-      },
       {
         "name": "voice-surface",
         "features": [

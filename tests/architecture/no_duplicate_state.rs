@@ -26,9 +26,9 @@ const FORBIDDEN_TYPE_SUBSTRINGS: &[&str] = &[
     "BTreeSet<String>",
 ];
 
-/// Roots to scan. Channels are the hottest drift surface; we lint there
+/// Roots to scan. Channel bridges are the hottest drift surface; we lint there
 /// first. Extending the scan is one entry away.
-const SCAN_ROOTS: &[&str] = &["crates/zeroclaw-channels/src"];
+const SCAN_ROOTS: &[&str] = &["bridges"];
 
 /// Files / paths that hold the canonical sources of truth and are
 /// therefore allowed to declare these fields. Anything outside these

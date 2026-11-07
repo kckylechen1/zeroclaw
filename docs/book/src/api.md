@@ -20,7 +20,7 @@ Full rustdoc for every public type in the workspace, auto-generated from the `//
 | [`zeroclaw-config`](/api/zeroclaw_config/index.html) | Config schema, autonomy types, secrets |
 | [`zeroclaw-runtime`](/api/zeroclaw_runtime/index.html) | Agent loop, security, SOP, onboarding |
 | [`zeroclaw-providers`](/api/zeroclaw_providers/index.html) | Every LLM-provider implementation |
-| [`zeroclaw-channels`](/api/zeroclaw_channels/index.html) | Messaging integrations |
+| [`zeroclaw-gateway-client`](/api/zeroclaw_gateway_client/index.html) | WebSocket client SDK for channel bridges and chat clients |
 | [`zeroclaw-gateway`](/api/zeroclaw_gateway/index.html) | HTTP/WebSocket gateway |
 | [`zeroclaw-tools`](/api/zeroclaw_tools/index.html) | Agent-callable tools |
 | [`zeroclaw-memory`](/api/zeroclaw_memory/index.html) | Conversation memory, embeddings |

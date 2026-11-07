@@ -2098,10 +2098,8 @@ async fn async_main(command: clap::Command) -> Result<()> {
         zeroclaw_runtime::cron::scheduler::register_delivery_fn(Box::new(
             |config, channel, target, thread_id, output| {
                 Box::pin(async move {
-                    zeroclaw_channels::orchestrator::deliver_announcement(
-                        &config, &channel, &target, thread_id, &output,
-                    )
-                    .await
+                    channels::deliver_announcement(&config, &channel, &target, thread_id, &output)
+                        .await
                 })
             },
         ));
@@ -2191,7 +2189,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
             // Register channel map factory for late-bound tool handle population.
             zeroclaw_runtime::agent::loop_::register_channel_map_fn(Box::new({
                 let config_clone = config.clone();
-                move || zeroclaw_channels::orchestrator::build_channel_map(&config_clone)
+                move || channels::build_channel_map(&config_clone)
             }));
 
             Box::pin(agent::run(
@@ -2215,48 +2213,11 @@ async fn async_main(command: clap::Command) -> Result<()> {
             max_sessions,
             session_timeout,
         } => {
-            #[cfg(feature = "channel-acp-server")]
-            {
-                let mut acp_config = channels::acp_server::AcpServerConfig {
-                    max_sessions: config.acp.max_sessions,
-                    session_timeout_secs: config.acp.session_timeout_secs,
-                };
-                if let Some(max) = max_sessions {
-                    acp_config.max_sessions = max;
-                }
-                if let Some(timeout) = session_timeout {
-                    acp_config.session_timeout_secs = timeout;
-                }
-                let store =
-                    zeroclaw_infra::acp_session_store::AcpSessionStore::new(&config.data_dir)
-                        .map(std::sync::Arc::new)
-                        .inspect_err(|e| {
-                            ::zeroclaw_log::record!(
-                                WARN,
-                                ::zeroclaw_log::Event::new(
-                                    module_path!(),
-                                    ::zeroclaw_log::Action::Note
-                                )
-                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                .with_attrs(::serde_json::json!({"error": e.to_string()})),
-                                "Failed to open ACP session store"
-                            );
-                        })
-                        .ok();
-                let server = if let Some(store) = store {
-                    std::sync::Arc::new(channels::acp_server::AcpServer::new_with_store(
-                        config, acp_config, store,
-                    ))
-                } else {
-                    std::sync::Arc::new(channels::acp_server::AcpServer::new(config, acp_config))
-                };
-                server.run().await
-            }
-            #[cfg(not(feature = "channel-acp-server"))]
-            {
-                let _ = (max_sessions, session_timeout);
-                anyhow::bail!("ACP server requires the `channel-acp-server` feature")
-            }
+            let _ = (max_sessions, session_timeout);
+            anyhow::bail!(
+                "Legacy in-process `zeroclaw acp` has been retired; use `zeroclaw acp-gateway` \
+                 (or the `zeroclaw-acp-bridge` binary) to connect ACP clients to the gateway."
+            )
         }
 
         Commands::Gateway { gateway_command } => {
@@ -2592,7 +2553,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
             loop {
                 companion_store =
                     zeroclaw_memory::reload_companion_store(companion_store, &current_config)?;
-                let (companion_for_gateway, companion_for_channels) =
+                let (companion_for_gateway, _companion_for_channels) =
                     zeroclaw_memory::clone_for_subsystems(&companion_store);
                 let companion_outbox_observer =
                     spawn_companion_outbox_observer(companion_store.clone());
@@ -2625,19 +2586,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                         })
                     },
                 ));
-
-                registry.register_channels(Box::new(move |config, cancel, task_identities| {
-                    let companion_store = companion_for_channels.clone();
-                    Box::pin(async move {
-                        Box::pin(zeroclaw_channels::orchestrator::start_channels(
-                            config,
-                            cancel,
-                            companion_store,
-                            task_identities,
-                        ))
-                        .await
-                    })
-                }));
 
                 let exit = Box::pin(daemon::run(
                     current_config.clone(),
@@ -2843,22 +2791,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
         Commands::Channel { channel_command } => match channel_command {
             ChannelCommands::Start => {
                 let cancel = tokio_util::sync::CancellationToken::new();
-                let task_identities =
-                    zeroclaw_runtime::tools::task_context::TaskIdentity::capture_all(&config);
-                let companion_store = zeroclaw_memory::create_companion_store(&config)?;
-                let companion_outbox_observer =
-                    spawn_companion_outbox_observer(companion_store.clone());
-                let result = Box::pin(channels::start_channels(
-                    config,
-                    cancel,
-                    companion_store,
-                    task_identities,
-                ))
-                .await;
-                if let Some(handle) = companion_outbox_observer {
-                    handle.abort();
-                }
-                result
+                Box::pin(channels::start_channels(config, cancel)).await
             }
             ChannelCommands::Doctor => Box::pin(channels::doctor_channels(config)).await,
             other => Box::pin(channels::handle_command(other, &config)).await,

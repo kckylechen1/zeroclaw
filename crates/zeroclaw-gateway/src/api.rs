@@ -1073,8 +1073,8 @@ pub async fn handle_api_channels(
         .into_iter()
         .map(|info| {
             let composite = format!("{}.{}", info.channel_type, info.alias);
-            let compiled_key = compiled_readiness_key_for_alias(&config, &info);
-            let compiled = zeroclaw_channels::listing::is_channel_type_compiled(compiled_key);
+            let _compiled_key = compiled_readiness_key_for_alias(&config, &info);
+            let compiled = false;
             let readiness = channel_readiness(&config, &info, &health, &state);
             let (status, health_status) = if compiled {
                 channel_readiness_summary(&readiness)
@@ -1103,25 +1103,10 @@ pub async fn handle_api_channels(
 /// POST /api/channels/{channel}/relink — replace a QR channel's pairing.
 ///
 /// `{channel}` is the composite `<type>.<alias>` name returned by
-/// `GET /api/channels`. Dispatches to the channel-owned relink hook
-/// ([`zeroclaw_channels::login_relink::relink`]); the gateway performs no
-/// file operations of its own and holds no knowledge of channel session
-/// layouts.
-///
-/// Responses (all authenticated via the standard bearer guard):
-///
-/// - `200` with `"outcome": "cleared"` — persisted login removed
-///   (`"removed"` lists the paths). `"restart_required": true`: the running
-///   channel keeps its in-memory session until the daemon restarts it, so
-///   the caller follows up with `POST /admin/reload` (which enforces its
-///   own, stricter admin policy — relink deliberately does not bypass it).
-/// - `200` with `"outcome": "nothing_to_clear"` — the channel supports
-///   relinking but held no persisted login; the next start already mints a
-///   fresh QR.
-/// - `409` with `"outcome": "unsupported"` — the channel type has no relink
-///   hook (it does not use QR-pairing sessions) or its feature is not
-///   compiled into this binary. **Explicit no-op: nothing was touched.**
-/// - `404` — no `[channels.<type>.<alias>]` block matches `{channel}`.
+/// `GET /api/channels`. With in-process `zeroclaw-channels` retired,
+/// no channel holds in-process QR-pairing login state, so configured
+/// channels return `409` with `"outcome": "unsupported"` and unknown
+/// channels return `404`.
 pub async fn handle_api_channel_relink(
     State(state): State<AppState>,
     Path(channel): Path<String>,
@@ -1146,63 +1131,20 @@ pub async fn handle_api_channel_relink(
             .into_response();
     };
 
-    // Resolve the string key to the typed QR-pairing channel once; probe
-    // and relink dispatch on the same enum. `None` means the channel type
-    // has no relink hook or its feature is not compiled — an explicit
-    // no-op conflict where nothing is touched.
-    let compiled_key = compiled_readiness_key_for_alias(&config, &info);
-    let Some(qr_channel) = zeroclaw_channels::listing::qr_pairing_channel(compiled_key) else {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "channel": channel,
-                "outcome": "unsupported",
-                "error": format!(
-                    "channel type {} has no relink operation (it does not use QR-pairing sessions) \
-                     or the feature is not compiled into this binary; nothing was changed",
-                    info.channel_type
-                ),
-            })),
-        )
-            .into_response();
-    };
-
-    match zeroclaw_channels::login_relink::relink(qr_channel, &config, &info.alias) {
-        Ok(zeroclaw_channels::login_relink::RelinkOutcome::Cleared { removed }) => {
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_attrs(::serde_json::json!({"channel": channel, "removed": removed})),
-                "channel persisted login cleared for relink"
-            );
-            Json(serde_json::json!({
-                "channel": channel,
-                "outcome": "cleared",
-                "removed": removed,
-                "restart_required": true,
-                "note": "restart the channel (POST /admin/reload) to begin the fresh QR pairing",
-            }))
-            .into_response()
-        }
-        Ok(zeroclaw_channels::login_relink::RelinkOutcome::NothingToClear) => {
-            Json(serde_json::json!({
-                "channel": channel,
-                "outcome": "nothing_to_clear",
-                "removed": [],
-                "restart_required": false,
-                "note": "no persisted login was stored; the next channel start already begins a fresh QR pairing",
-            }))
-            .into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "channel": channel,
-                "error": format!("failed to clear persisted login: {e}"),
-            })),
-        )
-            .into_response(),
-    }
+    let _compiled_key = compiled_readiness_key_for_alias(&config, &info);
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "channel": channel,
+            "outcome": "unsupported",
+            "error": format!(
+                "channel type {} has no relink operation (it does not use QR-pairing sessions) \
+                 or the feature is not compiled into this binary; nothing was changed",
+                info.channel_type
+            ),
+        })),
+    )
+        .into_response()
 }
 
 fn compiled_readiness_key_for_alias<'a>(config: &'a Config, info: &'a ChannelAliasInfo) -> &'a str {
@@ -1286,46 +1228,15 @@ fn channel_readiness(
     readiness
 }
 
-/// Fill `readiness.authenticated` from the channel-owned persisted-login
-/// probe (`zeroclaw_channels::login_probe`). The probe resolves the same
-/// on-disk session signal each QR-pairing channel uses at startup to decide
-/// between resuming a session and minting a fresh QR code; nothing is
-/// cached and nothing is written. Channel types without a typed QR-pairing
-/// key (no probe, or feature not compiled) keep `authenticated: unknown`
-/// and the existing "not checked yet" note.
 fn apply_persisted_login_readiness(
-    config: &zeroclaw_config::schema::Config,
+    _config: &zeroclaw_config::schema::Config,
     info: &zeroclaw_config::schema::ChannelAliasInfo,
     readiness: &mut ChannelReadiness,
 ) {
-    use zeroclaw_channels::login_probe::PersistedLogin;
-
-    // Resolve the string key to the typed QR-pairing channel once; all
-    // downstream dispatch is on the enum.
-    let compiled_key = compiled_readiness_key_for_alias(config, info);
-    let Some(channel) = zeroclaw_channels::listing::qr_pairing_channel(compiled_key) else {
-        readiness.notes.push(format!(
-            "Live readiness is not checked for `{}` channels yet.",
-            info.channel_type
-        ));
-        return;
-    };
-
-    match zeroclaw_channels::login_probe::persisted_login(channel, config, &info.alias) {
-        PersistedLogin::Present => {
-            readiness.authenticated = ChannelReadinessState::Ready;
-            readiness.notes.push(format!(
-                "Live listener readiness is not checked for `{}` channels yet.",
-                info.channel_type
-            ));
-        }
-        PersistedLogin::Absent => {
-            readiness.authenticated = ChannelReadinessState::Missing;
-            readiness.requirements.push(
-                "Pair this channel: no persisted login session was found on disk.".to_string(),
-            );
-        }
-    }
+    readiness.notes.push(format!(
+        "Live readiness is not checked for `{}` channels yet.",
+        info.channel_type
+    ));
 }
 
 fn channel_readiness_summary(readiness: &ChannelReadiness) -> (&'static str, &'static str) {
@@ -2537,107 +2448,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(feature = "channel-wechat")]
-    #[tokio::test]
-    async fn api_channels_wechat_authenticated_tracks_persisted_login() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.gateway.require_pairing = false;
-        config.channels.wechat.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WeChatConfig {
-                enabled: true,
-                state_dir: Some(temp.path().to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        bind_channel_to_agent(&mut config, "wechat.admin");
-
-        // Unpaired: nothing persisted in the channel's state dir.
-        let response = handle_api_channels(State(test_state(config.clone())), HeaderMap::new())
-            .await
-            .into_response();
-        let json = response_json(response).await;
-        let channel = json["channels"]
-            .as_array()
-            .expect("channels array")
-            .iter()
-            .find(|channel| channel["name"] == "wechat.admin")
-            .cloned()
-            .expect("wechat channel is listed");
-        assert_eq!(channel["readiness"]["authenticated"], "missing");
-        assert_eq!(channel["status"], "error");
-        assert_eq!(channel["health"], "down");
-        assert!(
-            channel["readiness"]["requirements"]
-                .as_array()
-                .expect("requirements array")
-                .iter()
-                .any(|item| item
-                    .as_str()
-                    .is_some_and(|s| s.contains("Pair this channel")))
-        );
-
-        // Paired: the channel's own persisted login (account.json token).
-        std::fs::write(
-            temp.path().join("account.json"),
-            r#"{"token": "tok_persisted", "account_id": "acct_1"}"#,
-        )
-        .unwrap();
-        let response = handle_api_channels(State(test_state(config)), HeaderMap::new())
-            .await
-            .into_response();
-        let json = response_json(response).await;
-        let channel = json["channels"]
-            .as_array()
-            .expect("channels array")
-            .iter()
-            .find(|channel| channel["name"] == "wechat.admin")
-            .cloned()
-            .expect("wechat channel is listed");
-        assert_eq!(channel["readiness"]["authenticated"], "ready");
-        // Listener liveness is still unprobed, so the summary stays
-        // conservative rather than claiming the channel is up.
-        assert_eq!(channel["readiness"]["listening"], "unknown");
-        assert_eq!(channel["status"], "unknown");
-    }
-
-    #[cfg(feature = "whatsapp-web")]
-    #[tokio::test]
-    async fn api_channels_whatsapp_web_unpaired_reports_missing_auth_without_touching_disk() {
-        let temp = tempfile::tempdir().unwrap();
-        let session_path = temp.path().join("session.db");
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.gateway.require_pairing = false;
-        config.channels.whatsapp.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                session_path: Some(session_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        bind_channel_to_agent(&mut config, "whatsapp.admin");
-
-        let response = handle_api_channels(State(test_state(config)), HeaderMap::new())
-            .await
-            .into_response();
-        let json = response_json(response).await;
-        let channel = json["channels"]
-            .as_array()
-            .expect("channels array")
-            .iter()
-            .find(|channel| channel["name"] == "whatsapp.admin")
-            .cloned()
-            .expect("whatsapp channel is listed");
-        assert_eq!(channel["readiness"]["authenticated"], "missing");
-        assert_eq!(channel["status"], "error");
-        assert!(
-            !session_path.exists(),
-            "the readiness probe must never create the session database"
-        );
-    }
-
     #[tokio::test]
     async fn api_channels_without_login_probe_keeps_authenticated_unknown() {
         let mut config = config_with_telegram("default");
@@ -2664,88 +2474,6 @@ pub(crate) mod tests {
                     note.as_str()
                         .is_some_and(|s| s.contains("not checked for `telegram`"))
                 })
-        );
-    }
-
-    #[cfg(feature = "channel-wechat")]
-    #[tokio::test]
-    async fn api_channel_relink_wechat_clears_persisted_login_then_noops() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.gateway.require_pairing = false;
-        config.channels.wechat.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WeChatConfig {
-                enabled: true,
-                state_dir: Some(temp.path().to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        std::fs::write(
-            temp.path().join("account.json"),
-            r#"{"token": "tok_persisted", "account_id": "acct_1"}"#,
-        )
-        .unwrap();
-        std::fs::write(temp.path().join("sync.json"), r#"{"get_updates_buf": "c"}"#).unwrap();
-
-        let response = handle_api_channel_relink(
-            State(test_state(config.clone())),
-            Path("wechat.admin".to_string()),
-            HeaderMap::new(),
-        )
-        .await
-        .into_response();
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["outcome"], "cleared");
-        assert_eq!(json["restart_required"], true);
-        assert_eq!(json["removed"].as_array().expect("removed array").len(), 2);
-        assert!(!temp.path().join("account.json").exists());
-        assert!(!temp.path().join("sync.json").exists());
-
-        // Relinking again is the documented no-op.
-        let response = handle_api_channel_relink(
-            State(test_state(config)),
-            Path("wechat.admin".to_string()),
-            HeaderMap::new(),
-        )
-        .await
-        .into_response();
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["outcome"], "nothing_to_clear");
-        assert_eq!(json["restart_required"], false);
-    }
-
-    #[cfg(feature = "whatsapp-web")]
-    #[tokio::test]
-    async fn api_channel_relink_whatsapp_web_unpaired_noops_without_touching_disk() {
-        let temp = tempfile::tempdir().unwrap();
-        let session_path = temp.path().join("session.db");
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.gateway.require_pairing = false;
-        config.channels.whatsapp.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                session_path: Some(session_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-
-        let response = handle_api_channel_relink(
-            State(test_state(config)),
-            Path("whatsapp.admin".to_string()),
-            HeaderMap::new(),
-        )
-        .await
-        .into_response();
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["outcome"], "nothing_to_clear");
-        assert!(
-            !session_path.exists(),
-            "relinking an unpaired channel must not create the session database"
         );
     }
 
@@ -3049,7 +2777,7 @@ pub(crate) mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = response_json(response).await;
         let channel = &json["channels"][0];
-        let webhook_compiled = zeroclaw_channels::listing::is_channel_type_compiled("webhook");
+        let webhook_compiled = false;
         assert_eq!(channel["name"], "webhook.ops");
         assert_eq!(channel["compiled"], webhook_compiled);
         if webhook_compiled {
