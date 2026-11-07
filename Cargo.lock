@@ -5170,7 +5170,6 @@ dependencies = [
  "zeroclaw-platform",
  "zeroclaw-policy",
  "zeroclaw-providers",
- "zeroclaw-sop-graph",
  "zeroclaw-spawn",
  "zeroclaw-tool-call-parser",
  "zeroclaw-tools",
@@ -5183,17 +5182,6 @@ dependencies = [
  "schemars",
  "serde_json",
  "zeroclaw-config",
-]
-
-[[package]]
-name = "zeroclaw-sop-graph"
-version = "0.8.3"
-dependencies = [
- "schemars",
- "serde",
- "serde_json",
- "strum",
- "strum_macros",
 ]
 
 [[package]]

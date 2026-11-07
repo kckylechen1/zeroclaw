@@ -216,7 +216,16 @@ place untouched.
 
 ## 4. Trigger Types
 
-{{#sop-trigger-index}}
+| Trigger (`type`) | Required fields | Optional fields | Summary |
+|---|---|---|---|
+| `webhook` | `path` | none | Inbound HTTP POST to the Gateway webhook endpoint |
+| `cron` | `expression` | none | Cron expression fired by the built-in scheduler |
+| `mqtt` | `topic` | `condition` | Message published to an MQTT broker topic |
+| `amqp` | `queue` | `exchange`, `routing_key`, `condition` | Message delivered to an AMQP 0-9-1 broker queue |
+| `peripheral` | `board`, `signal` | `condition` | Peripheral hardware signal / threshold condition |
+| `channel` | none | none | Retired: inbound chat channel messages no longer fire SOPs; the parser rejects `type = "channel"` triggers with an explicit error |
+| `filesystem` | `path` | `glob`, `recursive`, `debounce_ms`, `condition` | File creation or modification under a watched directory |
+| `manual` | none | none | On-demand trigger via CLI (`zeroclaw sop run`) or tool call |
 
 For the live-versus-unwired status of each source and the transport details, see [SOP Fan-In](./fan-in/overview.md).
 

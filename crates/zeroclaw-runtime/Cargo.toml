@@ -19,7 +19,6 @@ zeroclaw-log.workspace = true
 zeroclaw-providers.workspace = true
 zeroclaw-memory.workspace = true
 zeroclaw-tools.workspace = true
-zeroclaw-sop-graph.workspace = true
 zeroclaw-tool-call-parser.workspace = true
 fluent = "0.16"
 anyhow = "1.0"
@@ -107,7 +106,7 @@ default = [
 ]
 observability-prometheus = ["dep:prometheus"]
 sandbox-landlock = ["dep:landlock"]
-schema-export = ["dep:schemars", "zeroclaw-config/schema-export", "zeroclaw-sop-graph/schema-export"]
+schema-export = ["dep:schemars", "zeroclaw-config/schema-export"]
 
 
 # Concrete integration families from zeroclaw-tools. Default-on so this

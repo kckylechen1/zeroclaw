@@ -85,8 +85,6 @@ pub mod providers;
 #[cfg(feature = "agent-runtime")]
 pub(crate) mod security;
 #[cfg(feature = "agent-runtime")]
-pub mod sop;
-#[cfg(feature = "agent-runtime")]
 pub mod tools;
 #[cfg(feature = "agent-runtime")]
 pub(crate) mod tunnel;
@@ -892,47 +890,4 @@ pub enum IntegrationCommands {
         /// Integration name
         name: String,
     },
-}
-
-/// SOP management subcommands
-#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SopCommands {
-    /// List loaded SOPs
-    List,
-    /// Validate SOP definitions
-    Validate {
-        /// SOP name to validate (all if omitted)
-        name: Option<String>,
-    },
-    /// Show details of an SOP
-    Show {
-        /// Name of the SOP to show
-        name: String,
-    },
-    /// Render an SOP's node graph as text
-    Graph {
-        /// Name of the SOP to render
-        name: String,
-        /// Output format
-        #[arg(long, value_enum, default_value_t = SopGraphFormat::Outline)]
-        format: SopGraphFormat,
-    },
-    /// Delete an SOP definition from disk
-    Delete {
-        /// Name of the SOP to delete
-        name: String,
-    },
-}
-
-/// Text output format for `sop graph`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
-)]
-pub enum SopGraphFormat {
-    /// One line per node with its outbound flow edges.
-    Outline,
-    /// `from -> to [role]` adjacency, one edge per line.
-    Adjacency,
-    /// Pretty-printed JSON of the whole projection.
-    Json,
 }

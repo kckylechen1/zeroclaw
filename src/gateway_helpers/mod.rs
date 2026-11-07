@@ -8,7 +8,6 @@ use std::fmt::Write as _;
 #[cfg(feature = "agent-runtime")]
 pub mod bridges;
 
-use crate::SopCommands;
 use crate::config::Config;
 
 /// Resolve a `cli-*` Fluent key for CLI output. Routes through the runtime
