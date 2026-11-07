@@ -916,3 +916,4 @@ acp-bridge-reject-once = 拒绝一次
 cli-paircode-local-only = 配对码请求只能发往本机回环地址。请在网关主机上使用 --host 127.0.0.1 执行。
 cli-paircode-admin-token-missing = { $path } 中没有网关管理令牌。请在网关运行时，以运行网关的用户在网关主机上执行。
 delegation-result-notice = 委派任务 {$request} 已结束，结果为 {$outcome}。可询问代理，或对调度 {$dispatch} 查询 tachi_result。
+task-reminder-notice = 提醒：{$task}

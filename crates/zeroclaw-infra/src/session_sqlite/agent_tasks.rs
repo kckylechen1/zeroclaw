@@ -23,20 +23,27 @@ pub struct TaskItem {
     pub ordinal: i64,
     pub description: String,
     pub status: String,
+    /// The task's scheduled reminder due time, when one is armed (the
+    /// "has a reminder" projection; the occurrence stays the truth).
+    pub remind_at: Option<i64>,
 }
 
 /// One batched operation. Adds mint identity server-side; updates and
 /// removes address items by their stable id — never by description.
+/// The optional reminder field arms/clears the task's reminder occurrence
+/// in the SAME transaction (see `reminder_occurrences`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskOp {
     Add {
         description: String,
         status: String,
+        reminder: Option<super::reminder_occurrences::ArmReminder>,
     },
     Update {
         task_id: String,
         description: Option<String>,
         status: Option<String>,
+        reminder: super::reminder_occurrences::ReminderChange,
     },
     Remove {
         task_id: String,
@@ -88,7 +95,7 @@ pub(super) fn migrate_agent_tasks(conn: &mut Connection) -> Result<()> {
     tx.commit().context("committing agent_tasks schema")
 }
 
-fn validate_description(description: &str) -> Result<()> {
+pub(super) fn validate_description(description: &str) -> Result<()> {
     if description.is_empty() || description.len() > MAX_DESCRIPTION_BYTES {
         bail!(
             "task description must be 1..={MAX_DESCRIPTION_BYTES} bytes, got {}",
@@ -177,6 +184,7 @@ impl SqliteSessionBackend {
                 TaskOp::Add {
                     description,
                     status,
+                    reminder,
                 } => {
                     validate_description(description)?;
                     validate_status(status)?;
@@ -189,11 +197,28 @@ impl SqliteSessionBackend {
                         params![agent_identity, task_id, next_ordinal, description, status, now],
                     )
                     .context("inserting an agent task")?;
+                    if let Some(arm) = reminder {
+                        // An Add MAY carry status=completed (the tool schema
+                        // allows it); arming onto it is refused exactly like
+                        // an Update would be, rolling back the WHOLE batch.
+                        anyhow::ensure!(
+                            status != STATUS_COMPLETED,
+                            "cannot arm a reminder on a completed task"
+                        );
+                        super::reminder_occurrences::arm_reminder_tx(
+                            &tx,
+                            agent_identity,
+                            &task_id,
+                            arm,
+                            now,
+                        )?;
+                    }
                 }
                 TaskOp::Update {
                     task_id,
                     description,
                     status,
+                    reminder,
                 } => {
                     if let Some(description) = description {
                         validate_description(description)?;
@@ -218,6 +243,25 @@ impl SqliteSessionBackend {
                     if updated == 0 {
                         bail!("unknown task id {task_id}");
                     }
+                    // The reminder change is judged against the task's
+                    // status AFTER this update: completing in the same batch
+                    // invalidates; arming onto a completed task is refused.
+                    let now_status: String = tx
+                        .query_row(
+                            "SELECT status FROM agent_tasks
+                             WHERE agent_identity = ?1 AND task_id = ?2",
+                            params![agent_identity, task_id],
+                            |row| row.get(0),
+                        )
+                        .context("re-reading the updated task status")?;
+                    super::reminder_occurrences::apply_reminder_change_tx(
+                        &tx,
+                        agent_identity,
+                        task_id,
+                        reminder,
+                        now_status == STATUS_COMPLETED,
+                        now,
+                    )?;
                 }
                 TaskOp::Remove { task_id } => {
                     let removed = tx
@@ -229,6 +273,13 @@ impl SqliteSessionBackend {
                     if removed == 0 {
                         bail!("unknown task id {task_id}");
                     }
+                    // Deleting the task invalidates its pending reminders in
+                    // the same transaction; a reopen cannot revive them.
+                    super::reminder_occurrences::invalidate_task_reminders_tx(
+                        &tx,
+                        agent_identity,
+                        task_id,
+                    )?;
                 }
             }
         }
@@ -275,8 +326,12 @@ fn read_list(tx: &rusqlite::Transaction, agent_identity: &str) -> Result<TaskLis
 
 fn read_items(tx: &rusqlite::Transaction, agent_identity: &str) -> Result<Vec<TaskItem>> {
     let mut query = tx.prepare(
-        "SELECT task_id, ordinal, description, status FROM agent_tasks
-         WHERE agent_identity = ?1 ORDER BY ordinal, rowid LIMIT ?2",
+        "SELECT a.task_id, a.ordinal, a.description, a.status, r.due_at
+         FROM agent_tasks a
+         LEFT JOIN reminder_occurrences r
+           ON r.agent_identity = a.agent_identity AND r.task_id = a.task_id
+          AND r.state = 'scheduled'
+         WHERE a.agent_identity = ?1 ORDER BY a.ordinal, a.rowid LIMIT ?2",
     )?;
     let items = query
         .query_map(params![agent_identity, MAX_ITEMS + 1], |row| {
@@ -285,6 +340,7 @@ fn read_items(tx: &rusqlite::Transaction, agent_identity: &str) -> Result<Vec<Ta
                 ordinal: row.get(1)?,
                 description: row.get(2)?,
                 status: row.get(3)?,
+                remind_at: row.get(4)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -330,6 +386,7 @@ mod tests {
                 &[TaskOp::Add {
                     description: description.into(),
                     status: STATUS_PENDING.into(),
+                    reminder: None,
                 }],
             )
             .unwrap()
@@ -352,6 +409,7 @@ mod tests {
                 &[TaskOp::Add {
                     description: "stale".into(),
                     status: STATUS_PENDING.into(),
+                    reminder: None,
                 }],
             )
             .unwrap()
@@ -370,6 +428,7 @@ mod tests {
                 &[TaskOp::Add {
                     description: "two".into(),
                     status: STATUS_IN_PROGRESS.into(),
+                    reminder: None,
                 }],
             )
             .unwrap()
@@ -412,6 +471,7 @@ mod tests {
                         &[TaskOp::Add {
                             description: "must not be written".into(),
                             status: STATUS_PENDING.into(),
+                            reminder: None,
                         }],
                     )
                     .is_err()
@@ -461,6 +521,7 @@ mod tests {
                     &[TaskOp::Add {
                         description: "must not be written".into(),
                         status: STATUS_PENDING.into(),
+                        reminder: None,
                     }],
                 )
                 .is_err()
@@ -544,6 +605,7 @@ mod tests {
                         &[TaskOp::Add {
                             description: "must not be written".into(),
                             status: STATUS_PENDING.into(),
+                            reminder: None,
                         }],
                     )
                     .is_err(),
@@ -623,6 +685,7 @@ mod tests {
                 &[TaskOp::Add {
                     description: "must not be written".into(),
                     status: STATUS_PENDING.into(),
+                    reminder: None,
                 }],
             ) else {
                 panic!("counter exhaustion must fail");
@@ -649,6 +712,7 @@ mod tests {
                     task_id: task_id.clone(),
                     description: Some("renamed".into()),
                     status: Some(STATUS_COMPLETED.into()),
+                    reminder: super::super::reminder_occurrences::ReminderChange::Keep,
                 }],
             )
             .unwrap()
@@ -679,6 +743,7 @@ mod tests {
                     &[TaskOp::Add {
                         description: "".into(),
                         status: STATUS_PENDING.into(),
+                        reminder: None,
                     }],
                 )
                 .is_err()
@@ -691,6 +756,7 @@ mod tests {
                     &[TaskOp::Add {
                         description: "ok".into(),
                         status: "done".into(),
+                        reminder: None,
                     }],
                 )
                 .is_err()
@@ -704,6 +770,7 @@ mod tests {
                     &[TaskOp::Add {
                         description: format!("item {index}"),
                         status: STATUS_PENDING.into(),
+                        reminder: None,
                     }],
                 )
                 .unwrap()
@@ -721,6 +788,7 @@ mod tests {
                     &[TaskOp::Add {
                         description: "over cap".into(),
                         status: STATUS_PENDING.into(),
+                        reminder: None,
                     }],
                 )
                 .is_err()
@@ -738,6 +806,7 @@ mod tests {
                 &[TaskOp::Add {
                     description: "second".into(),
                     status: STATUS_IN_PROGRESS.into(),
+                    reminder: None,
                 }],
             )
             .unwrap()
@@ -755,6 +824,7 @@ mod tests {
                     task_id: list.items[0].task_id.clone(),
                     description: None,
                     status: Some(STATUS_IN_PROGRESS.into()),
+                    reminder: super::super::reminder_occurrences::ReminderChange::Keep,
                 }],
             )
             .unwrap()

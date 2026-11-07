@@ -286,6 +286,13 @@ pub struct Config {
     #[group = "Integrations"]
     pub acp: AcpConfig,
 
+    /// Durable task-list behavior (`[tasks]`, #568): the owner-selected
+    /// reminder destination armed occurrences copy at creation.
+    #[serde(default, skip_serializing_if = "crate::tasks::TasksConfig::is_unset")]
+    #[nested]
+    #[group = "Operations"]
+    pub tasks: crate::tasks::TasksConfig,
+
     /// Channel configurations: Telegram, Discord, Slack, etc. (`[channels]`).
     #[serde(default, alias = "channels_config")]
     #[nested]
@@ -14709,6 +14716,7 @@ impl Default for Config {
             data_dir: zeroclaw_dir.join("data"),
             config_path: zeroclaw_dir.join("config.toml"),
             composition: None,
+            tasks: crate::tasks::TasksConfig::default(),
             env_overridden_paths: std::collections::HashSet::new(),
             pre_override_snapshots: std::collections::HashMap::new(),
             onepassword_reference_snapshots: std::collections::HashMap::new(),

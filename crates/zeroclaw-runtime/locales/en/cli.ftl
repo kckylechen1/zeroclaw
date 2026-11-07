@@ -1118,3 +1118,4 @@ acp-bridge-reject-once = Reject once
 cli-paircode-local-only = Pairing-code requests must target loopback. Run this on the gateway host with --host 127.0.0.1.
 cli-paircode-admin-token-missing = No gateway admin token at { $path }. Run this on the gateway host, as the user running it, while the gateway is running.
 delegation-result-notice = Delegated task {$request} finished with outcome {$outcome}. Ask the agent or query tachi_result for dispatch {$dispatch}.
+task-reminder-notice = Reminder: {$task}

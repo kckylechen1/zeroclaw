@@ -193,9 +193,14 @@ impl TaskListSection {
                 break;
             }
             let one_line = neutralize_markers(&item.description.replace(['\n', '\r'], " "));
+            let reminder = item
+                .remind_at
+                .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0))
+                .map(|dt| format!(" ⏰ {}", dt.format("%Y-%m-%dT%H:%MZ")))
+                .unwrap_or_default();
             lines.push(format!(
-                "- [{}] {} ({})",
-                item.status, one_line, item.task_id
+                "- [{}] {}{} ({})",
+                item.status, one_line, reminder, item.task_id
             ));
         }
         Ok(lines.join("\n"))
