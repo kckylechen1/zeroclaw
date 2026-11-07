@@ -754,36 +754,6 @@ pub enum ParentActionKind {
     ReviewCandidate,
     /// Nothing further; informational.
     Note,
-    /// Submit a Tachi task intent on the child's behalf (vertical V3,
-    /// SA-29's role-exclusive law): the Supervisor holds no submit
-    /// operation, so implementation work it needs is requested as a
-    /// typed action and the PARENT performs the initial `submit` through
-    /// the TaskIntent bridge surface. The payload carries everything the
-    /// Parent needs — the composed intent and the TB-7 request id.
-    SubmitTaskIntent,
-}
-
-impl ParentActionKind {
-    /// Whether this action kind requires the `task_intent_request`
-    /// payload on a [`RequestedParentAction`].
-    #[must_use]
-    pub fn requires_task_intent_payload(self) -> bool {
-        matches!(self, Self::SubmitTaskIntent)
-    }
-}
-
-/// The typed payload of a [`ParentActionKind::SubmitTaskIntent`] action:
-/// the fully composed [`TaskIntentV1`] plus the TB-7 request id the
-/// Parent must submit it under (same tuple on replay — RULING-205 §2).
-/// Content, never authority: handing this to the Parent does not submit
-/// anything; the Parent's own admitted policy governs the actual submit.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskIntentSubmitRequest {
-    /// The composed intent (built through the production composer).
-    pub intent: crate::taskintent::TaskIntentV1,
-    /// The idempotency request id for the submit.
-    pub request_id: crate::taskintent::RequestId,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -792,11 +762,6 @@ pub struct RequestedParentAction {
     pub action: ParentActionKind,
     /// What the action concerns, by typed reference (no authority effect).
     pub subject_ref: String,
-    /// The typed submit payload, present iff `action` is
-    /// `submit_task_intent` (SA-21/SA-25: the child REQUESTS; the Parent
-    /// submits). Absent for every other action kind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_intent_request: Option<TaskIntentSubmitRequest>,
 }
 
 /// Kind of a proposed candidate. KP-18 active-authority kinds can reach
