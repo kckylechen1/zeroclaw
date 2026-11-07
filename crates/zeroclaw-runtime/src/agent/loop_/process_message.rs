@@ -135,15 +135,6 @@ pub async fn process_message_with_task_identity(
         )
         .await?;
 
-        let (composio_key, composio_entity_id) = if config.composio.enabled {
-            (
-                config.composio.api_key.as_deref(),
-                Some(config.composio.entity_id.as_str()),
-            )
-        } else {
-            (None, None)
-        };
-
         let all_tools_result_pm = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,
@@ -151,8 +142,6 @@ pub async fn process_message_with_task_identity(
             agent_alias,
             runtime.clone(),
             mem.clone(),
-            composio_key,
-            composio_entity_id,
             &config.browser,
             &config.http_request,
             &config.web_fetch,
@@ -200,10 +189,7 @@ pub async fn process_message_with_task_identity(
             registry,
             task_owner,
             ask_user_handle,
-            reaction_handle,
-            poll_handle,
             escalate_handle,
-            channel_room_handle,
             activated_handle: activated_handle_pm,
             mcp_tool_names: mcp_tool_names_pm,
             ..
@@ -213,14 +199,7 @@ pub async fn process_message_with_task_identity(
         // Populate all channel-driven tool handles from the registered factory.
         // `process_message` is the parent channel-turn entry; `false` keeps
         // the SA-7c child gate (inside the seed function) inert here.
-        let count = seed_channel_handles(
-            false,
-            &ask_user_handle,
-            &channel_room_handle,
-            &reaction_handle,
-            &poll_handle,
-            &escalate_handle,
-        );
+        let count = seed_channel_handles(false, &ask_user_handle, &escalate_handle);
         if count > 0 {
             ::zeroclaw_log::record!(
                 INFO,
@@ -292,13 +271,6 @@ pub async fn process_message_with_task_identity(
         if config.browser.enabled {
             tool_descs.push(("browser_open", "Open approved URLs in browser."));
         }
-        if config.composio.enabled {
-            tool_descs.push(("composio", "Execute actions on 1000+ apps via Composio."));
-        }
-        tool_descs.push((
-            "channel_room",
-            "Create channel rooms and invite users through active channels.",
-        ));
 
         let mut excluded_tools = compute_excluded_mcp_tools(
             &tools_registry,

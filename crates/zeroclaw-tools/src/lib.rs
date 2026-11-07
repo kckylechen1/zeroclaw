@@ -3,11 +3,6 @@
 pub mod attribution;
 pub mod helpers;
 pub(crate) mod i18n;
-// Concrete SaaS/vendor business tools. Gated so slim companion builds keep
-// the family out of the compiled surface; default-on via the
-// `integrations-saas` feature preserves the standard build.
-#[cfg(feature = "integrations-saas")]
-pub mod composio;
 pub mod util_helpers;
 
 pub mod ask_user;
@@ -15,7 +10,6 @@ pub mod backup_tool;
 pub mod browser;
 pub mod browser_open;
 pub mod calculator;
-pub mod channel_room;
 pub mod content_search;
 pub mod data_management;
 pub mod discord_search;
@@ -32,7 +26,6 @@ pub mod file_upload;
 pub mod file_upload_bundle;
 pub mod file_write;
 mod fs_guard;
-pub mod git_forge;
 pub mod git_operations;
 pub mod glob_search;
 pub mod http_request;
@@ -60,9 +53,7 @@ pub mod memory_store;
 pub mod node_capabilities;
 pub mod note_owner_correction;
 pub mod pipeline;
-pub mod poll;
 pub mod propose_soul_change;
-pub mod reaction;
 pub mod screenshot;
 pub mod send_via;
 pub mod sessions;

@@ -34,13 +34,9 @@ pub fn register_channel_map_fn(f: ChannelMapFn) {
 /// touching any handle), so a child's `ask_user`/`reaction`/... maps stay
 /// empty and every channel tool fails closed inside that run. Parent
 /// callers (CLI `run`, channel `process_message`) pass `false`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn seed_channel_handles(
     is_subagent: bool,
     ask_user_handle: &Option<tools::PerToolChannelHandle>,
-    channel_room_handle: &Option<tools::PerToolChannelHandle>,
-    reaction_handle: &tools::PerToolChannelHandle,
-    poll_handle: &Option<tools::PerToolChannelHandle>,
     escalate_handle: &Option<tools::PerToolChannelHandle>,
 ) -> usize {
     if is_subagent {
@@ -54,13 +50,7 @@ pub(crate) fn seed_channel_handles(
         return 0;
     }
 
-    let handles = [
-        ask_user_handle.as_ref(),
-        channel_room_handle.as_ref(),
-        Some(reaction_handle),
-        poll_handle.as_ref(),
-        escalate_handle.as_ref(),
-    ];
+    let handles = [ask_user_handle.as_ref(), escalate_handle.as_ref()];
 
     let mut count = 0;
     for (name, ch) in &map {

@@ -93,10 +93,7 @@ pub struct ScopedAssembled {
     pub registry: ScopedToolRegistry,
     pub task_owner: Option<super::task_list::TaskOwnerResolver>,
     pub ask_user_handle: Option<PerToolChannelHandle>,
-    pub reaction_handle: PerToolChannelHandle,
-    pub poll_handle: Option<PerToolChannelHandle>,
     pub escalate_handle: Option<PerToolChannelHandle>,
-    pub channel_room_handle: Option<PerToolChannelHandle>,
     /// The deferred-MCP tool-search listing on its own (deferred mode only): the
     /// `## Deferred Tools` section that names the policy-admitted `<server>__<tool>`
     /// stubs and instructs the model to call `tool_search`. Empty when deferred loading
@@ -180,10 +177,7 @@ impl ScopedToolRegistry {
             tools: mut tools_registry,
             task_owner,
             ask_user_handle,
-            reaction_handle,
-            poll_handle,
             escalate_handle,
-            channel_room_handle,
             unfiltered_tool_arcs,
         } = built;
 
@@ -538,10 +532,7 @@ impl ScopedToolRegistry {
                 .flatten(),
             registry: ScopedToolRegistry(tools_registry),
             ask_user_handle,
-            reaction_handle,
-            poll_handle,
             escalate_handle,
-            channel_room_handle,
             deferred_section,
             pinned_section,
             activated_handle,
@@ -642,10 +633,7 @@ mod tests {
             task_owner: None,
             tools,
             ask_user_handle: None,
-            reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
-            poll_handle: None,
             escalate_handle: None,
-            channel_room_handle: None,
             unfiltered_tool_arcs,
         }
     }
@@ -958,10 +946,7 @@ mod tests {
             task_owner: None,
             tools,
             ask_user_handle: None,
-            reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
-            poll_handle: None,
             escalate_handle: None,
-            channel_room_handle: None,
             unfiltered_tool_arcs: Vec::new(),
         }
     }
@@ -1388,10 +1373,7 @@ mod tests {
             registry: ScopedToolRegistry(Vec::new()),
             task_owner: None,
             ask_user_handle: None,
-            reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
-            poll_handle: None,
             escalate_handle: None,
-            channel_room_handle: None,
             deferred_section: deferred.to_string(),
             pinned_section: pinned.to_string(),
             activated_handle: None,
