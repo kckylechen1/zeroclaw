@@ -1789,8 +1789,10 @@ async fn max_iteration_summary_refreshes_committed_task_context() {
         let data_dir = data_dir.clone();
         Arc::new(move || Ok((identity.clone(), data_dir.clone())))
     };
-    let tools_registry: Vec<Box<dyn Tool>> =
-        vec![Box::new(crate::tools::TaskListTool::new(owner.clone()))];
+    let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(crate::tools::TaskListTool::new(
+        owner.clone(),
+        Arc::new(|| Err("no [tasks.reminder_target] configured".to_string())),
+    ))];
     let model_provider = SummaryTaskProvider {
         scripted: ScriptedModelProvider::from_native_tool_calls(
             vec![(

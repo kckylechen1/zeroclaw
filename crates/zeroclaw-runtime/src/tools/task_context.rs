@@ -11,7 +11,7 @@ use zeroclaw_api::companion::AgentIdentityId;
 use zeroclaw_config::schema::Config;
 use zeroclaw_policy::{SecurityPolicy, ToolOperation};
 
-use super::task_list::TaskOwnerResolver;
+use super::task_list::{ReminderTargetResolver, TaskOwnerResolver};
 
 type CapturedIdentities = BTreeMap<String, Result<AgentIdentityId, String>>;
 
@@ -178,6 +178,41 @@ pub(super) fn resolvers(
         Arc::new(move || read(false)),
         Arc::new(move || resolve(true)),
     )
+}
+
+/// Resolve the owner-configured reminder destination (#568) against the
+/// current live config (or the startup snapshot when no live handle exists).
+pub(super) fn reminder_target_resolver(
+    config: Arc<Config>,
+    live_config: Option<Arc<RwLock<Config>>>,
+) -> ReminderTargetResolver {
+    Arc::new(move || {
+        let resolve = |current: &Config| {
+            let target = current.tasks.reminder_target.as_ref().ok_or_else(|| {
+                "no [tasks.reminder_target] configured: reminders are unavailable \
+                 until the owner sets one"
+                    .to_string()
+            })?;
+            target
+                .validate()
+                .map_err(|error| format!("invalid [tasks.reminder_target]: {error}"))?;
+            if !current.gateway.bridges.contains_key(&target.bridge) {
+                return Err(format!(
+                    "[tasks.reminder_target] names bridge {:?} which is not configured",
+                    target.bridge
+                ));
+            }
+            Ok((
+                target.bridge.clone(),
+                target.recipient.clone(),
+                target.thread_id.clone(),
+            ))
+        };
+        match &live_config {
+            Some(live) => resolve(&live.read()),
+            None => resolve(&config),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -405,14 +440,15 @@ mod tests {
             let live = Arc::new(RwLock::new(config.clone()));
             let security = Arc::new(SecurityPolicy::for_agent(&config, "alpha").unwrap());
             let (read, write) = resolvers(
-                Arc::new(config),
+                Arc::new(config.clone()),
                 "alpha",
                 security.clone(),
                 true,
                 Some(live.clone()),
                 None,
             );
-            let tool = super::super::task_list::TaskListTool::new(write);
+            let target = reminder_target_resolver(Arc::new(config), Some(live.clone()));
+            let tool = super::super::task_list::TaskListTool::new(write, target);
             // Prompt refresh is a read; repeated refreshes must not spend the
             // execution's shared action allowance.
             for _ in 0..4 {
@@ -592,6 +628,7 @@ mod tests {
             &[TaskOp::Add {
                 description: "from another session".into(),
                 status: "pending".into(),
+                reminder: None,
             }],
         )
         .unwrap();

@@ -181,12 +181,43 @@ impl BridgeOutbox {
         source_id: &str,
         event_id: &str,
     ) -> Result<String> {
+        self.enqueue_source_deadline(
+            bridge,
+            to,
+            thread_id,
+            content,
+            source_kind,
+            source_id,
+            event_id,
+            None,
+        )
+    }
+
+    /// Queue one canonical source event with an ABSOLUTE expiry deadline
+    /// (#568): the row expires at `min(now + TTL, deadline)` and can never
+    /// outlive it no matter when the enqueue happened. Reminder producers
+    /// pass the occurrence's `due_at + validity` so a row enqueued late in
+    /// the window cannot deliver past the occurrence's validity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_source_deadline(
+        &self,
+        bridge: &str,
+        to: &str,
+        thread_id: Option<&str>,
+        content: &str,
+        source_kind: &str,
+        source_id: &str,
+        event_id: &str,
+        deadline: Option<i64>,
+    ) -> Result<String> {
         anyhow::ensure!(
             !source_kind.is_empty() && !source_id.is_empty() && !event_id.is_empty(),
             "attention_source_required"
         );
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
+        let ttl_expiry = now + self.ttl.as_secs() as i64;
+        let expires_at = deadline.map_or(ttl_expiry, |deadline| deadline.min(ttl_expiry));
         {
             let mut conn = self.conn.lock();
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -207,7 +238,7 @@ impl BridgeOutbox {
             tx.execute(
                 "INSERT INTO bridge_outbox (id, bridge, recipient, thread_id, content, created_at, source_kind, source_id, event_id, expires_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![id, bridge, to, thread_id, content, now, source_kind, source_id, event_id, now + self.ttl.as_secs() as i64],
+                params![id, bridge, to, thread_id, content, now, source_kind, source_id, event_id, expires_at],
             ).context("writing to the bridge outbox")?;
             tx.commit()?;
         }
@@ -328,7 +359,14 @@ impl BridgeOutbox {
         conn.execute("DELETE FROM bridge_outbox WHERE resolved_at < ?1 AND delivery_state IN ('confirmed','dismissed','expired')", [now - 30 * 86400])?;
         // Keep at most 10,000 terminal receipts per bridge. This bounds the
         // dedup window by both age and volume, never by evicting active attempts.
-        conn.execute("DELETE FROM bridge_outbox WHERE seq IN (SELECT seq FROM (SELECT seq, ROW_NUMBER() OVER (PARTITION BY bridge ORDER BY resolved_at DESC, seq DESC) AS rank FROM bridge_outbox WHERE delivery_state IN ('confirmed','dismissed','expired')) WHERE rank > 10000)", [])?;
+        // A REMINDER row's receipt is also its fire-once dedup tombstone for the
+        // occurrence's crash window (enqueue committed, occurrence state not yet
+        // marked) — capacity eviction must not evict it before the occurrence's
+        // absolute deadline passes, or a re-scan would insert a second candidate.
+        conn.execute(
+            "DELETE FROM bridge_outbox WHERE seq IN (SELECT seq FROM (SELECT seq, ROW_NUMBER() OVER (PARTITION BY bridge ORDER BY resolved_at DESC, seq DESC) AS rank FROM bridge_outbox WHERE delivery_state IN ('confirmed','dismissed','expired') AND NOT (source_kind='reminder' AND expires_at > ?1)) WHERE rank > 10000)",
+            [now],
+        )?;
         Ok(expired)
     }
 
@@ -586,6 +624,76 @@ mod tests {
             .unwrap();
         outbox.enqueue("tg", "42", None, "fresh").unwrap();
         assert_eq!(contents(&outbox.pending("tg", 0, 100).unwrap()), ["fresh"]);
+    }
+
+    #[test]
+    fn absolute_deadline_caps_row_expiry_and_reminder_tombstones_survive_eviction() {
+        let (_dir, outbox) = outbox();
+        // The deadline tightens, never extends, the TTL window.
+        let now = now_secs();
+        let id = outbox
+            .enqueue_source_deadline(
+                "tg",
+                "owner",
+                None,
+                "notice",
+                "reminder",
+                "occ-1",
+                "occ-1",
+                Some(now - 10),
+            )
+            .unwrap();
+        assert!(
+            !outbox.claim("tg", &id, now + 1).unwrap(),
+            "a row past its absolute deadline must not claim"
+        );
+        // Dedup identity is unchanged by the deadline variant.
+        assert_eq!(
+            outbox
+                .enqueue_source_deadline(
+                    "tg", "owner", None, "notice", "reminder", "occ-1", "occ-1", None
+                )
+                .unwrap(),
+            id
+        );
+        // A reminder tombstone inside its validity window survives rank
+        // eviction: confirm it first (a terminal receipt IS the tombstone —
+        // an accepted row never enters the eviction set and would prove
+        // nothing), then fill the bridge with 10,000+ newer terminal rows.
+        let kept = outbox
+            .enqueue_source_deadline(
+                "tg",
+                "owner",
+                None,
+                "later",
+                "reminder",
+                "occ-2",
+                "occ-2",
+                Some(now + 3600),
+            )
+            .unwrap();
+        assert!(outbox.claim("tg", &kept, now).unwrap());
+        assert!(outbox.ack("tg", &kept).unwrap());
+        {
+            let conn = outbox.conn.lock();
+            for i in 0..10_050 {
+                conn.execute(
+                    "INSERT INTO bridge_outbox (id, bridge, recipient, thread_id, content, created_at, source_kind, source_id, event_id, delivery_state, expires_at, resolved_at)
+                     VALUES (?1, 'tg', 'owner', NULL, '', ?2, 'cron', ?3, ?3, 'confirmed', 0, ?2)",
+                    params![format!("noise-{i}"), now, format!("job-{i}")],
+                )
+                .unwrap();
+            }
+        }
+        outbox.purge_expired().unwrap();
+        assert!(
+            outbox.inspect("tg", &kept).unwrap().is_some(),
+            "a reminder tombstone inside its validity window must survive capacity eviction"
+        );
+        assert!(
+            outbox.inspect("tg", "noise-0").unwrap().is_none(),
+            "non-reminder terminal rows are still rank-evicted past 10,000"
+        );
     }
 
     #[test]

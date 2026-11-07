@@ -857,7 +857,12 @@ pub fn all_tools_with_runtime(
         live_config.clone(),
         Some(task_identity),
     );
-    tool_arcs.push(Arc::new(TaskListTool::new(task_writer)));
+    let task_reminder_target =
+        task_context::reminder_target_resolver(shared_root_config.clone(), live_config.clone());
+    tool_arcs.push(Arc::new(TaskListTool::new(
+        task_writer,
+        task_reminder_target,
+    )));
 
     // Register discord_search if any configured Discord alias has
     // archive enabled. Multiple Discord aliases are supported (one per

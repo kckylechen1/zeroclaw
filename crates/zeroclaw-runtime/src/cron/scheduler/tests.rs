@@ -862,6 +862,7 @@ async fn queued_and_retried_agent_jobs_keep_their_admitted_task_owner() {
                     &[TaskOp::Add {
                         description: "replacement-only commitment".into(),
                         status: "pending".into(),
+                        reminder: None,
                     }],
                 )
                 .unwrap();
@@ -911,6 +912,7 @@ async fn queued_and_retried_agent_jobs_keep_their_admitted_task_owner() {
                 &[TaskOp::Add {
                     description: "original commitment".into(),
                     status: "pending".into(),
+                    reminder: None,
                 }],
             )
             .unwrap();

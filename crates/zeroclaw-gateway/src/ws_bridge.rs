@@ -349,9 +349,13 @@ async fn send_pending(
                 permitted
                     && crate::review_notifications::permits_delivery(&config, outbox, &row)
                     && crate::delegation_notifications::permits_delivery(&config, outbox, &row)
-                    && outbox
-                        .claim(bridge, &row.id, now.timestamp())
-                        .map_err(|_| "attention_store_unavailable")?
+                    && crate::reminder_notifications::permits_delivery(&config, outbox, &row)
+                    && crate::reminder_notifications::claim(
+                        &config.data_dir,
+                        outbox,
+                        &row,
+                        now.timestamp(),
+                    )?
             };
             if !claimed {
                 continue;

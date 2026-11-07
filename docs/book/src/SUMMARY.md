@@ -73,6 +73,7 @@
   - [Filesystem components](./agents/filesystem.md)
   - [Running agents](./agents/operating.md)
   - [Delegation & SubAgents](./agents/delegation.md)
+  - [Task reminders](./agents/task-reminders.md)
   - [Runtime internals](./agents/internals.md)
   - [History management](./agents/history-management.md)
 - [Model Providers](./providers/overview.md)

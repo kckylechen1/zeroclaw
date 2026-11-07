@@ -879,6 +879,7 @@ mod tests {
                 &[TaskOp::Add {
                     description: "sender-only commitment".into(),
                     status: "pending".into(),
+                    reminder: None,
                 }],
             )
             .unwrap();
@@ -925,6 +926,7 @@ mod tests {
                 &[TaskOp::Add {
                     description: "replacement-only commitment".into(),
                     status: "pending".into(),
+                    reminder: None,
                 }],
             )
             .unwrap();
