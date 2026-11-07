@@ -75,11 +75,11 @@ use serde::{Deserialize, Serialize};
 ///   gateway Nodes instead (ADR-017), so the section is ignored (see
 ///   `RETIRED_CONFIG_SURFACES`).
 /// - `saas_integration_removed`: a `[jira]`, `[linkedin]`, `[microsoft365]`,
-///   `[google_workspace]`, `[cloud_ops]` or `[project_intel]` section is
-///   still present. Those vendor tool families were retired (external
-///   services are reached through MCP servers, and outbound notifications
-///   through the gateway bridges' `notify` tool), so the section is ignored
-///   (see `RETIRED_CONFIG_SURFACES`).
+///   `[google_workspace]`, `[cloud_ops]`, `[project_intel]`, `[composio]` or
+///   `[notion]` section is still present. Those vendor tool families were
+///   retired (external services are reached through MCP servers, and outbound
+///   notifications through the gateway bridges' `notify` tool), so the section
+///   is ignored (see `RETIRED_CONFIG_SURFACES`).
 /// - `otel_observability_removed`: `[observability] backend` still names the
 ///   retired OpenTelemetry exporter (`otel`, `otlp`, `opentelemetry`) or an
 ///   `otel_*` field is still set. The exporter was removed; the backend loads
@@ -165,6 +165,8 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("google_workspace", "saas_integration_removed"),
     ("cloud_ops", "saas_integration_removed"),
     ("project_intel", "saas_integration_removed"),
+    ("composio", "saas_integration_removed"),
+    ("notion", "saas_integration_removed"),
     ("storage.postgres", "memory_backend_removed"),
     ("storage.qdrant", "memory_backend_removed"),
 ];
@@ -663,6 +665,27 @@ session_path = "~/.zeroclaw/state/whatsapp-web/web.db"
         assert!(retired_section_tombstones("[gateway]\npairing_dashboard = 3\n").is_empty());
         assert!(retired_section_tombstones("default_temperature = 0.7\n").is_empty());
         assert!(retired_section_tombstones("not toml {{{").is_empty());
+
+        let with_composio_and_notion =
+            "[composio]\nenabled = true\n\n[notion]\nenabled = true\ndatabase_id = \"db\"\n";
+        let warnings = retired_section_tombstones(with_composio_and_notion);
+        assert_eq!(
+            warnings.len(),
+            2,
+            "composio and notion sections must warn: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.path == "composio" && w.code == "saas_integration_removed"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.path == "notion" && w.code == "saas_integration_removed"),
+            "{warnings:?}"
+        );
     }
 
     #[test]

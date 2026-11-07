@@ -4703,13 +4703,15 @@ mod tests {
         };
         cfg.save().await.expect("initial save");
 
-        cfg.composio.api_key = Some("injected-via-env".into());
+        cfg.browser.computer_use.api_key = Some("injected-via-env".into());
         cfg.env_overridden_paths =
-            std::collections::HashSet::from(["composio.api_key".to_string()]);
+            std::collections::HashSet::from(["browser.computer_use.api_key".to_string()]);
 
         let drift = compute_drift(&cfg).await;
         assert!(
-            !drift.iter().any(|d| d.path == "composio.api_key"),
+            !drift
+                .iter()
+                .any(|d| d.path == "browser.computer_use.api_key"),
             "env-overridden secret must never appear in drift, got {drift:?}"
         );
     }

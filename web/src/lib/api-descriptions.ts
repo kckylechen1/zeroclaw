@@ -639,11 +639,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "principal_id": "Opaque owner principal id. Stamped on owner-authored rows; never used\nas the ingress match key.",
     "trust_local": "When `identities` is empty, treat Trusted CLI/stdio/pairing as owner."
   },
-  "ComposioConfig": {
-    "api_key": "Composio API key (stored encrypted when secrets.encrypt = true)",
-    "enabled": "Enable Composio integration for 1000+ OAuth tools",
-    "entity_id": "Default entity ID for multi-user setups"
-  },
   "Config": {
     "a2a": "Inbound A2A discovery server (`[a2a.server]`). Default-closed:\nserves the well-known catalog card and per-alias agent cards only\nwhen `enabled = true`. See `crate::multi_agent::A2aServerConfig`.",
     "acp": "ACP (Agent Client Protocol) server configuration (`[acp]`).",
@@ -658,7 +653,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "cloud_ops": "Cloud transformation accelerator configuration (`[cloud_ops]`).",
     "codex_cli": "Codex CLI tool configuration (`[codex_cli]`).",
     "companion_memory": "Companion-memory store and owner gate (`[companion_memory]`).\n\n`enable` defaults to false. Store files live under `{data_dir}/companion`\nunless `store_dir` is set. `[companion_memory.owner]` declares who may\nproduce `owner_authored` rows. Unmatched ingress is `shared-operator`\nand can never produce `owner_authored`.",
-    "composio": "Composio managed OAuth tools integration (`[composio]`).",
     "composition": "Install-wide tool composition selector (`composition`).\n\n`\"minimal\"` assembles only the explicit minimal companion membership\n(`crate::composition::MINIMAL_TOOL_MEMBERSHIP`); individual tool\n`enabled` flags do not widen it back. `\"full\"` (alias `\"legacy\"`) is\ntoday's assembly — a transitional opt-in compatibility profile. An\nabsent field resolves as `\"full\"` so existing installs never lose\ntools on upgrade.",
     "conversational_ai": "Conversational AI agent builder configuration (`[conversational_ai]`).\n\nExperimental / future feature — not yet wired into the agent runtime.\nOmitted from generated config files when disabled (the default).\nExisting configs that already contain this section will continue to\ndeserialize correctly thanks to `#[serde(default)]`.",
     "cost": "Cost tracking and budget enforcement configuration (`[cost]`).\nAlso hosts the operator-managed rate sheet at\n`[cost.rates.<type>.<model>]`.",
@@ -694,7 +688,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "multimodal": "Multimodal (image) handling configuration (`[multimodal]`).",
     "node_transport": "Secure inter-node transport configuration (`[node_transport]`).",
     "nodes": "Dynamic node discovery configuration (`[nodes]`).",
-    "notion": "Notion integration configuration (`[notion]`).",
     "observability": "Observability backend configuration (`[observability]`).",
     "onboard_state": "Meta-state for the Quickstart flow (which sections the user has\nalready walked through). Not user-facing config (`[onboard_state]`).",
     "opencode_cli": "OpenCode CLI tool configuration (`[opencode_cli]`).",
@@ -1131,21 +1124,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "method": "HTTP method. Only `POST` (default) and `PUT` are accepted.",
     "timeout_secs": "Request timeout in seconds. Default: 60.",
     "url": "Upload endpoint URL. Tool is disabled when this is `None` or empty."
-  },
-  "FilesystemConfig": {
-    "allow_broad_roots": "Watch broad system roots (`/`, `/home`, `/etc`, `/var`, `/proc`,\n`/sys`, `/dev`, `/tmp`) despite the deny-broad-roots default. The\npseudo-filesystems `/proc` and `/sys` would surface kernel object\npaths in SOP payloads and flood the watcher with events. Off unless\nexplicitly enabled.",
-    "debounce_ms": "Collapse rapid repeated events per path/kind within this window.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "events": "Event kinds to emit (`created`, `modified`, `deleted`, `renamed`).",
-    "exclude": "Glob patterns to exclude. Applied after `include`.",
-    "excluded_tools": "Tools excluded from this channel's tool spec.",
-    "follow_symlinks": "Follow symlinks when reading event-path metadata, hash, and content.\nOff by default: a symlink under a watched root is rejected before any\nmetadata/hash/content handling so its target cannot escape the root. When\non, the canonical target must still resolve inside a configured root.",
-    "include": "Glob patterns to include. Empty matches all paths under the roots.",
-    "max_content_bytes": "Maximum file content bytes admitted into a payload when `read_content`,\nand the size ceiling for hashing. `Some(n)` caps reads and hashing at\n`n` bytes; oversize files are skipped rather than truncated. `None`\nremoves the ceiling entirely (unbounded reads). Defaults to\n`Some(65536)` (64 KiB), so the cap applies by default whenever\n`read_content` or hashing runs.",
-    "paths": "Root paths to watch. At least one is required.",
-    "read_content": "Read file content into the event payload. Opt-in.",
-    "recursive": "Watch nested paths beneath each root.",
-    "settle_ms": "Wait this long after the last event before reading metadata or content,\ngiving atomic writes and slow copies time to finish."
   },
   "FirecrawlConfig": {
     "api_key_env": "Environment variable name for the Firecrawl API key",
@@ -2230,18 +2208,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "uri": "Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field.",
     "vision": "Override the provider's vision (image input) capability.\n`None` (default) uses the provider family's built-in default. Several\nfamilies (llama.cpp, the generic OpenAI-compatible endpoint, etc.)\nassume vision-capable because they can serve multimodal models. Set\n`vision = false` for a text-only model served by such a family (e.g. a\ntext LLM behind llama.cpp) so image messages are routed to a configured\n`[multimodal] vision_model_provider` instead of being sent to a model\nthat rejects them. `Some(true)` forces vision on.",
     "wire_api": "Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination."
-  },
-  "MqttConfig": {
-    "broker_url": "MQTT broker URL (e.g., `mqtt://localhost:1883` or `mqtts://broker.example.com:8883`).\nUse `mqtt://` for plain connections or `mqtts://` for TLS.",
-    "client_id": "MQTT client ID (must be unique per broker).",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "keep_alive_secs": "Keep-alive interval in seconds (default: 30). Prevents broker disconnect on idle.",
-    "password": "Password for authentication (optional).",
-    "qos": "MQTT QoS level (0 = at-most-once, 1 = at-least-once, 2 = exactly-once). Default: 1.",
-    "topics": "Topics to subscribe to (e.g., `sensors/#`, `alerts/+/critical`).\nAt least one topic is required.",
-    "use_tls": "Enable TLS encryption. Must match the broker_url scheme:\n- `mqtt://` → `use_tls: false`\n- `mqtts://` → `use_tls: true`",
-    "username": "Username for authentication (optional)."
   },
   "MultimodalConfig": {
     "allow_remote_fetch": "Allow fetching remote image URLs (http/https). Disabled by default.",

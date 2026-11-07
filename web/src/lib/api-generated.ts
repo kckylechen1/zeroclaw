@@ -3753,10 +3753,6 @@ export interface components {
             email?: {
                 [key: string]: components["schemas"]["EmailConfig"];
             };
-            /** @description Filesystem SOP listener instances (`[channels.filesystem.<alias>]`). */
-            filesystem?: {
-                [key: string]: components["schemas"]["FilesystemConfig"];
-            };
             /**
              * @description Git-forge channel instances (`[channels.git.<alias>]`). GitHub is
              *     the first provider; the `provider` field selects the forge.
@@ -3818,10 +3814,6 @@ export interface components {
             /** @description Mochat customer service channel instances (`[channels.mochat.<alias>]`). */
             mochat?: {
                 [key: string]: components["schemas"]["MochatConfig"];
-            };
-            /** @description MQTT channel instances (`[channels.mqtt.<alias>]`). */
-            mqtt?: {
-                [key: string]: components["schemas"]["MqttConfig"];
             };
             /** @description Nextcloud Talk bot channel instances (`[channels.nextcloud_talk.<alias>]`). */
             nextcloud_talk?: {
@@ -4507,28 +4499,6 @@ export interface components {
              */
             trust_local: boolean;
         };
-        /**
-         * @description Composio managed OAuth tools integration (`[composio]` section).
-         *
-         *     Provides access to 1000+ OAuth-connected tools via the Composio platform.
-         */
-        ComposioConfig: {
-            /**
-             * @description Composio API key (stored encrypted when secrets.encrypt = true)
-             * @default null
-             */
-            api_key: string | null;
-            /**
-             * @description Enable Composio integration for 1000+ OAuth tools
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Default entity ID for multi-user setups
-             * @default default
-             */
-            entity_id: string;
-        };
         /** @description Install-wide composition selector value. */
         Composition: "minimal" | "full";
         /**
@@ -4764,15 +4734,6 @@ export interface components {
              *     and can never produce `owner_authored`.
              */
             companion_memory?: components["schemas"]["CompanionMemoryConfig"];
-            /**
-             * @description Composio managed OAuth tools integration (`[composio]`).
-             * @default {
-             *       "api_key": null,
-             *       "enabled": false,
-             *       "entity_id": "default"
-             *     }
-             */
-            composio: components["schemas"]["ComposioConfig"];
             /**
              * @description Install-wide tool composition selector (`composition`).
              *
@@ -5293,21 +5254,6 @@ export interface components {
              *     }
              */
             nodes: components["schemas"]["NodesConfig"];
-            /**
-             * @description Notion integration configuration (`[notion]`).
-             * @default {
-             *       "api_key": "",
-             *       "database_id": "",
-             *       "enabled": false,
-             *       "input_property": "Input",
-             *       "max_concurrent": 4,
-             *       "poll_interval_secs": 5,
-             *       "recover_stale": true,
-             *       "result_property": "Result",
-             *       "status_property": "Status"
-             *     }
-             */
-            notion: components["schemas"]["NotionConfig"];
             /**
              * @description Observability backend configuration (`[observability]`).
              * @default {
@@ -8262,109 +8208,6 @@ export interface components {
              */
             url: string | null;
         };
-        /**
-         * @description Filesystem SOP listener configuration.
-         *
-         *     Watches configured paths and dispatches file create/modify/delete/rename
-         *     events to the SOP engine. This is a fan-in listener, not a chat channel:
-         *     its `Channel::send` has no outbound surface.
-         */
-        FilesystemConfig: {
-            /**
-             * @description Watch broad system roots (`/`, `/home`, `/etc`, `/var`, `/proc`,
-             *     `/sys`, `/dev`, `/tmp`) despite the deny-broad-roots default. The
-             *     pseudo-filesystems `/proc` and `/sys` would surface kernel object
-             *     paths in SOP payloads and flood the watcher with events. Off unless
-             *     explicitly enabled.
-             * @default false
-             */
-            allow_broad_roots: boolean;
-            /**
-             * Format: uint64
-             * @description Collapse rapid repeated events per path/kind within this window.
-             * @default 500
-             */
-            debounce_ms: number;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Event kinds to emit (`created`, `modified`, `deleted`, `renamed`).
-             * @default [
-             *       "created",
-             *       "modified",
-             *       "deleted",
-             *       "renamed"
-             *     ]
-             */
-            events: string[];
-            /**
-             * @description Glob patterns to exclude. Applied after `include`.
-             * @default []
-             */
-            exclude: string[];
-            /**
-             * @description Tools excluded from this channel's tool spec.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * @description Follow symlinks when reading event-path metadata, hash, and content.
-             *     Off by default: a symlink under a watched root is rejected before any
-             *     metadata/hash/content handling so its target cannot escape the root. When
-             *     on, the canonical target must still resolve inside a configured root.
-             * @default false
-             */
-            follow_symlinks: boolean;
-            /**
-             * @description Glob patterns to include. Empty matches all paths under the roots.
-             * @default []
-             */
-            include: string[];
-            /**
-             * Format: uint
-             * @description Maximum file content bytes admitted into a payload when `read_content`,
-             *     and the size ceiling for hashing. `Some(n)` caps reads and hashing at
-             *     `n` bytes; oversize files are skipped rather than truncated. `None`
-             *     removes the ceiling entirely (unbounded reads). Defaults to
-             *     `Some(65536)` (64 KiB), so the cap applies by default whenever
-             *     `read_content` or hashing runs.
-             * @default 65536
-             */
-            max_content_bytes: number | null;
-            /**
-             * @description Root paths to watch. At least one is required.
-             * @default []
-             */
-            paths: string[];
-            /**
-             * @description Read file content into the event payload. Opt-in.
-             * @default false
-             */
-            read_content: boolean;
-            /**
-             * @description Watch nested paths beneath each root.
-             * @default true
-             */
-            recursive: boolean;
-            /**
-             * Format: uint64
-             * @description Wait this long after the last event before reading metadata or content,
-             *     giving atomic writes and slow copies time to finish.
-             * @default 250
-             */
-            settle_ms: number;
-        };
-        /**
-         * @description A normalized filesystem change kind reported by the watcher.
-         * @enum {string}
-         */
-        FilesystemEventKind: "created" | "modified" | "deleted" | "renamed";
         /**
          * @description Firecrawl fallback configuration for JS-heavy and bot-blocked sites.
          *
@@ -15537,64 +15380,6 @@ export interface components {
             wire_api?: components["schemas"]["WireApi"] | null;
         };
         /**
-         * @description MQTT channel configuration (SOP listener).
-         *
-         *     Subscribes to MQTT topics and dispatches incoming messages
-         *     to the SOP engine for processing.
-         */
-        MqttConfig: {
-            /**
-             * @description MQTT broker URL (e.g., `mqtt://localhost:1883` or `mqtts://broker.example.com:8883`).
-             *     Use `mqtt://` for plain connections or `mqtts://` for TLS.
-             */
-            broker_url: string;
-            /** @description MQTT client ID (must be unique per broker). */
-            client_id: string;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * Format: uint64
-             * @description Keep-alive interval in seconds (default: 30). Prevents broker disconnect on idle.
-             * @default 30
-             */
-            keep_alive_secs: number;
-            /** @description Password for authentication (optional). */
-            password?: string | null;
-            /**
-             * Format: uint8
-             * @description MQTT QoS level (0 = at-most-once, 1 = at-least-once, 2 = exactly-once). Default: 1.
-             * @default 1
-             */
-            qos: number;
-            /**
-             * @description Topics to subscribe to (e.g., `sensors/#`, `alerts/+/critical`).
-             *     At least one topic is required.
-             * @default []
-             */
-            topics: string[];
-            /**
-             * @description Enable TLS encryption. Must match the broker_url scheme:
-             *     - `mqtt://` → `use_tls: false`
-             *     - `mqtts://` → `use_tls: true`
-             * @default false
-             */
-            use_tls: boolean;
-            /** @description Username for authentication (optional). */
-            username?: string | null;
-        };
-        /**
          * @description Multimodal (image) handling configuration (`[multimodal]` section).
          *
          *     # Privacy and cost note
@@ -16254,39 +16039,6 @@ export interface components {
              *     ]
              */
             relays: string[];
-        };
-        /**
-         * @description Notion integration configuration (`[notion]`).
-         *
-         *     When `enabled = true`, the agent polls a Notion database for pending tasks
-         *     and exposes a `notion` tool for querying, reading, creating, and updating pages.
-         *     Requires `api_key` (or the `NOTION_API_KEY` env var) and `database_id`.
-         */
-        NotionConfig: {
-            /** @default  */
-            api_key: string;
-            /** @default  */
-            database_id: string;
-            /** @default false */
-            enabled: boolean;
-            /** @default Input */
-            input_property: string;
-            /**
-             * Format: uint
-             * @default 4
-             */
-            max_concurrent: number;
-            /**
-             * Format: uint64
-             * @default 5
-             */
-            poll_interval_secs: number;
-            /** @default true */
-            recover_stale: boolean;
-            /** @default Result */
-            result_property: string;
-            /** @default Status */
-            status_property: string;
         };
         /** @description Named model_provider profile definition. */
         NovitaModelProviderConfig: {

@@ -360,79 +360,6 @@ async fn amqp_validate_requires_paired_client_cert_and_key() {
     };
     assert!(both.validate().is_ok());
 }
-
-#[test]
-async fn filesystem_validate_requires_path() {
-    let cfg = FilesystemConfig {
-        enabled: true,
-        ..FilesystemConfig::default()
-    };
-    let err = cfg.validate().unwrap_err();
-    assert!(err.to_string().contains("at least one path"));
-}
-
-#[test]
-async fn filesystem_validate_rejects_broad_root_by_default() {
-    for root in ["/etc", "/proc", "/sys", "/dev", "/tmp"] {
-        let cfg = FilesystemConfig {
-            enabled: true,
-            paths: vec![root.into()],
-            ..FilesystemConfig::default()
-        };
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("broad system root"),
-            "root {root} must be rejected by default"
-        );
-    }
-}
-
-#[test]
-async fn filesystem_validate_allows_broad_root_with_escape_hatch() {
-    let cfg = FilesystemConfig {
-        enabled: true,
-        paths: vec!["/var".into()],
-        allow_broad_roots: true,
-        ..FilesystemConfig::default()
-    };
-    assert!(cfg.validate().is_ok());
-}
-
-#[test]
-async fn filesystem_validate_rejects_unknown_event() {
-    let cfg = FilesystemConfig {
-        enabled: true,
-        paths: vec!["/srv/inbox".into()],
-        events: vec!["created".into(), "exploded".into()],
-        ..FilesystemConfig::default()
-    };
-    let err = cfg.validate().unwrap_err();
-    assert!(err.to_string().contains("exploded"));
-}
-
-#[test]
-async fn filesystem_validate_accepts_scoped_path() {
-    let cfg = FilesystemConfig {
-        enabled: true,
-        paths: vec!["/srv/inbox".into()],
-        ..FilesystemConfig::default()
-    };
-    assert!(cfg.validate().is_ok());
-}
-
-#[test]
-async fn filesystem_defaults_are_safe() {
-    let cfg = FilesystemConfig::default();
-    assert!(!cfg.enabled);
-    assert!(cfg.recursive);
-    assert!(!cfg.read_content);
-    assert!(!cfg.follow_symlinks);
-    assert!(!cfg.allow_broad_roots);
-    assert_eq!(cfg.debounce_ms, 500);
-    assert_eq!(cfg.settle_ms, 250);
-    assert_eq!(cfg.max_content_bytes, Some(65536));
-    assert_eq!(cfg.events.len(), 4);
-}
 use super::*;
 use std::ffi::OsString;
 #[cfg(unix)]
@@ -2180,7 +2107,6 @@ async fn config_toml_roundtrip() {
         storage: StorageConfig::default(),
         tunnel: TunnelConfig::default(),
         gateway: GatewayConfig::default(),
-        composio: ComposioConfig::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
         http_request: HttpRequestConfig::default(),
@@ -2209,7 +2135,6 @@ async fn config_toml_roundtrip() {
         tachi: crate::tachi::TachiConfig::default(),
         nodes: NodesConfig::default(),
         onboard_state: OnboardStateConfig::default(),
-        notion: NotionConfig::default(),
         node_transport: NodeTransportConfig::default(),
         knowledge: KnowledgeConfig::default(),
         image_gen: ImageGenConfig::default(),
@@ -3006,7 +2931,6 @@ async fn config_save_and_load_tmpdir() {
         storage: StorageConfig::default(),
         tunnel: TunnelConfig::default(),
         gateway: GatewayConfig::default(),
-        composio: ComposioConfig::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
         http_request: HttpRequestConfig::default(),
@@ -3036,7 +2960,6 @@ async fn config_save_and_load_tmpdir() {
         tachi: crate::tachi::TachiConfig::default(),
         nodes: NodesConfig::default(),
         onboard_state: OnboardStateConfig::default(),
-        notion: NotionConfig::default(),
         node_transport: NodeTransportConfig::default(),
         knowledge: KnowledgeConfig::default(),
         image_gen: ImageGenConfig::default(),
@@ -3111,7 +3034,6 @@ async fn config_save_encrypts_nested_credentials() {
         },
     );
     // ModelProvider fields are now resolved directly — no cache needed.
-    config.composio.api_key = Some("composio-credential".into());
     config.browser.computer_use.api_key = Some("browser-credential".into());
     config.web_search.brave_api_key = Some("brave-credential".into());
     config.web_search.tavily_api_key = Some("tavily-credential".into());
@@ -3205,7 +3127,6 @@ async fn config_save_encrypts_nested_credentials() {
     for plaintext in [
         "root-credential",
         "Bearer provider-header-credential",
-        "composio-credential",
         "browser-credential",
         "brave-credential",
         "tavily-credential",
@@ -3246,15 +3167,6 @@ async fn config_save_encrypts_nested_credentials() {
     assert_eq!(
         store.decrypt(provider_header).unwrap(),
         "Bearer provider-header-credential"
-    );
-
-    let composio_encrypted = stored.composio.api_key.as_deref().unwrap();
-    assert!(crate::secrets::SecretStore::is_encrypted(
-        composio_encrypted
-    ));
-    assert_eq!(
-        store.decrypt(composio_encrypted).unwrap(),
-        "composio-credential"
     );
 
     let browser_encrypted = stored.browser.computer_use.api_key.as_deref().unwrap();
@@ -4160,55 +4072,6 @@ async fn checklist_risk_profile_default_is_workspace_scoped() {
         a.forbidden_paths.contains(&"~/.ssh".to_string()),
         "Must block ~/.ssh"
     );
-}
-
-// ══════════════════════════════════════════════════════════
-// COMPOSIO CONFIG TESTS
-// ══════════════════════════════════════════════════════════
-
-#[test]
-async fn composio_config_default_disabled() {
-    let c = ComposioConfig::default();
-    assert!(!c.enabled, "Composio must be disabled by default");
-    assert!(c.api_key.is_none(), "No API key by default");
-    assert_eq!(c.entity_id, "default");
-}
-
-#[test]
-async fn composio_config_backward_compat_missing_section() {
-    let minimal = r#"
-workspace_dir = "/tmp/ws"
-config_path = "/tmp/config.toml"
-default_temperature = 0.7
-"#;
-    let parsed = parse_test_config(minimal);
-    assert!(
-        !parsed.composio.enabled,
-        "Missing [composio] must default to disabled"
-    );
-    assert!(parsed.composio.api_key.is_none());
-}
-
-#[test]
-async fn composio_config_partial_toml() {
-    let toml_str = r"
-enabled = true
-";
-    let parsed: ComposioConfig = toml::from_str(toml_str).unwrap();
-    assert!(parsed.enabled);
-    assert!(parsed.api_key.is_none());
-    assert_eq!(parsed.entity_id, "default");
-}
-
-#[test]
-async fn composio_config_enable_alias_supported() {
-    let toml_str = r"
-enable = true
-";
-    let parsed: ComposioConfig = toml::from_str(toml_str).unwrap();
-    assert!(parsed.enabled);
-    assert!(parsed.api_key.is_none());
-    assert_eq!(parsed.entity_id, "default");
 }
 
 // ══════════════════════════════════════════════════════════
