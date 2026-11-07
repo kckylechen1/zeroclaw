@@ -281,6 +281,40 @@ impl BridgeOutbox {
         Ok(rows)
     }
 
+    /// Read one canonical source event, including terminal and uncertain
+    /// receipts. Producers can recover an older event's destination without
+    /// changing its delivery state, owner actions, or stable acknowledgement id.
+    pub fn source_event(
+        &self,
+        bridge: &str,
+        to: &str,
+        source_kind: &str,
+        source_id: &str,
+        event_id: &str,
+    ) -> Result<Option<OutboxItem>> {
+        self.conn.lock().query_row(
+            "SELECT seq, id, bridge, recipient, thread_id, content, source_kind, source_id, event_id, delivery_state, snoozed_until, expires_at
+             FROM bridge_outbox WHERE bridge=?1 AND recipient=?2 AND source_kind=?3 AND source_id=?4 AND event_id=?5",
+            params![bridge, to, source_kind, source_id, event_id],
+            |row| {
+                Ok(OutboxItem {
+                    seq: row.get(0)?,
+                    id: row.get(1)?,
+                    bridge: row.get(2)?,
+                    to: row.get(3)?,
+                    thread_id: row.get(4)?,
+                    content: row.get(5)?,
+                    source_kind: row.get(6)?,
+                    source_id: row.get(7)?,
+                    event_id: row.get(8)?,
+                    delivery_state: row.get(9)?,
+                    snoozed_until: row.get(10)?,
+                    expires_at: row.get(11)?,
+                })
+            },
+        ).optional().context("reading a bridge outbox source event")
+    }
+
     /// Retain a confirmed receipt for an attempted row. Duplicate receipts
     /// are harmless; unattempted candidates cannot be acknowledged.
     pub fn ack(&self, bridge: &str, id: &str) -> Result<bool> {

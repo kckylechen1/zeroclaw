@@ -803,6 +803,9 @@ jobs:
       - name: Run chat surface regressions
         working-directory: web
         run: npm run test:chat
+      - name: Run monitor component regressions
+        working-directory: web
+        run: npm run test:monitor
       - name: Typecheck and build web client
         working-directory: web
         run: npm run build
