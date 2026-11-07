@@ -239,10 +239,7 @@ impl Fixture {
             tools: vec![],
             task_owner: None,
             ask_user_handle: None,
-            reaction_handle: Default::default(),
-            poll_handle: None,
             escalate_handle: None,
-            channel_room_handle: None,
             unfiltered_tool_arcs: vec![],
         };
         let assembled = ScopedToolRegistry::assemble(ScopedAssembly {

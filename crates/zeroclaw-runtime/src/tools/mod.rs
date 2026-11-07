@@ -35,9 +35,6 @@ pub use zeroclaw_tools::backup_tool::BackupTool;
 pub use zeroclaw_tools::browser::{BrowserTool, ComputerUseConfig};
 pub use zeroclaw_tools::browser_open::BrowserOpenTool;
 pub use zeroclaw_tools::calculator::CalculatorTool;
-pub use zeroclaw_tools::channel_room::ChannelRoomTool;
-#[cfg(feature = "integrations-saas")]
-pub use zeroclaw_tools::composio::ComposioTool;
 pub use zeroclaw_tools::content_search::ContentSearchTool;
 pub use zeroclaw_tools::data_management::DataManagementTool;
 pub use zeroclaw_tools::discord_search::DiscordSearchTool;
@@ -51,7 +48,6 @@ pub use zeroclaw_tools::file_edit::FileEditTool;
 pub use zeroclaw_tools::file_upload::FileUploadTool;
 pub use zeroclaw_tools::file_upload_bundle::FileUploadBundleTool;
 pub use zeroclaw_tools::file_write::FileWriteTool;
-pub use zeroclaw_tools::git_forge::GitForgeTool;
 pub use zeroclaw_tools::git_operations::GitOperationsTool;
 pub use zeroclaw_tools::glob_search::GlobSearchTool;
 pub use zeroclaw_tools::http_request::HttpRequestTool;
@@ -74,9 +70,7 @@ pub use zeroclaw_tools::memory_purge::MemoryPurgeTool;
 pub use zeroclaw_tools::memory_recall::MemoryRecallTool;
 pub use zeroclaw_tools::memory_store::MemoryStoreTool;
 pub use zeroclaw_tools::pipeline::PipelineTool;
-pub use zeroclaw_tools::poll::PollTool;
 pub use zeroclaw_tools::propose_soul_change::ProposeSoulChangeTool;
-pub use zeroclaw_tools::reaction::ReactionTool;
 pub use zeroclaw_tools::screenshot::ScreenshotTool;
 pub use zeroclaw_tools::send_via::{
     AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
@@ -497,16 +491,13 @@ pub struct AllToolsResult {
     pub tools: Vec<Box<dyn Tool>>,
     pub task_owner: Option<task_list::TaskOwnerResolver>,
     pub ask_user_handle: Option<PerToolChannelHandle>,
-    pub channel_room_handle: Option<PerToolChannelHandle>,
-    pub reaction_handle: PerToolChannelHandle,
-    pub poll_handle: Option<PerToolChannelHandle>,
     pub escalate_handle: Option<PerToolChannelHandle>,
     /// Pre-boxed Arcs of every tool (before policy filter). Used by
     /// skill-scoped builtin elevation to resolve targets at registration.
     pub unfiltered_tool_arcs: Vec<Arc<dyn Tool>>,
 }
 
-/// Create full tool registry including memory tools and optional Composio
+/// Create full tool registry including memory tools
 #[allow(
     clippy::implicit_hasher,
     clippy::too_many_arguments,
@@ -518,8 +509,6 @@ pub fn all_tools(
     risk_profile: &zeroclaw_config::schema::RiskProfileConfig,
     agent_alias: &str,
     memory: Arc<dyn Memory>,
-    composio_key: Option<&str>,
-    composio_entity_id: Option<&str>,
     browser_config: &zeroclaw_config::schema::BrowserConfig,
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
@@ -541,8 +530,6 @@ pub fn all_tools(
         agent_alias,
         Arc::new(NativeRuntime::new()),
         memory,
-        composio_key,
-        composio_entity_id,
         browser_config,
         http_config,
         web_fetch_config,
@@ -574,7 +561,7 @@ fn filter_agent_peer_groups(
         .collect()
 }
 
-/// Create full tool registry including memory tools and optional Composio.
+/// Create full tool registry including memory tools.
 #[allow(
     clippy::implicit_hasher,
     clippy::too_many_arguments,
@@ -587,8 +574,6 @@ pub fn all_tools_with_runtime(
     agent_alias: &str,
     runtime: Arc<dyn RuntimeAdapter>,
     memory: Arc<dyn Memory>,
-    composio_key: Option<&str>,
-    composio_entity_id: Option<&str>,
     browser_config: &zeroclaw_config::schema::BrowserConfig,
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
@@ -633,10 +618,6 @@ pub fn all_tools_with_runtime(
             "the durable task list requires persistent filesystem access",
         )
     };
-    // Composio credentials are only consumed when the SaaS family is compiled
-    // in; the parameters stay part of the stable signature for both builds.
-    #[cfg(not(feature = "integrations-saas"))]
-    let _ = (composio_key, composio_entity_id);
     let runtime_kind = root_config.runtime.kind.as_wire();
     let sandbox_cfg = risk_profile.sandbox_config();
     let sandbox = create_sandbox(&sandbox_cfg, runtime_kind, Some(&security.workspace_dir));
@@ -1176,44 +1157,6 @@ pub fn all_tools_with_runtime(
         )));
     }
 
-    // Poll tool — always registered; owns its own late-bound channel map.
-    let poll_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
-    tool_arcs.push(Arc::new(PollTool::new(
-        security.clone(),
-        Arc::clone(&poll_handle),
-    )));
-
-    #[cfg(feature = "integrations-saas")]
-    if let Some(key) = composio_key
-        && !key.is_empty()
-    {
-        tool_arcs.push(Arc::new(ComposioTool::new(
-            key,
-            composio_entity_id,
-            security.clone(),
-        )));
-    }
-
-    // Emoji reaction tool — always registered; owns its own late-bound channel map.
-    let reaction_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
-    let reaction_tool = ReactionTool::new(security.clone(), Arc::clone(&reaction_handle));
-    tool_arcs.push(Arc::new(reaction_tool));
-
-    // Unified forge operations tool, routes through the git channel via the
-    // same late-bound channel map as the reaction tool. Resource/action grid
-    // plus a raw catch-all over the channel's single forge_request transport.
-    let git_forge_tool = GitForgeTool::new(security.clone(), Arc::clone(&reaction_handle));
-    tool_arcs.push(Arc::new(git_forge_tool));
-
-    // Channel room-management tool — always registered; owns its own late-bound channel map.
-    let channel_room_handle: Option<PerToolChannelHandle> =
-        Some(Arc::new(RwLock::new(HashMap::new())));
-    let channel_room_tool = ChannelRoomTool::new(
-        security.clone(),
-        channel_room_handle.as_ref().cloned().unwrap(),
-    );
-    tool_arcs.push(Arc::new(channel_room_tool));
-
     // Interactive ask_user tool — always registered; owns its own late-bound channel map.
     let ask_user_handle: Option<PerToolChannelHandle> = Some(Arc::new(RwLock::new(HashMap::new())));
     let ask_user_tool =
@@ -1288,26 +1231,6 @@ pub fn all_tools_with_runtime(
     // Pipeline construction waits for ScopedToolRegistry::assemble(), where the
     // effective per-agent policy and optional caller allowlist are both known.
 
-    // The concrete SaaS integration family is not compiled into this build
-    // (the `integrations-saas` feature is off). Config sections still parse,
-    // so an install that enables one of these families must hear about the
-    // mismatch instead of silently losing the tool.
-    #[cfg(not(feature = "integrations-saas"))]
-    {
-        let enabled_but_absent = [("composio", root_config.composio.enabled)];
-        for (family, enabled) in enabled_but_absent {
-            if enabled {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"integration": family})),
-                    "config enables an integration whose tool family is not compiled into this build (integrations-saas feature is off); skipping registration"
-                );
-            }
-        }
-    }
-
     apply_install_composition(&mut tool_arcs, root_config);
 
     AllToolsResult {
@@ -1318,9 +1241,6 @@ pub fn all_tools_with_runtime(
         unfiltered_tool_arcs: tool_arcs.clone(),
         tools: boxed_registry_from_arcs(tool_arcs),
         ask_user_handle,
-        channel_room_handle,
-        reaction_handle,
-        poll_handle: Some(poll_handle),
         escalate_handle,
     }
 }

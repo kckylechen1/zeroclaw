@@ -299,8 +299,6 @@ async fn assemble_turn(req: TurnRequest<'_>) -> (ScopedAssembled, WireBudget) {
         req.agent_alias,
         Arc::clone(&runtime),
         mem,
-        None,
-        None,
         &req.config.browser,
         &req.config.http_request,
         &req.config.web_fetch,

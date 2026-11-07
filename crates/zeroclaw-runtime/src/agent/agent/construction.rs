@@ -219,17 +219,6 @@ impl Agent {
         )
         .await?;
 
-        let composio_key = if config.composio.enabled {
-            config.composio.api_key.as_deref()
-        } else {
-            None
-        };
-        let composio_entity_id = if config.composio.enabled {
-            Some(config.composio.entity_id.as_str())
-        } else {
-            None
-        };
-
         let all_tools_result = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,
@@ -237,8 +226,6 @@ impl Agent {
             agent_alias,
             runtime.clone(),
             memory.clone(),
-            composio_key,
-            composio_entity_id,
             &config.browser,
             &config.http_request,
             &config.web_fetch,
@@ -290,10 +277,7 @@ impl Agent {
             registry,
             task_owner,
             ask_user_handle,
-            reaction_handle,
-            poll_handle,
             escalate_handle,
-            channel_room_handle,
             activated_handle,
             // from_config performs no per-turn tool_filter_groups filtering
             // itself, so mcp_tool_names is dropped here along with `registry`'s
@@ -445,9 +429,6 @@ impl Agent {
         // the ACP server) can register back-channels after construction.
         agent.channel_handles = AgentChannelHandles {
             ask_user: ask_user_handle,
-            channel_room: channel_room_handle,
-            reaction: reaction_handle,
-            poll: poll_handle,
             escalate: escalate_handle,
         };
 
