@@ -8,36 +8,6 @@ use zeroclaw_infra::session_sqlite::agent_tasks::{MAX_ITEMS, TaskList};
 
 use crate::agent::prompt::{PromptContext, PromptSection};
 
-tokio::task_local! {
-    /// Per-turn tasks re-render scope (#567): the owning Agent sets this
-    /// around its tool loop; each model request re-renders the `## Tasks`
-    /// region through it so cross-session commits are visible mid-turn.
-    static TASKS_REFRESH: std::sync::Arc<dyn Fn() -> String + Send + Sync>;
-}
-
-/// Scope guard: clears the register when dropped. The Agent creates one
-/// per turn via [`set_tasks_refresh_scope`] inside `scope_async`.
-pub struct TasksRefreshGuard;
-
-/// Run `f` with the tasks re-render scope active.
-pub async fn with_tasks_refresh_scope<R>(
-    render: std::sync::Arc<dyn Fn() -> String + Send + Sync>,
-    f: impl std::future::Future<Output = R>,
-) -> R {
-    TASKS_REFRESH.scope(render, f).await
-}
-
-/// Swap the `## Tasks` region of a system prompt using the scoped
-/// register's renderer; a no-op when no scope is set (other surfaces/tests).
-pub fn refresh_tasks_region(system_prompt: &mut String) {
-    TASKS_REFRESH
-        .try_with(|render| {
-            let block = render();
-            *system_prompt = swap_or_append(system_prompt, &block);
-        })
-        .ok();
-}
-
 pub struct TaskListSection {
     /// Same resolver family as TaskListTool: (owner identity, data dir).
     pub resolve:

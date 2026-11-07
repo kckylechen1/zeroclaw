@@ -326,6 +326,7 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
         turn_id,
     } = p;
     let ResolvedAgentExecution {
+        task_owner,
         model_access:
             ResolvedModelAccess {
                 model_provider,
@@ -674,12 +675,9 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
         } = iteration_tool_specs;
 
         refresh_prompt_anchor(turn_state.history, use_native_tools);
-        // Per-model-request durable-task refresh (#567): swap the `## Tasks`
-        // region via the scoped register (set by the owning Agent for this
-        // turn) so cross-session commits are visible on the next request.
-        if let Some(first) = turn_state.history.first_mut() {
-            crate::tools::task_section::refresh_tasks_region(&mut first.content);
-        }
+        // Explicit execution context prevents a nested peer turn inheriting
+        // the parent's task owner. Every production entry point uses this seam.
+        refresh_task_context(turn_state.history, task_owner);
 
         let prepared_messages = prepare_messages_for_iteration(
             turn_state.history,
@@ -1186,8 +1184,29 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
         turn_id,
         knobs,
         turn_state.canonical.as_deref_mut(),
+        task_owner,
     )
     .await
+}
+
+fn refresh_task_context(
+    history: &mut Vec<ChatMessage>,
+    task_owner: Option<&crate::tools::task_list::TaskOwnerResolver>,
+) {
+    let Some(owner) = task_owner else {
+        return;
+    };
+    let section = crate::tools::TaskListSection {
+        resolve: owner.clone(),
+    };
+    if let Some(first) = history
+        .first_mut()
+        .filter(|message| message.role == "system")
+    {
+        first.content = section.refresh_into(&first.content);
+    } else {
+        history.insert(0, ChatMessage::system(section.refresh_into("")));
+    }
 }
 
 fn refresh_prompt_anchor(history: &mut [ChatMessage], use_native_tools: bool) {

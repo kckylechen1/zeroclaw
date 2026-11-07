@@ -554,6 +554,7 @@ async fn execute_job_with_retry_recovers_after_first_failure() {
         &security,
         "test-agent",
         &job,
+        None,
     ))
     .await;
     assert!(success);
@@ -576,6 +577,7 @@ async fn execute_job_with_retry_exhausts_attempts() {
         &security,
         "test-agent",
         &job,
+        None,
     ))
     .await;
     assert!(!success);
@@ -591,7 +593,8 @@ async fn run_agent_job_returns_error_without_provider_key() {
     job.prompt = Some("Say hello".into());
     let security = test_security(&config);
 
-    let (success, output) = Box::pin(run_agent_job(&config, &security, "test-agent", &job)).await;
+    let (success, output) =
+        Box::pin(run_agent_job(&config, &security, "test-agent", &job, None)).await;
     assert!(!success);
     assert!(output.contains("agent job failed:"));
 }
@@ -610,7 +613,8 @@ async fn run_agent_job_blocks_readonly_mode() {
     job.prompt = Some("Say hello".into());
     let security = test_security(&config);
 
-    let (success, output) = Box::pin(run_agent_job(&config, &security, "test-agent", &job)).await;
+    let (success, output) =
+        Box::pin(run_agent_job(&config, &security, "test-agent", &job, None)).await;
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.contains("read-only"));
@@ -630,7 +634,8 @@ async fn run_agent_job_blocks_rate_limited() {
     job.prompt = Some("Say hello".into());
     let security = test_security(&config);
 
-    let (success, output) = Box::pin(run_agent_job(&config, &security, "test-agent", &job)).await;
+    let (success, output) =
+        Box::pin(run_agent_job(&config, &security, "test-agent", &job, None)).await;
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.contains("rate limit exceeded"));
@@ -701,6 +706,7 @@ async fn run_agent_job_with_timeout_reports_timeout_for_hung_provider() {
         TEST_AGENT,
         &job,
         Duration::from_millis(750),
+        None,
     ))
     .await;
     let elapsed = started.elapsed();
@@ -751,7 +757,7 @@ async fn execute_and_persist_job_releases_lock_after_agent_timeout() {
         .scope(
             Duration::from_millis(750),
             Box::pin(execute_and_persist_job(
-                &config, &security, TEST_AGENT, &job, &component,
+                &config, &security, TEST_AGENT, &job, &component, None,
             )),
         )
         .await;
@@ -788,7 +794,9 @@ async fn execute_job_with_retry_does_not_retry_agent_timeout() {
     let (success, output) = TEST_AGENT_JOB_TIMEOUT
         .scope(
             Duration::from_millis(750),
-            Box::pin(execute_job_with_retry(&config, &security, TEST_AGENT, &job)),
+            Box::pin(execute_job_with_retry(
+                &config, &security, TEST_AGENT, &job, None,
+            )),
         )
         .await;
     let elapsed = started.elapsed();
@@ -813,13 +821,235 @@ async fn execute_job_with_retry_does_not_retry_agent_timeout() {
 }
 
 #[tokio::test]
+async fn queued_and_retried_agent_jobs_keep_their_admitted_task_owner() {
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+    use parking_lot::Mutex;
+    use zeroclaw_config::schema::{ModelProviderConfig, OllamaModelProviderConfig};
+    use zeroclaw_infra::session_sqlite::{SqliteSessionBackend, agent_tasks::TaskOp};
+    use zeroclaw_memory::companion as identity;
+
+    #[derive(Clone)]
+    struct ProviderState {
+        data_dir: std::path::PathBuf,
+        store_dir: std::path::PathBuf,
+        retry: bool,
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+    async fn chat(
+        State(state): State<ProviderState>,
+        Json(body): Json<serde_json::Value>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
+        let has_result = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "tool");
+        let first_request = {
+            let mut requests = state.requests.lock();
+            requests.push(body);
+            requests.len() == 1
+        };
+        if first_request {
+            identity::rename_alias_identity(&state.store_dir, TEST_AGENT, "retired-agent").unwrap();
+            identity::invalidate_alias_identity(&state.store_dir, TEST_AGENT).unwrap();
+            let replacement =
+                identity::resolve_or_mint_agent_identity(&state.store_dir, TEST_AGENT).unwrap();
+            SqliteSessionBackend::new(&state.data_dir)
+                .unwrap()
+                .apply_task_ops(
+                    replacement.as_str(),
+                    0,
+                    &[TaskOp::Add {
+                        description: "replacement-only commitment".into(),
+                        status: "pending".into(),
+                    }],
+                )
+                .unwrap();
+            if state.retry {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "retry this run"})),
+                );
+            }
+        }
+        let message = if first_request || has_result {
+            serde_json::json!({"role": "assistant", "content": "done"})
+        } else {
+            serde_json::json!({"role": "assistant", "content": null, "tool_calls": [{
+                "id": "task-write", "type": "function",
+                "function": {"name": "task_list", "arguments": serde_json::json!({
+                    "expected_revision": 1,
+                    "ops": [{"op": "add", "description": "must stay with the admitted owner"}]
+                }).to_string()}
+            }]})
+        };
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"choices": [{"message": message}]})),
+        )
+    }
+
+    for (retry, later_poll) in [(false, false), (true, false), (false, true)] {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.scheduler.max_concurrent = 1;
+        config.reliability.scheduler_retries = u32::from(retry);
+        config.reliability.provider_retries = 0;
+        config.reliability.provider_backoff_ms = 1;
+        config.memory.backend = "none".into();
+        config.memory.auto_save = false;
+        let profile = config.risk_profiles.get_mut(TEST_AGENT).unwrap();
+        profile.allowed_tools = Some(vec!["task_list".into()]);
+        profile.auto_approve = vec!["task_list".into()];
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        let admitted = identity::resolve_or_mint_agent_identity(&store_dir, TEST_AGENT).unwrap();
+        let sqlite = SqliteSessionBackend::new(&config.data_dir).unwrap();
+        sqlite
+            .apply_task_ops(
+                admitted.as_str(),
+                0,
+                &[TaskOp::Add {
+                    description: "original commitment".into(),
+                    status: "pending".into(),
+                }],
+            )
+            .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .with_state(ProviderState {
+                data_dir: config.data_dir.clone(),
+                store_dir: store_dir.clone(),
+                retry,
+                requests: requests.clone(),
+            });
+        let server = zeroclaw_spawn::spawn!(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        config.providers.models.ollama.insert(
+            "tasks".into(),
+            OllamaModelProviderConfig {
+                base: ModelProviderConfig {
+                    uri: Some(format!("http://{addr}")),
+                    model: Some("task-model".into()),
+                    native_tools: Some(true),
+                    timeout_secs: Some(5),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        config.agents.get_mut(TEST_AGENT).unwrap().model_provider = "ollama.tasks".into();
+        let mut jobs = Vec::new();
+        for index in 0..if retry || later_poll { 1 } else { 2 } {
+            jobs.push(
+                cron::add_agent_job(
+                    &config,
+                    TEST_AGENT,
+                    Some(format!("task-owner-{index}")),
+                    Schedule::Cron {
+                        expr: "*/5 * * * *".into(),
+                        tz: None,
+                    },
+                    "update your commitments",
+                    SessionTarget::Isolated,
+                    None,
+                    None,
+                    false,
+                    Some(vec!["task_list".into()]),
+                    false,
+                )
+                .unwrap(),
+            );
+        }
+        if retry {
+            let (success, output) =
+                tokio::time::timeout(Duration::from_secs(15), execute_job_now(&config, &jobs[0]))
+                    .await
+                    .unwrap();
+            assert!(
+                success,
+                "retry must finish its real task-tool loop: {output}"
+            );
+        } else {
+            // A daemon generation keeps this same snapshot across queued
+            // jobs, later DB polls, and worker supervisor restarts.
+            let task_identities = TaskIdentity::capture_all(&config);
+            let jobs = claim_due_jobs(&config, jobs);
+            assert_eq!(jobs.len(), if later_poll { 1 } else { 2 });
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                process_due_jobs(
+                    &config,
+                    jobs,
+                    &unique_component("queued-task-owner"),
+                    &None,
+                    &task_identities,
+                ),
+            )
+            .await
+            .unwrap();
+            if later_poll {
+                // The original row can remain while an agent rename/delete
+                // awaits its memory cascade. Re-read that real SQLite row
+                // on a later poll after the provider recreated its alias.
+                let jobs = claim_due_jobs(
+                    &config,
+                    due_jobs(&config, Utc::now() + ChronoDuration::hours(1)).unwrap(),
+                );
+                assert_eq!(jobs.len(), 1, "the recurring job is selected again");
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    process_due_jobs(
+                        &config,
+                        jobs,
+                        &unique_component("later-poll-task-owner"),
+                        &None,
+                        &task_identities,
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+        }
+        let replacement = identity::peek_agent_identity(&store_dir, TEST_AGENT).unwrap();
+        assert_ne!(replacement, admitted);
+        assert_eq!(
+            sqlite.task_list(replacement.as_str()).unwrap().revision,
+            1,
+            "queued, retried, or later-poll work must not mutate the replacement agent"
+        );
+        assert_eq!(sqlite.task_list(admitted.as_str()).unwrap().revision, 1);
+        let seen = requests.lock();
+        assert_eq!(
+            seen.len(),
+            3,
+            "one initial run and one complete task-tool loop"
+        );
+        assert!(seen[1].to_string().contains("Task list unavailable"));
+        assert!(!seen[1].to_string().contains("replacement-only commitment"));
+        assert!(seen[2].to_string().contains("identity changed"));
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn process_due_jobs_marks_component_ok_even_when_idle() {
     let tmp = TempDir::new().unwrap();
     let config = test_config(&tmp).await;
     let component = unique_component("scheduler-idle");
 
     crate::health::mark_component_error(&component, "pre-existing error");
-    process_due_jobs(&config, Vec::new(), &component, &None).await;
+    process_due_jobs(
+        &config,
+        Vec::new(),
+        &component,
+        &None,
+        &TaskIdentity::capture_all(&config),
+    )
+    .await;
 
     let snapshot = crate::health::snapshot_json();
     let entry = &snapshot["components"][component.as_str()];
@@ -836,7 +1066,14 @@ async fn process_due_jobs_failure_does_not_mark_component_unhealthy() {
     let component = unique_component("scheduler-fail");
 
     crate::health::mark_component_ok(&component);
-    process_due_jobs(&config, vec![job], &component, &None).await;
+    process_due_jobs(
+        &config,
+        vec![job],
+        &component,
+        &None,
+        &TaskIdentity::capture_all(&config),
+    )
+    .await;
 
     let snapshot = crate::health::snapshot_json();
     let entry = &snapshot["components"][component.as_str()];
@@ -1613,7 +1850,14 @@ async fn broadcast_sends_cron_result_on_success() {
     let (tx, mut rx) = tokio::sync::broadcast::channel::<serde_json::Value>(16);
     let event_tx: EventBroadcast = Some(tx);
 
-    process_due_jobs(&config, vec![job], &component, &event_tx).await;
+    process_due_jobs(
+        &config,
+        vec![job],
+        &component,
+        &event_tx,
+        &TaskIdentity::capture_all(&config),
+    )
+    .await;
 
     let event = rx.try_recv().expect("should receive a broadcast event");
     assert_eq!(event["type"], "cron_result");
@@ -1639,7 +1883,14 @@ async fn broadcast_sends_cron_result_on_failure() {
     let (tx, mut rx) = tokio::sync::broadcast::channel::<serde_json::Value>(16);
     let event_tx: EventBroadcast = Some(tx);
 
-    process_due_jobs(&config, vec![job], &component, &event_tx).await;
+    process_due_jobs(
+        &config,
+        vec![job],
+        &component,
+        &event_tx,
+        &TaskIdentity::capture_all(&config),
+    )
+    .await;
 
     let event = rx.try_recv().expect("should receive a broadcast event");
     assert_eq!(event["type"], "cron_result");
@@ -1695,7 +1946,14 @@ async fn process_due_jobs_releases_lock_for_skipped_orphan_job() {
         ..job.clone()
     };
 
-    process_due_jobs(&config, vec![orphan], &unique_component("orphan"), &None).await;
+    process_due_jobs(
+        &config,
+        vec![orphan],
+        &unique_component("orphan"),
+        &None,
+        &TaskIdentity::capture_all(&config),
+    )
+    .await;
 
     assert!(
         cron::claim_job(&config, &job.id, Utc::now()).unwrap(),
@@ -1711,7 +1969,14 @@ async fn broadcast_none_skips_without_error() {
     let component = unique_component("broadcast-none");
 
     // event_tx = None — should complete without panic.
-    process_due_jobs(&config, vec![job], &component, &None).await;
+    process_due_jobs(
+        &config,
+        vec![job],
+        &component,
+        &None,
+        &TaskIdentity::capture_all(&config),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1726,7 +1991,14 @@ async fn broadcast_handles_no_subscribers() {
     // process_due_jobs must not panic when there are no subscribers.
     let event_tx: EventBroadcast = Some(tx);
 
-    process_due_jobs(&config, vec![job], &component, &event_tx).await;
+    process_due_jobs(
+        &config,
+        vec![job],
+        &component,
+        &event_tx,
+        &TaskIdentity::capture_all(&config),
+    )
+    .await;
     // If we got here without panic, the test passes.
 }
 

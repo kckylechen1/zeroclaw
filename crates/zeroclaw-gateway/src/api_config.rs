@@ -1828,8 +1828,21 @@ async fn rename_agent_cascade(
     body: &RenameMapKeyBody,
     guard: ConfigWriteGuard,
 ) -> Response {
-    use zeroclaw_config::alias_refs::{self, AliasKind};
+    use zeroclaw_config::alias_refs::{self, AliasKind, RenameError};
     let (from, to) = (&body.from, &body.to);
+
+    // A retry of committed config bypasses rename_with_cascade below, but
+    // must still obey its name and reserved-agent guards before moving state.
+    if alias_refs::is_reserved_agent_alias(from) || alias_refs::is_reserved_agent_alias(to) {
+        return rename_error_response(
+            &body.path,
+            from,
+            RenameError::Reserved("default".to_string()),
+        );
+    }
+    if let Err(message) = zeroclaw_config::helpers::validate_alias_key(to) {
+        return rename_error_response(&body.path, from, RenameError::InvalidName(message));
+    }
 
     // Capture the OLD workspace path while the entry still lives under `from`
     // (custom paths are read off the entry, which is about to move).
@@ -1845,6 +1858,22 @@ async fn rename_agent_cascade(
                     working.mark_dirty(path);
                 }
                 let dirty_count = report.dirty_paths.len();
+                // The config cascade has validated the target and collisions.
+                // Bind its identity before committing: a stale target mapping
+                // must never become visible to a renamed agent after a failed
+                // best-effort owned-state cascade. The source mapping stays
+                // intact if config persistence subsequently fails.
+                let store_dir = working
+                    .companion_memory
+                    .resolved_store_dir(&working.data_dir);
+                if let Err(err) =
+                    zeroclaw_memory::companion::rename_alias_identity(&store_dir, from, to)
+                {
+                    return error_response(
+                        ConfigApiError::new(ConfigApiCode::InternalError, err.to_string())
+                            .with_path(format!("agents.{from}")),
+                    );
+                }
                 if let Err(e) = persist_and_swap(state, working, &guard, None).await {
                     return e;
                 }
@@ -3757,6 +3786,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_rename_into_retired_alias_mints_identity_before_config_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = temp_config(&tmp);
+        config.agents.insert("b".into(), Default::default());
+        config.agents.insert("c".into(), Default::default());
+        config.save().await.unwrap();
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        let retired =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "a").unwrap();
+        zeroclaw_memory::companion::rename_alias_identity(&store_dir, "a", "b").unwrap();
+        assert!(zeroclaw_memory::companion::peek_agent_identity(&store_dir, "c").is_none());
+
+        let state = test_state(config);
+        let (status, json) = response_json(
+            handle_rename_map_key(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                State(state.clone()),
+                HeaderMap::new(),
+                axum::Json(RenameMapKeyBody {
+                    path: "agents".into(),
+                    from: "c".into(),
+                    to: "a".into(),
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let fresh = zeroclaw_memory::companion::peek_agent_identity(&store_dir, "a").unwrap();
+        assert_ne!(fresh, retired, "a must not inherit b's durable state");
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "c"),
+            Some(fresh)
+        );
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "b"),
+            Some(retired)
+        );
+        assert!(state.config.read().agents.contains_key("a"));
+        assert!(!state.config.read().agents.contains_key("c"));
+        let disk: toml::Value =
+            toml::from_str(&std::fs::read_to_string(tmp.path().join("config.toml")).unwrap())
+                .unwrap();
+        assert!(disk["agents"].get("a").is_some());
+        assert!(disk["agents"].get("c").is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_rename_fails_closed_before_config_or_workspace_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = temp_config(&tmp);
+        config.agents.insert("from".into(), Default::default());
+        config.save().await.unwrap();
+        let old_ws = config.agent_workspace_dir("from");
+        let new_ws = config.agent_workspace_dir("to");
+        std::fs::create_dir_all(&old_ws).unwrap();
+        std::fs::write(old_ws.join("USER.md"), "source workspace").unwrap();
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        let source =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "from").unwrap();
+        let target =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "to").unwrap();
+        let identity_path =
+            store_dir.join(zeroclaw_config::companion::COMPANION_AGENT_IDENTITY_FILE);
+        let identities_before = std::fs::read(&identity_path).unwrap();
+        let config_before = std::fs::read(&config.config_path).unwrap();
+        // A directory at the atomic temporary-file path forces a real I/O
+        // failure even when the test process has root privileges.
+        std::fs::create_dir(identity_path.with_extension("json.tmp")).unwrap();
+
+        let state = test_state(config);
+        let response = handle_rename_map_key(
+            ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::Json(RenameMapKeyBody {
+                path: "agents".into(),
+                from: "from".into(),
+                to: "to".into(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(state.config.read().agents.contains_key("from"));
+        assert!(!state.config.read().agents.contains_key("to"));
+        assert_eq!(
+            std::fs::read(tmp.path().join("config.toml")).unwrap(),
+            config_before
+        );
+        assert_eq!(std::fs::read(&identity_path).unwrap(), identities_before);
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "from"),
+            Some(source)
+        );
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "to"),
+            Some(target)
+        );
+        assert!(old_ws.join("USER.md").exists());
+        assert!(!new_ws.exists());
+    }
+
+    #[tokio::test]
+    async fn agent_rename_validates_targets_before_touching_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = temp_config(&tmp);
+        config.agents.insert("from".into(), Default::default());
+        config.agents.insert("occupied".into(), Default::default());
+        config.save().await.unwrap();
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "from").unwrap();
+        let identity_path =
+            store_dir.join(zeroclaw_config::companion::COMPANION_AGENT_IDENTITY_FILE);
+        let identities_before = std::fs::read(&identity_path).unwrap();
+        let config_before = std::fs::read(&config.config_path).unwrap();
+        let state = test_state(config);
+
+        for target in ["occupied", "BadName", "default", "from"] {
+            let response = handle_rename_map_key(
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                State(state.clone()),
+                HeaderMap::new(),
+                axum::Json(RenameMapKeyBody {
+                    path: "agents".into(),
+                    from: "from".into(),
+                    to: target.into(),
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{target}");
+            assert_eq!(std::fs::read(&identity_path).unwrap(), identities_before);
+            assert_eq!(
+                std::fs::read(tmp.path().join("config.toml")).unwrap(),
+                config_before
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn agent_rename_leaves_owned_state_put_when_persist_fails() {
         let tmp = tempfile::tempdir().unwrap();
         // Force config persistence to FAIL by making `config_path` itself a
@@ -3784,6 +3954,10 @@ mod tests {
             .or_default()
             .allowed_commands = vec!["echo".into()];
         config.runtime_profiles.entry("default".into()).or_default();
+
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        let source_identity =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "from").unwrap();
 
         // Seed an owned-state row (a cron job) under `from` - the move-probe.
         zeroclaw_runtime::cron::add_job(&config, "from", "* * * * *", "echo hi")
@@ -3826,6 +4000,11 @@ mod tests {
         // In-memory config was never swapped: still names `from`.
         assert!(state.config.read().agents.contains_key("from"));
         assert!(!state.config.read().agents.contains_key("to"));
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "from"),
+            Some(source_identity),
+            "a failed config save must leave the configured source identity usable"
+        );
     }
 
     #[tokio::test]
@@ -3913,6 +4092,15 @@ mod tests {
             .allowed_commands = vec!["echo".into()];
         config.runtime_profiles.entry("default".into()).or_default();
 
+        // An older owned-state retry must not overwrite the target's current
+        // identity, even if a retained source mapping now names another UUID.
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        let current_identity =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "to").unwrap();
+        let old_identity =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "from").unwrap();
+        assert_ne!(current_identity, old_identity);
+
         // Seed the lagging owned state + workspace under `from` (added while
         // `from` is still a known agent so cron::add_job validates).
         zeroclaw_runtime::cron::add_job(&config, "from", "* * * * *", "echo hi")
@@ -3971,6 +4159,11 @@ mod tests {
         // Config still names `to` and never regained `from` (no double-rename).
         assert!(state.config.read().agents.contains_key("to"));
         assert!(!state.config.read().agents.contains_key("from"));
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "to"),
+            Some(current_identity),
+            "a post-commit owned-state retry must not rebind current identity authority"
+        );
     }
 
     #[tokio::test]

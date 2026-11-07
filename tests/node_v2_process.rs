@@ -237,6 +237,7 @@ impl Fixture {
         });
         let built = AllToolsResult {
             tools: vec![],
+            task_owner: None,
             ask_user_handle: None,
             reaction_handle: Default::default(),
             poll_handle: None,

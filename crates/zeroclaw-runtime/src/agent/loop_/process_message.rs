@@ -32,6 +32,17 @@ pub async fn process_message(
     session_id: Option<&str>,
     origin: TurnOrigin,
 ) -> Result<String> {
+    process_message_with_task_identity(config, agent_alias, message, session_id, origin, None).await
+}
+
+pub async fn process_message_with_task_identity(
+    config: Config,
+    agent_alias: &str,
+    message: &str,
+    session_id: Option<&str>,
+    origin: TurnOrigin,
+    task_identity: Option<crate::tools::task_context::TaskIdentity>,
+) -> Result<String> {
     use ::zeroclaw_log::Instrument;
     let agent = resolved_agent_for_turn(&config, agent_alias)?;
     crate::agent::thinking::validate_thinking_config(&agent.resolved.thinking);
@@ -89,6 +100,11 @@ pub async fn process_message(
             Arc::from(observability::create_observer(&config.observability));
         let runtime: Arc<dyn platform::RuntimeAdapter> =
             Arc::from(platform::create_runtime(&config.runtime)?);
+        let task_identity = task_identity.or_else(|| {
+            runtime
+                .has_filesystem_access()
+                .then(|| crate::tools::task_context::TaskIdentity::capture(&config, agent_alias))
+        });
         let security = Arc::new(SecurityPolicy::for_agent(&config, agent_alias)?);
         let (provider_name, provider_alias, agent_model_provider) = match config
             .resolved_model_provider_for_agent(agent_alias)
@@ -152,6 +168,7 @@ pub async fn process_message(
             // Gateway/WS and ACP turn seeding is a top-level origin: the
             // turn's own lineage root, no inherited one.
             None,
+            task_identity,
         );
         let skills = crate::skills::load_skills_for_agent_from_config(&config, agent_alias);
         let assembled = scoped::ScopedToolRegistry::assemble(scoped::ScopedAssembly {
@@ -181,6 +198,7 @@ pub async fn process_message(
         let mut deferred_section = assembled.combined_mcp_prompt_section();
         let scoped::ScopedAssembled {
             registry,
+            task_owner,
             ask_user_handle,
             reaction_handle,
             poll_handle,
@@ -464,6 +482,7 @@ pub async fn process_message(
                     }),
                     Some(agent_alias),
                     Some(&turn_id),
+                    task_owner.as_ref(),
                 ),
             )
             .await

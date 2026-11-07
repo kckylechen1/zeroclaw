@@ -210,6 +210,7 @@ async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
         None,
         None,
         None,
+        None,
     )
     .tools;
     let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
@@ -289,6 +290,7 @@ fn shared_store_tools_open_data_dir_not_per_agent_workspace() {
         None,
         &root_config,
         false,
+        None,
         None,
         None,
         None,
@@ -1014,6 +1016,7 @@ async fn registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth() {
         None,
         None,
         Some(at_cap.clone()),
+        None,
     );
 
     // The retired legacy spawn tools must not reappear in a rebuilt
@@ -1564,6 +1567,7 @@ async fn tone_proposals_resolve_defaults_in_fixed_and_live_registries() {
             false,
             None,
             use_live.then(|| live.clone()),
+            None,
             None,
         );
         // Mutation after registry construction must affect the live branch,

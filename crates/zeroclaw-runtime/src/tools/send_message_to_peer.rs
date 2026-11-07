@@ -7,6 +7,7 @@ use crate::agent::cost::{
 };
 use crate::cron::scheduler::deliver_announcement;
 use crate::peers::resolve_peer_set;
+use crate::tools::task_context::TaskIdentity;
 use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -21,16 +22,27 @@ use zeroclaw_config::schema::Config;
 pub struct SendMessageToPeerTool {
     config: Arc<Config>,
     sender_alias: String,
+    task_identity: TaskIdentity,
     description: String,
 }
 
 impl SendMessageToPeerTool {
     pub fn new(config: Arc<Config>, sender_alias: impl Into<String>) -> Self {
         let sender_alias = sender_alias.into();
+        let task_identity = TaskIdentity::capture(&config, &sender_alias);
+        Self::with_task_identity(config, sender_alias, task_identity)
+    }
+
+    pub(super) fn with_task_identity(
+        config: Arc<Config>,
+        sender_alias: impl Into<String>,
+        task_identity: TaskIdentity,
+    ) -> Self {
         let description = build_description();
         Self {
             config,
-            sender_alias,
+            sender_alias: sender_alias.into(),
+            task_identity,
             description,
         }
     }
@@ -186,6 +198,7 @@ impl Tool for SendMessageToPeerTool {
                 .find(|alias| alias.to_ascii_lowercase() == target_norm)
                 .cloned()
                 .unwrap_or_else(|| target.clone());
+            let task_identity = self.task_identity.for_alias(&canonical);
 
             let cfg = (*self.config).clone();
             let sender = self.sender_alias.clone();
@@ -201,12 +214,13 @@ impl Tool for SendMessageToPeerTool {
                 .as_ref()
                 .map(|_| Arc::new(Mutex::new(TurnUsage::default())));
             zeroclaw_spawn::spawn!(async move {
-                let turn = crate::agent::loop_::process_message(
+                let turn = crate::agent::loop_::process_message_with_task_identity(
                     cfg,
                     &recipient_alias,
                     &body,
                     None,
                     zeroclaw_api::ingress::TurnOrigin::AgentDirect,
+                    Some(task_identity),
                 );
                 if let Err(e) = deliver_peer_turn_with_cost_scope(cost_ctx, turn_usage, turn).await
                 {
@@ -474,7 +488,11 @@ mod tests {
 
     #[test]
     fn description_stays_channel_agnostic() {
-        let mut config = Config::default();
+        let workspace = tempfile::TempDir::new().unwrap();
+        let mut config = Config {
+            data_dir: workspace.path().to_path_buf(),
+            ..Config::default()
+        };
         config.agents.insert(
             "aa".to_string(),
             AliasedAgentConfig {
@@ -724,6 +742,272 @@ mod tests {
             peer_map.len(),
             MAX_PEER_MAP_CHARS
         );
+    }
+
+    #[tokio::test]
+    async fn peer_task_owner_is_the_recipient_and_cannot_follow_a_reused_alias() {
+        use axum::{Json, Router, extract::State, routing::post};
+        use std::sync::atomic::{AtomicI64, Ordering};
+        use tokio::sync::mpsc;
+        use zeroclaw_config::schema::{
+            ModelProviderConfig, OllamaModelProviderConfig, RiskProfileConfig,
+        };
+        use zeroclaw_infra::session_sqlite::{SqliteSessionBackend, agent_tasks::TaskOp};
+        use zeroclaw_memory::companion as identity;
+
+        type Requests = (Arc<AtomicI64>, mpsc::UnboundedSender<serde_json::Value>);
+        async fn chat(
+            State((revision, requests)): State<Requests>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            let has_result = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["role"] == "tool");
+            let is_relay = body["model"] == "relay-model";
+            requests.send(body).unwrap();
+            let message = if has_result {
+                json!({"role": "assistant", "content": "done"})
+            } else if is_relay {
+                json!({"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "peer-forward", "type": "function",
+                    "function": {"name": "send_message_to_peer", "arguments": json!({
+                        "channel": "telegram.prod", "target": "recipient",
+                        "message": "update your commitments"
+                    }).to_string()}
+                }]})
+            } else {
+                json!({"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "task-write", "type": "function",
+                    "function": {"name": "task_list", "arguments": json!({
+                        "expected_revision": revision.load(Ordering::SeqCst),
+                        "ops": [{"op": "add", "description": "peer commitment"}]
+                    }).to_string()}
+                }]})
+            };
+            Json(json!({"choices": [{"message": message}]}))
+        }
+
+        let revision = Arc::new(AtomicI64::new(0));
+        let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(chat))
+            .with_state((revision.clone(), requests_tx));
+        let server = zeroclaw_spawn::spawn!(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let workspace = tempfile::TempDir::new().unwrap();
+        let mut config = Config {
+            data_dir: workspace.path().to_path_buf(),
+            config_path: workspace.path().join("config.toml"),
+            ..Config::default()
+        };
+        config.memory.backend = "none".into();
+        config.memory.auto_save = false;
+        config.providers.models.ollama.insert(
+            "tasks".into(),
+            OllamaModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("task-model".into()),
+                    uri: Some(format!("http://{addr}")),
+                    native_tools: Some(true),
+                    timeout_secs: Some(5),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        config.providers.models.ollama.insert(
+            "relay".into(),
+            OllamaModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("relay-model".into()),
+                    uri: Some(format!("http://{addr}")),
+                    native_tools: Some(true),
+                    timeout_secs: Some(5),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        config.risk_profiles.insert(
+            "tasks".into(),
+            RiskProfileConfig {
+                allowed_tools: Some(vec!["task_list".into(), "send_message_to_peer".into()]),
+                auto_approve: vec!["task_list".into(), "send_message_to_peer".into()],
+                ..Default::default()
+            },
+        );
+        for alias in ["sender", "recipient", "relay"] {
+            config.agents.insert(
+                alias.into(),
+                AliasedAgentConfig {
+                    channels: vec!["telegram.prod".into()],
+                    model_provider: if alias == "relay" {
+                        "ollama.relay"
+                    } else {
+                        "ollama.tasks"
+                    }
+                    .into(),
+                    risk_profile: "tasks".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        config.peer_groups.insert(
+            "tasks".into(),
+            PeerGroupConfig {
+                channel: "telegram".into(),
+                agents: vec![
+                    AgentAlias::new("sender"),
+                    AgentAlias::new("recipient"),
+                    AgentAlias::new("relay"),
+                ],
+                ..Default::default()
+            },
+        );
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        let sender = identity::resolve_or_mint_agent_identity(&store_dir, "sender").unwrap();
+        let sqlite = SqliteSessionBackend::new(&config.data_dir).unwrap();
+        sqlite
+            .apply_task_ops(
+                sender.as_str(),
+                0,
+                &[TaskOp::Add {
+                    description: "sender-only commitment".into(),
+                    status: "pending".into(),
+                }],
+            )
+            .unwrap();
+        let tool = SendMessageToPeerTool::new(Arc::new(config.clone()), "sender");
+        let old_recipient = identity::peek_agent_identity(&store_dir, "recipient").unwrap();
+        let send = json!({"channel": "telegram.prod", "target": "@Recipient", "message": "update your commitments"});
+
+        assert!(tool.execute(send.clone()).await.unwrap().success);
+        let first = tokio::time::timeout(std::time::Duration::from_secs(10), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!first.to_string().contains("sender-only commitment"));
+        assert!(
+            result["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["role"] == "tool")
+        );
+        let committed = sqlite.task_list(old_recipient.as_str()).unwrap();
+        assert_eq!(
+            committed.revision, 1,
+            "the real recipient task tool must run"
+        );
+        assert_eq!(committed.items[0].description, "peer commitment");
+        assert_eq!(
+            sqlite.task_list(sender.as_str()).unwrap().items[0].description,
+            "sender-only commitment"
+        );
+
+        identity::rename_alias_identity(&store_dir, "recipient", "retired-recipient").unwrap();
+        identity::invalidate_alias_identity(&store_dir, "recipient").unwrap();
+        let replacement =
+            identity::resolve_or_mint_agent_identity(&store_dir, "recipient").unwrap();
+        sqlite
+            .apply_task_ops(
+                replacement.as_str(),
+                0,
+                &[TaskOp::Add {
+                    description: "replacement-only commitment".into(),
+                    status: "pending".into(),
+                }],
+            )
+            .unwrap();
+        revision.store(1, Ordering::SeqCst);
+
+        // The old tool must keep its original recipient binding even though
+        // the next execution and registry are constructed after alias reuse.
+        assert!(tool.execute(send).await.unwrap().success);
+        let first = tokio::time::timeout(std::time::Duration::from_secs(10), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!first.to_string().contains("replacement-only commitment"));
+        assert!(first.to_string().contains("Task list unavailable"));
+        assert!(result.to_string().contains("identity changed"));
+        assert_eq!(sqlite.task_list(replacement.as_str()).unwrap().revision, 1);
+        assert_eq!(
+            sqlite.task_list(old_recipient.as_str()).unwrap().items,
+            committed.items
+        );
+
+        // sender -> relay -> recipient traverses two real tool registries. The
+        // relay's registry is created after recipient's alias was reused, but
+        // its own peer tool must inherit the original snapshot rather than
+        // capturing the replacement recipient during that rebuild.
+        assert!(
+            tool.execute(json!({
+                "channel": "telegram.prod", "target": "relay", "message": "forward this request"
+            }))
+            .await
+            .unwrap()
+            .success
+        );
+        let mut nested = Vec::new();
+        for _ in 0..4 {
+            nested.push(
+                tokio::time::timeout(std::time::Duration::from_secs(10), requests_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        let recipient_requests: Vec<_> = nested
+            .iter()
+            .filter(|body| body["model"] == "task-model")
+            .collect();
+        assert_eq!(
+            recipient_requests.len(),
+            2,
+            "the nested recipient must execute its task tool"
+        );
+        assert_eq!(
+            nested
+                .iter()
+                .filter(|body| body["model"] == "relay-model")
+                .count(),
+            2
+        );
+        assert!(
+            recipient_requests[0]
+                .to_string()
+                .contains("Task list unavailable")
+        );
+        assert!(
+            !recipient_requests[0]
+                .to_string()
+                .contains("replacement-only commitment")
+        );
+        assert!(
+            recipient_requests[1]
+                .to_string()
+                .contains("identity changed")
+        );
+        assert_eq!(sqlite.task_list(replacement.as_str()).unwrap().revision, 1);
+        assert_eq!(
+            sqlite.task_list(old_recipient.as_str()).unwrap().items,
+            committed.items
+        );
+        server.abort();
     }
 
     #[tokio::test]

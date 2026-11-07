@@ -454,6 +454,7 @@ struct ChannelRuntimeContext {
     /// expire with their session and never enter the durable store.
     task_prefs: Arc<TaskPreferenceOverlay>,
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
+    task_owner: Option<zeroclaw_runtime::tools::task_list::TaskOwnerResolver>,
     observer: Arc<dyn Observer>,
     system_prompt: Arc<String>,
     model: Arc<String>,
@@ -3894,6 +3895,7 @@ fn build_owner_by_channel_key(
 /// `start_channels` needs from [`assemble_channel_agent_tools`].
 struct ChannelAssembledTools {
     tools: Vec<Box<dyn Tool>>,
+    task_owner: Option<zeroclaw_runtime::tools::task_list::TaskOwnerResolver>,
     deferred_section: String,
     pinned_section: String,
     ask_user_handle: Option<tools::PerToolChannelHandle>,
@@ -3984,6 +3986,7 @@ async fn assemble_channel_agent_tools(
     let pinned_section = assembled.pinned_section().to_string();
     let zeroclaw_runtime::tools::scoped::ScopedAssembled {
         registry,
+        task_owner,
         ask_user_handle,
         reaction_handle,
         poll_handle,
@@ -3994,6 +3997,7 @@ async fn assemble_channel_agent_tools(
     } = assembled;
     ChannelAssembledTools {
         tools: registry.into_inner(),
+        task_owner,
         deferred_section,
         pinned_section,
         ask_user_handle,
@@ -4158,6 +4162,7 @@ fn concurrent_persist_lock_serialization() {
         persist_locks: Arc::new(Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
     ctx.conversation_histories
         .lock()

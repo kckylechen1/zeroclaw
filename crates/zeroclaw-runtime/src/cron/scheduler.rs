@@ -8,6 +8,7 @@ use crate::cron::{
     skip_missed_run, sync_declarative_jobs,
 };
 use crate::security::SecurityPolicy;
+use crate::tools::task_context::TaskIdentity;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
@@ -375,6 +376,7 @@ pub async fn run(
     config: Config,
     event_tx: EventBroadcast,
     cancel: CancellationToken,
+    task_identities: TaskIdentity,
 ) -> Result<()> {
     let poll_secs = config.reliability.scheduler_poll_secs.max(MIN_POLL_SECONDS);
     let mut interval = time::interval(Duration::from_secs(poll_secs));
@@ -451,7 +453,7 @@ pub async fn run(
     }
 
     if config.scheduler.catch_up_on_startup {
-        catch_up_overdue_jobs(&config, &event_tx).await;
+        catch_up_overdue_jobs(&config, &event_tx, &task_identities).await;
     } else {
         ::zeroclaw_log::record!(
             INFO,
@@ -510,7 +512,7 @@ pub async fn run(
                 };
 
                 let jobs = claim_due_jobs(&config, jobs);
-                process_due_jobs(&config, jobs, SCHEDULER_COMPONENT, &event_tx).await;
+                process_due_jobs(&config, jobs, SCHEDULER_COMPONENT, &event_tx, &task_identities).await;
             }
             _ = cancel.cancelled() => {
                 crate::health::mark_component_ok(SCHEDULER_COMPONENT);
@@ -540,7 +542,11 @@ fn resolve_owning_agent<'a>(config: &'a Config, job: &CronJob) -> Option<&'a str
 /// Fetch **all** overdue jobs (ignoring `max_tasks`) and execute them.
 /// Called once at scheduler startup so that jobs missed during downtime
 /// (e.g. late boot, daemon restart) are caught up immediately.
-async fn catch_up_overdue_jobs(config: &Config, event_tx: &EventBroadcast) {
+async fn catch_up_overdue_jobs(
+    config: &Config,
+    event_tx: &EventBroadcast,
+    task_identities: &TaskIdentity,
+) {
     let now = Utc::now();
     let jobs = match all_overdue_jobs(config, now) {
         Ok(jobs) => jobs,
@@ -573,7 +579,7 @@ async fn catch_up_overdue_jobs(config: &Config, event_tx: &EventBroadcast) {
     );
 
     let jobs = claim_due_jobs(config, jobs);
-    process_due_jobs(config, jobs, SCHEDULER_COMPONENT, event_tx).await;
+    process_due_jobs(config, jobs, SCHEDULER_COMPONENT, event_tx, task_identities).await;
 
     ::zeroclaw_log::record!(
         INFO,
@@ -665,9 +671,17 @@ pub async fn execute_job_now(config: &Config, job: &CronJob) -> (bool, String) {
         Err(e) => return (false, format!("agent {agent_alias} risk profile: {e}")),
     };
     let span = zeroclaw_log::attribution_span!(job);
-    Box::pin(execute_job_with_retry(config, &security, &agent_alias, job))
-        .instrument(span)
-        .await
+    let task_identity =
+        matches!(job.job_type, JobType::Agent).then(|| TaskIdentity::capture(config, &agent_alias));
+    Box::pin(execute_job_with_retry(
+        config,
+        &security,
+        &agent_alias,
+        job,
+        task_identity,
+    ))
+    .instrument(span)
+    .await
 }
 
 fn cron_agent_run_security_policy(base: &SecurityPolicy, job: &CronJob) -> SecurityPolicy {
@@ -697,6 +711,7 @@ async fn execute_job_with_retry(
     security: &SecurityPolicy,
     agent_alias: &str,
     job: &CronJob,
+    task_identity: Option<TaskIdentity>,
 ) -> (bool, String) {
     let mut last_output = String::new();
     let retries = config.reliability.scheduler_retries;
@@ -705,7 +720,16 @@ async fn execute_job_with_retry(
     for attempt in 0..=retries {
         let (success, output) = match job.job_type {
             JobType::Shell => run_job_command(config, security, job).await,
-            JobType::Agent => Box::pin(run_agent_job(config, security, agent_alias, job)).await,
+            JobType::Agent => {
+                Box::pin(run_agent_job(
+                    config,
+                    security,
+                    agent_alias,
+                    job,
+                    task_identity.clone(),
+                ))
+                .await
+            }
         };
         last_output = output;
 
@@ -766,12 +790,15 @@ async fn process_due_jobs(
     jobs: Vec<CronJob>,
     component: &str,
     event_tx: &EventBroadcast,
+    task_identities: &TaskIdentity,
 ) {
     // Refresh scheduler health on every successful poll cycle, including idle cycles.
     crate::health::mark_component_ok(component);
 
     let max_concurrent = config.scheduler.max_concurrent.max(1);
-    let mut in_flight = stream::iter(jobs.into_iter().filter_map(|job| {
+    // The daemon's original owners survive later polls and worker retries.
+    // An old configuration/job cannot adopt an alias recreated between polls.
+    let pending: Vec<_> = jobs.into_iter().filter_map(|job| {
         let Some(agent_alias) = resolve_owning_agent(config, &job) else {
             ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"job_id": job.id})), "Cron job has no owning agent; add the alias to an [agents.<x>].cron_jobs list");
             let _ = release_job(config, &job.id);
@@ -788,6 +815,8 @@ async fn process_due_jobs(
         };
         let config = config.clone();
         let component = component.to_owned();
+        let task_identity = matches!(job.job_type, JobType::Agent)
+            .then(|| task_identities.for_alias(&agent_alias));
         Some(async move {
             Box::pin(execute_and_persist_job(
                 &config,
@@ -795,11 +824,12 @@ async fn process_due_jobs(
                 &agent_alias,
                 &job,
                 &component,
+                task_identity,
             ))
             .await
         })
-    }))
-    .buffer_unordered(max_concurrent);
+    }).collect();
+    let mut in_flight = stream::iter(pending).buffer_unordered(max_concurrent);
 
     while let Some((job_id, success, output, execution_success, delivery_status)) =
         in_flight.next().await
@@ -834,15 +864,22 @@ async fn execute_and_persist_job(
     agent_alias: &str,
     job: &CronJob,
     component: &str,
+    task_identity: Option<TaskIdentity>,
 ) -> (String, bool, String, bool, &'static str) {
     crate::health::mark_component_ok(component);
     warn_if_high_frequency_agent_job(job);
 
     let started_at = Utc::now();
     let span = zeroclaw_log::attribution_span!(job);
-    let (success, output) = Box::pin(execute_job_with_retry(config, security, agent_alias, job))
-        .instrument(span)
-        .await;
+    let (success, output) = Box::pin(execute_job_with_retry(
+        config,
+        security,
+        agent_alias,
+        job,
+        task_identity,
+    ))
+    .instrument(span)
+    .await;
     let finished_at = Utc::now();
     let run_outcome = Box::pin(persist_job_result(
         config,
@@ -883,8 +920,17 @@ async fn run_agent_job(
     security: &SecurityPolicy,
     agent_alias: &str,
     job: &CronJob,
+    task_identity: Option<TaskIdentity>,
 ) -> (bool, String) {
-    run_agent_job_with_timeout(config, security, agent_alias, job, agent_job_timeout()).await
+    run_agent_job_with_timeout(
+        config,
+        security,
+        agent_alias,
+        job,
+        agent_job_timeout(),
+        task_identity,
+    )
+    .await
 }
 
 /// Best-effort purge of an Isolated cron run's per-run memory session.
@@ -949,6 +995,7 @@ async fn run_agent_job_with_timeout(
     agent_alias: &str,
     job: &CronJob,
     timeout: Duration,
+    task_identity: Option<TaskIdentity>,
 ) -> (bool, String) {
     let subagent_ctx = match crate::subagent::SubAgentSpawn::for_agent(config, agent_alias)
         .and_then(|spawn| spawn.build(crate::subagent::SubAgentOverrides::default()))
@@ -1004,6 +1051,7 @@ async fn run_agent_job_with_timeout(
 
     let run_security = cron_agent_run_security_policy(subagent_ctx.policy.as_ref(), job);
     let run_overrides = crate::agent::loop_::AgentRunOverrides {
+        task_identity,
         security: Some(Arc::new(run_security)),
         memory: None,
         is_subagent: false,

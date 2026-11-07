@@ -1718,6 +1718,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_select_create_retries_without_inheriting_a_retired_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = zeroclaw_config::schema::Config {
+            config_path: tmp.path().join("config.toml"),
+            data_dir: tmp.path().join("data"),
+            ..Default::default()
+        };
+        config.save().await.unwrap();
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        let retired =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "a").unwrap();
+        zeroclaw_memory::companion::rename_alias_identity(&store_dir, "a", "b").unwrap();
+        let identity_path =
+            store_dir.join(zeroclaw_config::companion::COMPANION_AGENT_IDENTITY_FILE);
+        let config_before = std::fs::read(&config.config_path).unwrap();
+        let identities_before = std::fs::read(&identity_path).unwrap();
+        let blocker = identity_path.with_extension("json.tmp");
+        std::fs::create_dir(&blocker).unwrap();
+        let state = section_test_state(config);
+
+        let response = handle_section_select(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::extract::Path(SectionItemPath {
+                section: "agents".into(),
+                key: "a".into(),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(!state.config.read().agents.contains_key("a"));
+        assert_eq!(
+            std::fs::read(tmp.path().join("config.toml")).unwrap(),
+            config_before
+        );
+        assert_eq!(std::fs::read(&identity_path).unwrap(), identities_before);
+
+        std::fs::remove_dir(blocker).unwrap();
+        let mut fresh = None;
+        // First retry creates a fresh identity; selecting that existing agent
+        // again must retain it rather than invalidate an active identity.
+        for _ in 0..2 {
+            let response = handle_section_select(
+                State(state.clone()),
+                HeaderMap::new(),
+                axum::extract::Path(SectionItemPath {
+                    section: "agents".into(),
+                    key: "a".into(),
+                }),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert!(state.config.read().agents.contains_key("a"));
+            let identity =
+                zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "a")
+                    .unwrap();
+            assert_ne!(identity, retired);
+            if let Some(expected) = fresh.as_ref() {
+                assert_eq!(&identity, expected);
+            }
+            fresh = Some(identity);
+        }
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "b"),
+            Some(retired)
+        );
+    }
+
+    #[tokio::test]
     async fn tunnel_select_updates_canonical_provider_and_active_picker_badge() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = zeroclaw_config::schema::Config {

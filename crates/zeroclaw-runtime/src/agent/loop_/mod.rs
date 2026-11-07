@@ -100,7 +100,7 @@ pub use super::tool_execution::{ToolExecutionOutcome, should_execute_tools_in_pa
 pub use self::agent_turn::agent_turn;
 
 // Run overrides / resolve helpers moved to `run_overrides`.
-pub use self::process_message::process_message;
+pub use self::process_message::{process_message, process_message_with_task_identity};
 pub use self::run::run;
 pub use self::run_overrides::AgentRunOverrides;
 #[cfg(all(test, feature = "heavy-tests"))]

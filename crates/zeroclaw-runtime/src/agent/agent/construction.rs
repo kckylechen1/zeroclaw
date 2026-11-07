@@ -41,6 +41,7 @@ impl Agent {
             false,
             None,
             None,
+            None,
         )
         .await
     }
@@ -61,6 +62,7 @@ impl Agent {
             exclude_memory,
             None,
             None,
+            None,
         )
         .await
     }
@@ -74,7 +76,16 @@ impl Agent {
         initialize_mcp: bool,
         exclude_memory: bool,
     ) -> Result<Self> {
-        let config = live_config.read().clone();
+        // Bind identity under the same live-config read that selects the
+        // agent. A delete/recreate must not fit between the config snapshot
+        // and its identity capture.
+        let (config, task_identity) = {
+            let current = live_config.read();
+            (
+                current.clone(),
+                crate::tools::task_context::TaskIdentity::capture(&current, agent_alias),
+            )
+        };
         Self::from_config_with_session_cwd_and_mcp_approval_mode(
             &config,
             agent_alias,
@@ -84,6 +95,7 @@ impl Agent {
             exclude_memory,
             None,
             Some(live_config),
+            Some(task_identity),
         )
         .await
     }
@@ -109,6 +121,7 @@ impl Agent {
             exclude_memory,
             tui_env,
             None,
+            None,
         )
         .await
     }
@@ -123,6 +136,7 @@ impl Agent {
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
         live_config: Option<Arc<parking_lot::RwLock<Config>>>,
+        task_identity: Option<crate::tools::task_context::TaskIdentity>,
     ) -> Result<Self> {
         let agent_cfg = config
             .agent(agent_alias)
@@ -139,6 +153,11 @@ impl Agent {
             Arc::from(observability::create_observer(&config.observability));
         let runtime: Arc<dyn platform::RuntimeAdapter> =
             Arc::from(platform::create_runtime(&config.runtime)?);
+        let task_identity = task_identity.or_else(|| {
+            runtime
+                .has_filesystem_access()
+                .then(|| crate::tools::task_context::TaskIdentity::capture(config, agent_alias))
+        });
         // Per-agent workspace becomes the SecurityPolicy boundary
         // (file_read/write/edit + shell tool jail to the agent's own
         // dir). The session-cwd override still wins so ACP sessions
@@ -233,6 +252,7 @@ impl Agent {
             // Daemon direct-turn construction is a top-level origin: no
             // inherited lineage; the run mints its own root.
             None,
+            task_identity,
         );
         // Skills are loaded here and handed to `assemble`, which owns skill
         // registration and resolves builtin/MCP elevation against the pre-filter
@@ -268,6 +288,7 @@ impl Agent {
         let pinned_section = assembled.pinned_section().to_string();
         let crate::tools::scoped::ScopedAssembled {
             registry,
+            task_owner,
             ask_user_handle,
             reaction_handle,
             poll_handle,
@@ -363,6 +384,7 @@ impl Agent {
         let mut agent = Agent::builder()
             .model_provider(model_provider)
             .tools(tools)
+            .task_owner(task_owner)
             .memory(memory.clone())
             .observer(observer)
             .response_cache(response_cache)

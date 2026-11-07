@@ -207,7 +207,8 @@ impl Agent {
                             context_token_budget: self.config.resolved.effective_context_budget(),
                             knobs: &knobs,
                         },
-                    ),
+                    )
+                    .with_task_owner(self.task_owner.as_ref()),
                     history: &mut loop_history,
                     channel_name: &self.channel_name,
                     channel_reply_target: None,
@@ -610,7 +611,8 @@ impl Agent {
                             context_token_budget: self.config.resolved.effective_context_budget(),
                             knobs: &knobs,
                         },
-                    ),
+                    )
+                    .with_task_owner(self.task_owner.as_ref()),
                     history: &mut loop_history,
                     channel_name: &self.channel_name,
                     channel_reply_target: None,
