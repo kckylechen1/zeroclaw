@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DOCUMENT_LIMIT","DOWNLOAD_LIMIT","MESSAGE_LIMIT","QUESTION_MARKER","REPLY_DOCUMENT_NAME"],"enum":["Inbound"],"fn":["classify"],"struct":["Api","CallbackQuery","Chat","File","Message","Refused","ReplyToMessage","Update","User"]};

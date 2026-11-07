@@ -1,0 +1,136 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`TaskIntentV1` — the ZeroClaw ENCODER half of the frozen host semantic wire (vertical V2b; contract law TB-3; the host decoder half is the tachi TaskIntent bridge, vertical V2a)."><title>zeroclaw_api::taskintent - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="zeroclaw_api" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module taskintent</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../zeroclaw_api/index.html">zeroclaw_<wbr>api</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module taskintent</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate zeroclaw_<wbr>api</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">zeroclaw_api</a></div><h1>Module <span>taskintent</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><code>TaskIntentV1</code> — the ZeroClaw ENCODER half of the frozen host semantic
+wire (vertical V2b; contract law TB-3; the host decoder half is the
+tachi TaskIntent bridge, vertical V2a).</p>
+<p>Both halves are pinned to ONE golden vector,
+<a href="constant.GOLDEN_TASK_INTENT_V1.html" title="constant zeroclaw_api::taskintent::GOLDEN_TASK_INTENT_V1"><code>GOLDEN_TASK_INTENT_V1</code></a> (<code>golden/task-intent.v1.json</code>, copied
+byte-identical from tachi <code>crates/tachi-params/src/taskintent/golden/</code>
+at tachi <code>origin/main</code> = <code>b073882929f</code>): a nested-type or
+serde-rename change on either side fails its golden test (TB-3
+cross-repo golden pair).</p>
+<p>Field freeze (exactly these seventeen top-level fields, TB-3):</p>
+<div class="example-wrap"><pre class="language-text"><code>objective, capability_request, requester, parent_ref, supervisor_ref,
+context_bundle_ref, source_refs, constraints, expected_artifacts,
+evaluation_requirement, workspace_source, routing_preference,
+approval_requirement, privacy_class, expiry, retry_of</code></pre></div>
+<p>(plus <code>schema</code> — the version tag, see <a href="constant.SCHEMA_TAG.html" title="constant zeroclaw_api::taskintent::SCHEMA_TAG"><code>SCHEMA_TAG</code></a>).</p>
+<p>Watershed discrimination, enforced structurally on this side:</p>
+<ul>
+<li><strong>No execution detail is representable as a FIELD</strong> (TB-1/TB-4).
+There is no <code>command</code>/<code>env</code>/<code>cwd</code>/<code>path</code>/<code>model</code>/<code>backend</code>-shaped
+field at any depth, and every struct on the wire is
+<code>deny_unknown_fields</code>, so a smuggled field fails deserialization
+instead of being silently carried. Every free-text value is a
+bounded <a href="struct.BoundedText.html" title="struct zeroclaw_api::taskintent::BoundedText"><code>BoundedText</code></a>; every selector is a closed enum.</li>
+<li><strong><code>Capability</code> is a closed enum</strong> (DECISION TB-5/A, carrier picked
+as option (a) by the tachi host bridge; this leaf admits
+<a href="enum.Capability.html#variant.RepositoryImplementation" title="variant zeroclaw_api::taskintent::Capability::RepositoryImplementation"><code>Capability::RepositoryImplementation</code></a> into the catalog per
+the watershed ticket). No variant can name a vendor, model, CLI, or tool:
+<code>glm</code>, <code>codex</code>, CLI flags, and friends are not representable in
+<code>capability_request</code> — they fail enum deserialization.</li>
+<li><strong>Content-level rejection is per the five frozen TB-4 categories</strong>
+(credential-shaped, command-lead-token, worktree-path,
+private-dyad, caller-minted-ref), mirrored marker-for-marker from
+the tachi host admission law so the two sides cannot drift. This
+scan covers every <code>BoundedText</code> field of the intent; the typed refs
+are namespace- and length-enforced instead (they carry no free
+text). The scan is category-law, not a prose ban: text that merely
+MENTIONS a vendor inside an otherwise-clean objective passes THIS
+mirrored scan (and the host-side law it mirrors) — the structural
+bans above are what make placement impossible. The V2b CLIENT adds
+a deliberate strict superset on top
+(<code>zeroclaw-runtime</code>’s <code>tachi_bridge::compose</code> watershed layer):
+vendor/model/worktree/cwd/tmux-SSH/sandbox/CLI-flag PROSE is
+rejected at compose time before anything is sent. The client may
+reject more than the mirrored law; it may never reject less.</li>
+<li><strong><code>TaskRef</code>/<code>AttemptRef</code> are decode-only here</strong> (TB-6): Tachi mints
+them; the ZeroClaw side has NO public constructor, no <code>mint</code>, and
+no <code>From&lt;String&gt;</code> — there is no constructor API, so no code path
+MINTS a ref value; the only way one enters this process is by
+DESERIALIZING a wire value (that is how transport receipts
+arrive). A value hand-written into raw JSON therefore still
+enters as a decoded value — it is not authority: the host
+validates retry lineage at admission and rejects foreign ids, and
+ZeroClaw treats refs it did not receive from a receipt as
+untrusted input.</li>
+<li><strong><code>ParentRunRef</code>/<code>SubAgentRunRef</code> constructors force their own
+namespace</strong> (<code>parent:</code>/<code>subrun:</code>) and length-cap the body exactly
+like the decode path: ZeroClaw names its own run lineage but can
+never fabricate a <code>task:</code>/<code>attempt:</code> value through them.</li>
+</ul>
+<p>Digest: <a href="struct.TaskIntentV1.html#method.canonical_digest" title="method zeroclaw_api::taskintent::TaskIntentV1::canonical_digest"><code>TaskIntentV1::canonical_digest</code></a> implements the identical
+rule to tachi’s <code>memcore::canonical_digest::canonical_json_digest_hex</code>
+(recursively key-sorted canonical JSON, SHA-256, lower hex, no prefix)
+over <code>{"schema": tag, "intent": payload}</code>. The golden pins the sample
+digest <code>84ab2316…ce3a31</code>.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ArtifactExpectation.html" title="struct zeroclaw_api::taskintent::ArtifactExpectation">Artifact<wbr>Expectation</a></dt><dd>What artifact the requester expects (TB-3 <code>expected_artifacts</code>; drives
+the TB-13 “success without required artifact is not contract success”
+check).</dd><dt><a class="struct" href="struct.AttemptRef.html" title="struct zeroclaw_api::taskintent::AttemptRef">Attempt<wbr>Ref</a></dt><dd>One execution try of a task (TB-18: Task ≠ Attempt). Tachi-minted;
+decode-only on this side.</dd><dt><a class="struct" href="struct.BoundedText.html" title="struct zeroclaw_api::taskintent::BoundedText">Bounded<wbr>Text</a></dt><dd>A bounded text value. Construction validates length; the encode-side
+admission scan (see <code>zeroclaw-runtime::tachi_bridge</code>) additionally
+rejects forbidden content per TB-4 category.</dd><dt><a class="struct" href="struct.CapabilityRequest.html" title="struct zeroclaw_api::taskintent::CapabilityRequest">Capability<wbr>Request</a></dt><dd>The capability an intent requests (TB-5). One capability per intent.</dd><dt><a class="struct" href="struct.ConversationSessionRef.html" title="struct zeroclaw_api::taskintent::ConversationSessionRef">Conversation<wbr>Session<wbr>Ref</a></dt><dd>A durable conversational session identity (TB-14). Not a Tachi
+<code>acp_sessions.session_uuid</code>, not a <code>TaskRef</code>. Decode-only here.</dd><dt><a class="struct" href="struct.DeliveryIntentRef.html" title="struct zeroclaw_api::taskintent::DeliveryIntentRef">Delivery<wbr>Intent<wbr>Ref</a></dt><dd>A durable delivery intent identity (tachi durable-delivery surface; V2 is
+pull-only so this ref is only projected). Decode-only here.</dd><dt><a class="struct" href="struct.EvaluationRequirement.html" title="struct zeroclaw_api::taskintent::EvaluationRequirement">Evaluation<wbr>Requirement</a></dt><dd>Evaluation independence requirement (TB-3 <code>evaluation_requirement</code>;
+classes frozen by TB-17).</dd><dt><a class="struct" href="struct.HarnessSessionRef.html" title="struct zeroclaw_api::taskintent::HarnessSessionRef">Harness<wbr>Session<wbr>Ref</a></dt><dd>A host/harness-owned session attached through the tachi attached-session
+attachment spine (never an ACP <code>session_uuid</code>). Tachi-owned;
+decode-only on this side.</dd><dt><a class="struct" href="struct.ParentRunRef.html" title="struct zeroclaw_api::taskintent::ParentRunRef">Parent<wbr>RunRef</a></dt><dd>A parent run the submitting requester belongs to (TB-14). This is
+the REQUESTER’s own run lineage — ZeroClaw names it, but only ever
+inside the <code>parent:</code> namespace.</dd><dt><a class="struct" href="struct.ProcedureRunRef.html" title="struct zeroclaw_api::taskintent::ProcedureRunRef">Procedure<wbr>RunRef</a></dt><dd>A procedure run identity (TB-14). Tachi-owned; decode-only here.</dd><dt><a class="struct" href="struct.RequestId.html" title="struct zeroclaw_api::taskintent::RequestId">Request<wbr>Id</a></dt><dd>A caller RequestId for TB-7 idempotency: the <code>(requester, request_id)</code>
+tuple is the idempotency scope for submit (and, later, intervene/stop).</dd><dt><a class="struct" href="struct.RequesterRef.html" title="struct zeroclaw_api::taskintent::RequesterRef">Requester<wbr>Ref</a></dt><dd>The identity of the requester submitting an intent (TB-3 wire field;
+not one of the TB-14 eight, and never interchangeable with them).</dd><dt><a class="struct" href="struct.SourceRef.html" title="struct zeroclaw_api::taskintent::SourceRef">Source<wbr>Ref</a></dt><dd>Where a task’s source material lives (TB-3 <code>source_refs</code>).</dd><dt><a class="struct" href="struct.StopReceipt.html" title="struct zeroclaw_api::taskintent::StopReceipt">Stop<wbr>Receipt</a></dt><dd>One <code>request_stop</code> receipt (TB-12). Exactly one stop receipt type; the
+stop variants of <code>intervene</code> carry this payload (TB-11 connection).</dd><dt><a class="struct" href="struct.SubAgentRunRef.html" title="struct zeroclaw_api::taskintent::SubAgentRunRef">SubAgent<wbr>RunRef</a></dt><dd>A supervising sub-agent run (TB-14, SubAgent spine).
+Requester-owned lineage, <code>subrun:</code> namespace only.</dd><dt><a class="struct" href="struct.TaskConstraint.html" title="struct zeroclaw_api::taskintent::TaskConstraint">Task<wbr>Constraint</a></dt><dd>A semantic constraint on the work (TB-3 <code>constraints</code>).</dd><dt><a class="struct" href="struct.TaskIntentV1.html" title="struct zeroclaw_api::taskintent::TaskIntentV1">Task<wbr>Intent<wbr>V1</a></dt><dd>The frozen host semantic wire (TB-3). Exactly the fields below; the
+golden test pins the wire shape and the canonical digest.</dd><dt><a class="struct" href="struct.TaskRef.html" title="struct zeroclaw_api::taskintent::TaskRef">TaskRef</a></dt><dd>A Tachi-minted durable task identity (TB-6: minted by Tachi only,
+after admission; caller-provided task ids are not authority). The
+ZeroClaw side is decode-only: no constructor API exists, so a
+value enters this process only by deserializing a Tachi-sent
+wire value.</dd><dt><a class="struct" href="struct.Timestamp.html" title="struct zeroclaw_api::taskintent::Timestamp">Timestamp</a></dt><dd>RFC3339 timestamp on the wire (e.g. task expiry). Serialization is the
+chrono <code>to_rfc3339</code> form (<code>2026-12-01T00:00:00+00:00</code>) — byte-identical
+to the tachi decoder side, which the golden pins.</dd><dt><a class="struct" href="struct.WorkspaceSourceRef.html" title="struct zeroclaw_api::taskintent::WorkspaceSourceRef">Workspace<wbr>Source<wbr>Ref</a></dt><dd>Typed workspace selector (TB-3 <code>workspace_source</code>): a repo and revision
+the requester points at. This is a <strong>selector over Tachi-admitted
+workspace truth</strong> (the Tachi ExecEnv/Workspace plane owns placement);
+a caller-selected worktree path as execution authority is forbidden
+wire content (TB-4) and is not representable here.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ApprovalRequirement.html" title="enum zeroclaw_api::taskintent::ApprovalRequirement">Approval<wbr>Requirement</a></dt><dd>Typed approval requirement asserted by the requester (TB-3). This is an
+assertion of what approval the requester believes applies — actual
+approval authority is resolved by Tachi admission against policy,
+never granted by this field (TB-4 seam law: intent fields are not
+authority).</dd><dt><a class="enum" href="enum.ArtifactClass.html" title="enum zeroclaw_api::taskintent::ArtifactClass">Artifact<wbr>Class</a></dt><dd>Closed artifact-class vocabulary.</dd><dt><a class="enum" href="enum.Capability.html" title="enum zeroclaw_api::taskintent::Capability">Capability</a></dt><dd>DECISION TB-5/A (carrier: closed Rust enum, option (a) — the pick
+recorded by the tachi host bridge; least authority). No variant can name a
+vendor, model, CLI, or tool, so a <code>capability_request</code> carrying <code>glm</code>,
+<code>codex</code>, or CLI flags fails enum deserialization — the discrimination
+is structural, not a content filter.</dd><dt><a class="enum" href="enum.IndependenceClass.html" title="enum zeroclaw_api::taskintent::IndependenceClass">Independence<wbr>Class</a></dt><dd>TB-17 independence classes. <code>SameSessionContinuation</code> can never satisfy
+an independent-review requirement.</dd><dt><a class="enum" href="enum.InterventionError.html" title="enum zeroclaw_api::taskintent::InterventionError">Intervention<wbr>Error</a></dt><dd>Typed intervention/stop failure surface (TB-11/TB-12), ZeroClaw mirror
+of the tachi host’s <code>InterventionError</code>. <code>category</code> in
+<code>ForbiddenContent</code> is a label string because the forbidden-category
+enum lives in <code>zeroclaw-runtime</code>’s compose layer (client superset);
+the host law stays authoritative host-side.</dd><dt><a class="enum" href="enum.InterventionReceipt.html" title="enum zeroclaw_api::taskintent::InterventionReceipt">Intervention<wbr>Receipt</a></dt><dd>Typed intervention receipt envelope (TB-11). The stop variants carry
+exactly the <a href="struct.StopReceipt.html" title="struct zeroclaw_api::taskintent::StopReceipt"><code>StopReceipt</code></a> of TB-12. Externally tagged with the
+tachi host’s EXACT serde shape — the host’s enum carries no
+<code>rename_all</code>, so variant tags travel PascalCase
+(<code>{"CorrectionRequested": {...}}</code>, <code>{"Stop": {...}}</code>); the stage-B
+live pair depends on the shapes matching byte-for-byte.</dd><dt><a class="enum" href="enum.InterventionStatic.html" title="enum zeroclaw_api::taskintent::InterventionStatic">Intervention<wbr>Static</a></dt><dd>Payload-free discriminant of the frozen 10-op <code>InterventionV1</code>
+vocabulary (TB-11).</dd><dt><a class="enum" href="enum.InterventionV1.html" title="enum zeroclaw_api::taskintent::InterventionV1">Intervention<wbr>V1</a></dt><dd>The frozen 10-op intervention vocabulary (TB-11), ZeroClaw mirror.
+<code>RequestIndependentReview</code> and <code>Escalate</code> are NOT session
+interventions — the host refuses them with
+<a href="enum.InterventionError.html#variant.RequiresNewTaskLineage" title="variant zeroclaw_api::taskintent::InterventionError::RequiresNewTaskLineage"><code>InterventionError::RequiresNewTaskLineage</code></a> and the client maps
+independent review to a NEW task submission (vertical V3).</dd><dt><a class="enum" href="enum.PrivacyClass.html" title="enum zeroclaw_api::taskintent::PrivacyClass">Privacy<wbr>Class</a></dt><dd>Privacy class of the intent content (TB-3). Private-Dyad-labeled
+content is forbidden on this wire entirely (TB-4); <code>Confidential</code> is
+the most sensitive class that may be represented.</dd><dt><a class="enum" href="enum.RefError.html" title="enum zeroclaw_api::taskintent::RefError">RefError</a></dt><dd>Typed ref construction failure.</dd><dt><a class="enum" href="enum.RoutingPreference.html" title="enum zeroclaw_api::taskintent::RoutingPreference">Routing<wbr>Preference</a></dt><dd>Typed routing preference (TB-5: preference only — never grants
+placement, credentials, data egress, safety exceptions, or lifecycle
+authority).</dd><dt><a class="enum" href="enum.SourceKind.html" title="enum zeroclaw_api::taskintent::SourceKind">Source<wbr>Kind</a></dt><dd>Closed source-kind vocabulary.</dd><dt><a class="enum" href="enum.StopMode.html" title="enum zeroclaw_api::taskintent::StopMode">Stop<wbr>Mode</a></dt><dd>Stop mode for <code>request_stop</code> and the stop-alias interventions (TB-12).</dd><dt><a class="enum" href="enum.StopStage.html" title="enum zeroclaw_api::taskintent::StopStage">Stop<wbr>Stage</a></dt><dd>The multi-stage stop fact (TB-12): requested → forwarded → confirmed →
+terminal. <code>Confirmed</code> is the only stage a <code>cancelled</code> projection may
+derive from; the client never mints one locally.</dd><dt><a class="enum" href="enum.WireError.html" title="enum zeroclaw_api::taskintent::WireError">Wire<wbr>Error</a></dt><dd>Wire-level construction/validation failure.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.BOUNDED_TEXT_MAX.html" title="constant zeroclaw_api::taskintent::BOUNDED_TEXT_MAX">BOUNDED_<wbr>TEXT_<wbr>MAX</a></dt><dd>Hard cap for any single text-bearing wire value (TB-4: an unbounded
+transcript cannot be represented on this wire at all).</dd><dt><a class="constant" href="constant.GOLDEN_DIGEST_SHA256.html" title="constant zeroclaw_api::taskintent::GOLDEN_DIGEST_SHA256">GOLDEN_<wbr>DIGEST_<wbr>SHA256</a></dt><dd>The digest pinned by the checked-in golden vector (<code>84ab2316…ce3a31</code>).
+The encoder golden test asserts <a href="struct.TaskIntentV1.html#method.canonical_digest" title="method zeroclaw_api::taskintent::TaskIntentV1::canonical_digest"><code>TaskIntentV1::canonical_digest</code></a>
+equals exactly this constant — drift anywhere in the rule, the field
+set, or a serde name breaks the pin.</dd><dt><a class="constant" href="constant.GOLDEN_TASK_INTENT_V1.html" title="constant zeroclaw_api::taskintent::GOLDEN_TASK_INTENT_V1">GOLDEN_<wbr>TASK_<wbr>INTENT_<wbr>V1</a></dt><dd>The checked-in golden vector pinning the <code>task-intent.v1</code> wire (TB-3
+cross-repo golden pair; byte-identical to the tachi-side copy).</dd><dt><a class="constant" href="constant.REF_VALUE_MAX.html" title="constant zeroclaw_api::taskintent::REF_VALUE_MAX">REF_<wbr>VALUE_<wbr>MAX</a></dt><dd>Byte cap for the BODY of a ref wire value (the value minus its
+namespace prefix). Refs are opaque bounded identifiers, never content
+carriers (TB-4 forbids oversized payloads); the full wire value may
+exceed this constant by the prefix length.</dd><dt><a class="constant" href="constant.SCHEMA_TAG.html" title="constant zeroclaw_api::taskintent::SCHEMA_TAG">SCHEMA_<wbr>TAG</a></dt><dd>Version tag carried on every <code>TaskIntentV1</code> wire payload (frozen by the
+<code>task-intent.v1</code> golden).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.canonical_json.html" title="fn zeroclaw_api::taskintent::canonical_json">canonical_<wbr>json</a></dt><dd>Recursively sort every object key, leaving arrays in caller order
+(array order is content, not layout) — the first half of the shared
+canonical-JSON digest rule.</dd><dt><a class="fn" href="fn.canonical_json_digest_hex.html" title="fn zeroclaw_api::taskintent::canonical_json_digest_hex">canonical_<wbr>json_<wbr>digest_<wbr>hex</a></dt><dd>SHA-256 lower hex (no prefix) of the canonical serialization of
+<code>value</code> — the second half of the shared digest rule, byte-identical to
+tachi’s <code>memcore::canonical_digest::canonical_json_digest_hex</code>.</dd></dl></section></div></main></body></html>

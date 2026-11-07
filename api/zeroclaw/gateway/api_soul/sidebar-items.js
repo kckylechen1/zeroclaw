@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_drift","get_export","get_history","get_proposals","get_soul","post_anchor","post_anchor_rollback","post_resolve_proposal","post_rollback","put_identity","put_principles","put_story","put_tone","put_tone_exemplars"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AUTH_TIME","MAX_CLIENTS","MAX_FRAME","SESSION_TIME","TURN_TIME"],"fn":["accept_batch","admins","command","epoch","face","face_name","mac","main","management","poll","run","serve","starttime","tokens","unix_line","unix_write"],"struct":["Auth","Conn","Runtime"]};

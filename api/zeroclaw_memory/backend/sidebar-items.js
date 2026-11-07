@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RETIRED_MEMORY_BACKENDS"],"enum":["MemoryBackendKind"],"fn":["classify_memory_backend","default_memory_backend_key","memory_backend_profile","selectable_memory_backends"],"struct":["MemoryBackendProfile"]};

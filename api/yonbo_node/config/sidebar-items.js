@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Mode"],"fn":["absolute"],"struct":["Config","Face","Owner"]};

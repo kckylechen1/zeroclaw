@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["make_query_summary","native_tool_specs_present_for_turn"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROTECTED_PERSONA_FILES"],"enum":["AutonomyLevel","CommandRiskLevel","EscalationViolation","ToolOperation"],"fn":["tachi_tool_operation"],"struct":["ActionTracker","PerSenderTracker","SecurityPolicy"]};

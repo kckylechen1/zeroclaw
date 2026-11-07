@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_HOSTS","MAX_STORE"],"fn":["atomic_write","canonical_seq","checked_file","flock","geteuid","host_id","lock","parse_store","secure_dir"],"struct":["Host","Lock","Parser","Store"]};

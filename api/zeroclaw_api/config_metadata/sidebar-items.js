@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ConfigTab","CredentialSurfaceClass","PropKind"],"struct":["ChannelInfo","IntegrationDescriptor","NestedOptionEntry","SecretFieldInfo"],"trait":["ChannelConfig"]};

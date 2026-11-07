@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_DESCRIPTION_BYTES","MAX_ITEMS","STATUS_COMPLETED","STATUS_IN_PROGRESS","STATUS_PENDING"],"enum":["ApplyOutcome","TaskOp"],"struct":["TaskItem","TaskList"]};

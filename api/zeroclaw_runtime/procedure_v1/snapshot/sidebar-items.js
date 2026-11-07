@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SnapshotContentCategory","SnapshotMintError"],"fn":["mint_snapshot","snapshot_content_scan"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["IO","MAX_LINE","MAX_SESSIONS"],"enum":["Command"],"fn":["canonical","connect","credential","execute","project","prompt","receive","run","send","session_loop"],"mod":["state"],"struct":["Admission","Config","FileConfig","Output","Permission","Session","Settings"],"type":["Result","Socket"]};

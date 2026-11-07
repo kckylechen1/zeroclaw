@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["default_allowed_commands","default_forbidden_paths"]};
