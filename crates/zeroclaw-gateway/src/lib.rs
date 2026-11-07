@@ -846,26 +846,6 @@ pub async fn run_gateway(
                 list_deferred_mcp_specs: true,
             })
             .await;
-            let reaction_handle_gw_opt = Some(assembled.reaction_handle.clone());
-            let channel_names = zeroclaw_channels::orchestrator::register_channels_for_tools(
-                &config,
-                &assembled.ask_user_handle,
-                &assembled.channel_room_handle,
-                &reaction_handle_gw_opt,
-                &assembled.poll_handle,
-                &assembled.escalate_handle,
-            );
-            if !channel_names.is_empty() {
-                ::zeroclaw_log::record!(
-                    INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_attrs(::serde_json::json!({"count": channel_names.len()})),
-                    &format!(
-                        "Registered {} channel(s) for dashboard agent",
-                        channel_names.len()
-                    ),
-                );
-            }
             // Listing-only registry: no turn runs against it, so the
             // deferred-MCP prompt section and activation handle returned by
             // `assemble` have no consumer here (live gateway chat resolves

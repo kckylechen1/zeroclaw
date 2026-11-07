@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-schema-markdown", "crates/zeroclaw-cost", "crates/zeroclaw-http", "crates/zeroclaw-platform", "crates/zeroclaw-policy", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "crates/zeroclaw-yonbo-node", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
+members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-schema-markdown", "crates/zeroclaw-cost", "crates/zeroclaw-http", "crates/zeroclaw-platform", "crates/zeroclaw-policy", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "crates/zeroclaw-yonbo-node", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -22,7 +22,6 @@ zeroclaw-spawn = { path = "crates/zeroclaw-spawn", version = "0.8.3" }
 zeroclaw-commands = { path = "crates/zeroclaw-commands", version = "0.8.3" }
 zeroclaw-providers = { path = "crates/zeroclaw-providers", version = "0.8.3" }
 zeroclaw-memory = { path = "crates/zeroclaw-memory", version = "0.8.3" }
-zeroclaw-channels = { path = "crates/zeroclaw-channels", version = "0.8.3", default-features = false }
 zeroclaw-tools = { path = "crates/zeroclaw-tools", version = "0.8.3", default-features = false }
 zeroclaw-sop-graph = { path = "crates/zeroclaw-sop-graph", version = "0.8.3", default-features = false }
 zeroclaw-runtime = { path = "crates/zeroclaw-runtime", version = "0.8.3", default-features = false }
@@ -85,7 +84,6 @@ zeroclaw-config = { workspace = true, features = ["clap"] }
 zeroclaw-log.workspace = true
 zeroclaw-providers.workspace = true
 zeroclaw-memory.workspace = true
-zeroclaw-channels = { workspace = true, optional = true }
 zeroclaw-tools = { workspace = true, optional = true }
 zeroclaw-runtime = { workspace = true, optional = true }
 zeroclaw-eval = { workspace = true, optional = true }
@@ -158,9 +156,6 @@ console = "0.16"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"], optional = true }
-
-# MIME parsing for email attachment integration tests
-mail-parser = { version = "0.11.2", optional = true }
 
 # Gateway integration-test fixtures (enabled with the gateway feature).
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws", "macros"], optional = true }
@@ -252,7 +247,7 @@ integrations-saas = [
 # Channels are opt-in via the lean `default-channels` bundle, `channels-full`,
 # or individual `channel-*` features.
 agent-runtime = [
-    "dep:zeroclaw-runtime", "dep:zeroclaw-eval", "dep:zeroclaw-channels", "dep:zeroclaw-tools",
+    "dep:zeroclaw-runtime", "dep:zeroclaw-eval", "dep:zeroclaw-tools",
     "dep:zeroclaw-gateway-client",
     "dep:rusqlite",
     "dep:tokio-tungstenite",
@@ -269,7 +264,7 @@ default-channels = [
 
 # Historical broad channel bundle. Preserves the older default channel surface.
 channels-full = [
-    "default-channels", "zeroclaw-channels/channels-full", "channel-lark",
+    "default-channels", "channel-lark",
     "channel-line",
     "channel-slack", "channel-signal",
     "channel-mattermost", "channel-irc", "channel-imessage",
@@ -286,49 +281,49 @@ gateway = [
 ]
 schema-export = ["dep:zeroclaw-schema-markdown", "zeroclaw-config/schema-export", "zeroclaw-gateway?/schema-export"]
 
-# Channels — each forwards to zeroclaw-channels.
-channel-email = ["zeroclaw-channels/channel-email", "zeroclaw-runtime?/email-tools", "dep:mail-parser"]
-channel-telegram = ["zeroclaw-channels/channel-telegram"]
-channel-lark = ["zeroclaw-channels/channel-lark"]
-channel-nostr = ["zeroclaw-channels/channel-nostr"]
-channel-matrix = ["zeroclaw-channels/channel-matrix"]
-channel-discord = ["zeroclaw-channels/channel-discord"]
-channel-slack = ["zeroclaw-channels/channel-slack"]
-channel-signal = ["zeroclaw-channels/channel-signal"]
-channel-mattermost = ["zeroclaw-channels/channel-mattermost"]
-channel-irc = ["zeroclaw-channels/channel-irc"]
-channel-twitch = ["zeroclaw-channels/channel-twitch"]
-channel-imessage = ["zeroclaw-channels/channel-imessage"]
-channel-dingtalk = ["zeroclaw-channels/channel-dingtalk"]
-channel-qq = ["zeroclaw-channels/channel-qq"]
-channel-bluesky = ["zeroclaw-channels/channel-bluesky"]
-channel-git = ["zeroclaw-channels/channel-git"]
-provider-github = ["zeroclaw-channels/provider-github"]
-provider-gitea = ["zeroclaw-channels/provider-gitea"]
-channel-twitter = ["zeroclaw-channels/channel-twitter"]
-channel-reddit = ["zeroclaw-channels/channel-reddit"]
-channel-notion = ["zeroclaw-channels/channel-notion"]
-channel-amqp = ["zeroclaw-channels/channel-amqp"]
-channel-mochat = ["zeroclaw-channels/channel-mochat"]
-channel-wechat = ["zeroclaw-channels/channel-wechat", "zeroclaw-gateway?/channel-wechat"]
-channel-wecom = ["zeroclaw-channels/channel-wecom"]
-channel-wecom-ws = ["zeroclaw-channels/channel-wecom-ws"]
-channel-clawdtalk = ["zeroclaw-channels/channel-clawdtalk"]
-channel-webhook = ["zeroclaw-channels/channel-webhook"]
-channel-acp-server = ["zeroclaw-channels/channel-acp-server"]
+# Channel feature flags retained for CLI/installer preset compatibility.
+channel-email = ["zeroclaw-runtime?/email-tools"]
+channel-telegram = []
+channel-lark = []
+channel-nostr = []
+channel-matrix = []
+channel-discord = []
+channel-slack = []
+channel-signal = []
+channel-mattermost = []
+channel-irc = []
+channel-twitch = []
+channel-imessage = []
+channel-dingtalk = []
+channel-qq = []
+channel-bluesky = []
+channel-git = []
+provider-github = []
+provider-gitea = []
+channel-twitter = []
+channel-reddit = []
+channel-notion = []
+channel-amqp = []
+channel-mochat = []
+channel-wechat = []
+channel-wecom = []
+channel-wecom-ws = []
+channel-clawdtalk = []
+channel-webhook = []
+channel-acp-server = []
 
 # Node discovery surface (gateway `/ws/nodes` registry + LAN mDNS peer hints).
 # Default-off, mirroring `zeroclaw-gateway`'s own `nodes` feature. The root
 # package needs this forward so targets that construct `gateway::AppState`
 # (e.g. the `component` test) can cfg-gate the node-only fields.
 nodes = ["zeroclaw-gateway?/nodes"]
-channel-voice-call = ["zeroclaw-channels/channel-voice-call"]
-channel-line = ["zeroclaw-channels/channel-line"]
+channel-voice-call = []
+channel-line = []
 # Feishu uses the same channel implementation as Lark; `use_feishu = true`
 # selects Feishu endpoints at runtime.
 channel-feishu = ["channel-lark"]
-whatsapp-web = ["zeroclaw-channels/whatsapp-web", "zeroclaw-gateway?/whatsapp-web"]
-voice-wake = ["zeroclaw-channels/voice-wake"]
+whatsapp-web = []
+voice-wake = []
 memory-tachi = ["zeroclaw-memory/tachi"]
 
 # Backends and platform flags — each forwards to ONE crate
@@ -355,7 +350,6 @@ ci-all = [
     "channel-nostr", "channel-matrix", "whatsapp-web",
     "observability-prometheus",
     "sandbox-landlock", "sandbox-bubblewrap",
-    "zeroclaw-channels/heavy-tests",
     "zeroclaw-runtime/heavy-tests",
 ]
 

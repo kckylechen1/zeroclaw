@@ -29,10 +29,10 @@ for MODE in "${MODES[@]}"; do
         cargo clippy --locked "${CLIPPY_WORKSPACE_ARGS[@]}" --features ci-all -- -D warnings
     else
         # Local `--correctness` path: deny `clippy::correctness` on the
-        # default-feature surface plus the gated channels/runtime heavy-tests suites.
+        # default-feature surface plus the gated runtime heavy-tests suite.
         # Full-surface validation runs via `--strict` or in CI.
-        echo "==> rust quality: cargo clippy --locked --workspace --all-targets --features zeroclaw-channels/heavy-tests,zeroclaw-runtime/heavy-tests -- -D clippy::correctness"
-        cargo clippy --locked "${CLIPPY_WORKSPACE_ARGS[@]}" --features zeroclaw-channels/heavy-tests,zeroclaw-runtime/heavy-tests -- -D clippy::correctness
+        echo "==> rust quality: cargo clippy --locked --workspace --all-targets --features zeroclaw-runtime/heavy-tests -- -D clippy::correctness"
+        cargo clippy --locked "${CLIPPY_WORKSPACE_ARGS[@]}" --features zeroclaw-runtime/heavy-tests -- -D clippy::correctness
     fi
     # Keep the first provider check before strict Clippy when running both.
     if [ "$MODE" = "${MODES[0]}" ]; then

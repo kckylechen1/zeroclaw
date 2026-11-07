@@ -38,7 +38,7 @@ GENERATED_SITE_TARGETS = {
     f"/api/{crate}/index.html": "xtask/src/cmd/mdbook/refs.rs::build_api"
     for crate in (
         "zeroclaw", "zeroclaw_api", "zeroclaw_config", "zeroclaw_runtime",
-        "zeroclaw_providers", "zeroclaw_channels", "zeroclaw_gateway",
+        "zeroclaw_providers", "zeroclaw_gateway_client", "zeroclaw_gateway",
         "zeroclaw_tools", "zeroclaw_memory", "zeroclaw_infra",
     )
 }
