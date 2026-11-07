@@ -8,6 +8,7 @@ export type WsMessageHandler = (msg: WsMessage) => void;
 export type WsOpenHandler = () => void;
 export type WsCloseHandler = (ev: CloseEvent) => void;
 export type WsErrorHandler = (ev: Event) => void;
+export type WsNegotiationErrorHandler = (code: string, unsentRequestIds: string[]) => void;
 
 export interface WebSocketClientOptions {
   /** Agent alias to bind this socket to (required by the gateway). */
@@ -20,6 +21,8 @@ export interface WebSocketClientOptions {
   maxReconnectDelay?: number;
   /** Set to false to disable auto-reconnect. Default true. */
   autoReconnect?: boolean;
+  /** Preserve the S2 requirement when rebuilding an authenticated client. */
+  requireTurnControl?: boolean;
 }
 
 const DEFAULT_RECONNECT_DELAY = 1000;
@@ -50,19 +53,15 @@ export class WebSocketClient {
   public onOpen: WsOpenHandler | null = null;
   public onClose: WsCloseHandler | null = null;
   public onError: WsErrorHandler | null = null;
+  public onNegotiationError: WsNegotiationErrorHandler | null = null;
 
   /** S2 (#549): negotiated epoch, or null before `turn_ready` / during a
    * reconnect window (onopen clears it until the new socket negotiates). */
   private turnEpoch: string | null = null;
-  /** S2 (#549): latched on the first successful negotiation. Distinguishes a
-   * reconnect window (epoch null but S2 in use — scoped cancellation is the
-   * only Stop path) from a socket that genuinely never negotiated (legacy
-   * REST-abort fallback). */
-  private negotiatedOnce = false;
-  /** S2 (#549): the server's replay-cache event bound from `turn_ready`
-   * limits. Events with seq beyond it are live-only (never replayed), which
-   * bounds the client's applied-sequence dedup set. */
-  private replayEventLimit: number | null = null;
+  /** Once selected, S2 stays required across failed negotiation, credential
+   * loss and reconnect. Legacy is only chosen for an anonymous attachment. */
+  private turnControlRequired = false;
+  private protocol: 'negotiating' | 's2' | 'legacy' | 'failed' = 'negotiating';
   /** Requests accepted for admission but not yet sent (pre-`turn_ready`). */
   private readonly queuedSends: { requestId: string; frame: Record<string, unknown> }[] = [];
 
@@ -87,6 +86,7 @@ export class WebSocketClient {
     this.maxReconnectDelay = options.maxReconnectDelay ?? MAX_RECONNECT_DELAY;
     this.autoReconnect = options.autoReconnect ?? true;
     this.currentDelay = this.reconnectDelay;
+    this.turnControlRequired = options.requireTurnControl ?? false;
   }
 
   /** Open the WebSocket connection. */
@@ -95,6 +95,7 @@ export class WebSocketClient {
     this.clearReconnectTimer();
 
     const token = getToken();
+    this.turnControlRequired ||= Boolean(token);
     const sessionId = getOrCreateSessionId(this.agentAlias);
     const params = new URLSearchParams();
     if (token) params.set('token', token);
@@ -109,30 +110,42 @@ export class WebSocketClient {
 
     this.ws.onopen = () => {
       this.currentDelay = this.reconnectDelay;
-      // S2 (#549): negotiation precedes every admission on this socket; the
-      // gateway refuses legacy `message` frames once negotiated, and refuses
-      // turn ops before it. The epoch arrives with `turn_ready` below.
+      // Anonymous connections are supported when pairing is disabled, but S2
+      // requires an authenticated subject. Use the existing legacy contract
+      // only before this attachment has ever selected S2. Losing a token
+      // during reconnect must never downgrade the contract.
       this.turnEpoch = null;
-      this.sendRaw({ type: 'turn_control', version: 1, op: 'negotiate' });
+      this.protocol = this.turnControlRequired ? 'negotiating' : 'legacy';
+      if (this.protocol === 'negotiating') {
+        this.sendRaw({ type: 'turn_control', version: 1, op: 'negotiate' });
+      }
       this.onOpen?.();
     };
 
     this.ws.onmessage = (ev: MessageEvent) => {
       try {
         const msg = JSON.parse(ev.data) as WsMessage;
+        const negotiationRefused = msg.type === 'turn_error' && (msg.op === 'negotiate' || msg.op === undefined)
+          || msg.type === 'error' && ['BRIDGE_OPERATION_DENIED', 'AUTH_ERROR', 'UNKNOWN_MESSAGE_TYPE', 'AGENT_INIT_FAILED'].includes(msg.code ?? '');
+        if (this.protocol === 'negotiating' && negotiationRefused) {
+          this.protocol = 'failed';
+          const unsentRequestIds = this.queuedSends.splice(0).map((queued) => queued.requestId);
+          this.onNegotiationError?.(msg.code ?? 'UNKNOWN', unsentRequestIds);
+          return;
+        }
         // S2 (#549): `turn_ready` completes negotiation and flushes anything
         // queued while the socket was pre-negotiation.
-        if (msg.type === 'turn_ready' && typeof msg.epoch === 'string') {
+        if (this.protocol === 'negotiating' && msg.type === 'turn_ready' && typeof msg.epoch === 'string') {
           this.turnEpoch = msg.epoch;
-          this.negotiatedOnce = true;
-          const replayEvents = msg.limits?.replay_events;
-          if (typeof replayEvents === 'number' && replayEvents > 0) {
-            this.replayEventLimit = replayEvents;
-          }
+          this.protocol = 's2';
+          // Reconciliation needs to distinguish an unsent queued request from
+          // an admission whose outcome belongs to the previous process epoch.
+          this.onMessage?.(msg);
           while (this.turnEpoch === msg.epoch && this.queuedSends.length > 0) {
             const queued = this.queuedSends.shift()!;
             this.sendRaw({ ...queued.frame, epoch: msg.epoch });
           }
+          return;
         }
         this.onMessage?.(msg);
       } catch {
@@ -150,31 +163,45 @@ export class WebSocketClient {
     };
   }
 
-  /** Send a chat message as a negotiated S2 turn (#549). Returns the
+  /** Send through this attachment's established contract. Returns the
    * `request_id` the caller must correlate `turn_ack`/`turn_event` frames
    * against. Frames sent before `turn_ready` are queued and flushed with the
-   * negotiated epoch; they are never silently dropped. */
+   * negotiated epoch, unless cancelled locally or negotiation is refused. */
   sendTurnMessage(content: string, attachments?: string[]): string {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (!this.connected) {
       throw new Error('WebSocket is not connected');
     }
     const requestId = generateUUID();
     const frame: Record<string, unknown> = {
-      type: 'turn_control',
-      version: 1,
-      op: 'message',
       request_id: requestId,
       content,
     };
     if (attachments && attachments.length > 0) {
       frame.attachments = attachments;
     }
-    if (this.turnEpoch === null) {
-      this.queuedSends.push({ requestId, frame });
+    if (this.protocol === 'legacy') {
+      this.sendRaw({ type: 'message', ...frame });
     } else {
-      this.sendRaw({ ...frame, epoch: this.turnEpoch });
+      const turnFrame = { type: 'turn_control', version: 1, op: 'message', ...frame };
+      if (this.turnEpoch === null) {
+        this.queuedSends.push({ requestId, frame: turnFrame });
+      } else {
+        this.sendRaw({ ...turnFrame, epoch: this.turnEpoch });
+      }
     }
     return requestId;
+  }
+
+  /** Withdraw only a message that has never reached the wire. */
+  cancelQueuedMessage(requestId: string): boolean {
+    const index = this.queuedSends.findIndex((queued) => queued.requestId === requestId);
+    if (index < 0) return false;
+    this.queuedSends.splice(index, 1);
+    return true;
+  }
+
+  isMessageQueued(requestId: string): boolean {
+    return this.queuedSends.some((queued) => queued.requestId === requestId);
   }
 
   /** Cancel the observed turn (S2 scoped cancellation). The control MUST
@@ -216,17 +243,13 @@ export class WebSocketClient {
     return this.turnEpoch;
   }
 
-  /** True once ANY socket of this client completed S2 negotiation. Stop and
-   * model-switch use this (not `epoch`) to decide whether the legacy REST
-   * abort fallback is allowed: during a reconnect window the epoch is null
-   * but a session-level abort could still cancel a newer turn server-side. */
-  get hasNegotiated(): boolean {
-    return this.negotiatedOnce;
+  /** Replacements must preserve S2 even when this socket never reached ready. */
+  get requiresTurnControl(): boolean {
+    return this.turnControlRequired;
   }
 
-  /** Server replay-cache bound (events), or null before negotiation. */
-  get replayLimit(): number | null {
-    return this.replayEventLimit;
+  get isLegacy(): boolean {
+    return this.protocol === 'legacy';
   }
 
   /** Negotiation includes the same auth query params as the socket itself, so
@@ -252,15 +275,16 @@ export class WebSocketClient {
   disconnect(): void {
     this.intentionallyClosed = true;
     this.clearReconnectTimer();
+    this.queuedSends.length = 0;
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
   }
 
-  /** Returns true if the socket is open. */
+  /** Returns true if the open transport can accept new messages. */
   get connected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return this.ws?.readyState === WebSocket.OPEN && this.protocol !== 'failed';
   }
 
   // ---------------------------------------------------------------------------

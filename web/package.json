@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -b && vite build",
     "dev": "vite",
-    "test:chat": "jiti src/lib/ws.logic.test.ts",
+    "test:chat": "jiti src/lib/ws.logic.test.ts && jiti src/lib/turnSequencer.logic.test.ts && node scripts/chat-component.test.cjs",
     "test:review": "jiti src/lib/review.logic.test.ts",
     "test:monitor": "node scripts/monitor-component.test.cjs",
     "test:permissions": "jiti src/components/ToolPermissionGrid.logic.test.ts && jiti src/lib/toolCatalog.logic.test.ts"

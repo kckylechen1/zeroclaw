@@ -278,7 +278,7 @@ export interface WsMessage {
   // S2 turn-control transport fields (#549).
   /** Gateway process epoch; changes when the gateway restarts. */
   epoch?: string;
-  /** The failing operation on `turn_error` (message | cancel | resume). */
+  /** The failing operation on `turn_error` (negotiate | message | cancel | resume). */
   op?: string;
   /** Negotiated bounds on `turn_ready`: the server's replay-cache size. */
   limits?: {

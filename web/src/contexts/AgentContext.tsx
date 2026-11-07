@@ -7,6 +7,7 @@ import { getProp, putProp, listProps, getStatus, getSessionMessages, abortSessio
 import { primeModelProviderCatalog, modelProviderDisplayName } from '@/lib/modelProviders';
 import type { ToolCallInfo } from '@/components/ToolCallCard';
 import { resolveToolResultIndex } from '@/lib/toolCardMatch';
+import { TurnSequencer, type SequencedRelease } from '@/lib/turnSequencer';
 import {
   loadChatHistory,
   mapServerMessagesToPersisted,
@@ -42,31 +43,28 @@ export interface ChatMessage {
 
 /** S2 correlation state for the one in-flight request this surface tracks
  *  (#549). `turnId` binds after `turn_ack: accepted` (or the first event /
- *  replay, when the ACK was lost). Display dedup is by APPLIED sequence set:
- *  the live ring and a resume snapshot can interleave (live seq N+1 may
- *  arrive before the replay carrying N), so a max-watermark check would drop
- *  never-displayed events. `resumeSeq` is the contiguous watermark — resume
- *  asks for everything after it, so events displayed out of order still get
- *  replayed to their consumer rather than silently skipped. */
+ *  replay, when the ACK was lost). Sequenced events are applied STRICTLY in
+ *  seq order through `sequencer` (#563 review): the live ring and a resume
+ *  snapshot can interleave (live seq N+1 may arrive before the replay
+ *  carrying N), so N+1 is held until N is applied or declared unrecoverable.
+ *  `sequencer.resumeSeq` is the contiguous anchor resume asks after. */
 interface ActiveTurn {
   requestId: string;
   turnId: string | null;
-  /** Highest sequence observed (informational). */
-  lastSeq: number;
-  /** Highest sequence with all of 1..N applied — the resume anchor. */
-  resumeSeq: number;
-  appliedSeqs: Set<number>;
+  sequencer: TurnSequencer<WsMessage>;
+  /** The terminal marker was RECEIVED (it may still be buffered behind a
+   * hole); the outcome is known even before it is applied. */
   terminalSeen: boolean;
-  /** The terminal marker's own seq — it is re-delivered by replay even
-   * beyond the replay-cache bound, so it is exempt from pruning. */
-  terminalSeq: number | null;
-  /** A replay declared a server-side gap: missing middle events can never be
-   * filled, so a later live terminal must settle immediately. */
-  gapSeen: boolean;
-  /** Grace timer armed when a live terminal outruns the replay that may
-   * still fill the holes below it. */
-  terminalTimer: ReturnType<typeof setTimeout> | null;
+  /** Stop remains pending until the authoritative turn id can bind it. */
+  cancelRequested: boolean;
+  /** Grace timer armed while a hole holds events back. First expiry asks
+   * for a resume; the second declares the hole unrecoverable and flushes. */
+  holeTimer: ReturnType<typeof setTimeout> | null;
+  holeTimerStage: 0 | 1;
 }
+
+/** Grace for a hole to be filled by an in-flight / requested replay. */
+const HOLE_GRACE_MS = 3_000;
 
 interface AgentContextValue {
   messages: ChatMessage[];
@@ -266,8 +264,8 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   }, []);
 
   const finalizeActiveTurn = useCallback(() => {
-    if (activeTurnRef.current?.terminalTimer) {
-      clearTimeout(activeTurnRef.current.terminalTimer);
+    if (activeTurnRef.current?.holeTimer) {
+      clearTimeout(activeTurnRef.current.holeTimer);
     }
     activeTurnRef.current = null;
     setStopRequested(false);
@@ -298,6 +296,90 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   // `turn_event.event` payload is an ordinary display frame, so it recurses
   // through this same handler rather than a parallel display path.
   const handleWsMessage = useCallback(function handleWsMessage(msg: WsMessage) {
+    /** Apply ONE ordered `turn_event` wrapper (its seq is next in order). */
+    const applyTurnEvent = (active: ActiveTurn, wrapper: WsMessage) => {
+      const inner = wrapper.event;
+      if (!inner) return;
+      if (inner.type === 'turn_terminal') {
+        if (inner.outcome === 'aborted') {
+          // Mirror the legacy `aborted` cleanup; the server publishes the
+          // legacy frame too, but the marker can arrive as the sole witness
+          // on a replayed terminal.
+          pendingContentRef.current = '';
+          pendingThinkingRef.current = '';
+          capturedThinkingRef.current = '';
+          setStreamingContent('');
+          setStreamingThinking('');
+          setPendingApproval(null);
+        }
+        releaseTerminalWaiter(wrapper.turn_id ?? active.turnId ?? '');
+        // Ordered delivery guarantees every lower seq was applied (or
+        // declared lost) before the terminal: settling now drops nothing.
+        finalizeActiveTurn();
+        return;
+      }
+      handleWsMessage(inner);
+    };
+
+    /** Apply a sequencer release in order, then re-evaluate the hole timer. */
+    const applyRelease = (active: ActiveTurn, release: SequencedRelease<WsMessage>) => {
+      if (release.skipped.length > 0) {
+        addNotice(t('agent.replay_gap'));
+      }
+      for (const { event } of release.ready) {
+        if (activeTurnRef.current !== active) return; // settled mid-release
+        applyTurnEvent(active, event);
+      }
+      if (activeTurnRef.current !== active) return;
+      if (!active.sequencer.hasHole) {
+        if (active.holeTimer) clearTimeout(active.holeTimer);
+        active.holeTimer = null;
+        active.holeTimerStage = 0;
+        return;
+      }
+      if (active.holeTimer) return;
+      const arm = () => {
+        active.holeTimer = setTimeout(() => {
+          active.holeTimer = null;
+          if (activeTurnRef.current !== active || !active.sequencer.hasHole) return;
+          if (active.holeTimerStage === 0) {
+            // First expiry: the replay that fills the hole may never have
+            // been requested (e.g. a silently dropped live frame) — ask.
+            active.holeTimerStage = 1;
+            wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
+            arm();
+            return;
+          }
+          // Second expiry: declare the hole unrecoverable, apply the rest
+          // in order (a buffered terminal settles the turn).
+          active.holeTimerStage = 0;
+          applyRelease(active, active.sequencer.flush());
+        }, HOLE_GRACE_MS);
+      };
+      arm();
+    };
+
+    /** Route one sequenced `turn_event` wrapper (live or replayed). */
+    const offerTurnEvent = (active: ActiveTurn, wrapper: WsMessage) => {
+      if (wrapper.event?.type === 'turn_terminal') {
+        active.terminalSeen = true;
+      }
+      if (typeof wrapper.seq !== 'number') {
+        // Unsequenced (legacy) frame: no ordering contract to honour.
+        applyTurnEvent(active, wrapper);
+        return;
+      }
+      applyRelease(active, active.sequencer.offer(wrapper.seq, wrapper));
+    };
+
+    const bindTurn = (active: ActiveTurn, turnId: string | null | undefined) => {
+      if (active.turnId !== null || typeof turnId !== 'string') return;
+      active.turnId = turnId;
+      if (active.cancelRequested) {
+        wsRef.current?.cancelTurn(active.requestId, turnId);
+      }
+    };
+
     switch (msg.type) {
       case 'session_start':
       case 'connected':
@@ -320,8 +402,14 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         const previous = lastEpochRef.current;
         lastEpochRef.current = epoch;
         const active = activeTurnRef.current;
+        // The transport calls us before flushing unsent messages. A request
+        // queued on this attachment has no outcome in the previous epoch.
+        if (active && wsRef.current?.isMessageQueued(active.requestId)) break;
         if (epoch && previous === epoch && active) {
-          wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
+          if (active.cancelRequested && active.turnId) {
+            wsRef.current?.cancelTurn(active.requestId, active.turnId);
+          }
+          wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
         } else if (epoch && previous && previous !== epoch && active) {
           if (!active.terminalSeen) {
             addNotice(t('agent.turn_outcome_unknown'));
@@ -336,12 +424,13 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         if (!active || msg.request_id !== active.requestId) break;
         switch (msg.status) {
           case 'accepted':
-            active.turnId = msg.turn_id ?? null;
+            bindTurn(active, msg.turn_id);
             break;
           case 'duplicate':
             // The request already ran (or is running) under this identity;
             // reconcile by replaying everything past our applied sequence.
-            wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
+            bindTurn(active, msg.turn_id);
+            wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
             break;
           case 'conflict':
             addNotice(t('agent.turn_conflict'));
@@ -363,104 +452,47 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       case 'turn_event': {
         const active = activeTurnRef.current;
         if (!active || msg.request_id !== active.requestId) break;
-        const inner = msg.event;
         // Late-ACK recovery: events and replays carry the authoritative turn
         // identity even when the accepted ACK was never observed.
-        if (active.turnId === null && typeof msg.turn_id === 'string') {
-          active.turnId = msg.turn_id;
-        }
-        // Record the terminal's own seq BEFORE any pruning in this handler:
-        // the marker is re-delivered by replay even beyond the replay-cache
-        // bound, so it must survive the dedup-set trim (round-5 review P3).
-        if (inner?.type === 'turn_terminal' && typeof msg.seq === 'number') {
-          active.terminalSeq = msg.seq;
-        }
-        // Dedup by applied sequence, not a watermark: the live ring can
-        // deliver seq N+1 before the replay carrying N, and both must display.
-        if (typeof msg.seq === 'number') {
-          if (active.appliedSeqs.has(msg.seq)) break;
-          active.appliedSeqs.add(msg.seq);
-          active.lastSeq = Math.max(active.lastSeq, msg.seq);
-          while (active.appliedSeqs.has(active.resumeSeq + 1)) {
-            active.resumeSeq += 1;
-          }
-          // Bounded by the re-deliverable domain: the server replays only its
-          // cached prefix (first `replay_events` events — not a rolling
-          // window) plus the terminal marker, so sequence numbers beyond that
-          // bound can only ever arrive live-once and need no dedup entry.
-          const replayLimit = wsRef.current?.replayLimit ?? 128;
-          if (active.appliedSeqs.size > replayLimit + 32) {
-            for (const seq of active.appliedSeqs) {
-              if (seq > replayLimit && seq !== active.terminalSeq) {
-                active.appliedSeqs.delete(seq);
-              }
-            }
-          }
-        }
-        if (!inner) break;
-        if (inner.type === 'turn_terminal') {
-          active.terminalSeen = true;
-          if (inner.outcome === 'aborted') {
-            // Mirror the legacy `aborted` cleanup; the server publishes the
-            // legacy frame too, but the marker can arrive as the sole witness
-            // on a replayed terminal.
-            pendingContentRef.current = '';
-            pendingThinkingRef.current = '';
-            capturedThinkingRef.current = '';
-            setStreamingContent('');
-            setStreamingThinking('');
-            setPendingApproval(null);
-          }
-          releaseTerminalWaiter(msg.turn_id ?? '');
-          // A live terminal can outrun the replay that fills the holes below
-          // it (live seq 11 before replay 6-11). Settling now would drop the
-          // never-displayed middle forever — but holes do NOT prove a replay
-          // is still in flight (a server-side gap already declared the middle
-          // lost). Hold only when the middle is still fillable, with a
-          // bounded grace; the replay (or the timer) settles the turn.
-          const holesBelowTerminal =
-            typeof msg.seq === 'number' && active.resumeSeq < msg.seq - 1;
-          if (holesBelowTerminal && !active.gapSeen) {
-            const requestId = active.requestId;
-            active.terminalTimer = setTimeout(() => {
-              const current = activeTurnRef.current;
-              if (current?.requestId === requestId) {
-                addNotice(t('agent.replay_gap'));
-                finalizeActiveTurn();
-              }
-            }, 3_000);
-          } else {
-            if (holesBelowTerminal && active.gapSeen) {
-              addNotice(t('agent.replay_gap'));
-            }
-            finalizeActiveTurn();
-          }
-          break;
-        }
-        handleWsMessage(inner);
+        bindTurn(active, msg.turn_id);
+        offerTurnEvent(active, msg);
         break;
       }
 
       case 'turn_replay': {
         const active = activeTurnRef.current;
         if (!active || msg.request_id !== active.requestId) break;
-        if (active.turnId === null && typeof msg.turn_id === 'string') {
-          active.turnId = msg.turn_id;
-        }
+        bindTurn(active, msg.turn_id);
         if (msg.gap) {
-          active.gapSeen = true;
           addNotice(t('agent.replay_gap'));
         }
         for (const event of msg.events ?? []) {
-          handleWsMessage(event);
+          if (activeTurnRef.current !== active) break;
+          if (event.type === 'turn_event') {
+            offerTurnEvent(active, event);
+          } else {
+            handleWsMessage(event);
+          }
         }
-        if (msg.terminal === true || active.terminalSeen) {
-          // Either the replay itself says the request finished, or its
-          // terminal marker already arrived live and was held open for
-          // exactly this replay (or its grace timer is pending — the first
-          // path to reach here wins; finalize clears the timer).
-          releaseTerminalWaiter(active.turnId ?? '');
-          finalizeActiveTurn();
+        if (activeTurnRef.current !== active) break;
+        // Only after feeding the entire batch can missing events be declared
+        // lost. A gap in this snapshot says nothing about later live holes.
+        // The replay carried everything the server still holds after our
+        // anchor: any seq <= last_seq it did not carry is unrecoverable, so
+        // skip those holes and release what is buffered above them in order.
+        if (typeof msg.last_seq === 'number') {
+          const release = active.sequencer.settleThrough(msg.last_seq);
+          // The gap notice was already shown for a declared gap.
+          applyRelease(active, msg.gap ? { ...release, skipped: [] } : release);
+        }
+        if (activeTurnRef.current === active && msg.terminal === true) {
+          // Defensive: the replay says the request finished but its marker
+          // was not (re)delivered past our anchor — settle anyway.
+          applyRelease(active, active.sequencer.flush());
+          if (activeTurnRef.current === active) {
+            releaseTerminalWaiter(active.turnId ?? '');
+            finalizeActiveTurn();
+          }
         }
         break;
       }
@@ -469,7 +501,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         // Correlate to the observed turn: a late ack for an old turn must not
         // rewrite the current turn's Stop state.
         const active = activeTurnRef.current;
-        if (active && typeof msg.turn_id === 'string' && msg.turn_id !== active.turnId) {
+        if (!active || msg.request_id !== active.requestId || msg.turn_id !== active.turnId) {
           break;
         }
         if (msg.status === 'requested') {
@@ -512,7 +544,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         const active = activeTurnRef.current;
         addNotice(t('agent.replay_gap'));
         if (active) {
-          wsRef.current?.resumeTurn(active.requestId, active.resumeSeq);
+          wsRef.current?.resumeTurn(active.requestId, active.sequencer.resumeSeq);
         }
         break;
       }
@@ -803,11 +835,22 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       }
     };
 
+    ws.onNegotiationError = (code, unsentRequestIds) => {
+      if (version !== wsVersionRef.current) return;
+      const active = activeTurnRef.current;
+      if (active && !unsentRequestIds.includes(active.requestId) && !active.terminalSeen) {
+        addNotice(t('agent.turn_outcome_unknown'));
+      }
+      finalizeActiveTurn();
+      setConnected(false);
+      setError(t('agent.turn_refused').replace('{code}', code));
+    };
+
     ws.onMessage = (msg: WsMessage) => {
       if (version !== wsVersionRef.current) return;
       handleWsMessage(msg);
     };
-  }, [handleWsMessage]);
+  }, [handleWsMessage, addNotice, finalizeActiveTurn]);
 
   // WebSocket bound to the configured agent. Re-keys (via the outer
   // <AgentProvider key={alias}>) when the alias changes.
@@ -895,16 +938,14 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       // S2 (#549): admission carries a client-minted request_id; every later
       // turn frame for this bubble correlates against it.
       const requestId = wsRef.current.sendTurnMessage(content, attachments);
-      activeTurnRef.current = {
+      activeTurnRef.current = wsRef.current.isLegacy ? null : {
         requestId,
         turnId: null,
-        lastSeq: 0,
-        resumeSeq: 0,
-        appliedSeqs: new Set(),
+        sequencer: new TurnSequencer<WsMessage>(),
         terminalSeen: false,
-        terminalSeq: null,
-        gapSeen: false,
-        terminalTimer: null,
+        cancelRequested: false,
+        holeTimer: null,
+        holeTimerStage: 0,
       };
       setStopRequested(false);
       setTyping(true);
@@ -976,25 +1017,30 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       // turn so a late/duplicate control can never reach a newer turn. On a
       // negotiated socket there is no REST fallback (a session-level abort
       // cancels whatever turn is current server-side); the legacy fallback
-      // only exists for a socket that never negotiated.
+      // only exists for an explicitly legacy attachment.
       if (typing) {
         try {
-          const negotiated = wsRef.current?.hasNegotiated ?? false;
-          if (negotiated && switchTarget?.turnId) {
-            wsRef.current?.cancelTurn(switchTarget.requestId, switchTarget.turnId);
-            await Promise.race([
-              waitForTerminal(switchTarget.turnId, 1_500),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('abort-timeout')), 1_500),
-              ),
-            ]);
-          } else if (!negotiated) {
+          const ws = wsRef.current;
+          if (switchTarget && ws?.cancelQueuedMessage(switchTarget.requestId)) {
+            if (activeTurnRef.current === switchTarget) finalizeActiveTurn();
+          } else if (ws?.isLegacy) {
             await Promise.race([
               abortSession(sessionIdRef.current),
               new Promise((_, reject) =>
                 setTimeout(() => reject(new Error('abort-timeout')), 1_500),
               ),
             ]);
+          } else if (switchTarget) {
+            switchTarget.cancelRequested = true;
+            if (switchTarget.turnId) {
+              ws?.cancelTurn(switchTarget.requestId, switchTarget.turnId);
+              await Promise.race([
+                waitForTerminal(switchTarget.turnId, 1_500),
+                new Promise((_, reject) =>
+                  setTimeout(() => reject(new Error('abort-timeout')), 1_500),
+                ),
+              ]);
+            }
           }
         } catch {
           // Best-effort: if cancel fails or times out we still proceed with the
@@ -1030,10 +1076,11 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         oldWs.onClose = null;
         oldWs.onError = null;
         oldWs.onMessage = null;
+        oldWs.onNegotiationError = null;
         oldWs.disconnect();
       }
 
-      const ws = new WebSocketClient({ agentAlias });
+      const ws = new WebSocketClient({ agentAlias, requireTurnControl: oldWs?.requiresTurnControl });
       // Point wsRef at the NEW client before connect(), so a synchronous
       // connect() throw (e.g. an invalid WebSocket URL/protocol token) still
       // leaves a live, reconnect-capable socket in the ref instead of the old
@@ -1056,7 +1103,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setModelLoading(false);
       setError(err instanceof Error ? err.message : t('agent.failed_switch_model'));
     }
-  }, [attachSocketCallbacks, modelLoading, typing, agentAlias, waitForTerminal]);
+  }, [attachSocketCallbacks, modelLoading, typing, agentAlias, waitForTerminal, finalizeActiveTurn]);
 
   const deleteMessage = useCallback((id: string) => {
     localMessageMutationVersionRef.current += 1;
@@ -1109,9 +1156,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         oldWs.onClose = null;
         oldWs.onError = null;
         oldWs.onMessage = null;
+        oldWs.onNegotiationError = null;
         oldWs.disconnect();
 
-        const ws = new WebSocketClient({ agentAlias });
+        const ws = new WebSocketClient({ agentAlias, requireTurnControl: oldWs.requiresTurnControl });
         // Assign wsRef before connect() so a synchronous throw can't strand the
         // page on the old intentionally-closed socket (see switchModel).
         wsRef.current = ws;
@@ -1172,14 +1220,18 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setPendingApproval(null);
       // S2 (#549): scoped cancellation of the observed turn; "requested" is
       // shown until the terminal marker confirms aborted. Once ANY socket of
-      // this client has negotiated S2 there is deliberately NO fallback —
+      // this client has selected S2 there is deliberately NO fallback —
       // including during a reconnect window (epoch is null there, but a
       // session-level REST abort cancels whatever turn is current server-side
-      // and could kill a newer turn). Without an observed turn id there is
-      // nothing scoped to stop; the identity binds on the first event/ack.
+      // and could kill a newer turn). A sent request without a turn id keeps
+      // its cancellation intent until an ACK/event binds the scoped target.
       const active = activeTurnRef.current;
       const ws = wsRef.current;
-      if (!ws?.hasNegotiated) {
+      if (active && ws?.cancelQueuedMessage(active.requestId)) {
+        finalizeActiveTurn();
+        return;
+      }
+      if (ws?.isLegacy) {
         try {
           await abortSession(sessionIdRef.current);
         } catch {
@@ -1187,8 +1239,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         }
         return;
       }
-      if (active?.turnId) {
-        ws.cancelTurn(active.requestId, active.turnId);
+      if (active) {
+        active.cancelRequested = true;
+        setStopRequested(true);
+        if (active.turnId) ws?.cancelTurn(active.requestId, active.turnId);
       }
     },
     stopRequested,
