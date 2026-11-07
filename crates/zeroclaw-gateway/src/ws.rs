@@ -818,29 +818,6 @@ async fn build_ws_session(
         )
         .await?;
     agent.add_prompt_section(Box::new(surface::Section));
-    // Durable task-list projection (#567): same owner resolution as the
-    // registered tool (mint-once identity); read failures render
-    // `unavailable`, never an empty list.
-    {
-        let tasks_config = state.config.read().clone();
-        let tasks_agent = agent_alias.to_string();
-        agent.add_prompt_section(Box::new(zeroclaw_runtime::tools::TaskListSection {
-            resolve: std::sync::Arc::new(move || {
-                let store_dir = tasks_config
-                    .companion_memory
-                    .resolved_store_dir(&tasks_config.data_dir);
-                let identity = zeroclaw_memory::companion::resolve_or_mint_agent_identity(
-                    &store_dir,
-                    &tasks_agent,
-                )
-                .map_err(|error| format!("agent identity unavailable: {error}"))?;
-                if tasks_config.channels.session_backend != "sqlite" {
-                    return Err("task list unavailable".to_string());
-                }
-                Ok((identity.as_str().to_string(), tasks_config.data_dir.clone()))
-            }),
-        }));
-    }
     // Keep ONE ingress identity for the WebSocket turn: the turn span records
     // `channel = "wss"`, and observer events derive from `Agent.channel_name`,
     // so this must stay `wss` or a single turn is split across two names.
@@ -1545,49 +1522,6 @@ fn start_ws_turns(
 /// Run a claimed turn to completion, then any messages that arrived as
 /// steering too late for it to read, as one follow-up turn.
 async fn run_ws_turns(
-    state: AppState,
-    conversation: Arc<Conversation<WsSession>>,
-    scope: WsTurnScope,
-    claim: TurnClaim,
-) {
-    // Per-request durable-task refresh scope (#567): each model request in
-    // this turn re-renders the `## Tasks` region from the committed store,
-    // so another session's update is visible mid-turn.
-    let tasks_state = state.clone();
-    let tasks_alias = conversation
-        .key()
-        .rsplit_once('\u{1f}')
-        .map_or(String::new(), |(_, alias)| alias.to_string());
-    let render: std::sync::Arc<dyn Fn() -> String + Send + Sync> = std::sync::Arc::new(move || {
-        let config = tasks_state.config.read().clone();
-        // Same gate as the initial section attach: a non-SQLite session
-        // backend must render unavailable, never open a stale SQLite list.
-        if config.channels.session_backend != "sqlite" {
-            return "## Tasks\n\nTask list unavailable.".to_string();
-        }
-        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
-        match zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, &tasks_alias) {
-            Ok(identity) => {
-                let section = zeroclaw_runtime::tools::TaskListSection {
-                    resolve: std::sync::Arc::new(move || {
-                        Ok((identity.as_str().to_string(), config.data_dir.clone()))
-                    }),
-                };
-                use zeroclaw_runtime::agent::prompt::PromptSection;
-                section
-                    .build(&zeroclaw_runtime::agent::prompt::PromptContext::placeholder())
-                    .unwrap_or_else(|_| "## Tasks\n\nTask list unavailable.".to_string())
-            }
-            Err(_) => "## Tasks\n\nTask list unavailable.".to_string(),
-        }
-    });
-    zeroclaw_runtime::tools::task_section::with_tasks_refresh_scope(render, async move {
-        run_ws_turns_inner(state, conversation, scope, claim).await
-    })
-    .await
-}
-
-async fn run_ws_turns_inner(
     state: AppState,
     conversation: Arc<Conversation<WsSession>>,
     mut scope: WsTurnScope,
@@ -3300,32 +3234,6 @@ mod tests {
                         }
                         let mut agent = builder.build()?;
                         agent.add_prompt_section(Box::new(surface::Section));
-    // Durable task-list projection (#567) — test-harness attachment: this
-    // site builds agents without AppState, so resolve against the harness
-    // temp dir's default config (production attaches at the main build site).
-    {
-        let tasks_config = zeroclaw_config::schema::Config {
-            data_dir: workspace.clone(),
-            ..zeroclaw_config::schema::Config::default()
-        };
-        let tasks_agent = "web".to_string();
-        agent.add_prompt_section(Box::new(zeroclaw_runtime::tools::TaskListSection {
-            resolve: std::sync::Arc::new(move || {
-                let store_dir = tasks_config
-                    .companion_memory
-                    .resolved_store_dir(&tasks_config.data_dir);
-                let identity = zeroclaw_memory::companion::resolve_or_mint_agent_identity(
-                    &store_dir,
-                    &tasks_agent,
-                )
-                .map_err(|error| format!("agent identity unavailable: {error}"))?;
-                if tasks_config.channels.session_backend != "sqlite" {
-                    return Err("task list unavailable".to_string());
-                }
-                Ok((identity.as_str().to_string(), tasks_config.data_dir.clone()))
-            }),
-        }));
-    }
                         Ok::<_, anyhow::Error>((
                             WsSession {
                                 agent,

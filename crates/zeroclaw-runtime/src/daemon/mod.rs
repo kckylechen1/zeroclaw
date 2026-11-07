@@ -5,6 +5,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use zeroclaw_config::schema::Config;
 
+use crate::tools::task_context::TaskIdentity;
+
 mod registry;
 pub use registry::{DaemonRegistry, GatewayReloadControls};
 
@@ -225,6 +227,10 @@ pub async fn run(
         config.gateway.port = port;
     }
 
+    // Every component retry belongs to this daemon configuration generation.
+    // Capture before any await so a failed worker cannot bind a reused alias.
+    let task_identities = TaskIdentity::capture_all(&config);
+
     let initial_backoff = config.reliability.channel_initial_backoff_secs.max(1);
     let max_backoff = config
         .reliability
@@ -313,6 +319,7 @@ pub async fn run(
             let channels_cfg = config.clone();
             let channels_start = std::sync::Arc::new(channels_start);
             let cancel_for_supervisor = channels_cancel.clone();
+            let channel_task_identities = task_identities.clone();
             handles.push(spawn_component_supervisor(
                 "channels",
                 initial_backoff,
@@ -322,7 +329,8 @@ pub async fn run(
                     let cfg = channels_cfg.clone();
                     let start = channels_start.clone();
                     let cancel = cancel_for_supervisor.clone();
-                    async move { start(cfg, cancel).await }
+                    let task_identities = channel_task_identities.clone();
+                    async move { start(cfg, cancel, task_identities).await }
                 },
             ));
         } else {
@@ -344,6 +352,7 @@ pub async fn run(
 
     if config.heartbeat.enabled {
         let heartbeat_cfg = config.clone();
+        let heartbeat_task_identities = task_identities.clone();
         handles.push(spawn_component_supervisor(
             "heartbeat",
             initial_backoff,
@@ -351,7 +360,8 @@ pub async fn run(
             channels_cancel.clone(),
             move || {
                 let cfg = heartbeat_cfg.clone();
-                async move { Box::pin(run_heartbeat_worker(cfg)).await }
+                let task_identities = heartbeat_task_identities.clone();
+                async move { Box::pin(run_heartbeat_worker(cfg, task_identities)).await }
             },
         ));
     }
@@ -360,6 +370,7 @@ pub async fn run(
         let scheduler_cfg = config.clone();
         let scheduler_event_tx = event_tx.clone();
         let scheduler_cancel = channels_cancel.clone();
+        let scheduler_task_identities = task_identities;
         handles.push(spawn_component_supervisor(
             "scheduler",
             initial_backoff,
@@ -369,7 +380,16 @@ pub async fn run(
                 let cfg = scheduler_cfg.clone();
                 let tx = scheduler_event_tx.clone();
                 let cancel = scheduler_cancel.clone();
-                async move { Box::pin(crate::cron::scheduler::run(cfg, Some(tx), cancel)).await }
+                let task_identities = scheduler_task_identities.clone();
+                async move {
+                    Box::pin(crate::cron::scheduler::run(
+                        cfg,
+                        Some(tx),
+                        cancel,
+                        task_identities,
+                    ))
+                    .await
+                }
             },
         ));
     } else {
@@ -1056,13 +1076,14 @@ async fn retry_heartbeat_mcp_registry(
     Ok(())
 }
 
-async fn run_heartbeat_worker(config: Config) -> Result<()> {
+async fn run_heartbeat_worker(config: Config, task_identities: TaskIdentity) -> Result<()> {
     use crate::heartbeat::engine::{
         HeartbeatEngine, HeartbeatTask, TaskPriority, TaskStatus, compute_adaptive_interval,
     };
     use std::sync::Arc;
 
     let (agent_alias, heartbeat_workspace_dir) = resolve_heartbeat_workspace_dir(&config)?;
+    let task_identity = task_identities.for_alias(&agent_alias);
 
     // Build the daemon-level MCP registry ONCE per worker. With this
     // owner in place, every `agent::run` tick below reuses the same
@@ -1216,6 +1237,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 None,
                 zeroclaw_api::ingress::TurnOrigin::Daemon,
                 crate::agent::loop_::AgentRunOverrides {
+                    task_identity: Some(task_identity.clone()),
                     mcp_registry: shared_mcp_registry.as_ref().map(Arc::clone),
                     ..crate::agent::loop_::AgentRunOverrides::default()
                 },
@@ -1336,6 +1358,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 None,
                 zeroclaw_api::ingress::TurnOrigin::Daemon,
                 crate::agent::loop_::AgentRunOverrides {
+                    task_identity: Some(task_identity.clone()),
                     mcp_registry: shared_mcp_registry.as_ref().map(Arc::clone),
                     ..crate::agent::loop_::AgentRunOverrides::default()
                 },

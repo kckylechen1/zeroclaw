@@ -958,7 +958,7 @@ async fn process_channel_message_body(
                             context_token_budget: ctx.context_token_budget,
                             knobs: &loop_knobs,
                         },
-                    ),
+                    ).with_task_owner(ctx.task_owner.as_ref()),
                     // Reborrow, not move: the model-switch loop may take
                     // another lap with the same vector.
                     history: &mut history,

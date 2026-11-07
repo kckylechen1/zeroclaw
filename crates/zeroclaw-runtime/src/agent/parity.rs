@@ -242,6 +242,7 @@ fn a4_policy() -> Arc<SecurityPolicy> {
 /// `scoped::tests::built_with` uses to drive `assemble()` in isolation.
 fn built_with(tools: Vec<Box<dyn Tool>>) -> AllToolsResult {
     AllToolsResult {
+        task_owner: None,
         tools,
         ask_user_handle: None,
         reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),

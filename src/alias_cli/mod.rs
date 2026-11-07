@@ -359,29 +359,46 @@ pub async fn handle_agents(cmd: AgentsCommands, config: &mut Config) -> Result<(
     match cmd {
         AgentsCommands::List => list_section(config, "agents"),
         AgentsCommands::Create { alias } => {
-            let created = create_entry(config, "agents", &alias)?;
-            save(config).await?;
-            // Same lifecycle rule as the HTTP create paths (#567): a
-            // persisted NEW agent drops any stale preserved-rename identity
-            // mapping so it mints fresh instead of inheriting the old
-            // identity's durable task list. A duplicate create is a no-op on
-            // the existing agent's identity — `created` is false there.
+            // A refused create must not leave an in-memory alias that would
+            // make its retry skip the new-agent identity invalidation.
+            let mut working = config.clone();
+            let created = create_entry(&mut working, "agents", &alias)?;
+            // Same fail-closed lifecycle rule as the HTTP create paths
+            // (#567/#569): a NEW agent drops any stale preserved-rename
+            // identity mapping BEFORE the config is saved, so a failure
+            // aborts the create with nothing persisted instead of leaving a
+            // saved agent bound to the old identity's durable task list. A
+            // duplicate create is a no-op on the existing agent's identity —
+            // `created` is false there.
             if created {
-                let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+                let store_dir = working
+                    .companion_memory
+                    .resolved_store_dir(&working.data_dir);
                 zeroclaw_memory::companion::invalidate_alias_identity(&store_dir, &alias)
-                    .context("failed to clear a stale companion identity mapping")?;
+                    .context("agent not created: failed to clear a stale companion identity mapping (repair or remove the companion identity file and retry)")?;
             }
+            save(&mut working).await?;
+            *config = working;
             Ok(())
         }
         AgentsCommands::Rename { from, to } => {
+            let mut working = config.clone();
             // Capture the workspace path while the `from` entry still exists
             // (custom paths are read off the entry, which the rename moves).
-            let old_ws = config.agent_workspace_dir(&from);
-            rename_config(config, &AliasKind::Agent, &from, &to)?;
+            let old_ws = working.agent_workspace_dir(&from);
+            rename_config(&mut working, &AliasKind::Agent, &from, &to)?;
+            // Validate the config rename first, then bind identity before any
+            // config commit. Failure leaves both disk and caller's live config
+            // under the source alias, ready for a safe retry.
+            let store_dir = working
+                .companion_memory
+                .resolved_store_dir(&working.data_dir);
+            zeroclaw_memory::companion::rename_alias_identity(&store_dir, &from, &to)?;
             // Persist the config rename before the irreversible owned-state side
             // effects (workspace move + DB re-point), so a later failure can't
             // leave the config and owned state split.
-            save(config).await?;
+            save(&mut working).await?;
+            *config = working;
             agent_rename_owned_state(config, &from, &to, &old_ws).await
         }
         AgentsCommands::Delete {
@@ -798,6 +815,158 @@ pub async fn handle_channels(cmd: ChannelsCommands, config: &mut Config) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroclaw_config::schema::AliasedAgentConfig;
+
+    fn agent_test_config(tmp: &tempfile::TempDir) -> Config {
+        let mut config = Config {
+            config_path: tmp.path().join("config.toml"),
+            data_dir: tmp.path().join("data"),
+            ..Default::default()
+        };
+        config.memory.backend = "none".into();
+        config.gateway.session_persistence = false;
+        config
+    }
+
+    #[tokio::test]
+    async fn agent_create_failure_retry_and_duplicate_preserve_identity_isolation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = agent_test_config(&tmp);
+        Box::pin(config.save()).await.unwrap();
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        let retired =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "a").unwrap();
+        zeroclaw_memory::companion::rename_alias_identity(&store_dir, "a", "b").unwrap();
+        let identity_path =
+            store_dir.join(zeroclaw_config::companion::COMPANION_AGENT_IDENTITY_FILE);
+        let identities_before = std::fs::read(&identity_path).unwrap();
+        let config_before = std::fs::read(&config.config_path).unwrap();
+        let blocker = identity_path.with_extension("json.tmp");
+        std::fs::create_dir(&blocker).unwrap();
+
+        assert!(
+            Box::pin(handle_agents(
+                AgentsCommands::Create { alias: "a".into() },
+                &mut config
+            ))
+            .await
+            .is_err()
+        );
+        assert!(!config.agents.contains_key("a"));
+        assert_eq!(std::fs::read(&config.config_path).unwrap(), config_before);
+        assert_eq!(std::fs::read(&identity_path).unwrap(), identities_before);
+
+        std::fs::remove_dir(blocker).unwrap();
+        Box::pin(handle_agents(
+            AgentsCommands::Create { alias: "a".into() },
+            &mut config,
+        ))
+        .await
+        .unwrap();
+        let fresh =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "a").unwrap();
+        assert_ne!(fresh, retired);
+        Box::pin(handle_agents(
+            AgentsCommands::Create { alias: "a".into() },
+            &mut config,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "a"),
+            Some(fresh)
+        );
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "b"),
+            Some(retired)
+        );
+        let disk: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config.config_path).unwrap()).unwrap();
+        assert!(disk["agents"].get("a").is_some());
+    }
+
+    #[tokio::test]
+    async fn agent_rename_refuses_invalid_or_unwritable_identity_then_retries_safely() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = agent_test_config(&tmp);
+        for alias in ["b", "c", "occupied"] {
+            config
+                .agents
+                .insert(alias.into(), AliasedAgentConfig::default());
+        }
+        Box::pin(config.save()).await.unwrap();
+        let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
+        let retired =
+            zeroclaw_memory::companion::resolve_or_mint_agent_identity(&store_dir, "a").unwrap();
+        zeroclaw_memory::companion::rename_alias_identity(&store_dir, "a", "b").unwrap();
+        let identity_path =
+            store_dir.join(zeroclaw_config::companion::COMPANION_AGENT_IDENTITY_FILE);
+        let identities_before = std::fs::read(&identity_path).unwrap();
+        let config_before = std::fs::read(&config.config_path).unwrap();
+
+        for target in ["occupied", "BadName", "default", "c"] {
+            assert!(
+                Box::pin(handle_agents(
+                    AgentsCommands::Rename {
+                        from: "c".into(),
+                        to: target.into(),
+                    },
+                    &mut config,
+                ))
+                .await
+                .is_err(),
+                "{target}"
+            );
+            assert!(config.agents.contains_key("c"));
+            assert_eq!(std::fs::read(&identity_path).unwrap(), identities_before);
+            assert_eq!(std::fs::read(&config.config_path).unwrap(), config_before);
+        }
+
+        let blocker = identity_path.with_extension("json.tmp");
+        std::fs::create_dir(&blocker).unwrap();
+        assert!(
+            Box::pin(handle_agents(
+                AgentsCommands::Rename {
+                    from: "c".into(),
+                    to: "a".into(),
+                },
+                &mut config,
+            ))
+            .await
+            .is_err()
+        );
+        assert!(config.agents.contains_key("c"));
+        assert!(!config.agents.contains_key("a"));
+        assert_eq!(std::fs::read(&config.config_path).unwrap(), config_before);
+        assert_eq!(std::fs::read(&identity_path).unwrap(), identities_before);
+
+        std::fs::remove_dir(blocker).unwrap();
+        Box::pin(handle_agents(
+            AgentsCommands::Rename {
+                from: "c".into(),
+                to: "a".into(),
+            },
+            &mut config,
+        ))
+        .await
+        .unwrap();
+        let fresh = zeroclaw_memory::companion::peek_agent_identity(&store_dir, "a").unwrap();
+        assert_ne!(fresh, retired);
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "c"),
+            Some(fresh)
+        );
+        assert_eq!(
+            zeroclaw_memory::companion::peek_agent_identity(&store_dir, "b"),
+            Some(retired)
+        );
+        assert!(config.agents.contains_key("a"));
+        assert!(!config.agents.contains_key("c"));
+        let disk: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config.config_path).unwrap()).unwrap();
+        assert!(disk["agents"].get("a").is_some());
+        assert!(disk["agents"].get("c").is_none());
+    }
 
     #[test]
     fn parse_provider_category_maps_known_and_rejects_unknown() {

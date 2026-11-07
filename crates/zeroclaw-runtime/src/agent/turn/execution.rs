@@ -60,6 +60,8 @@ impl ResolvedModelAccess<'_> {
 }
 
 pub struct ResolvedAgentExecution<'a> {
+    /// Same pinned owner as the task tool in this execution's registry.
+    pub task_owner: Option<&'a crate::tools::task_list::TaskOwnerResolver>,
     /// Provider + model + temperature.
     pub model_access: ResolvedModelAccess<'a>,
     /// The tools available this turn (gated per the agent's policy upstream).
@@ -146,6 +148,7 @@ impl<'a> ResolvedAgentExecution<'a> {
         runtime: ResolvedRuntimeKnobs<'a>,
     ) -> Self {
         Self {
+            task_owner: None,
             model_access,
             tools_registry: io.tools_registry,
             observer: io.observer,
@@ -167,6 +170,14 @@ impl<'a> ResolvedAgentExecution<'a> {
             receipt_generator: io.receipt_generator,
             knobs: runtime.knobs,
         }
+    }
+
+    pub fn with_task_owner(
+        mut self,
+        owner: Option<&'a crate::tools::task_list::TaskOwnerResolver>,
+    ) -> Self {
+        self.task_owner = owner;
+        self
     }
 }
 

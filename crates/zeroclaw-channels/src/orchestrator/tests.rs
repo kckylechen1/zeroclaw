@@ -453,6 +453,7 @@ fn router_test_ctx() -> Arc<ChannelRuntimeContext> {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     })
 }
 
@@ -1062,6 +1063,7 @@ fn channel_runtime_context_for_defaults_test(
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     }
 }
 
@@ -1523,6 +1525,7 @@ fn compact_sender_history_keeps_recent_truncated_messages() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     };
 
     assert!(compact_sender_history(&ctx, &sender));
@@ -1619,6 +1622,7 @@ fn append_sender_turn_stores_single_turn_per_call() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     };
 
     append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -1734,6 +1738,7 @@ fn rollback_orphan_user_turn_removes_only_latest_matching_user_turn() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     };
 
     assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -1853,6 +1858,7 @@ fn rollback_orphan_user_turn_also_removes_from_session_store() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     };
 
     assert!(rollback_orphan_user_turn(
@@ -2615,6 +2621,7 @@ fn test_runtime_ctx_with_observer(
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     })
 }
 
@@ -4210,6 +4217,7 @@ fn channel_path_excluded_tools_drops_denied_builtin() {
 
 fn channel_all_tools_result(tools: Vec<Box<dyn Tool>>) -> tools::AllToolsResult {
     tools::AllToolsResult {
+        task_owner: None,
         tools,
         ask_user_handle: None,
         reaction_handle: Arc::new(parking_lot::RwLock::new(HashMap::new())),
@@ -4809,6 +4817,7 @@ fn peer_prompt_test_context(
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     })
 }
 
@@ -4894,6 +4903,7 @@ async fn process_channel_message_executes_tool_calls_instead_of_sending_raw_json
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -5014,6 +5024,7 @@ async fn process_channel_message_scopes_sender_session_key_for_sessions_current_
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
         agent_transcription_provider: String::new(),
     });
@@ -5130,6 +5141,7 @@ async fn process_channel_message_renders_trailing_tool_receipts_block_when_enabl
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
         agent_transcription_provider: String::new(),
     });
@@ -5283,6 +5295,7 @@ async fn process_channel_message_omits_receipts_block_when_disabled() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
         agent_transcription_provider: String::new(),
     });
@@ -5400,6 +5413,7 @@ async fn process_channel_message_disabled_receipt_generator_emits_no_receipts_an
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
         agent_transcription_provider: String::new(),
     });
@@ -5542,6 +5556,7 @@ async fn process_channel_message_telegram_does_not_persist_tool_summary_prefix()
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -5670,6 +5685,7 @@ async fn process_channel_message_strips_unexecuted_tool_json_artifacts_from_repl
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -5783,6 +5799,7 @@ async fn process_channel_message_executes_tool_calls_with_alias_tags() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -5916,6 +5933,7 @@ async fn process_channel_message_handles_models_command_without_llm_call() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -6073,6 +6091,7 @@ async fn process_channel_message_uses_route_override_provider_and_model() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -6252,6 +6271,7 @@ async fn process_channel_message_persists_model_switch_with_route_credential() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -6735,6 +6755,7 @@ async fn process_channel_message_prefers_cached_default_provider_instance() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -6846,6 +6867,7 @@ async fn process_channel_message_respects_configured_max_tool_iterations_above_d
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -6964,6 +6986,7 @@ async fn process_channel_message_reports_configured_max_tool_iterations_limit() 
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -7234,6 +7257,7 @@ async fn message_dispatch_processes_messages_in_parallel() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
@@ -7472,6 +7496,7 @@ async fn deliver_messages_through_loop(
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
@@ -7588,6 +7613,7 @@ async fn message_dispatch_interrupts_in_flight_telegram_request_and_preserves_co
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(8);
@@ -7747,6 +7773,7 @@ async fn message_dispatch_interrupts_in_flight_slack_request_and_preserves_conte
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(8);
@@ -7909,6 +7936,7 @@ async fn message_dispatch_interrupts_in_flight_whatsapp_request_and_preserves_co
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(8);
@@ -8065,6 +8093,7 @@ async fn message_dispatch_interrupt_scope_is_same_sender_same_chat() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(8);
@@ -8199,6 +8228,7 @@ async fn process_channel_message_cancels_scoped_typing_task() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -8428,6 +8458,7 @@ async fn process_channel_message_adds_and_swaps_reactions() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -8555,6 +8586,7 @@ async fn process_channel_message_no_reply_clears_early_ack() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -8727,6 +8759,7 @@ async fn process_channel_message_acks_before_slow_model_completes() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -10901,6 +10934,7 @@ async fn process_channel_message_restores_per_sender_history_on_follow_ups() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -11076,6 +11110,7 @@ async fn process_channel_message_refreshes_available_skills_after_new_session() 
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -11464,6 +11499,7 @@ fn cache_stability_test_context(
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     })
 }
 
@@ -11947,6 +11983,7 @@ async fn process_channel_message_persists_image_payload_verbatim() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -12097,6 +12134,7 @@ async fn process_channel_message_telegram_keeps_system_instruction_at_top_only()
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -13728,6 +13766,7 @@ async fn e2e_photo_attachment_rejected_by_non_vision_provider() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     // Simulate a photo attachment message with [IMAGE:] marker.
@@ -13848,6 +13887,7 @@ async fn e2e_failed_vision_turn_does_not_poison_follow_up_text_turn() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -14007,6 +14047,7 @@ async fn e2e_failed_non_retryable_turn_does_not_poison_follow_up_text_turn() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
         media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
         transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
         agent_transcription_provider: String::new(),
@@ -14245,6 +14286,7 @@ async fn process_channel_message_applies_query_classification_route() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -14398,6 +14440,7 @@ async fn process_channel_message_classification_disabled_uses_default_route() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -14543,6 +14586,7 @@ async fn process_channel_message_classification_no_match_uses_default_route() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -14708,6 +14752,7 @@ async fn process_channel_message_classification_priority_selects_highest() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     process_channel_message(
@@ -15211,6 +15256,7 @@ async fn message_dispatch_different_threads_do_not_cancel_each_other() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(8);
@@ -16697,6 +16743,7 @@ async fn message_dispatch_abandoned_before_processing_stays_replayable() {
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+        task_owner: None,
     });
 
     let seen_dir = tempfile::tempdir().unwrap();

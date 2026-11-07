@@ -13,6 +13,8 @@ use crate::security::SecurityPolicy;
 
 #[derive(Default)]
 pub struct AgentRunOverrides {
+    /// Identity captured by the worker before queueing; retained across retries.
+    pub task_identity: Option<crate::tools::task_context::TaskIdentity>,
     pub security: Option<Arc<SecurityPolicy>>,
     pub memory: Option<Arc<dyn Memory>>,
     pub is_subagent: bool,

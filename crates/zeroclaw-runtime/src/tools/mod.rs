@@ -23,6 +23,7 @@ pub mod shell;
 pub mod skill_http;
 pub mod skill_manage;
 pub mod skill_tool;
+pub mod task_context;
 pub mod task_list;
 pub mod task_section;
 pub mod todo_write;
@@ -494,6 +495,7 @@ pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
 #[allow(clippy::type_complexity)]
 pub struct AllToolsResult {
     pub tools: Vec<Box<dyn Tool>>,
+    pub task_owner: Option<task_list::TaskOwnerResolver>,
     pub ask_user_handle: Option<PerToolChannelHandle>,
     pub channel_room_handle: Option<PerToolChannelHandle>,
     pub reaction_handle: PerToolChannelHandle,
@@ -552,6 +554,7 @@ pub fn all_tools(
         tui_env,
         // No runtime adapter / live-config here; and no lineage —
         // callers of the non-runtime variant are top-level origins.
+        None,
         None,
         None,
     )
@@ -614,11 +617,22 @@ pub fn all_tools_with_runtime(
     // ledger (SA-10). `None` for top-level origins (the run mints a
     // root) and legacy test callers.
     spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
+    task_identity: Option<task_context::TaskIdentity>,
 ) -> AllToolsResult {
     // These tools retain the same immutable root snapshot. `config` may be
     // agent-specific, so share one copy of `root_config` rather than that Arc.
     let shared_root_config = Arc::new(root_config.clone());
     let persistent_writes = runtime.has_filesystem_access();
+    let task_identity = if persistent_writes {
+        task_identity
+            .unwrap_or_else(|| task_context::TaskIdentity::capture(root_config, agent_alias))
+    } else {
+        task_context::TaskIdentity::unavailable(
+            root_config,
+            agent_alias,
+            "the durable task list requires persistent filesystem access",
+        )
+    };
     // Composio credentials are only consumed when the SaaS family is compiled
     // in; the parameters stay part of the stable signature for both builds.
     #[cfg(not(feature = "integrations-saas"))]
@@ -726,9 +740,10 @@ pub fn all_tools_with_runtime(
             security,
             spawn_lineage.clone(),
         )),
-        Arc::new(SendMessageToPeerTool::new(
+        Arc::new(SendMessageToPeerTool::with_task_identity(
             Arc::clone(&shared_root_config),
             agent_alias,
+            task_identity.clone(),
         )),
         // Operator/admin tools are deliberately absent from this registry:
         // model_routing_config, model_switch, and proxy_config mutate
@@ -834,27 +849,15 @@ pub fn all_tools_with_runtime(
     // Durable cross-session commitment list (#567). Owner identity is the
     // mint-once companion UUID (alias renames keep the list); the model
     // never chooses the owner. Requires the SQLite session backend.
-    {
-        let tasks_config = config.clone();
-        let tasks_agent = agent_alias.to_string();
-        tool_arcs.push(Arc::new(TaskListTool::new(std::sync::Arc::new(
-            move || {
-                let config = tasks_config.clone();
-                let store_dir = config.companion_memory.resolved_store_dir(&config.data_dir);
-                let identity = zeroclaw_memory::companion::resolve_or_mint_agent_identity(
-                    &store_dir,
-                    &tasks_agent,
-                )
-                .map_err(|error| format!("agent identity unavailable: {error}"))?;
-                if config.channels.session_backend != "sqlite" {
-                    return Err(
-                        "the durable task list requires the SQLite session backend".to_string()
-                    );
-                }
-                Ok((identity.as_str().to_string(), config.data_dir.clone()))
-            },
-        ))));
-    }
+    let (task_owner, task_writer) = task_context::resolvers(
+        shared_root_config.clone(),
+        agent_alias,
+        security.clone(),
+        persistent_writes,
+        live_config.clone(),
+        Some(task_identity),
+    );
+    tool_arcs.push(Arc::new(TaskListTool::new(task_writer)));
 
     // Register discord_search if any configured Discord alias has
     // archive enabled. Multiple Discord aliases are supported (one per
@@ -1303,6 +1306,10 @@ pub fn all_tools_with_runtime(
     apply_install_composition(&mut tool_arcs, root_config);
 
     AllToolsResult {
+        task_owner: tool_arcs
+            .iter()
+            .any(|tool| tool.name() == "task_list")
+            .then_some(task_owner),
         unfiltered_tool_arcs: tool_arcs.clone(),
         tools: boxed_registry_from_arcs(tool_arcs),
         ask_user_handle,

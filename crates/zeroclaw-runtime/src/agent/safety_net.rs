@@ -462,6 +462,7 @@ async fn safety_net_thinking_never_leaks_into_draft_or_chunks() {
     let result = crate::agent::loop_::run_tool_call_loop(crate::agent::loop_::ToolLoop {
         parent_agent_alias: None,
         exec: crate::agent::loop_::ResolvedAgentExecution {
+            task_owner: None,
             model_access: crate::agent::loop_::ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock",
@@ -851,6 +852,7 @@ async fn safety_net_task_locals_probe_per_entry_path() {
             crate::agent::loop_::run_tool_call_loop(crate::agent::loop_::ToolLoop {
                 parent_agent_alias: None,
                 exec: crate::agent::loop_::ResolvedAgentExecution {
+                    task_owner: None,
                     model_access: crate::agent::loop_::ResolvedModelAccess {
                         model_provider: &provider,
                         provider_name: "mock",

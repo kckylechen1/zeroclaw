@@ -91,6 +91,7 @@ pub struct ScopedAssembly<'a> {
 /// side-channel handles + the deferred-MCP prompt section the callers thread on.
 pub struct ScopedAssembled {
     pub registry: ScopedToolRegistry,
+    pub task_owner: Option<super::task_list::TaskOwnerResolver>,
     pub ask_user_handle: Option<PerToolChannelHandle>,
     pub reaction_handle: PerToolChannelHandle,
     pub poll_handle: Option<PerToolChannelHandle>,
@@ -177,6 +178,7 @@ impl ScopedToolRegistry {
 
         let AllToolsResult {
             tools: mut tools_registry,
+            task_owner,
             ask_user_handle,
             reaction_handle,
             poll_handle,
@@ -529,6 +531,11 @@ impl ScopedToolRegistry {
         }
 
         ScopedAssembled {
+            task_owner: tools_registry
+                .iter()
+                .any(|tool| tool.name() == "task_list")
+                .then_some(task_owner)
+                .flatten(),
             registry: ScopedToolRegistry(tools_registry),
             ask_user_handle,
             reaction_handle,
@@ -632,6 +639,7 @@ mod tests {
             .map(|tool| Box::new(tools::ArcToolRef(tool)) as Box<dyn Tool>)
             .collect();
         AllToolsResult {
+            task_owner: None,
             tools,
             ask_user_handle: None,
             reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
@@ -947,6 +955,7 @@ mod tests {
 
     fn built_with(tools: Vec<Box<dyn Tool>>) -> AllToolsResult {
         AllToolsResult {
+            task_owner: None,
             tools,
             ask_user_handle: None,
             reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
@@ -1377,6 +1386,7 @@ mod tests {
     fn assembled_with_sections(deferred: &str, pinned: &str) -> ScopedAssembled {
         ScopedAssembled {
             registry: ScopedToolRegistry(Vec::new()),
+            task_owner: None,
             ask_user_handle: None,
             reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             poll_handle: None,
