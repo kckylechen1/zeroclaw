@@ -1440,8 +1440,6 @@ fn production_tools(
         "home",
         Arc::new(crate::platform::NativeRuntime::new()),
         Arc::new(zeroclaw_memory::NoneMemory::new("none")),
-        None,
-        None,
         &cfg.browser,
         &cfg.http_request,
         &cfg.web_fetch,

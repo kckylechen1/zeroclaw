@@ -772,15 +772,6 @@ pub async fn run_gateway(
     }
     let agent_alias_opt = default_agent_alias(&config);
 
-    let (composio_key, composio_entity_id) = if config.composio.enabled {
-        (
-            config.composio.api_key.as_deref(),
-            Some(config.composio.entity_id.as_str()),
-        )
-    } else {
-        (None, None)
-    };
-
     let agent_setup: Option<(
         zeroclaw_config::schema::RiskProfileConfig,
         Arc<SecurityPolicy>,
@@ -809,8 +800,6 @@ pub async fn run_gateway(
                 agent_alias,
                 Arc::clone(&runtime),
                 Arc::clone(&mem),
-                composio_key,
-                composio_entity_id,
                 &config.browser,
                 &config.http_request,
                 &config.web_fetch,
@@ -918,8 +907,6 @@ pub async fn run_gateway(
             &alias,
             Arc::clone(&runtime),
             Arc::clone(&mem),
-            composio_key,
-            composio_entity_id,
             &config.browser,
             &config.http_request,
             &config.web_fetch,

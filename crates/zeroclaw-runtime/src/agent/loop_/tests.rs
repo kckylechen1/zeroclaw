@@ -62,7 +62,7 @@ impl Channel for SeedMockChannel {
 // ── seed_channel_handles tests ───────────────────────────────
 
 #[test]
-fn seed_channel_handles_populates_channel_room_handle() {
+fn seed_channel_handles_populates_ask_user_and_escalate_handles() {
     let channel = Arc::new(SeedMockChannel) as Arc<dyn Channel>;
     super::register_channel_map_fn(Box::new(move || {
         let mut map = HashMap::new();
@@ -71,25 +71,16 @@ fn seed_channel_handles_populates_channel_room_handle() {
     }));
 
     let ask_user_handle = Arc::new(RwLock::new(HashMap::new()));
-    let channel_room_handle = Arc::new(RwLock::new(HashMap::new()));
-    let reaction = Arc::new(RwLock::new(HashMap::new()));
-    let poll_handle = Arc::new(RwLock::new(HashMap::new()));
     let escalate_handle = Arc::new(RwLock::new(HashMap::new()));
 
     let count = seed_channel_handles(
         false,
         &Some(Arc::clone(&ask_user_handle)),
-        &Some(Arc::clone(&channel_room_handle)),
-        &reaction,
-        &Some(Arc::clone(&poll_handle)),
         &Some(Arc::clone(&escalate_handle)),
     );
 
     assert_eq!(count, 1);
     assert!(ask_user_handle.read().contains_key("matrix.default"));
-    assert!(channel_room_handle.read().contains_key("matrix.default"));
-    assert!(reaction.read().contains_key("matrix.default"));
-    assert!(poll_handle.read().contains_key("matrix.default"));
     assert!(escalate_handle.read().contains_key("matrix.default"));
 }
 
@@ -108,25 +99,16 @@ fn child_run_seeds_zero_channel_handles_sa7c() {
     }));
 
     let ask_user_handle = Arc::new(RwLock::new(HashMap::new()));
-    let channel_room_handle = Arc::new(RwLock::new(HashMap::new()));
-    let reaction = Arc::new(RwLock::new(HashMap::new()));
-    let poll_handle = Arc::new(RwLock::new(HashMap::new()));
     let escalate_handle = Arc::new(RwLock::new(HashMap::new()));
 
     let count = seed_channel_handles(
         true,
         &Some(Arc::clone(&ask_user_handle)),
-        &Some(Arc::clone(&channel_room_handle)),
-        &reaction,
-        &Some(Arc::clone(&poll_handle)),
         &Some(Arc::clone(&escalate_handle)),
     );
 
     assert_eq!(count, 0, "a child run must seed zero channel handles");
     assert!(ask_user_handle.read().is_empty());
-    assert!(channel_room_handle.read().is_empty());
-    assert!(reaction.read().is_empty());
-    assert!(poll_handle.read().is_empty());
     assert!(escalate_handle.read().is_empty());
 }
 
@@ -11529,8 +11511,6 @@ async fn process_message_seam_narrows_safe_defaults_outside_allowed_tools() {
         &risk,
         "test",
         mem,
-        None,
-        None,
         &config.browser,
         &config.http_request,
         &config.web_fetch,

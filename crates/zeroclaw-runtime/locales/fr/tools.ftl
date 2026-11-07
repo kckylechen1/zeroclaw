@@ -1,28 +1,5 @@
 tool-browser = Automatisation de navigateur avec des backends plugables (agent-browser, rust-native, computer_use). Prend en charge les actions DOM et des actions au niveau du système d'exploitation (mouse_move, mouse_click, mouse_drag, key_type, key_press, screen_capture) via un sidecar d'utilisation de l'ordinateur. Utilisez 'snapshot' pour mapper les éléments interactifs aux refs (@e1, @e2). Applique browser.allowed_domains pour les actions d'ouverture.
 tool-browser-open = Ouvrir une URL HTTPS approuvée dans le navigateur du système. Contraintes de sécurité : whitelist de domaines uniquement, aucun hôte local/privé, aucun scraping.
-tool-channel-room = Créez des salons et invitez des utilisateurs via un canal actif. Fournissez une clé de canal telle que 'matrix.default', l'action 'create_room' ou 'invite_user', et les champs de salon spécifiques à l'action.
-tool-channel-room-param-action = Action de gestion de salon à effectuer.
-tool-channel-room-param-channel = Clé de canal actif telle que 'matrix.default'.
-tool-channel-room-param-name = Nom de salon optionnel pour create_room.
-tool-channel-room-param-topic = Sujet de salon optionnel pour create_room.
-tool-channel-room-param-invites = Identifiants d'utilisateur optionnels à inviter lors de la création du salon.
-tool-channel-room-param-visibility = Visibilité de salon optionnelle pour create_room.
-tool-channel-room-param-encryption = Indique s'il faut demander le chiffrement du salon lors de create_room.
-tool-channel-room-param-room-id = Identifiant de salon existant pour invite_user.
-tool-channel-room-param-user-id = Identifiant d'utilisateur à inviter pour invite_user.
-tool-channel-room-error-security = Action bloquée : { $err }
-tool-channel-room-error-invalid-action = Action invalide '{ $action }' : doit être 'create_room' ou 'invite_user'.
-tool-channel-room-error-not-initialized = Aucun canal disponible pour le moment (canaux non initialisés).
-tool-channel-room-error-channel-not-found = Canal '{ $channel }' introuvable. Canaux disponibles : { $available }
-tool-channel-room-error-create-failed = Échec de la création du salon : { $err }
-tool-channel-room-error-invite-failed = Échec de l'invitation de l'utilisateur : { $err }
-tool-channel-room-error-invites-array = 'invites' doit être un tableau de chaînes.
-tool-channel-room-error-invites-item = 'invites' doit être un tableau de chaînes non vides.
-tool-channel-room-error-invalid-visibility = Visibilité du salon invalide : { $err }
-tool-channel-room-error-missing-param = Paramètre '{ $param }' manquant.
-tool-channel-room-error-string-param = '{ $param }' doit être une chaîne.
-tool-channel-room-error-bool-param = '{ $param }' doit être un booléen.
-tool-composio = Exécutez des actions sur plus de 1000 applications via Composio (Gmail, Notion, GitHub, Slack, etc.). Utilisez action='list' pour afficher les actions disponibles (y compris les noms des paramètres). action='execute' avec action_name/tool_slug et params pour exécuter une action. Si vous n'avez pas les paramètres exacts, transmettez 'text' à la place avec une description en langage naturel de ce que vous souhaitez faire (Composio résoudra les paramètres corrects via NLP). action='list_accounts' ou action='connected_accounts' pour lister les comptes connectés via OAuth. action='connect' avec app/auth_config_id pour obtenir l'URL OAuth. connected_account_id est automatiquement résolu lorsqu'il est omis.
 tool-content-search = Rechercher dans le contenu des fichiers en utilisant un pattern regex au sein de l'espace de travail. Prend en charge ripgrep (rg) avec fallback sur grep ou interne. Modes de sortie : 'content' (lignes correspondantes avec contexte), 'files_with_matches' (chemins de fichiers uniquement), 'count' (nombres de correspondances par fichier). Exemple : pattern='fn main', include='*.rs', output_mode='content'.
 tool-cron-add = Créer un cron job planifié (shell ou agent) avec des plannings cron/at/every. Utilisez job_type='agent' avec une invite pour exécuter l'agent d'IA selon le planning. Pour livrer la sortie à un canal (Discord, Telegram, Slack, Mattermost, Matrix), définissez delivery={"{"}"mode":"announce","channel":"discord","to":"<channel_id_or_chat_id>"{"}"}. Ceci est l'outil préféré pour envoyer des messages planifiés/décalés aux utilisateurs via des canaux.
 tool-cron-list = Liste toutes les tâches cron planifiées
@@ -58,17 +35,6 @@ tool-file-read = Lire le contenu du fichier avec les numéros de ligne. Prise en
 tool-file-write = Écrire le contenu dans un fichier de l'espace de travail
 tool-git-operations = Effectue des opérations Git structurées (état, diff, journal, branche, engagement, ajouter, checkout, stash). Fournit une sortie JSON analysée et s'intègre à la politique de sécurité pour les contrôles d'autonomie.
 tool-git-operations-error-not-in-repo = Pas dans un dépôt Git à '{ $path }'. Choisissez un chemin dans un arbre de travail Git, passez 'path' pour un sous-répertoire du dépôt, ou initialisez un dépôt avant d'exécuter git_operations.
-tool-git-forge-error-requires-field = { $resource }.{ $action } nécessite '{ $field }'.
-tool-git-forge-error-requires-number = { $resource }.{ $action } nécessite 'number'.
-tool-git-forge-error-issue-close-reason = issue.close 'reason' doit être 'completed' ou 'not_planned'.
-tool-git-forge-error-pull-merge-method = pull.merge 'method' doit être 'merge', 'squash' ou 'rebase'.
-tool-git-forge-error-review-verdict = review.create 'verdict' doit être approve|request_changes|comment, reçu '{ $verdict }'.
-tool-git-forge-error-unknown-cell = resource/action '{ $resource }.{ $action }' inconnue ou non prise en charge. Appelez l'action 'describe' pour la grille prise en charge, ou utilisez 'raw' pour tout élément non répertorié.
-tool-git-forge-error-no-channels = Aucun canal disponible pour le moment (canaux non initialisés).
-tool-git-forge-error-raw-requires-method = 'raw' nécessite 'method'.
-tool-git-forge-error-raw-requires-path = 'raw' nécessite 'path'.
-tool-git-forge-error-requires-resource = un appel typé nécessite 'resource' (ou utilisez l'action 'raw'/'describe').
-tool-git-forge-error-missing-repo = 'repo' manquant (attendu 'owner/repo').
 tool-glob-search = Rechercher des fichiers correspondant à un motif glob dans l'espace de travail. Renvoie une liste triée des chemins de fichiers correspondants par rapport à la racine de l'espace de travail. Exemples : '**/*.rs' (tous les fichiers Rust), 'src/**/mod.rs' (tous les fichiers mod.rs dans src).
 tool-http-request = Effectuer des requêtes HTTP vers des API externes. Prend en charge les méthodes GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS. Contraintes de sécurité : domaines autorisés uniquement, aucun hôte local/privé, limite de temps configurable et limite de taille de réponse.
 tool-image-info = Lire les métadonnées du fichier image (format, dimensions, taille) et éventuellement retourner les données encodées en base64.

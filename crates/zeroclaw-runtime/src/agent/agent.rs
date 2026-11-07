@@ -196,22 +196,13 @@ pub struct ProviderSwitchConfig {
 #[derive(Clone, Default)]
 pub struct AgentChannelHandles {
     pub ask_user: Option<tools::PerToolChannelHandle>,
-    pub channel_room: Option<tools::PerToolChannelHandle>,
-    pub reaction: tools::PerToolChannelHandle,
-    pub poll: Option<tools::PerToolChannelHandle>,
     pub escalate: Option<tools::PerToolChannelHandle>,
 }
 
 impl AgentChannelHandles {
     /// Return references to all populated per-tool channel handles.
     fn populated_handles(&self) -> Vec<Option<&tools::PerToolChannelHandle>> {
-        vec![
-            self.ask_user.as_ref(),
-            self.channel_room.as_ref(),
-            Some(&self.reaction),
-            self.poll.as_ref(),
-            self.escalate.as_ref(),
-        ]
+        vec![self.ask_user.as_ref(), self.escalate.as_ref()]
     }
 
     /// Register a channel into every populated handle so all channel-driven

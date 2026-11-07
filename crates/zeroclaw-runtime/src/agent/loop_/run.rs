@@ -189,15 +189,6 @@ pub async fn run(
         );
 
         // ── Tools (including memory tools) ────────────
-        let (composio_key, composio_entity_id) = if config.composio.enabled {
-            (
-                config.composio.api_key.as_deref(),
-                Some(config.composio.entity_id.as_str()),
-            )
-        } else {
-            (None, None)
-        };
-
         let all_tools_result = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,
@@ -205,8 +196,6 @@ pub async fn run(
             agent_alias,
             runtime.clone(),
             mem.clone(),
-            composio_key,
-            composio_entity_id,
             &config.browser,
             &config.http_request,
             &config.web_fetch,
@@ -255,10 +244,7 @@ pub async fn run(
             registry,
             task_owner,
             ask_user_handle,
-            reaction_handle,
-            poll_handle,
             escalate_handle,
-            channel_room_handle,
             activated_handle,
             mcp_tool_names,
             ..
@@ -269,14 +255,7 @@ pub async fn run(
         // SubAgent child run (`overrides.is_subagent`) seeds nothing, so
         // its channel tools fail closed and the child reaches the user
         // only through its typed report.
-        let count = seed_channel_handles(
-            is_subagent_caller,
-            &ask_user_handle,
-            &channel_room_handle,
-            &reaction_handle,
-            &poll_handle,
-            &escalate_handle,
-        );
+        let count = seed_channel_handles(is_subagent_caller, &ask_user_handle, &escalate_handle);
         if count > 0 {
             ::zeroclaw_log::record!(
                 INFO,
@@ -447,20 +426,10 @@ pub async fn run(
                 "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
             ));
         }
-        if config.composio.enabled {
-            tool_descs.push((
-            "composio",
-            "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). Use action='list' to discover, 'execute' to run (optionally with connected_account_id), 'connect' to OAuth.",
-        ));
-        }
         tool_descs.push((
         "schedule",
         "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
     ));
-        tool_descs.push((
-            "channel_room",
-            "Create channel rooms and invite users through active channels. Use with Matrix channel keys such as matrix.default.",
-        ));
         retain_registered_tool_descriptions(&mut tool_descs, &tools_registry);
         let bootstrap_max_chars = if eff_compact_context {
             Some(crate::agent::system_prompt::COMPACT_BOOTSTRAP_MAX_CHARS)

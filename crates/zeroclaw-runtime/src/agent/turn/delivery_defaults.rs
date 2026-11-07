@@ -16,7 +16,7 @@ const AUTO_DELIVERY_DEFAULT_CHANNELS: &[&str] = &[
 /// default they can route an interactive prompt to a random external channel
 /// while the user is sitting in the RPC/ACP/WS session that issued the turn —
 /// which looks like a hang until timeout/cancel.
-const ORIGINATING_CHANNEL_TOOLS: &[&str] = &["ask_user", "poll", "escalate_to_human"];
+const ORIGINATING_CHANNEL_TOOLS: &[&str] = &["ask_user", "escalate_to_human"];
 
 /// When `tool_args` omits `channel`, fill it from the turn's originating
 /// channel name so interactive tools prefer the conversation back-channel
@@ -203,12 +203,10 @@ mod tests {
     }
 
     #[test]
-    fn poll_and_escalate_also_get_originating_channel() {
-        for tool in ["poll", "escalate_to_human"] {
-            let mut args = serde_json::json!({ "question": "q" });
-            maybe_inject_originating_channel(tool, &mut args, "acp");
-            assert_eq!(args["channel"], "acp", "tool={tool}");
-        }
+    fn escalate_also_gets_originating_channel() {
+        let mut args = serde_json::json!({ "question": "q" });
+        maybe_inject_originating_channel("escalate_to_human", &mut args, "acp");
+        assert_eq!(args["channel"], "acp");
     }
 
     #[test]
