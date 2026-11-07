@@ -8209,6 +8209,11 @@ export interface components {
             url: string | null;
         };
         /**
+         * @description A normalized filesystem change kind reported by the watcher.
+         * @enum {string}
+         */
+        FilesystemEventKind: "created" | "modified" | "deleted" | "renamed";
+        /**
          * @description Firecrawl fallback configuration for JS-heavy and bot-blocked sites.
          *
          *     When enabled, if the standard web fetch fails (HTTP error, empty body, or
