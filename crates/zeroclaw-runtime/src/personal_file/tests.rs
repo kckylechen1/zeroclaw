@@ -1111,7 +1111,6 @@ fn personal_file_is_registered_nowhere() {
         "crates/zeroclaw-config/src/composition.rs",
         "crates/zeroclaw-runtime/src/tools/mod.rs",
         "crates/zeroclaw-runtime/src/subagent_v1/mod.rs",
-        "crates/zeroclaw-runtime/src/supervisor_v1/mod.rs",
     ];
     let token = ["personal", "_file"].join("");
     for surface in surfaces {

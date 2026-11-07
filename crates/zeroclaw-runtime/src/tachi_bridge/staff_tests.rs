@@ -2599,3 +2599,66 @@ async fn mirror_watch_timeout_while_running_does_not_observe() {
     assert_eq!(watch.output.data().unwrap()["terminal"], false);
     assert_eq!(observed.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn module_source_scans_hold() {
+    // Row 12 structural halves + TB-23 item 4:
+    // (a) the bridge client module contains no process/command execution
+    //     capability (TB-20: there is nothing to fall back TO);
+    // (b) it imports nothing from zeroclaw-eval;
+    // (c) the local-chat/agent path does not reference the bridge (the
+    //     positive control: ordinary local chat cannot depend on Tachi
+    //     availability because nothing in the agent path names it).
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let sources = [
+        format!("{manifest_dir}/src/tachi_bridge/mod.rs"),
+        format!("{manifest_dir}/src/tachi_bridge/staff.rs"),
+        format!("{manifest_dir}/../zeroclaw-api/src/tachi_staff.rs"),
+        format!("{manifest_dir}/../zeroclaw-api/src/delegation_admission.rs"),
+        format!("{manifest_dir}/../zeroclaw-tools/src/tachi_staff.rs"),
+        format!("{manifest_dir}/../zeroclaw-tools/src/tachi_delegation.rs"),
+        format!("{manifest_dir}/../zeroclaw-tools/src/tachi_admission.rs"),
+    ];
+    for file in sources {
+        let source =
+            std::fs::read_to_string(&file).unwrap_or_else(|error| panic!("read {file}: {error}"));
+        for banned in [
+            "std::process",
+            "tokio::process",
+            "process::Command",
+            "zeroclaw_eval",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "{file} must not contain {banned} (TB-20/TB-23)"
+            );
+        }
+    }
+    // (c) scan the agent module tree for references to the bridge.
+    let agent_dir = format!("{manifest_dir}/src/agent");
+    let mut scanned = 0;
+    let mut stack: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(agent_dir)];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("read dir {}: {error}", dir.display()));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                scanned += 1;
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                assert!(
+                    !source.contains("tachi_bridge"),
+                    "{} must not reference the tachi bridge (TB-20 positive control)",
+                    path.display()
+                );
+            }
+        }
+    }
+    assert!(
+        scanned > 10,
+        "agent tree scan must actually cover sources ({scanned})"
+    );
+}

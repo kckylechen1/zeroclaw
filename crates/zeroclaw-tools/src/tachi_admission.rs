@@ -2,7 +2,9 @@
 //! Tachi remains authoritative; this client guard rejects more, never less.
 
 use zeroclaw_api::delegation_admission::ForbiddenCategory;
-use zeroclaw_api::taskintent::{AttemptRef, TaskRef};
+
+const TACHI_TASK_WIRE_PREFIX: &str = "tachi:task:";
+const TACHI_ATTEMPT_WIRE_PREFIX: &str = "tachi:attempt:";
 
 /// Substrings whose presence in any text-bearing value is
 /// credential-shaped (TB-4 category 1). Byte-identical list to the tachi
@@ -88,7 +90,7 @@ pub fn scan_text(text: &str) -> Result<(), ForbiddenCategory> {
             return Err(ForbiddenCategory::PrivateDyad);
         }
     }
-    if text.contains(TaskRef::WIRE_PREFIX) || text.contains(AttemptRef::WIRE_PREFIX) {
+    if text.contains(TACHI_TASK_WIRE_PREFIX) || text.contains(TACHI_ATTEMPT_WIRE_PREFIX) {
         return Err(ForbiddenCategory::CallerMintedRef);
     }
 
