@@ -257,8 +257,6 @@ mod service;
 #[cfg(feature = "agent-runtime")]
 mod skills;
 #[cfg(feature = "agent-runtime")]
-mod sop;
-#[cfg(feature = "agent-runtime")]
 mod tools;
 #[cfg(feature = "agent-runtime")]
 mod tunnel;
@@ -279,8 +277,7 @@ pub(crate) use gateway_helpers::{t, ta};
 pub use zeroclaw::{
     AgentsCommands, BridgeCommands, ChannelCommands, ChannelsCommands, CronCommands,
     GatewayCommands, IntegrationCommands, KernelMigrationStoreKind, MigrateCommands,
-    ProvidersCommands, ServiceCommands, SkillBundleCommands, SkillCommands, SopCommands,
-    SopGraphFormat,
+    ProvidersCommands, ServiceCommands, SkillBundleCommands, SkillCommands,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -813,12 +810,6 @@ Examples:
         /// Path relative to `<install>/shared/`. Empty = root.
         #[arg(default_value = "")]
         path: String,
-    },
-
-    /// Manage standard operating procedures (SOPs)
-    Sop {
-        #[command(subcommand)]
-        sop_command: SopCommands,
     },
 
     /// Migrate data from other agent runtimes
@@ -2811,8 +2802,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
         Commands::Skills { skill_command } => skills::handle_command(skill_command, &config).await,
 
         Commands::Browse { path } => browse::handle_browse(path, &config),
-
-        Commands::Sop { sop_command } => sop::handle_command(sop_command, &config),
 
         Commands::Migrate { migrate_command } => {
             migration::handle_command(migrate_command, &config).await

@@ -461,28 +461,6 @@ cli-skills-skipped-header = Skipped ({$count}):
 cli-skills-skipped-reason = {"    "}Reason: {$reason}
 cli-skills-skipped-scripts-hint = {"    "}Set `skills.allow_scripts = true` in your zeroclaw config to enable it.
 
-# ── sop (zeroclaw sop) ──
-cli-sop-none = No SOPs found.
-cli-sop-create-hint = {"  "}Create one: mkdir -p <workspace>/sops/my-sop
-cli-sop-create-hint-2 = {"              "}then add SOP.toml and SOP.md
-cli-sop-loaded-header = Loaded SOPs ({$count}):
-cli-sop-none-to-validate = No SOPs found to validate.
-cli-sop-valid = ✅ {$name} — valid
-cli-sop-deleted = Deleted SOP: {$name}
-cli-sop-warnings = ⚠️  {$name} — {$count} warning(s):
-cli-sop-all-passed = All SOPs passed validation.
-cli-sop-priority = {"  "}Priority:       {$value}
-cli-sop-execution-mode = {"  "}Execution mode: {$value}
-cli-sop-deterministic = {"  "}Deterministic:  {$value}
-cli-sop-cooldown = {"  "}Cooldown:       {$value}s
-cli-sop-max-concurrent = {"  "}Max concurrent: {$value}
-cli-sop-admission-policy = {"  "}Admission:      {$value}
-cli-sop-max-pending-approvals = {"  "}Max pending:    {$value}
-cli-sop-location = {"  "}Location:       {$value}
-cli-sop-triggers = {"  "}Triggers:
-cli-sop-steps = {"  "}Steps:
-cli-sop-step-tools = Tools: {$tools}
-
 # ── memory (zeroclaw memory) ──
 cli-memory-reindexing = Reindexing memory backend...
 cli-memory-none = No memory entries found.
@@ -1009,12 +987,6 @@ cli-doctor-degraded-section = config section `{$path}` is malformed and was rese
 
 # ── Personality file truncation (doctor diagnose, #310) ──
 cli-doctor-personality-file-truncated = {$alias}/{$filename}: personality cap {$cap} vs {$total} chars ({$discarded} would be discarded)
-sop-approval-deferred-at-capacity = Approval could not resume run {$run_id}: execution slots are full. The gate remains waiting; retry after a slot frees.
-sop-approval-policy-unavailable = Approval failed because the parked SOP step is unavailable: {$reason}. The run remains waiting.
-sop-rpc-decision-invalid-state = Run {$run_id} cannot be resolved in its current state.
-sop-rpc-decision-unauthorized = The RPC principal is not authorized to resolve this SOP step.
-sop-rpc-policy-missing = SOP approval policy '{$name}' is not configured.
-sop-rpc-policy-unavailable = The parked SOP policy is unavailable: {$reason}.
 
 # ── Runtime command construction — shell and skill shell tools ──
 tool-runtime-command-build-failed = Failed to build runtime command: {$error}

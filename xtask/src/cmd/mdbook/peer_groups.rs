@@ -116,8 +116,6 @@ fn expand_directives(
         "{{#thread-context ",
         "{{#config-fields ",
         "{{#config-set ",
-        "{{#sop-trigger-index",
-        "{{#sop-trigger ",
         "{{#streaming ",
         "{{#env-var-bridge",
         "{{#env-var-table",
@@ -144,8 +142,6 @@ fn expand_directives(
             "{{#config-where " => render_config_where(arg, depth)?,
             "{{#config-fields " => render_config_fields(arg)?,
             "{{#config-set " => render_config_set(arg),
-            "{{#sop-trigger-index" => render_sop_trigger_index()?,
-            "{{#sop-trigger " => render_sop_trigger(arg)?,
             "{{#secret-config " => render_secret_config(arg),
             "{{#thread-context " => render_thread_context(arg)?,
             "{{#streaming " => render_streaming(arg)?,
@@ -207,150 +203,6 @@ fn render_config_fields(arg: &str) -> anyhow::Result<String> {
     let schema = schemars::schema_for!(zeroclaw_config::schema::Config);
     zeroclaw_schema_markdown::field_table_for_path(&schema.to_value(), path, false, None)
         .map_err(anyhow::Error::msg)
-}
-
-fn sop_trigger_variants() -> anyhow::Result<(serde_json::Value, Vec<(String, serde_json::Value)>)> {
-    let schema = schemars::schema_for!(zeroclaw_runtime::sop::types::SopTrigger);
-    let root = schema.to_value();
-    let defs = root
-        .get("$defs")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let variants = root
-        .get("oneOf")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow::Error::msg("sop-trigger: schema has no oneOf"))?
-        .iter()
-        .filter_map(|v| {
-            let tag = v
-                .get("properties")
-                .and_then(|p| p.get("type"))
-                .and_then(|t| t.get("const"))
-                .and_then(serde_json::Value::as_str)?
-                .to_string();
-            Some((tag, v.clone()))
-        })
-        .collect();
-    Ok((defs, variants))
-}
-
-/// Field names of a trigger variant, in schema order, with the `type`
-/// discriminator removed and required fields marked.
-fn sop_trigger_field_summary(variant: &serde_json::Value) -> String {
-    let Some(props) = variant
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return "none".to_string();
-    };
-    let empty = Vec::new();
-    let required = variant
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .unwrap_or(&empty);
-    let mut names: Vec<String> = props
-        .keys()
-        .filter(|k| k.as_str() != "type")
-        .map(|k| {
-            let req = required.iter().any(|r| r.as_str() == Some(k.as_str()));
-            if req {
-                format!("`{k}`")
-            } else {
-                format!("optional `{k}`")
-            }
-        })
-        .collect();
-    if names.is_empty() {
-        "none".to_string()
-    } else {
-        names.sort_by_key(|n| n.starts_with("optional"));
-        names.join(", ")
-    }
-}
-
-/// Render the full SOP trigger index table from the `SopTrigger` schema: every
-/// variant, its fields, and the status line from its doc-comment. Replaces any
-/// hand-typed trigger list so the table is a pure projection of the enum.
-fn render_sop_trigger_index() -> anyhow::Result<String> {
-    let (_defs, variants) = sop_trigger_variants()?;
-    let mut out = String::from("| Type | Fields | Notes |\n|---|---|---|\n");
-    for (tag, variant) in variants {
-        let notes = variant
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .replace('\n', " ");
-        let fields = sop_trigger_field_summary(&variant);
-        out.push_str(&format!("| `{tag}` | {fields} | {notes} |\n"));
-    }
-    Ok(out)
-}
-
-fn render_sop_trigger(arg: &str) -> anyhow::Result<String> {
-    let ty = arg.trim();
-    let (defs, variants) = sop_trigger_variants()?;
-    let variant = variants
-        .into_iter()
-        .find(|(tag, _)| tag == ty)
-        .map(|(_, v)| v)
-        .ok_or_else(|| anyhow::Error::msg(format!("sop-trigger: unknown trigger type `{ty}`")))?;
-
-    let summary = variant
-        .get("description")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-
-    let mut node = variant;
-    if let Some(props) = node
-        .get_mut("properties")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        props.remove("type");
-    }
-    if let Some(req) = node
-        .get_mut("required")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        req.retain(|r| r.as_str() != Some("type"));
-    }
-    if let Some(obj) = node.as_object_mut() {
-        obj.insert("$defs".to_string(), defs);
-    }
-    let fields = zeroclaw_schema_markdown::field_table(&node, true, None, None);
-
-    Ok(format!(
-        r#"{summary}
-
-{fields}
-
-**Load and verify the SOP:**
-
-<div class="os-tabs-src">
-
-#### Define
-
-Author the SOP as described in [Syntax](../syntax.md), with a `{ty}` trigger. The trigger fields above are the supported keys; the page walks the full file.
-
-#### Validate
-
-```sh
-zeroclaw sop validate
-```
-
-#### Inspect
-
-```sh
-zeroclaw sop list
-zeroclaw sop show <name>
-```
-
-</div>
-"#,
-        summary = summary.replace('\n', " "),
-        fields = fields,
-        ty = ty,
-    ))
 }
 
 fn config_section_label(path: &str) -> anyhow::Result<String> {
@@ -1064,17 +916,6 @@ mod generated_prose_gate {
             }
         }
         false
-    }
-
-    #[test]
-    fn sop_trigger_channel_renders_retired_feeder_and_appears_in_index() {
-        let single = super::render_sop_trigger("channel").expect("channel trigger renders");
-        assert!(single.contains("the channel SOP fan-in is retired"));
-        assert!(single.contains("channel"));
-
-        let index = super::render_sop_trigger_index().expect("trigger index renders");
-        assert!(index.contains("| `channel` |"));
-        assert!(index.contains("| `amqp` |"));
     }
 
     #[test]
