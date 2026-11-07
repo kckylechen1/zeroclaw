@@ -6,6 +6,8 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use zeroclaw_config::schema::Config;
 
+use crate::tools::task_context::TaskIdentity;
+
 pub type StarterFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
 #[derive(Clone)]
@@ -27,7 +29,9 @@ pub type GatewayStarter = Box<
 >;
 
 /// Starts the supervised channel orchestrator for one daemon run/reload iteration.
-pub type ChannelsStarter = Box<dyn Fn(Config, CancellationToken) -> StarterFuture + Send + Sync>;
+/// The identity snapshot belongs to that configuration and survives retries.
+pub type ChannelsStarter =
+    Box<dyn Fn(Config, CancellationToken, TaskIdentity) -> StarterFuture + Send + Sync>;
 
 #[derive(Default)]
 pub struct DaemonRegistry {
@@ -80,7 +84,7 @@ mod tests {
     }
 
     fn channels_starter() -> ChannelsStarter {
-        Box::new(|_, _| Box::pin(async { Ok(()) }))
+        Box::new(|_, _, _| Box::pin(async { Ok(()) }))
     }
 
     #[test]

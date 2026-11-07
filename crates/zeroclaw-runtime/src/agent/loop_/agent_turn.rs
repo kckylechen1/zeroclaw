@@ -59,6 +59,7 @@ pub async fn agent_turn(
     memory: Option<crate::agent::memory_inject::TurnMemory<'_>>,
     agent_alias: Option<&str>,
     turn_id: Option<&str>,
+    task_owner: Option<&crate::tools::task_list::TaskOwnerResolver>,
 ) -> Result<String> {
     let turn_id = turn_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
     // Bracket the turn with AgentStart/AgentEnd so entry points that dispatch
@@ -106,7 +107,8 @@ pub async fn agent_turn(
                 context_token_budget,
                 knobs: &LoopKnobs::default(),
             },
-        ),
+        )
+        .with_task_owner(task_owner),
         history,
         channel_name,
         channel_reply_target,

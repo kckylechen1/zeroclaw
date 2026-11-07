@@ -8,10 +8,9 @@
 //!
 //! # Rename
 //!
-//! Changing `[agents.<alias>]` mints a **new** UUID the first time the new
-//! alias is seen. To keep the old identity, copy the existing UUID onto the
-//! new alias key before the new alias is captured. The runtime never rewrites
-//! a key that is already present.
+//! Supported agent renames bind both aliases to the same UUID before the
+//! configuration is committed. Creating a new agent under a retired alias
+//! clears that alias's old mapping so the new agent receives a fresh UUID.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -64,20 +63,33 @@ pub fn resolve_or_mint(store_dir: &Path, alias: &str) -> anyhow::Result<AgentIde
     ))
 }
 
-/// Read a stored mapping without minting.
 /// Re-point `to` at the identity currently held by `from` (alias rename).
 /// The `from` mapping is PRESERVED (both names resolve to one identity, so a
-/// rename back and in-flight `from` resolutions stay continuous). Renaming
-/// onto a `to` that already holds a different identity overwrites it
-/// (last-write-wins); the config-level collision guard is the outer
-/// protection against that case. Returns whether `from` had a mapping.
+/// failed config save leaves the source identity intact). If `from` has
+/// never been resolved, mint its identity here: a stale `to` mapping must
+/// never supply the identity of an unrelated, renamed-away agent.
+///
+/// Callers must validate the config rename and reject an occupied target
+/// before calling this function, then persist config only after it succeeds.
+/// Returns whether the identity map changed.
 pub fn rename_alias(store_dir: &Path, from: &str, to: &str) -> anyhow::Result<bool> {
+    let (from, to) = (from.trim(), to.trim());
+    anyhow::ensure!(
+        !from.is_empty() && !to.is_empty(),
+        "companion agent aliases are empty; refusing to rename an identity"
+    );
     let _guard = IDENTITY_FILE_LOCK.lock();
     let path = identity_path(store_dir);
     let mut file = load_identity_file(&path)?;
-    let Some(identity) = file.agents.get(from).cloned() else {
-        return Ok(false);
+    let identity = match file.agents.get(from) {
+        Some(raw) => parse_stored_uuid(from, raw)?.as_str().to_string(),
+        None => uuid::Uuid::new_v4().hyphenated().to_string(),
     };
+    if file.agents.get(from) == Some(&identity) && file.agents.get(to) == Some(&identity) {
+        return Ok(false);
+    }
+    file.version = identity_file_version();
+    file.agents.insert(from.to_string(), identity.clone());
     file.agents.insert(to.to_string(), identity);
     persist_identity_file(&path, &file)?;
     Ok(true)
@@ -223,12 +235,72 @@ mod tests {
     }
 
     #[test]
-    fn rename_without_manual_copy_mints_a_new_identity() {
+    fn unrelated_alias_mints_a_new_identity() {
         let tmp = TempDir::new().unwrap();
         let old = resolve_or_mint(tmp.path(), "old-alias").expect("old");
         let new = resolve_or_mint(tmp.path(), "new-alias").expect("new");
         assert_ne!(old, new);
         assert_eq!(peek(tmp.path(), "old-alias").as_ref(), Some(&old));
+    }
+
+    #[test]
+    fn rename_before_first_use_replaces_a_retired_targets_identity() {
+        let tmp = TempDir::new().unwrap();
+        let old = resolve_or_mint(tmp.path(), "a").unwrap();
+        rename_alias(tmp.path(), "a", "b").unwrap();
+        assert!(peek(tmp.path(), "c").is_none());
+
+        assert!(rename_alias(tmp.path(), "c", "a").unwrap());
+        let renamed = resolve_or_mint(tmp.path(), "a").unwrap();
+        assert_ne!(renamed, old, "c must not inherit b's durable state");
+        assert_eq!(peek(tmp.path(), "c"), Some(renamed.clone()));
+        assert_eq!(peek(tmp.path(), "b"), Some(old));
+        assert!(!rename_alias(tmp.path(), "c", "a").unwrap());
+        assert_eq!(peek(tmp.path(), "a"), Some(renamed));
+    }
+
+    #[test]
+    fn rename_keeps_source_identity_and_create_reuse_mints_fresh() {
+        let tmp = TempDir::new().unwrap();
+        let old = resolve_or_mint(tmp.path(), "a").unwrap();
+        rename_alias(tmp.path(), "a", "b").unwrap();
+        assert_eq!(peek(tmp.path(), "a"), Some(old.clone()));
+        assert_eq!(peek(tmp.path(), "b"), Some(old.clone()));
+
+        invalidate_alias(tmp.path(), "a").unwrap();
+        assert_ne!(resolve_or_mint(tmp.path(), "a").unwrap(), old);
+        assert_eq!(peek(tmp.path(), "b"), Some(old));
+    }
+
+    #[test]
+    fn failed_rename_preserves_existing_identity_file() {
+        let tmp = TempDir::new().unwrap();
+        let old = resolve_or_mint(tmp.path(), "a").unwrap();
+        let stale = resolve_or_mint(tmp.path(), "b").unwrap();
+        let path = identity_path(tmp.path());
+        let before = std::fs::read(&path).unwrap();
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+
+        assert!(rename_alias(tmp.path(), "a", "b").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(peek(tmp.path(), "a"), Some(old));
+        assert_eq!(peek(tmp.path(), "b"), Some(stale));
+    }
+
+    #[test]
+    fn rename_refuses_a_corrupt_source_identity_without_overwriting_target() {
+        let tmp = TempDir::new().unwrap();
+        let target = resolve_or_mint(tmp.path(), "b").unwrap();
+        let path = identity_path(tmp.path());
+        let mut file = load_identity_file(&path).unwrap();
+        file.agents
+            .insert("a".to_string(), "not-a-uuid".to_string());
+        persist_identity_file(&path, &file).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        assert!(rename_alias(tmp.path(), "a", "b").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(peek(tmp.path(), "b"), Some(target));
     }
 
     #[test]

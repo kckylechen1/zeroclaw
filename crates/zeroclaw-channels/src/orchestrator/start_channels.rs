@@ -39,6 +39,7 @@ pub async fn start_channels(
     config: Config,
     cancel: tokio_util::sync::CancellationToken,
     companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
+    task_identities: tools::task_context::TaskIdentity,
 ) -> Result<()> {
     let config_arc = Arc::new(RwLock::new(config));
     let config: Config = config_arc.read().clone();
@@ -275,6 +276,9 @@ pub async fn start_channels(
             // Channel turns are top-level origins: the turn mints its own
             // lineage root; no inherited lineage crosses this boundary.
             None,
+            // Keep the daemon generation's owners across worker warmup and
+            // supervisor retries with this configuration snapshot.
+            Some(task_identities.for_alias(agent_alias)),
         );
         // Route the per-agent tool registry through the one gated seam - see
         // `assemble_channel_agent_tools` for the knobs and why. `mut` because the
@@ -282,6 +286,7 @@ pub async fn start_channels(
         // non-native strict-tool-parsing target.
         let ChannelAssembledTools {
             tools: built_tools,
+            task_owner,
             mut deferred_section,
             pinned_section,
             ask_user_handle: ask_user_handle_ch,
@@ -627,6 +632,7 @@ pub async fn start_channels(
             user_model: user_model_store.clone(),
             task_prefs: Arc::clone(&task_prefs),
             tools_registry: Arc::clone(&tools_registry),
+            task_owner,
             observer: Arc::clone(&observer),
             system_prompt: Arc::new(system_prompt),
             model: Arc::new(model.clone()),

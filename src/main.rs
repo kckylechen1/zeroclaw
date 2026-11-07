@@ -2626,13 +2626,14 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     },
                 ));
 
-                registry.register_channels(Box::new(move |config, cancel| {
+                registry.register_channels(Box::new(move |config, cancel, task_identities| {
                     let companion_store = companion_for_channels.clone();
                     Box::pin(async move {
                         Box::pin(zeroclaw_channels::orchestrator::start_channels(
                             config,
                             cancel,
                             companion_store,
+                            task_identities,
                         ))
                         .await
                     })
@@ -2842,11 +2843,18 @@ async fn async_main(command: clap::Command) -> Result<()> {
         Commands::Channel { channel_command } => match channel_command {
             ChannelCommands::Start => {
                 let cancel = tokio_util::sync::CancellationToken::new();
+                let task_identities =
+                    zeroclaw_runtime::tools::task_context::TaskIdentity::capture_all(&config);
                 let companion_store = zeroclaw_memory::create_companion_store(&config)?;
                 let companion_outbox_observer =
                     spawn_companion_outbox_observer(companion_store.clone());
-                let result =
-                    Box::pin(channels::start_channels(config, cancel, companion_store)).await;
+                let result = Box::pin(channels::start_channels(
+                    config,
+                    cancel,
+                    companion_store,
+                    task_identities,
+                ))
+                .await;
                 if let Some(handle) = companion_outbox_observer {
                     handle.abort();
                 }

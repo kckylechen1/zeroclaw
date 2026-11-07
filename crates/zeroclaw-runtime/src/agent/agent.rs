@@ -66,6 +66,7 @@ mod turn_entry;
 pub struct Agent {
     model_provider: Box<dyn ModelProvider>,
     tools: Vec<Box<dyn Tool>>,
+    task_owner: Option<crate::tools::task_list::TaskOwnerResolver>,
     memory: Arc<dyn Memory>,
     observer: Arc<dyn Observer>,
     prompt_builder: SystemPromptBuilder,
@@ -247,6 +248,7 @@ impl AgentChannelHandles {
 pub struct AgentBuilder {
     model_provider: Option<Box<dyn ModelProvider>>,
     tools: Option<Vec<Box<dyn Tool>>>,
+    task_owner: Option<crate::tools::task_list::TaskOwnerResolver>,
     memory: Option<Arc<dyn Memory>>,
     observer: Option<Arc<dyn Observer>>,
     prompt_builder: Option<SystemPromptBuilder>,
@@ -298,6 +300,7 @@ impl AgentBuilder {
         Self {
             model_provider: None,
             tools: None,
+            task_owner: None,
             memory: None,
             observer: None,
             prompt_builder: None,
@@ -341,6 +344,11 @@ impl AgentBuilder {
 
     pub fn model_provider(mut self, model_provider: Box<dyn ModelProvider>) -> Self {
         self.model_provider = Some(model_provider);
+        self
+    }
+
+    pub fn task_owner(mut self, owner: Option<crate::tools::task_list::TaskOwnerResolver>) -> Self {
+        self.task_owner = owner;
         self
     }
 
@@ -617,6 +625,17 @@ impl AgentBuilder {
             })?
         };
         let config = self.config.unwrap_or_default();
+        let task_owner = self
+            .task_owner
+            .filter(|_| tools.iter().any(|tool| tool.name() == "task_list"));
+        let mut prompt_builder = self
+            .prompt_builder
+            .unwrap_or_else(|| SystemPromptBuilder::with_defaults(None));
+        if let Some(owner) = &task_owner {
+            prompt_builder = prompt_builder.add_section(Box::new(crate::tools::TaskListSection {
+                resolve: owner.clone(),
+            }));
+        }
 
         Ok(Agent {
             model_provider: self.model_provider.ok_or_else(|| {
@@ -630,6 +649,7 @@ impl AgentBuilder {
                 anyhow::Error::msg("model_provider is required")
             })?,
             tools,
+            task_owner,
             memory: memory.clone(),
             observer: self.observer.ok_or_else(|| {
                 ::zeroclaw_log::record!(
@@ -641,9 +661,7 @@ impl AgentBuilder {
                 );
                 anyhow::Error::msg("observer is required")
             })?,
-            prompt_builder: self
-                .prompt_builder
-                .unwrap_or_else(|| SystemPromptBuilder::with_defaults(None)),
+            prompt_builder,
             tool_dispatcher: self.tool_dispatcher.ok_or_else(|| {
                 ::zeroclaw_log::record!(
                     ERROR,

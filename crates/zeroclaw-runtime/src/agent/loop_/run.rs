@@ -132,6 +132,11 @@ pub async fn run(
         }
         let runtime: Arc<dyn platform::RuntimeAdapter> =
             Arc::from(platform::create_runtime(&config.runtime)?);
+        let task_identity = overrides.task_identity.or_else(|| {
+            runtime
+                .has_filesystem_access()
+                .then(|| crate::tools::task_context::TaskIdentity::capture(&config, agent_alias))
+        });
         let is_subagent_caller = overrides.is_subagent;
         let suppress_memory_inject = overrides.suppress_memory_inject;
         let memory_free = overrides.memory_free;
@@ -213,6 +218,7 @@ pub async fn run(
             None,
             None,
             Some(effective_lineage.clone()),
+            task_identity,
         );
         let skills = crate::skills::load_skills_for_agent_from_config(&config, agent_alias);
         // Route the per-agent tool registry through the one gated seam
@@ -247,6 +253,7 @@ pub async fn run(
         let deferred_section = assembled.combined_mcp_prompt_section();
         let scoped::ScopedAssembled {
             registry,
+            task_owner,
             ask_user_handle,
             reaction_handle,
             poll_handle,
@@ -668,7 +675,7 @@ pub async fn run(
                                             .effective_context_budget(),
                                         knobs: &LoopKnobs::default(),
                                     },
-                                ),
+                                ).with_task_owner(task_owner.as_ref()),
                                 history: &mut history,
                                 channel_name,
                                 channel_reply_target: None,

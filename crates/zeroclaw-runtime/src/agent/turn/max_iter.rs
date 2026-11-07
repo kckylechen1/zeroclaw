@@ -24,6 +24,7 @@ pub(crate) async fn finish_after_max_iterations(
     turn_id: &str,
     knobs: &LoopKnobs,
     mut new_messages_out: Option<&mut Vec<ChatMessage>>,
+    task_owner: Option<&crate::tools::task_list::TaskOwnerResolver>,
 ) -> Result<String> {
     ::zeroclaw_log::record!(
         WARN,
@@ -78,6 +79,10 @@ pub(crate) async fn finish_after_max_iterations(
     );
     let summary_prompt_mirror = summary_prompt.clone();
     history.push(summary_prompt);
+    // The final allowed tool iteration may have committed task changes.
+    // Refresh with the same admitted owner before the tools-free request,
+    // just as an ordinary next iteration would do.
+    super::refresh_task_context(history, task_owner);
 
     enum SummaryCall {
         Cancelled,
@@ -266,6 +271,7 @@ mod graceful_summary_metering_tests {
             "trace-req-test",
             &knobs,
             None,
+            None,
         )
         .await
     }
@@ -421,6 +427,7 @@ mod graceful_summary_metering_tests {
             String::new(),
             "trace-req-audio",
             &knobs,
+            None,
             None,
         )
         .await

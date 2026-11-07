@@ -6,7 +6,7 @@
 
 use super::SqliteSessionBackend;
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 /// Hard bounds keep a whole list renderable in one prompt section.
@@ -117,47 +117,14 @@ impl SqliteSessionBackend {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .context("opening a task list read")?;
-        // Missing row = revision 0; anything else is a real error.
-        let revision: i64 = tx
-            .query_row(
-                "SELECT revision FROM agent_task_revisions WHERE agent_identity = ?1",
-                params![agent_identity],
-                |row| row.get(0),
-            )
-            .map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => anyhow::Error::msg("no revision row"),
-                other => anyhow::Error::from(other),
-            })
-            .or_else(|error| {
-                if error.to_string().contains("no revision row") {
-                    Ok(0)
-                } else {
-                    Err(error)
-                }
-            })?;
-        let mut query = tx.prepare(
-            "SELECT task_id, ordinal, description, status FROM agent_tasks
-             WHERE agent_identity = ?1 ORDER BY ordinal, rowid",
-        )?;
-        let items = query
-            .query_map(params![agent_identity], |row| {
-                Ok(TaskItem {
-                    task_id: row.get(0)?,
-                    ordinal: row.get(1)?,
-                    description: row.get(2)?,
-                    status: row.get(3)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(query);
+        let list = read_list(&tx, agent_identity)?;
         tx.commit().context("closing a task list read")?;
-        Ok(TaskList { revision, items })
+        Ok(list)
     }
 
-    /// Apply one batched, transactional mutation. `expected_revision` < 0
-    /// means "accept any current revision" (first write / forced repair by
-    /// the model after a conflict round-trip is NOT this — the model must
-    /// echo the returned revision).
+    /// Apply one batched, transactional mutation. The caller must echo a
+    /// non-negative revision from the last read or conflict response; there
+    /// is no unchecked write or automatic repair of corrupt stored state.
     pub fn apply_task_ops(
         &self,
         agent_identity: &str,
@@ -175,20 +142,19 @@ impl SqliteSessionBackend {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("opening agent_tasks transaction")?;
-        let revision: i64 = tx
-            .query_row(
-                "SELECT revision FROM agent_task_revisions WHERE agent_identity = ?1",
-                params![agent_identity],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let list = read_items(&tx, agent_identity)?;
-        if expected_revision >= 0 && expected_revision != revision {
+        let TaskList {
+            revision,
+            items: list,
+        } = read_list(&tx, agent_identity)?;
+        if expected_revision != revision {
             return Ok(ApplyOutcome::Conflict(TaskList {
                 revision,
                 items: list,
             }));
         }
+        let next_revision = revision
+            .checked_add(1)
+            .context("task list revision exhausted")?;
         // The cap applies to the POST-BATCH size: removes in the same batch
         // free room for adds (a legal replacement stays one transaction).
         let adds = ops
@@ -267,28 +233,53 @@ impl SqliteSessionBackend {
             }
         }
         tx.execute(
-            "INSERT INTO agent_task_revisions (agent_identity, revision) VALUES (?1, 1)
-             ON CONFLICT(agent_identity) DO UPDATE SET revision = revision + 1",
-            params![agent_identity],
+            "INSERT INTO agent_task_revisions (agent_identity, revision) VALUES (?1, ?2)
+             ON CONFLICT(agent_identity) DO UPDATE SET revision = excluded.revision",
+            params![agent_identity, next_revision],
         )
         .context("bumping the task list revision")?;
-        let revision = revision + 1;
         let items = read_items(&tx, agent_identity)?;
         tx.commit().context("committing agent task operations")?;
         if let Some(path) = conn.path() {
             crate::sqlite_perms::harden_sqlite_owner_only(std::path::Path::new(path));
         }
-        Ok(ApplyOutcome::Applied(TaskList { revision, items }))
+        Ok(ApplyOutcome::Applied(TaskList {
+            revision: next_revision,
+            items,
+        }))
     }
+}
+
+fn read_list(tx: &rusqlite::Transaction, agent_identity: &str) -> Result<TaskList> {
+    let revision: Option<i64> = tx
+        .query_row(
+            "SELECT revision FROM agent_task_revisions WHERE agent_identity = ?1",
+            params![agent_identity],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("reading task list revision")?;
+    if let Some(revision) = revision {
+        anyhow::ensure!(revision > 0, "stored task list revision must be positive");
+    }
+    let items = read_items(tx, agent_identity)?;
+    anyhow::ensure!(
+        revision.is_some() || items.is_empty(),
+        "stored task items have no list revision"
+    );
+    Ok(TaskList {
+        revision: revision.unwrap_or(0),
+        items,
+    })
 }
 
 fn read_items(tx: &rusqlite::Transaction, agent_identity: &str) -> Result<Vec<TaskItem>> {
     let mut query = tx.prepare(
         "SELECT task_id, ordinal, description, status FROM agent_tasks
-         WHERE agent_identity = ?1 ORDER BY ordinal, rowid",
+         WHERE agent_identity = ?1 ORDER BY ordinal, rowid LIMIT ?2",
     )?;
     let items = query
-        .query_map(params![agent_identity], |row| {
+        .query_map(params![agent_identity, MAX_ITEMS + 1], |row| {
             Ok(TaskItem {
                 task_id: row.get(0)?,
                 ordinal: row.get(1)?,
@@ -297,6 +288,16 @@ fn read_items(tx: &rusqlite::Transaction, agent_identity: &str) -> Result<Vec<Ta
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    anyhow::ensure!(
+        items.len() <= MAX_ITEMS,
+        "stored task list exceeds {MAX_ITEMS} items"
+    );
+    for item in &items {
+        uuid::Uuid::parse_str(&item.task_id).context("stored task id is not a UUID")?;
+        anyhow::ensure!(item.ordinal > 0, "stored task ordinal must be positive");
+        validate_description(&item.description).context("invalid stored task description")?;
+        validate_status(&item.status).context("invalid stored task status")?;
+    }
     Ok(items)
 }
 
@@ -307,8 +308,8 @@ fn next_ordinal(tx: &rusqlite::Transaction, agent_identity: &str) -> Result<i64>
             params![agent_identity],
             |row| row.get(0),
         )
-        .unwrap_or(0);
-    Ok(max + 1)
+        .context("reading task ordinal")?;
+    max.checked_add(1).context("task ordinal exhausted")
 }
 
 #[cfg(test)]
@@ -378,6 +379,258 @@ mod tests {
                 assert_eq!(list.items.len(), 2);
             }
             ApplyOutcome::Conflict(_) => panic!("current revision must apply"),
+        }
+    }
+
+    #[test]
+    fn corrupt_revisions_never_become_initial_revision_zero() {
+        use rusqlite::types::Value;
+
+        for corrupt in [
+            Value::Text("corrupt revision".into()),
+            Value::Real(1.5),
+            Value::Integer(-1),
+            Value::Integer(0),
+        ] {
+            let (_tmp, backend) = backend();
+            add(&backend, "owner-a", "keep");
+            backend
+                .conn
+                .lock()
+                .execute(
+                    "UPDATE agent_task_revisions SET revision = ?1",
+                    params![corrupt],
+                )
+                .unwrap();
+
+            assert!(backend.task_list("owner-a").is_err());
+            assert!(
+                backend
+                    .apply_task_ops(
+                        "owner-a",
+                        0,
+                        &[TaskOp::Add {
+                            description: "must not be written".into(),
+                            status: STATUS_PENDING.into(),
+                        }],
+                    )
+                    .is_err()
+            );
+            let conn = backend.conn.lock();
+            let (revision, count): (Value, i64) = conn
+                .query_row(
+                    "SELECT revision, (SELECT COUNT(*) FROM agent_tasks)
+                     FROM agent_task_revisions",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                revision, corrupt,
+                "a corrupt revision must not be rewritten"
+            );
+            assert_eq!(count, 1, "a failed read must not admit a write");
+        }
+    }
+
+    #[test]
+    fn revision_query_error_text_is_not_treated_as_a_missing_row() {
+        let (_tmp, backend) = backend();
+        add(&backend, "owner-a", "keep");
+        backend
+            .conn
+            .lock()
+            .execute_batch(
+                "ALTER TABLE agent_task_revisions RENAME TO saved_task_revisions;
+                 CREATE VIEW agent_task_revisions AS
+                 SELECT agent_identity, revision FROM \"no revision row\";",
+            )
+            .unwrap();
+
+        // The SQLite error deliberately contains the former sentinel text.
+        // It is a failed query, not QueryReturnedNoRows.
+        let Err(error) = backend.task_list("owner-a") else {
+            panic!("read must fail");
+        };
+        assert!(format!("{error:#}").contains("no revision row"));
+        assert!(
+            backend
+                .apply_task_ops(
+                    "owner-a",
+                    0,
+                    &[TaskOp::Add {
+                        description: "must not be written".into(),
+                        status: STATUS_PENDING.into(),
+                    }],
+                )
+                .is_err()
+        );
+        let conn = backend.conn.lock();
+        let (revision, count): (i64, i64) = conn
+            .query_row(
+                "SELECT revision, (SELECT COUNT(*) FROM agent_tasks)
+                 FROM saved_task_revisions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((revision, count), (1, 1));
+    }
+
+    #[test]
+    fn only_an_empty_list_can_have_no_revision_row() {
+        let (_tmp, backend) = backend();
+        let empty = backend.task_list("owner-a").unwrap();
+        assert_eq!(empty.revision, 0);
+        assert!(empty.items.is_empty());
+        let first = add(&backend, "owner-a", "keep");
+        backend
+            .conn
+            .lock()
+            .execute("DELETE FROM agent_task_revisions", [])
+            .unwrap();
+
+        assert!(backend.task_list("owner-a").is_err());
+        assert!(
+            backend
+                .apply_task_ops(
+                    "owner-a",
+                    0,
+                    &[TaskOp::Remove {
+                        task_id: first.items[0].task_id.clone(),
+                    }],
+                )
+                .is_err()
+        );
+        let count: i64 = backend
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM agent_tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn corrupt_task_rows_are_neither_projected_nor_mutated() {
+        use rusqlite::types::Value;
+
+        for (column, value) in [
+            ("task_id", Value::Text("invalid task id".into())),
+            ("ordinal", Value::Integer(0)),
+            ("description", Value::Text(String::new())),
+            (
+                "description",
+                Value::Text("x".repeat(MAX_DESCRIPTION_BYTES + 1)),
+            ),
+            ("status", Value::Text("invalid status".into())),
+        ] {
+            let (_tmp, backend) = backend();
+            let first = add(&backend, "owner-a", "keep");
+            backend
+                .conn
+                .lock()
+                .execute(
+                    &format!("UPDATE agent_tasks SET {column} = ?1"),
+                    params![value],
+                )
+                .unwrap();
+
+            assert!(backend.task_list("owner-a").is_err(), "{column}");
+            assert!(
+                backend
+                    .apply_task_ops(
+                        "owner-a",
+                        first.revision,
+                        &[TaskOp::Add {
+                            description: "must not be written".into(),
+                            status: STATUS_PENDING.into(),
+                        }],
+                    )
+                    .is_err(),
+                "{column}"
+            );
+            let conn = backend.conn.lock();
+            let (revision, count): (i64, i64) = conn
+                .query_row(
+                    "SELECT revision, (SELECT COUNT(*) FROM agent_tasks)
+                     FROM agent_task_revisions",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((revision, count), (first.revision, 1));
+        }
+    }
+
+    #[test]
+    fn overfull_stored_list_is_rejected_without_silent_truncation() {
+        let (_tmp, backend) = backend();
+        let first = add(&backend, "owner-a", "keep");
+        {
+            let conn = backend.conn.lock();
+            for ordinal in 2..=MAX_ITEMS + 1 {
+                conn.execute(
+                    "INSERT INTO agent_tasks
+                     (agent_identity, task_id, ordinal, description, status, created_at, updated_at)
+                     VALUES ('owner-a', ?1, ?2, 'extra', 'pending', 0, 0)",
+                    params![uuid::Uuid::new_v4().to_string(), ordinal],
+                )
+                .unwrap();
+            }
+        }
+        assert!(backend.task_list("owner-a").is_err());
+        assert!(
+            backend
+                .apply_task_ops(
+                    "owner-a",
+                    first.revision,
+                    &[TaskOp::Remove {
+                        task_id: first.items[0].task_id.clone(),
+                    }],
+                )
+                .is_err()
+        );
+        let count: usize = backend
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM agent_tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, MAX_ITEMS + 1);
+    }
+
+    #[test]
+    fn exhausted_counters_reject_writes_without_partial_changes() {
+        for counter in ["revision", "ordinal"] {
+            let (_tmp, backend) = backend();
+            add(&backend, "owner-a", "keep");
+            let table = if counter == "revision" {
+                "agent_task_revisions"
+            } else {
+                "agent_tasks"
+            };
+            backend
+                .conn
+                .lock()
+                .execute(
+                    &format!("UPDATE {table} SET {counter} = ?1"),
+                    params![i64::MAX],
+                )
+                .unwrap();
+            let before = backend.task_list("owner-a").unwrap();
+            let Err(error) = backend.apply_task_ops(
+                "owner-a",
+                before.revision,
+                &[TaskOp::Add {
+                    description: "must not be written".into(),
+                    status: STATUS_PENDING.into(),
+                }],
+            ) else {
+                panic!("counter exhaustion must fail");
+            };
+            assert!(error.to_string().contains("exhausted"));
+            let after = backend.task_list("owner-a").unwrap();
+            assert_eq!(after.revision, before.revision);
+            assert_eq!(after.items, before.items);
         }
     }
 

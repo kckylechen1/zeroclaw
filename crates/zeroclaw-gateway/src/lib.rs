@@ -824,6 +824,7 @@ pub async fn run_gateway(
                 None,
                 // Gateway request handling is a top-level origin.
                 None,
+                None,
             );
             let assembled = scoped::ScopedToolRegistry::assemble(scoped::ScopedAssembly {
                 config: &config,
@@ -951,6 +952,7 @@ pub async fn run_gateway(
             None,
             None,
             // Dashboard agent-tool enumeration: top-level origin.
+            None,
             None,
         );
         // Same gated seam as the dashboard seed above, so this listing shows

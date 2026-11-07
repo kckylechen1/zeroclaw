@@ -2333,14 +2333,14 @@ mod tests {
             "typed provider must be registered under 'groq.default'"
         );
 
-        // Binding the dotted alias and calling transcribe must reach the
-        // provider (not fail with "no transcription_provider configured").
+        // Reach the provider's local validation through the dotted alias.
+        // An unsupported format keeps this routing test off the network.
         let manager = manager.with_agent_transcription_provider("groq.default");
-        let result = manager.transcribe(b"", "voice.wav").await;
+        let result = manager.transcribe(b"", "voice.unsupported").await;
         let err = result.unwrap_err().to_string();
         assert!(
-            !err.contains("no transcription_provider configured"),
-            "dotted alias must resolve; got: {err}"
+            err.contains("Unsupported audio format"),
+            "dotted alias must reach provider validation; got: {err}"
         );
     }
 }

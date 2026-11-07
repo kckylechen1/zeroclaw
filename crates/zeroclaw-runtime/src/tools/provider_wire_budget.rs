@@ -312,6 +312,7 @@ async fn assemble_turn(req: TurnRequest<'_>) -> (ScopedAssembled, WireBudget) {
         None,
         None,
         None,
+        None,
     );
     let assembled = tokio::time::timeout(
         std::time::Duration::from_secs(20),

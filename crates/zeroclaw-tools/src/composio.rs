@@ -1833,8 +1833,8 @@ mod tests {
     #[tokio::test]
     async fn connected_accounts_alias_dispatches_same_as_list_accounts() {
         // Both spellings should reach the same handler and return the same
-        // shape of error (network failure in test, not a dispatch error).
-        let tool = ComposioTool::new("test-key", None, test_security());
+        // local request-construction error. The invalid header prevents I/O.
+        let tool = ComposioTool::new("invalid\nheader", None, test_security());
         let r1 = tool
             .execute(json!({"action": "list_accounts"}))
             .await
@@ -1843,13 +1843,15 @@ mod tests {
             .execute(json!({"action": "connected_accounts"}))
             .await
             .unwrap();
-        // Both fail the same way (network) — neither is a dispatch error.
+        // Both fail within the account handler before network dispatch.
         assert!(!r1.success);
         assert!(!r2.success);
         let e1 = r1.error.unwrap_or_default();
         let e2 = r2.error.unwrap_or_default();
         assert!(!e1.contains("Unknown action"), "list_accounts: {e1}");
         assert!(!e2.contains("Unknown action"), "connected_accounts: {e2}");
+        assert!(e1.starts_with("Failed to list connected accounts:"), "{e1}");
+        assert_eq!(e1, e2);
     }
 
     #[test]

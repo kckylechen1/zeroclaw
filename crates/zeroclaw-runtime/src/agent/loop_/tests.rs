@@ -1394,6 +1394,7 @@ async fn tool_results_for_denying_channel_with_store(
     let _ = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -1730,6 +1731,155 @@ impl Tool for FailingTool {
 }
 
 #[tokio::test]
+async fn max_iteration_summary_refreshes_committed_task_context() {
+    use crate::tools::task_list::TaskOwnerResolver;
+    use crate::tools::task_section::{TASKS_REGION_BEGIN, TASKS_REGION_END};
+    use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
+
+    struct SummaryTaskProvider {
+        scripted: ScriptedModelProvider,
+        requests: Mutex<Vec<(Vec<ChatMessage>, bool)>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for SummaryTaskProvider {
+        fn capabilities(&self) -> ProviderCapabilities {
+            self.scripted.capabilities()
+        }
+
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("the tool loop must use chat")
+        }
+
+        async fn chat(
+            &self,
+            request: ChatRequest<'_>,
+            model: &str,
+            temperature: Option<f64>,
+        ) -> anyhow::Result<ChatResponse> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request.messages.to_vec(), request.tools.is_some()));
+            self.scripted.chat(request, model, temperature).await
+        }
+    }
+
+    impl zeroclaw_api::attribution::Attributable for SummaryTaskProvider {
+        fn role(&self) -> zeroclaw_api::attribution::Role {
+            zeroclaw_api::attribution::Attributable::role(&self.scripted)
+        }
+
+        fn alias(&self) -> &str {
+            "summary-task-provider"
+        }
+    }
+
+    let tmp = tempdir().unwrap();
+    let data_dir = tmp.path().to_path_buf();
+    let identity = uuid::Uuid::new_v4().to_string();
+    let owner: TaskOwnerResolver = {
+        let identity = identity.clone();
+        let data_dir = data_dir.clone();
+        Arc::new(move || Ok((identity.clone(), data_dir.clone())))
+    };
+    let tools_registry: Vec<Box<dyn Tool>> =
+        vec![Box::new(crate::tools::TaskListTool::new(owner.clone()))];
+    let model_provider = SummaryTaskProvider {
+        scripted: ScriptedModelProvider::from_native_tool_calls(
+            vec![(
+                "commit-task",
+                "task_list",
+                r#"{"expected_revision":0,"ops":[{"op":"add","description":"committed at the iteration cap"}]}"#,
+            )],
+            "task saved; final summary",
+        ),
+        requests: Mutex::new(Vec::new()),
+    };
+    let observer = NoopObserver;
+    let mut history = vec![
+        ChatMessage::system("Keep the existing identity instructions."),
+        ChatMessage::user("Save this commitment."),
+    ];
+    let result = run_tool_call_loop(ToolLoop {
+        parent_agent_alias: None,
+        exec: ResolvedAgentExecution {
+            task_owner: Some(&owner),
+            model_access: ResolvedModelAccess {
+                model_provider: &model_provider,
+                provider_name: "mock-provider",
+                model: "mock-model",
+                temperature: Some(0.0),
+            },
+            tools_registry: &tools_registry,
+            observer: &observer,
+            silent: true,
+            approval: None,
+            multimodal_config: &zeroclaw_config::schema::MultimodalConfig::default(),
+            config: None,
+            max_tool_iterations: 1,
+            hooks: None,
+            excluded_tools: &[],
+            dedup_exempt_tools: &[],
+            activated_tools: None,
+            model_switch_callback: None,
+            pacing: &zeroclaw_config::schema::PacingConfig::default(),
+            strict_tool_parsing: false,
+            parallel_tools: false,
+            max_tool_result_chars: 0,
+            context_token_budget: 0,
+            receipt_generator: None,
+            knobs: &LoopKnobs::default(),
+        },
+        history: &mut history,
+        channel_name: "cli",
+        channel_reply_target: None,
+        cancellation_token: None,
+        on_delta: None,
+        shared_budget: None,
+        channel: None,
+        collected_receipts: None,
+        event_tx: None,
+        steering: None,
+        new_messages_out: None,
+        image_cache: None,
+        memory: None,
+        ingress: IngressContext::sub_turn(),
+        agent_alias: Some("task-owner"),
+        turn_id: "task-cap-turn",
+    })
+    .await
+    .unwrap();
+
+    assert!(result.contains("task saved; final summary"));
+    let requests = model_provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "one tool request plus the final summary");
+    assert!(requests[0].1, "first request must offer the real task tool");
+    assert!(!requests[1].1, "the final summary must not offer tools");
+    let initial_system = &requests[0].0[0].content;
+    let summary_system = &requests[1].0[0].content;
+    assert!(initial_system.contains("No committed tasks (revision 0)"));
+    assert!(summary_system.contains("committed at the iteration cap"));
+    assert!(summary_system.contains("expected_revision=1"));
+    assert!(!summary_system.contains("No committed tasks"));
+    assert!(summary_system.starts_with("Keep the existing identity instructions."));
+    assert_eq!(summary_system.matches(TASKS_REGION_BEGIN).count(), 1);
+    assert_eq!(summary_system.matches(TASKS_REGION_END).count(), 1);
+    let committed = SqliteSessionBackend::new(&data_dir)
+        .unwrap()
+        .task_list(&identity)
+        .unwrap();
+    assert_eq!(committed.revision, 1);
+    assert_eq!(committed.items.len(), 1);
+}
+
+#[tokio::test]
 async fn run_tool_call_loop_returns_structured_error_for_non_vision_provider() {
     let turn_id = uuid::Uuid::new_v4().to_string();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -1746,6 +1896,7 @@ async fn run_tool_call_loop_returns_structured_error_for_non_vision_provider() {
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -1822,6 +1973,7 @@ async fn run_tool_call_loop_skips_oversized_image_payload() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -1903,6 +2055,7 @@ async fn run_tool_call_loop_degrades_carried_over_image_on_non_vision_provider()
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -1991,6 +2144,7 @@ async fn run_tool_call_loop_accepts_valid_multimodal_request_flow() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -2064,6 +2218,7 @@ async fn run_tool_call_loop_degrades_tool_result_image_for_non_vision_provider()
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -2140,6 +2295,7 @@ async fn run_tool_call_loop_vision_provider_creation_failure() {
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -2217,6 +2373,7 @@ async fn run_tool_call_loop_no_images_uses_default_provider() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "scripted",
@@ -2280,6 +2437,7 @@ async fn run_tool_call_loop_ingress_default_loop_is_behavior_identical() {
         run_tool_call_loop(ToolLoop {
             parent_agent_alias: None,
             exec: ResolvedAgentExecution {
+                task_owner: None,
                 model_access: ResolvedModelAccess {
                     model_provider: &model_provider,
                     provider_name: "scripted",
@@ -2463,6 +2621,7 @@ async fn run_tool_call_loop_memory_injection_keys_on_origin() {
         run_tool_call_loop(ToolLoop {
             parent_agent_alias: None,
             exec: ResolvedAgentExecution {
+                task_owner: None,
                 model_access: ResolvedModelAccess {
                     model_provider: &model_provider,
                     provider_name: "scripted",
@@ -2587,6 +2746,7 @@ async fn run_tool_call_loop_vision_provider_without_model_falls_back() {
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -2663,6 +2823,7 @@ async fn run_tool_call_loop_empty_image_markers_use_default_provider() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "scripted",
@@ -2738,6 +2899,7 @@ async fn run_tool_call_loop_multiple_images_trigger_vision_routing() {
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -2899,6 +3061,7 @@ async fn run_tool_call_loop_executes_multiple_tools_with_ordered_results() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3024,6 +3187,7 @@ async fn run_tool_call_loop_native_emits_tool_message_per_parallel_call() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3189,6 +3353,7 @@ async fn run_tool_call_loop_parallel_cancel_no_double_terminal_for_completed_cal
     let _ = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3297,6 +3462,7 @@ async fn run_tool_call_loop_injects_channel_delivery_defaults_for_cron_add() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3389,6 +3555,7 @@ async fn run_tool_call_loop_preserves_explicit_cron_delivery_none() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3473,6 +3640,7 @@ async fn run_tool_call_loop_injects_channel_delivery_defaults_for_lark() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3565,6 +3733,7 @@ async fn run_tool_call_loop_injects_channel_delivery_defaults_for_feishu() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3660,6 +3829,7 @@ async fn run_tool_call_loop_deduplicates_repeated_tool_calls() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3760,6 +3930,7 @@ async fn run_tool_call_loop_allows_low_risk_shell_in_non_interactive_mode() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3853,6 +4024,7 @@ async fn run_tool_call_loop_reports_unanswerable_approval_without_blaming_the_us
     let _ = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -3972,6 +4144,7 @@ async fn run_tool_call_loop_aborts_repeated_prompt_required_shell_before_repromp
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -4068,6 +4241,7 @@ async fn run_tool_call_loop_skips_same_round_prompt_required_shell_duplicate_wit
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -4170,6 +4344,7 @@ async fn run_tool_call_loop_prompt_guard_ignores_same_round_dedup_exempt_tools()
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -4262,6 +4437,7 @@ async fn run_tool_call_loop_dedup_exempt_allows_repeated_calls() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -4372,6 +4548,7 @@ async fn run_tool_call_loop_reentrant_agent_tools_are_dedup_exempt_by_default() 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -4470,6 +4647,7 @@ async fn run_tool_call_loop_dedup_exempt_only_affects_listed_tools() {
     let _result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -4554,6 +4732,7 @@ async fn run_tool_call_loop_native_mode_preserves_fallback_tool_call_ids() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -4642,6 +4821,7 @@ async fn run_tool_call_loop_retries_malformed_tool_protocol_without_leaking_json
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -4724,6 +4904,7 @@ async fn run_tool_call_loop_preserves_unknown_function_call_json_with_tools() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -4805,6 +4986,7 @@ async fn run_tool_call_loop_preserves_malformed_unknown_tool_calls_json_with_too
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -4889,6 +5071,7 @@ async fn run_tool_call_loop_falls_back_after_repeated_malformed_tool_protocol() 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -4970,6 +5153,7 @@ async fn run_tool_call_loop_streams_toolcalls_reference_json_when_no_tools_are_e
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5050,6 +5234,7 @@ async fn run_tool_call_loop_returns_toolcalls_reference_json_when_no_tools_are_e
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5122,6 +5307,7 @@ async fn run_tool_call_loop_returns_schema_json_array_when_no_tools_are_enabled(
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5194,6 +5380,7 @@ async fn run_tool_call_loop_returns_tool_calls_audit_json_when_no_tools_are_enab
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5267,6 +5454,7 @@ async fn run_tool_call_loop_returns_function_call_reference_json_when_no_tools_a
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5342,6 +5530,7 @@ This is an example, not an invocation."#;
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5422,6 +5611,7 @@ This is an example, not an invocation."#;
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5514,6 +5704,7 @@ This is an example, not an invocation."#;
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5588,6 +5779,7 @@ Done."#;
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5665,6 +5857,7 @@ Done."#;
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5740,6 +5933,7 @@ async fn run_tool_call_loop_retries_malformed_tool_protocol_fenced_call_without_
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5817,6 +6011,7 @@ This is an example, not an invocation."#;
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -5951,6 +6146,7 @@ This is an example, not an invocation."#;
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -6035,6 +6231,7 @@ This is an example, not an invocation."#;
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -6124,6 +6321,7 @@ async fn run_tool_call_loop_executes_streamed_tool_call_fence_without_draft_leak
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -6236,6 +6434,7 @@ async fn run_tool_call_loop_sanitizes_native_tool_call_text_before_display_and_h
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -6352,6 +6551,7 @@ async fn run_tool_call_loop_consumes_provider_stream_for_final_response() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -6443,6 +6643,7 @@ async fn run_tool_call_loop_streaming_path_preserves_tool_loop_semantics() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -6545,6 +6746,7 @@ async fn parsed_tool_call_iteration_text_is_suppressed() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "mock-provider",
@@ -7426,6 +7628,7 @@ async fn run_tool_call_loop_streams_native_tool_events_without_chat_fallback() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -7530,6 +7733,7 @@ async fn run_tool_call_loop_does_not_duplicate_streamed_narration_before_native_
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -7633,6 +7837,7 @@ async fn run_tool_call_loop_forwards_native_narration_emitted_after_tool_call() 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -7736,6 +7941,7 @@ async fn run_tool_call_loop_preserves_guard_withheld_narration_tail_before_tool_
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -7894,6 +8100,7 @@ async fn run_tool_call_loop_routed_streaming_uses_live_provider_deltas_once() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &router,
                 provider_name: "router",
@@ -8031,6 +8238,7 @@ fn agent_turn_executes_activated_tool_from_wrapper() {
             None,
             None, // agent_alias: not under test here
             None, // turn_id: self-minted
+            None,
         )
         .await
         .expect("wrapper path should execute activated tools");
@@ -8104,6 +8312,7 @@ fn agent_turn_strict_tool_parsing_ignores_activated_tool_text_from_wrapper() {
             None,
             None, // agent_alias: not under test here
             None, // turn_id: self-minted
+            None,
         )
         .await
         .expect("strict wrapper path should preserve fallback-looking text");
@@ -8231,6 +8440,7 @@ fn agent_turn_forwards_max_tool_result_chars_to_truncate_tool_result() {
             None,
             None, // agent_alias: not under test here
             None, // turn_id: self-minted
+            None,
         )
         .await
         .expect("agent_turn should complete");
@@ -8312,6 +8522,7 @@ fn agent_turn_with_zero_budget_preserves_full_tool_result() {
             None,
             None, // agent_alias: not under test here
             None, // turn_id: self-minted
+            None,
         )
         .await
         .expect("agent_turn should complete");
@@ -9914,6 +10125,7 @@ async fn run_tool_call_loop_surfaces_tool_failure_reason_in_on_delta() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -10090,6 +10302,7 @@ async fn cost_tracking_records_usage_when_scoped() {
             run_tool_call_loop(ToolLoop {
                 parent_agent_alias: None,
                 exec: ResolvedAgentExecution {
+                    task_owner: None,
                     model_access: ResolvedModelAccess {
                         model_provider: &model_provider,
                         provider_name: "mock-provider",
@@ -10166,6 +10379,7 @@ async fn tool_loop_normalizes_non_leading_system_messages_before_provider_reques
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
                 provider_name: "recording-provider",
@@ -10279,6 +10493,7 @@ async fn cost_tracking_enforces_budget() {
             run_tool_call_loop(ToolLoop {
                 parent_agent_alias: None,
                 exec: ResolvedAgentExecution {
+                    task_owner: None,
                     model_access: ResolvedModelAccess {
                         model_provider: &model_provider,
                         provider_name: "mock-provider",
@@ -10360,6 +10575,7 @@ async fn cost_tracking_is_noop_without_scope() {
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -10448,6 +10664,7 @@ async fn trim_record_carries_model_attribution() {
     let _ = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "anthropic.personal",
@@ -11520,6 +11737,7 @@ async fn run_tool_call_loop_events_share_consistent_turn_id_channel_and_alias() 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
         exec: ResolvedAgentExecution {
+            task_owner: None,
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
                 provider_name: "mock-provider",
@@ -11622,6 +11840,7 @@ async fn agent_turn_propagates_resolved_agent_alias_to_observer_events() {
         None,
         Some("test-agent"),
         None, // turn_id: self-minted
+        None,
     )
     .await
     .expect("agent_turn should complete");
@@ -11675,6 +11894,7 @@ async fn agent_turn_brackets_turn_with_agent_start_and_agent_end() {
         None,
         Some("test-agent"),
         None, // turn_id: self-minted
+        None,
     )
     .await
     .expect("turn should succeed");
@@ -11739,6 +11959,7 @@ async fn agent_turn_uses_the_pre_minted_turn_id_on_its_bracket() {
         None,
         Some("test-agent"),
         Some("pre-minted-turn"),
+        None,
     )
     .await
     .expect("turn should succeed");
@@ -12259,6 +12480,7 @@ async fn recall_uses_canonical_memory_scopes_in_sequential_and_parallel_turns() 
         let future = run_tool_call_loop(ToolLoop {
             parent_agent_alias: None,
             exec: ResolvedAgentExecution {
+                task_owner: None,
                 model_access: ResolvedModelAccess {
                     model_provider: &model_provider,
                     provider_name: "scripted",
@@ -12377,6 +12599,7 @@ async fn scheduled_and_delegated_tools_obey_host_memory_policy() {
             let future = run_tool_call_loop(ToolLoop {
                 parent_agent_alias: None,
                 exec: ResolvedAgentExecution {
+                    task_owner: None,
                     model_access: ResolvedModelAccess {
                         model_provider: &model_provider,
                         provider_name: "scripted",
