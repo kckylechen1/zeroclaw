@@ -416,6 +416,32 @@ async fn update_draft_utf8_truncation_is_safe_for_multibyte_text() {
 
 #[tokio::test]
 async fn finalize_draft_invalid_message_id_falls_back_to_chunk_send() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    for html in [true, false] {
+        Mock::given(method("POST"))
+            .and(path("/botfake-token/sendMessage"))
+            .and(move |request: &wiremock::Request| {
+                request.body_json::<serde_json::Value>().is_ok_and(|body| {
+                    body["chat_id"] == "123"
+                        && body["text"].as_str().is_some_and(|text| !text.is_empty())
+                        && if html {
+                            body["parse_mode"] == "HTML"
+                        } else {
+                            body.get("parse_mode").is_none()
+                        }
+                })
+            })
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "ok": false, "description": "mocked Telegram send failure"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
     let mention_only = false;
     let ch = TelegramChannel::new(
         "fake-token".into(),
@@ -423,6 +449,7 @@ async fn finalize_draft_invalid_message_id_falls_back_to_chunk_send() {
         Arc::new(|| vec!["*".into()]),
         mention_only,
     )
+    .with_api_base(server.uri())
     .with_streaming(StreamMode::Partial, 0);
     let long_text = "a".repeat(TELEGRAM_MAX_MESSAGE_LENGTH + 64);
 
@@ -866,43 +893,49 @@ fn parse_update_message_extracts_thread_id_for_forum_topic() {
 
 // ── File sending integration tests (with mock server) ──────────
 
-#[tokio::test]
-async fn telegram_send_document_bytes_builds_correct_form() {
-    // This test verifies the method doesn't panic and handles bytes correctly
-    let mention_only = false;
-    let ch = TelegramChannel::new(
+async fn media_send_failure_fixture(api_method: &str) -> (wiremock::MockServer, TelegramChannel) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/botfake-token/{api_method}")))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "ok": false, "description": "mocked Telegram send failure"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let channel = TelegramChannel::new(
         "fake-token".into(),
         "telegram_test_alias",
         Arc::new(|| vec!["*".into()]),
-        mention_only,
-    );
+        false,
+    )
+    .with_api_base(server.uri());
+    (server, channel)
+}
+
+#[tokio::test]
+async fn telegram_send_document_bytes_builds_correct_form() {
+    let (_server, ch) = media_send_failure_fixture("sendDocument").await;
     let file_bytes = b"Hello, this is a test file content".to_vec();
 
-    // The actual API call will fail (no real server), but we verify the method exists
-    // and handles the input correctly up to the network call
     let result = ch
         .send_document_bytes("123456", None, file_bytes, "test.txt", Some("Test caption"))
         .await;
 
-    // Should fail with network error, not a panic or type error
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    // Error should be network-related, not a code bug
     assert!(
-        err.contains("error") || err.contains("failed") || err.contains("connect"),
-        "Expected network error, got: {err}"
+        err.contains("mocked Telegram send failure"),
+        "Expected the local fixture error, got: {err}"
     );
 }
 
 #[tokio::test]
 async fn telegram_send_photo_bytes_builds_correct_form() {
-    let mention_only = false;
-    let ch = TelegramChannel::new(
-        "fake-token".into(),
-        "telegram_test_alias",
-        Arc::new(|| vec!["*".into()]),
-        mention_only,
-    );
+    let (_server, ch) = media_send_failure_fixture("sendPhoto").await;
     // Minimal valid PNG header bytes
     let file_bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
@@ -915,13 +948,7 @@ async fn telegram_send_photo_bytes_builds_correct_form() {
 
 #[tokio::test]
 async fn telegram_send_document_by_url_builds_correct_json() {
-    let mention_only = false;
-    let ch = TelegramChannel::new(
-        "fake-token".into(),
-        "telegram_test_alias",
-        Arc::new(|| vec!["*".into()]),
-        mention_only,
-    );
+    let (_server, ch) = media_send_failure_fixture("sendDocument").await;
 
     let result = ch
         .send_document_by_url(
@@ -937,13 +964,7 @@ async fn telegram_send_document_by_url_builds_correct_json() {
 
 #[tokio::test]
 async fn telegram_send_photo_by_url_builds_correct_json() {
-    let mention_only = false;
-    let ch = TelegramChannel::new(
-        "fake-token".into(),
-        "telegram_test_alias",
-        Arc::new(|| vec!["*".into()]),
-        mention_only,
-    );
+    let (_server, ch) = media_send_failure_fixture("sendPhoto").await;
 
     let result = ch
         .send_photo_by_url("123456", None, "https://example.com/image.jpg", None)
@@ -1117,13 +1138,7 @@ fn telegram_split_very_long_message() {
 
 #[tokio::test]
 async fn telegram_send_document_bytes_with_caption() {
-    let mention_only = false;
-    let ch = TelegramChannel::new(
-        "fake-token".into(),
-        "telegram_test_alias",
-        Arc::new(|| vec!["*".into()]),
-        mention_only,
-    );
+    let (_caption_server, ch) = media_send_failure_fixture("sendDocument").await;
     let file_bytes = b"test content".to_vec();
 
     // With caption
@@ -1136,24 +1151,19 @@ async fn telegram_send_document_bytes_with_caption() {
             Some("My caption"),
         )
         .await;
-    assert!(result.is_err()); // Network error expected
+    assert!(result.is_err());
 
     // Without caption
+    let (_plain_server, ch) = media_send_failure_fixture("sendDocument").await;
     let result = ch
         .send_document_bytes("123456", None, file_bytes, "test.txt", None)
         .await;
-    assert!(result.is_err()); // Network error expected
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn telegram_send_photo_bytes_with_caption() {
-    let mention_only = false;
-    let ch = TelegramChannel::new(
-        "fake-token".into(),
-        "telegram_test_alias",
-        Arc::new(|| vec!["*".into()]),
-        mention_only,
-    );
+    let (_caption_server, ch) = media_send_failure_fixture("sendPhoto").await;
     let file_bytes = vec![0x89, 0x50, 0x4E, 0x47];
 
     // With caption
@@ -1169,6 +1179,7 @@ async fn telegram_send_photo_bytes_with_caption() {
     assert!(result.is_err());
 
     // Without caption
+    let (_plain_server, ch) = media_send_failure_fixture("sendPhoto").await;
     let result = ch
         .send_photo_bytes("123456", None, file_bytes, "test.png", None)
         .await;
@@ -1216,13 +1227,7 @@ async fn telegram_send_document_bytes_empty_file() {
 
 #[tokio::test]
 async fn telegram_send_document_bytes_empty_filename() {
-    let mention_only = false;
-    let ch = TelegramChannel::new(
-        "fake-token".into(),
-        "telegram_test_alias",
-        Arc::new(|| vec!["*".into()]),
-        mention_only,
-    );
+    let (_server, ch) = media_send_failure_fixture("sendDocument").await;
     let file_bytes = b"content".to_vec();
 
     let result = ch
@@ -1235,13 +1240,7 @@ async fn telegram_send_document_bytes_empty_filename() {
 
 #[tokio::test]
 async fn telegram_send_document_bytes_empty_chat_id() {
-    let mention_only = false;
-    let ch = TelegramChannel::new(
-        "fake-token".into(),
-        "telegram_test_alias",
-        Arc::new(|| vec!["*".into()]),
-        mention_only,
-    );
+    let (_server, ch) = media_send_failure_fixture("sendDocument").await;
     let file_bytes = b"content".to_vec();
 
     let result = ch

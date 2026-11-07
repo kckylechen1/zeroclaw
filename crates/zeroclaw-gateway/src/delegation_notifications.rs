@@ -81,8 +81,8 @@ fn short(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
-/// The outbox source identity: owning agent + request, length-delimited so
-/// no alias+request pair can alias another.
+/// The outbox source identity: owning agent + request. Admitted request ids
+/// exclude the separator, so the final separator unambiguously splits them.
 fn source_identity(agent: &str, request_id: &str) -> String {
     format!("{agent}\u{1f}{request_id}")
 }
@@ -90,7 +90,7 @@ fn source_identity(agent: &str, request_id: &str) -> String {
 /// The owning agent encoded in a delegation outbox row's source identity.
 fn owning_agent(source_id: &str) -> &str {
     source_id
-        .split_once('\u{1f}')
+        .rsplit_once('\u{1f}')
         .map_or("", |(agent, _)| agent)
 }
 
@@ -148,10 +148,16 @@ impl Default for Rotation {
 /// A destination is `(bridge, recipient, thread_id)` — the SAME triple
 /// [`permits_delivery`] gates on. Entries written before the thread became
 /// part of the identity carry only `outcome \x1f bridge \x1f recipient`;
-/// such a legacy entry is treated as covering EVERY thread of that
-/// recipient (conservative: an outcome notified before the upgrade is never
-/// re-sent because of the format change).
+/// an existing legacy outbox receipt recovers its exact thread. Without
+/// that evidence, retain conservative suppression for that recipient rather
+/// than risk re-sending an expired or uncertain notification.
 const MARKER_LIST_CAP: usize = 8;
+
+struct MarkerUpdate {
+    rowid: i64,
+    entry: String,
+    replaces: Option<String>,
+}
 
 /// Encode an optional thread so `None` and every `Some(_)` are distinct and
 /// no thread value can collide with another (the `=` prefix keeps an empty
@@ -180,17 +186,15 @@ fn legacy_marker_entry(outcome: &str, bridge: &str, recipient: &str) -> String {
 /// has no thread column, so the thread is folded into the event id: a notice
 /// queued for thread A and a retarget to thread B of the SAME recipient are
 /// two rows, each gated by [`permits_delivery`] on its own thread. The
-/// thread-less destination keeps the bare outcome (unchanged identity for
-/// existing rows and consumers).
+/// thread-less destination is also explicit: a legacy threaded row used the
+/// bare outcome, and must not absorb a new notice targeting no thread.
 fn destination_event_id(outcome: &str, thread_id: Option<&str>) -> String {
-    match thread_id {
-        None => outcome.to_string(),
-        Some(_) => format!("{outcome}\u{1f}thread\u{1f}{}", thread_token(thread_id)),
-    }
+    format!("{outcome}\u{1f}thread\u{1f}{}", thread_token(thread_id))
 }
 
-/// True when this outcome was already notified to this exact destination
-/// (or recorded by a legacy, thread-less entry for the same recipient).
+/// True when this outcome was already enqueued to this exact destination.
+/// Legacy markers need the receipt lookup in `reconcile` before they can be
+/// interpreted as an exact destination.
 fn already_notified(
     list: &str,
     outcome: &str,
@@ -199,7 +203,6 @@ fn already_notified(
     thread_id: Option<&str>,
 ) -> bool {
     marker_contains(list, &marker_entry(outcome, bridge, recipient, thread_id))
-        || marker_contains(list, &legacy_marker_entry(outcome, bridge, recipient))
 }
 
 /// True when the marker list already contains `entry`.
@@ -211,7 +214,7 @@ fn marker_contains(list: &str, entry: &str) -> bool {
 fn marker_push(list: &str, entry: &str) -> String {
     let mut items: Vec<&str> = list
         .split('\u{1e}')
-        .filter(|item| !item.is_empty())
+        .filter(|item| !item.is_empty() && *item != entry)
         .collect();
     items.push(entry);
     let start = items.len().saturating_sub(MARKER_LIST_CAP);
@@ -267,8 +270,8 @@ pub(crate) async fn reconcile(
     }
     let outbox = BridgeOutbox::shared(data_dir)?;
     let mut notified = 0;
-    let mut marks: Vec<(i64, String)> = Vec::new();
-    let mut enqueue_failure: Option<anyhow::Error> = None;
+    let mut marks: Vec<MarkerUpdate> = Vec::new();
+    let mut outbox_failure: Option<anyhow::Error> = None;
     for row in &page {
         if stop.is_cancelled() {
             break;
@@ -335,6 +338,53 @@ pub(crate) async fn reconcile(
         }) {
             continue;
         }
+        let source_id = source_identity(&row.agent_alias, &row.request_id);
+        let legacy_entry = legacy_marker_entry(outcome, &target.bridge, &target.recipient);
+        // The old producer marked at enqueue, not delivery, and used a bare
+        // outcome event id even for threaded rows. Recover the old destination
+        // from that receipt before interpreting its thread-blind marker. This
+        // also handles a crash after enqueue but before the marker was saved.
+        let legacy_receipt = match outbox.source_event(
+            &target.bridge,
+            &target.recipient,
+            DELEGATION,
+            &source_id,
+            outcome,
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                outbox_failure = Some(error);
+                break;
+            }
+        };
+        if let Some(receipt) = legacy_receipt {
+            marks.push(MarkerUpdate {
+                rowid: row.rowid,
+                entry: marker_entry(
+                    outcome,
+                    &target.bridge,
+                    &target.recipient,
+                    receipt.thread_id.as_deref(),
+                ),
+                replaces: Some(legacy_entry),
+            });
+            if receipt.thread_id.as_deref() == thread {
+                // Reuse the original candidate/receipt. In particular, an
+                // uncertain or sent attempt must never be automatically replayed.
+                continue;
+            }
+            // A different configured thread is a new destination. Leave the
+            // original row and its owner actions untouched, as for new-format
+            // A→B retargeting; only the new destination may get a new row.
+        } else if row
+            .notified_outcome
+            .as_deref()
+            .is_some_and(|list| marker_contains(list, &legacy_entry))
+        {
+            // Retention has erased the evidence needed to identify the old
+            // thread. Do not guess that an old notification was never attempted.
+            continue;
+        }
         let content = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
             "delegation-result-notice",
             &[
@@ -352,13 +402,17 @@ pub(crate) async fn reconcile(
             target.thread_id.as_deref(),
             &content,
             DELEGATION,
-            &source_identity(&row.agent_alias, &row.request_id),
+            &source_id,
             &destination_event_id(outcome, thread),
         ) {
-            enqueue_failure = Some(error);
+            outbox_failure = Some(error);
             break;
         }
-        marks.push((row.rowid, entry));
+        marks.push(MarkerUpdate {
+            rowid: row.rowid,
+            entry,
+            replaces: None,
+        });
         notified += 1;
     }
     // Batched marker persistence: one short-lived handle per pass, after the
@@ -368,15 +422,22 @@ pub(crate) async fn reconcile(
     // after retention eviction, requiring a crash in that window).
     if !marks.is_empty() {
         let sessions = SqliteSessionBackend::new(data_dir)?;
-        for (rowid, entry) in &marks {
+        for update in &marks {
             // Per-row read with a propagated error: treating a read failure
             // as empty history would silently drop remembered destinations.
-            let existing = sessions.binding_notified_marker(*rowid)?;
-            let merged = marker_push(existing.as_deref().unwrap_or(""), entry);
-            sessions.mark_binding_notified(*rowid, &merged)?;
+            let existing = sessions.binding_notified_marker(update.rowid)?;
+            let retained = existing
+                .as_deref()
+                .unwrap_or("")
+                .split('\u{1e}')
+                .filter(|entry| Some(*entry) != update.replaces.as_deref())
+                .collect::<Vec<_>>()
+                .join("\u{1e}");
+            let merged = marker_push(&retained, &update.entry);
+            sessions.mark_binding_notified(update.rowid, &merged)?;
         }
     }
-    if let Some(error) = enqueue_failure {
+    if let Some(error) = outbox_failure {
         return Err(error);
     }
     Ok(notified)
@@ -619,7 +680,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "two agents, same request id, two rows");
         assert_eq!(rows[0]["source_id"], "butler\u{1f}req-00000001");
         assert_eq!(rows[1]["source_id"], "maid\u{1f}req-00000001");
-        assert_eq!(rows[0]["event_id"], "completed");
+        assert_eq!(rows[0]["event_id"], "completed\u{1f}thread\u{1f}-");
         assert_eq!(rows[0]["delivery_state"], "accepted");
 
         // Re-observation is suppressed by the binding's notified marker even
@@ -660,7 +721,7 @@ mod tests {
             "distinct outcome is a distinct canonical event"
         );
         assert_eq!(rows[0]["source_id"], "butler\u{1f}req-00000001");
-        assert_eq!(rows[0]["event_id"], "failed");
+        assert_eq!(rows[0]["event_id"], "failed\u{1f}thread\u{1f}-");
     }
 
     #[tokio::test]
@@ -1056,8 +1117,11 @@ mod tests {
         reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
             .await
             .unwrap();
-        // Thread-less identity is unchanged: bare outcome event id.
-        assert_eq!(delegation_rows(&tmp)[0]["event_id"], "completed");
+        // New thread-less events cannot collide with a legacy threaded row.
+        assert_eq!(
+            delegation_rows(&tmp)[0]["event_id"],
+            "completed\u{1f}thread\u{1f}-"
+        );
         let shared = RwLock::new(with_thread(&base, Some("t")));
         assert_eq!(
             reconcile(&shared, tmp.path(), &stop, &mut rotation, &fetch)
@@ -1068,21 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_thread_less_marker_suppresses_every_thread() {
-        // A marker written before thread identity existed must not cause a
-        // re-notification after upgrade, whatever the current thread.
-        let legacy = "completed\u{1f}tg\u{1f}owner";
-        assert!(already_notified(legacy, "completed", "tg", "owner", None));
-        assert!(already_notified(
-            legacy,
-            "completed",
-            "tg",
-            "owner",
-            Some("t")
-        ));
-        assert!(!already_notified(legacy, "failed", "tg", "owner", None));
-        assert!(!already_notified(legacy, "completed", "tg", "other", None));
-        // New-format entries are thread-exact.
+    fn marker_destinations_are_thread_exact() {
         let list = marker_push("", &marker_entry("completed", "tg", "owner", Some("a")));
         assert!(already_notified(
             &list,
@@ -1103,6 +1153,311 @@ mod tests {
         assert_ne!(
             marker_entry("completed", "tg", "owner", Some("")),
             marker_entry("completed", "tg", "owner", None)
+        );
+        assert_ne!(
+            destination_event_id("completed", Some("")),
+            destination_event_id("completed", None)
+        );
+    }
+
+    fn legacy_notice_fixture(
+        thread: Option<&str>,
+        marked: bool,
+    ) -> (tempfile::TempDir, Config, String, i64) {
+        let (tmp, base) = fixture_config();
+        let config = with_thread(&base, thread);
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        seed_binding(
+            &backend,
+            &config,
+            "butler",
+            "legacy-request",
+            "legacy-dispatch",
+            None,
+        );
+        let rowid = backend.list_dispatch_bindings_page(0, 1).unwrap()[0].rowid;
+        let id = BridgeOutbox::shared(tmp.path())
+            .unwrap()
+            .enqueue_source(
+                "tg",
+                "owner",
+                thread,
+                "legacy notice",
+                DELEGATION,
+                "butler\u{1f}legacy-request",
+                "completed",
+            )
+            .unwrap();
+        if marked {
+            backend
+                .mark_binding_notified(rowid, "completed\u{1f}tg\u{1f}owner")
+                .unwrap();
+        }
+        (tmp, config, id, rowid)
+    }
+
+    async fn observe(config: &Config, tmp: &tempfile::TempDir) -> usize {
+        reconcile(
+            &RwLock::new(config.clone()),
+            tmp.path(),
+            &tokio_util::sync::CancellationToken::new(),
+            &mut Rotation::default(),
+            &completed_fetch,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn legacy_pending_receipt_recovers_thread_before_retarget() {
+        for (old_thread, new_thread) in [
+            (Some("thread-a"), Some("thread-b")),
+            (Some("thread-a"), None),
+            (None, Some("thread-b")),
+        ] {
+            let (tmp, original, old_id, rowid) = legacy_notice_fixture(old_thread, true);
+            let outbox = BridgeOutbox::shared(tmp.path()).unwrap();
+            let old_row = outbox.pending("tg", 0, 100).unwrap().remove(0);
+            let retargeted = with_thread(&original, new_thread);
+
+            assert_eq!(observe(&retargeted, &tmp).await, 1);
+            assert_eq!(
+                deliverable(&retargeted, &tmp),
+                vec![new_thread.map(str::to_string)],
+                "the new target has one deliverable notice, including a target with no thread"
+            );
+            let rows = outbox.pending("tg", 0, 100).unwrap();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows.iter().find(|row| row.id == old_id), Some(&old_row));
+            assert_ne!(rows[0].event_id, rows[1].event_id);
+            assert_eq!(observe(&retargeted, &tmp).await, 0);
+            assert_eq!(observe(&original, &tmp).await, 0);
+            assert_eq!(
+                deliverable(&original, &tmp),
+                vec![old_thread.map(str::to_string)],
+                "returning to the old target resumes its original pending row"
+            );
+
+            let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+            let marker = backend.binding_notified_marker(rowid).unwrap().unwrap();
+            assert!(!marker_contains(&marker, "completed\u{1f}tg\u{1f}owner"));
+            for thread in [old_thread, new_thread] {
+                assert!(already_notified(
+                    &marker,
+                    "completed",
+                    "tg",
+                    "owner",
+                    thread
+                ));
+            }
+
+            // Once the old destination is recovered, retention cannot turn
+            // its legacy marker back into a wildcard over future destinations.
+            assert!(
+                outbox
+                    .claim("tg", &old_id, chrono::Utc::now().timestamp())
+                    .unwrap()
+            );
+            outbox.mark_sent("tg", &old_id).unwrap();
+            assert!(outbox.ack("tg", &old_id).unwrap());
+            let connection =
+                rusqlite::Connection::open(tmp.path().join("sessions").join("bridge_outbox.db"))
+                    .unwrap();
+            connection
+                .execute("DELETE FROM bridge_outbox WHERE id = ?1", [&old_id])
+                .unwrap();
+            assert_eq!(observe(&original, &tmp).await, 0);
+            assert_eq!(
+                observe(&with_thread(&original, Some("thread-c")), &tmp).await,
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_attempts_and_owner_actions_survive_recovery_without_replay() {
+        for state in [
+            "accepted",
+            "sent",
+            "unknown",
+            "confirmed",
+            "dismissed",
+            "expired",
+        ] {
+            // With no marker, this is the crash-after-enqueue window. With
+            // the old marker, it is an ordinary pre-upgrade notification.
+            for marked in [false, true] {
+                let (tmp, original, old_id, _) = legacy_notice_fixture(Some("thread-a"), marked);
+                let outbox = BridgeOutbox::shared(tmp.path()).unwrap();
+                let source_id = "butler\u{1f}legacy-request";
+                let now = chrono::Utc::now().timestamp();
+                match state {
+                    "accepted" => {
+                        outbox
+                            .owner_action(
+                                "tg",
+                                "owner",
+                                DELEGATION,
+                                source_id,
+                                &old_id,
+                                "snooze",
+                                Some(now + 3600),
+                                "operator",
+                            )
+                            .unwrap();
+                    }
+                    "sent" | "unknown" | "confirmed" => {
+                        assert!(outbox.claim("tg", &old_id, now).unwrap());
+                        if state != "unknown" {
+                            outbox.mark_sent("tg", &old_id).unwrap();
+                        }
+                        if state == "confirmed" {
+                            assert!(outbox.ack("tg", &old_id).unwrap());
+                        }
+                    }
+                    "dismissed" => {
+                        outbox
+                            .owner_action(
+                                "tg", "owner", DELEGATION, source_id, &old_id, "dismiss", None,
+                                "operator",
+                            )
+                            .unwrap();
+                    }
+                    "expired" => {
+                        let connection = rusqlite::Connection::open(
+                            tmp.path().join("sessions").join("bridge_outbox.db"),
+                        )
+                        .unwrap();
+                        connection
+                            .execute(
+                                "UPDATE bridge_outbox SET expires_at = ?1 WHERE id = ?2",
+                                rusqlite::params![now - 1, &old_id],
+                            )
+                            .unwrap();
+                        outbox.purge_expired().unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                outbox
+                    .owner_action(
+                        "tg", "owner", DELEGATION, source_id, &old_id, "mute", None, "operator",
+                    )
+                    .unwrap();
+                let before = outbox.inspect("tg", &old_id).unwrap().unwrap();
+                assert_eq!(before["delivery_state"], state);
+                assert_eq!(observe(&original, &tmp).await, 0);
+                assert_eq!(
+                    delegation_rows(&tmp).len(),
+                    1,
+                    "a recovered receipt never gets replayed"
+                );
+                assert_eq!(outbox.inspect("tg", &old_id).unwrap().unwrap(), before);
+
+                let retargeted = with_thread(&original, Some("thread-b"));
+                assert_eq!(observe(&retargeted, &tmp).await, 1);
+                assert_eq!(outbox.inspect("tg", &old_id).unwrap().unwrap(), before);
+                let new_row = outbox
+                    .pending("tg", 0, 100)
+                    .unwrap()
+                    .into_iter()
+                    .find(|row| row.thread_id.as_deref() == Some("thread-b"))
+                    .unwrap();
+                assert!(
+                    !outbox.claim("tg", &new_row.id, now).unwrap(),
+                    "source mute still applies at the new thread"
+                );
+                assert_eq!(observe(&original, &tmp).await, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_marker_without_receipt_keeps_conservative_suppression() {
+        let (tmp, original, old_id, _) = legacy_notice_fixture(Some("thread-a"), true);
+        let outbox = BridgeOutbox::shared(tmp.path()).unwrap();
+        assert!(
+            outbox
+                .claim("tg", &old_id, chrono::Utc::now().timestamp())
+                .unwrap()
+        );
+        outbox.mark_sent("tg", &old_id).unwrap();
+        assert!(outbox.ack("tg", &old_id).unwrap());
+        let connection =
+            rusqlite::Connection::open(tmp.path().join("sessions").join("bridge_outbox.db"))
+                .unwrap();
+        connection.execute("DELETE FROM bridge_outbox", []).unwrap();
+        for thread in [Some("thread-a"), Some("thread-b"), None] {
+            assert_eq!(observe(&with_thread(&original, thread), &tmp).await, 0);
+        }
+        assert!(delegation_rows(&tmp).is_empty());
+        // Evidence was lost only for this recipient/outcome, not all targets.
+        let mut new_recipient = original;
+        new_recipient
+            .tachi
+            .result_notification
+            .as_mut()
+            .unwrap()
+            .recipient = "owner-new".into();
+        assert_eq!(observe(&new_recipient, &tmp).await, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_receipt_read_failure_preserves_prior_enqueue_markers() {
+        let (tmp, config) = fixture_config();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        for request in ["first-request", "legacy-request"] {
+            seed_binding(&backend, &config, "butler", request, request, None);
+        }
+        let bindings = backend.list_dispatch_bindings_page(0, 10).unwrap();
+        backend
+            .mark_binding_notified(bindings[1].rowid, "completed\u{1f}tg\u{1f}owner")
+            .unwrap();
+        let outbox = BridgeOutbox::shared(tmp.path()).unwrap();
+        let old_id = outbox
+            .enqueue_source(
+                "tg",
+                "owner",
+                Some("thread-a"),
+                "legacy notice",
+                DELEGATION,
+                "butler\u{1f}legacy-request",
+                "completed",
+            )
+            .unwrap();
+        let connection =
+            rusqlite::Connection::open(tmp.path().join("sessions").join("bridge_outbox.db"))
+                .unwrap();
+        connection
+            .execute(
+                "UPDATE bridge_outbox SET thread_id = x'80' WHERE id = ?1",
+                [&old_id],
+            )
+            .unwrap();
+        let result = reconcile(
+            &RwLock::new(config),
+            tmp.path(),
+            &tokio_util::sync::CancellationToken::new(),
+            &mut Rotation::default(),
+            &completed_fetch,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a malformed receipt is not treated as missing"
+        );
+        assert_eq!(delegation_rows(&tmp).len(), 2);
+        let first = backend
+            .binding_notified_marker(bindings[0].rowid)
+            .unwrap()
+            .unwrap();
+        assert!(already_notified(&first, "completed", "tg", "owner", None));
+        assert_eq!(
+            backend
+                .binding_notified_marker(bindings[1].rowid)
+                .unwrap()
+                .as_deref(),
+            Some("completed\u{1f}tg\u{1f}owner"),
+            "failed recovery must not erase the legacy history"
         );
     }
 
@@ -1183,6 +1538,13 @@ mod tests {
             &config,
             &outbox,
             &row("ghost\u{1f}req-1", "tg", "owner")
+        ));
+        // A malformed or manually stored composite owner cannot borrow an
+        // enabled prefix's authority. Request ids contain no separator.
+        assert!(!permits_delivery(
+            &config,
+            &outbox,
+            &row("butler\u{1f}ghost\u{1f}req-1", "tg", "owner")
         ));
         // Disabled owner withholds even though the request ran.
         config.agents.insert(

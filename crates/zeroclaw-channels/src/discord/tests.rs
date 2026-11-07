@@ -1,5 +1,8 @@
 use super::*;
 
+// Reject request construction locally in lifecycle tests that expect HTTP failure.
+const INVALID_HTTP_TOKEN: &str = "invalid\nheader";
+
 #[test]
 fn effective_recipient_prefers_per_message_target() {
     let ids = vec!["fallback_channel".to_string()];
@@ -2266,7 +2269,7 @@ async fn start_typing_sets_handle() {
     let listen_to_bots = false;
     let mention_only = false;
     let ch = DiscordChannel::new(
-        "fake".into(),
+        INVALID_HTTP_TOKEN.into(),
         vec![],
         "discord_test_alias",
         Arc::new(Vec::new),
@@ -2283,7 +2286,7 @@ async fn stop_typing_clears_handle() {
     let listen_to_bots = false;
     let mention_only = false;
     let ch = DiscordChannel::new(
-        "fake".into(),
+        INVALID_HTTP_TOKEN.into(),
         vec![],
         "discord_test_alias",
         Arc::new(Vec::new),
@@ -2317,7 +2320,7 @@ async fn concurrent_typing_handles_are_independent() {
     let listen_to_bots = false;
     let mention_only = false;
     let ch = DiscordChannel::new(
-        "fake".into(),
+        INVALID_HTTP_TOKEN.into(),
         vec![],
         "discord_test_alias",
         Arc::new(Vec::new),
@@ -3098,7 +3101,7 @@ async fn cancel_draft_cleans_up_tracking() {
     let listen_to_bots = false;
     let mention_only = false;
     let ch = DiscordChannel::new(
-        "t".into(),
+        INVALID_HTTP_TOKEN.into(),
         vec![],
         "discord_test_alias",
         Arc::new(Vec::new),
@@ -3111,8 +3114,8 @@ async fn cancel_draft_cleans_up_tracking() {
         .lock()
         .insert("chan".to_string(), std::time::Instant::now());
 
-    // cancel_draft will try to delete a message (will fail with network error)
-    // but should still clean up the tracking entry.
+    // The invalid header makes deletion fail before network I/O, but
+    // cancel_draft must still clean up the tracking entry.
     let _ = ch.cancel_draft("chan", "fake_msg_id").await;
     assert!(!ch.last_draft_edit.lock().contains_key("chan"));
 }
