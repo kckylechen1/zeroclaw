@@ -785,7 +785,7 @@ async fn build_ws_session(
     config: &zeroclaw_config::schema::Config,
     state: &AppState,
     agent_alias: &str,
-    session_key: &str,
+    _session_key: &str,
     session_cwd: &Path,
     memory_session_id: String,
     stored_messages: &[zeroclaw_providers::ChatMessage],
@@ -861,25 +861,6 @@ async fn build_ws_session(
         pending_approvals,
         approval_leak_detection
     ));
-
-    let ch = agent.channel_handles();
-    let channel_names = zeroclaw_channels::orchestrator::register_channels_for_tools(
-        config,
-        &ch.ask_user,
-        &ch.channel_room,
-        &Some(ch.reaction.clone()),
-        &ch.poll,
-        &ch.escalate,
-    );
-    if !channel_names.is_empty() {
-        ::zeroclaw_log::record!(
-            INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
-                ::serde_json::json!({"channels": channel_names, "session": session_key})
-            ),
-            "Seeded {} channel(s) into dashboard agent session",
-        );
-    }
 
     Ok((WsSession { agent, ws_memory }, restore_trim_event))
 }

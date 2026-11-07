@@ -16,7 +16,6 @@ zeroclaw-infra.workspace = true
 zeroclaw-log.workspace = true
 zeroclaw-memory.workspace = true
 zeroclaw-providers.workspace = true
-zeroclaw-channels = { workspace = true, default-features = false }
 zeroclaw-runtime.workspace = true
 zeroclaw-tools.workspace = true
 
@@ -94,9 +93,6 @@ default = ["schema-export"]
 # zeroclaw-config (schema.rs is a hot upstream file — not worth the churn).
 nodes = ["dep:ring"]
 observability-prometheus = ["zeroclaw-runtime/observability-prometheus"]
-channel-nostr = ["zeroclaw-channels/channel-nostr"]
-channel-wechat = ["zeroclaw-channels/channel-wechat"]
-whatsapp-web = ["zeroclaw-channels/whatsapp-web"]
 gateway-voice-duplex = []
 # Explicit opt-in to spoken-text presentation; no audio transport.
 voice-surface = []

@@ -531,7 +531,7 @@ pub async fn handle_api_channel_bind(
     let alias = body.alias.trim();
 
     // Closed-set gate: only telegram/wechat/line have an operator-bind surface.
-    if zeroclaw_channels::orchestrator::channel_identity_normalizer(channel_type).is_none() {
+    if zeroclaw_config::multi_agent::channel_identity_normalizer(channel_type).is_none() {
         return error_response(ConfigApiError::new(
             ConfigApiCode::ValidationFailed,
             format!(
@@ -545,14 +545,14 @@ pub async fn handle_api_channel_bind(
 
     // Reject a phantom alias loudly (404) rather than minting a peer group the
     // runtime never reads.
-    if !zeroclaw_channels::orchestrator::channel_alias_configured(&working, channel_type, alias) {
+    if !zeroclaw_config::multi_agent::channel_alias_configured(&working, channel_type, alias) {
         return error_response(ConfigApiError::new(
             ConfigApiCode::PathNotFound,
             format!("channel `{channel_type}.{alias}` is not configured"),
         ));
     }
 
-    let newly = match zeroclaw_channels::orchestrator::bind_channel_identity_into(
+    let newly = match zeroclaw_config::multi_agent::bind_channel_identity_into(
         &mut working,
         channel_type,
         alias,

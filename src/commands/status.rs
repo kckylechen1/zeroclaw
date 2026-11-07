@@ -373,7 +373,7 @@ pub async fn handle(config: &Config, format: Option<String>) -> Result<()> {
     println!();
     println!("{}", t("cli-status-channels", "Channels:"));
     println!("{}", t("cli-status-cli-always", "  CLI:      ✅ always"));
-    for entry in zeroclaw_channels::listing::compiled_channels(&config.channels) {
+    for entry in crate::channels::listing::compiled_channels(&config.channels) {
         let channel_status = if entry.configured {
             t("cli-status-word-configured", "configured")
         } else {
@@ -389,7 +389,7 @@ pub async fn handle(config: &Config, format: Option<String>) -> Result<()> {
             }
         );
     }
-    let uncompiled = zeroclaw_channels::listing::configured_uncompiled_channels(&config.channels);
+    let uncompiled = crate::channels::listing::configured_uncompiled_channels(&config.channels);
     if !uncompiled.is_empty() {
         println!(
             "{}",
