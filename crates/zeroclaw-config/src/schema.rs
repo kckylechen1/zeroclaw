@@ -43,7 +43,6 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "channel.telegram",
     "channel.wechat",
     "tool.browser",
-    "tool.composio",
     "tool.http_request",
     "tool.web_search",
     "memory.embeddings",
@@ -60,6 +59,7 @@ const RETIRED_PROXY_SERVICE_KEYS: &[&str] = &[
     "channel.nextcloud_talk",
     "channel.wati",
     "channel.whatsapp",
+    "tool.composio",
     "tool.pushover",
 ];
 
@@ -319,12 +319,6 @@ pub struct Config {
     #[group = "Network"]
     pub gateway: GatewayConfig,
 
-    /// Composio managed OAuth tools integration (`[composio]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Integrations"]
-    pub composio: ComposioConfig,
-
     /// Secrets encryption configuration (`[secrets]`).
     #[serde(default)]
     #[nested]
@@ -519,12 +513,6 @@ pub struct Config {
     #[serde(default)]
     #[nested]
     pub onboard_state: OnboardStateConfig,
-
-    /// Notion integration configuration (`[notion]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Integrations"]
-    pub notion: NotionConfig,
 
     /// Secure inter-node transport configuration (`[node_transport]`).
     #[serde(default)]
@@ -6893,43 +6881,6 @@ impl Default for NodeTransportConfig {
     }
 }
 
-// ── Composio (managed tool surface) ─────────────────────────────
-
-/// Composio managed OAuth tools integration (`[composio]` section).
-///
-/// Provides access to 1000+ OAuth-connected tools via the Composio platform.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "composio"]
-pub struct ComposioConfig {
-    /// Enable Composio integration for 1000+ OAuth tools
-    #[serde(default, alias = "enable")]
-    pub enabled: bool,
-    /// Composio API key (stored encrypted when secrets.encrypt = true)
-    #[serde(default)]
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub api_key: Option<String>,
-    /// Default entity ID for multi-user setups
-    #[serde(default = "default_entity_id")]
-    pub entity_id: String,
-}
-
-fn default_entity_id() -> String {
-    "default".into()
-}
-
-impl Default for ComposioConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            api_key: None,
-            entity_id: default_entity_id(),
-        }
-    }
-}
-
 // ── Secrets (encrypted credential store) ────────────────────────
 
 /// Secrets encryption configuration (`[secrets]` section).
@@ -10767,7 +10718,7 @@ pub struct ChannelsConfig {
         deserialize_with = "reject_retired_sop_channel"
     )]
     #[cfg_attr(feature = "schema-export", schemars(skip))]
-    pub mqtt: HashMap<String, MqttConfig>,
+    pub mqtt: HashMap<String, ()>,
     /// AMQP channel instances (`[channels.amqp.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -10781,7 +10732,7 @@ pub struct ChannelsConfig {
         deserialize_with = "reject_retired_sop_channel"
     )]
     #[cfg_attr(feature = "schema-export", schemars(skip))]
-    pub filesystem: HashMap<String, FilesystemConfig>,
+    pub filesystem: HashMap<String, ()>,
     /// Base timeout in seconds for processing a single channel message (LLM + tools).
     /// Runtime uses this as a per-turn budget that scales with tool-loop depth
     /// (up to 4x, capped) so one slow/retried model call does not consume the
@@ -12433,302 +12384,6 @@ impl WhatsAppConfig {
     pub fn is_web_config(&self) -> bool {
         self.has_web_selector()
     }
-}
-
-/// MQTT channel configuration.
-///
-/// Subscribes to MQTT topics and feeds incoming messages into the agent
-/// loop. The former SOP-listener fan-in (which dispatched messages to the
-/// SOP engine) was removed with the run side; its config section is a
-/// parse-time tombstone that rejects legacy blocks with a migration
-/// message.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.mqtt"]
-pub struct MqttConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// MQTT broker URL (e.g., `mqtt://localhost:1883` or `mqtts://broker.example.com:8883`).
-    /// Use `mqtt://` for plain connections or `mqtts://` for TLS.
-    #[tab(Connection)]
-    pub broker_url: String,
-    /// MQTT client ID (must be unique per broker).
-    #[tab(Advanced)]
-    pub client_id: String,
-    /// Topics to subscribe to (e.g., `sensors/#`, `alerts/+/critical`).
-    /// At least one topic is required.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub topics: Vec<String>,
-    /// MQTT QoS level (0 = at-most-once, 1 = at-least-once, 2 = exactly-once). Default: 1.
-    #[tab(Advanced)]
-    #[serde(default = "default_mqtt_qos")]
-    pub qos: u8,
-    /// Username for authentication (optional).
-    #[tab(Connection)]
-    pub username: Option<String>,
-    /// Password for authentication (optional).
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub password: Option<String>,
-    /// Enable TLS encryption. Must match the broker_url scheme:
-    /// - `mqtt://` → `use_tls: false`
-    /// - `mqtts://` → `use_tls: true`
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub use_tls: bool,
-    /// Keep-alive interval in seconds (default: 30). Prevents broker disconnect on idle.
-    #[tab(Advanced)]
-    #[serde(default = "default_mqtt_keep_alive_secs")]
-    pub keep_alive_secs: u64,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl MqttConfig {
-    /// Validate the MQTT configuration.
-    ///
-    /// Checks:
-    /// - QoS is 0, 1, or 2
-    /// - broker_url uses valid scheme (`mqtt://` or `mqtts://`)
-    /// - `use_tls` flag matches broker_url scheme
-    /// - At least one topic is configured
-    /// - client_id is non-empty
-    pub fn validate(&self) -> anyhow::Result<()> {
-        // QoS validation
-        if self.qos > 2 {
-            anyhow::bail!("qos must be 0, 1, or 2, got {}", self.qos);
-        }
-
-        // Broker URL validation
-        let is_tls_scheme = self.broker_url.starts_with("mqtts://");
-        let is_mqtt_scheme = self.broker_url.starts_with("mqtt://");
-
-        if !is_tls_scheme && !is_mqtt_scheme {
-            anyhow::bail!(
-                "broker_url must start with 'mqtt://' or 'mqtts://', got: {}",
-                self.broker_url
-            );
-        }
-
-        // TLS flag validation
-        if is_mqtt_scheme && self.use_tls {
-            anyhow::bail!("use_tls is true but broker_url uses 'mqtt://' (not 'mqtts://')");
-        }
-
-        if is_tls_scheme && !self.use_tls {
-            anyhow::bail!(
-                "use_tls is false but broker_url uses 'mqtts://' (requires use_tls: true)"
-            );
-        }
-
-        // Topics validation
-        if self.topics.is_empty() {
-            anyhow::bail!("at least one topic must be configured");
-        }
-
-        // Client ID validation
-        if self.client_id.is_empty() {
-            validation_bail!(
-                RequiredFieldEmpty,
-                "client_id",
-                "client_id must not be empty"
-            );
-        }
-
-        Ok(())
-    }
-}
-
-impl ChannelConfig for MqttConfig {
-    fn name() -> &'static str {
-        "MQTT"
-    }
-    fn desc() -> &'static str {
-        "MQTT SOP Listener"
-    }
-}
-
-fn default_mqtt_qos() -> u8 {
-    1
-}
-
-fn default_mqtt_keep_alive_secs() -> u64 {
-    30
-}
-
-/// Filesystem channel configuration.
-///
-/// Watches configured paths and feeds file create/modify/delete/rename
-/// events into the agent loop. The former SOP-listener fan-in (which
-/// dispatched these events to the SOP engine) was removed with the run
-/// side; its config section is a parse-time tombstone that rejects legacy
-/// blocks with a migration message.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.filesystem"]
-pub struct FilesystemConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Root paths to watch. At least one is required.
-    #[tab(Connection)]
-    #[serde(default)]
-    pub paths: Vec<String>,
-    /// Watch nested paths beneath each root.
-    #[tab(Behavior)]
-    #[serde(default = "default_true")]
-    pub recursive: bool,
-    /// Glob patterns to include. Empty matches all paths under the roots.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub include: Vec<String>,
-    /// Glob patterns to exclude. Applied after `include`.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub exclude: Vec<String>,
-    /// Event kinds to emit (`created`, `modified`, `deleted`, `renamed`).
-    #[tab(Behavior)]
-    #[serde(default = "default_filesystem_events")]
-    pub events: Vec<String>,
-    /// Collapse rapid repeated events per path/kind within this window.
-    #[tab(Advanced)]
-    #[serde(default = "default_filesystem_debounce_ms")]
-    pub debounce_ms: u64,
-    /// Wait this long after the last event before reading metadata or content,
-    /// giving atomic writes and slow copies time to finish.
-    #[tab(Advanced)]
-    #[serde(default = "default_filesystem_settle_ms")]
-    pub settle_ms: u64,
-    /// Read file content into the event payload. Opt-in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub read_content: bool,
-    /// Follow symlinks when reading event-path metadata, hash, and content.
-    /// Off by default: a symlink under a watched root is rejected before any
-    /// metadata/hash/content handling so its target cannot escape the root. When
-    /// on, the canonical target must still resolve inside a configured root.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub follow_symlinks: bool,
-    /// Maximum file content bytes admitted into a payload when `read_content`,
-    /// and the size ceiling for hashing. `Some(n)` caps reads and hashing at
-    /// `n` bytes; oversize files are skipped rather than truncated. `None`
-    /// removes the ceiling entirely (unbounded reads). Defaults to
-    /// `Some(65536)` (64 KiB), so the cap applies by default whenever
-    /// `read_content` or hashing runs.
-    #[tab(Advanced)]
-    #[serde(default = "default_filesystem_max_content_bytes")]
-    pub max_content_bytes: Option<usize>,
-    /// Watch broad system roots (`/`, `/home`, `/etc`, `/var`, `/proc`,
-    /// `/sys`, `/dev`, `/tmp`) despite the deny-broad-roots default. The
-    /// pseudo-filesystems `/proc` and `/sys` would surface kernel object
-    /// paths in SOP payloads and flood the watcher with events. Off unless
-    /// explicitly enabled.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub allow_broad_roots: bool,
-    /// Tools excluded from this channel's tool spec.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl Default for FilesystemConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            paths: Vec::new(),
-            recursive: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            events: default_filesystem_events(),
-            debounce_ms: default_filesystem_debounce_ms(),
-            settle_ms: default_filesystem_settle_ms(),
-            read_content: false,
-            follow_symlinks: false,
-            max_content_bytes: default_filesystem_max_content_bytes(),
-            allow_broad_roots: false,
-            excluded_tools: Vec::new(),
-        }
-    }
-}
-
-const FILESYSTEM_BROAD_ROOTS: [&str; 8] = [
-    "/", "/home", "/etc", "/var", "/proc", "/sys", "/dev", "/tmp",
-];
-
-impl FilesystemConfig {
-    /// Validate the filesystem listener configuration.
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if self.paths.is_empty() {
-            anyhow::bail!("at least one path must be configured");
-        }
-        for path in &self.paths {
-            let trimmed = path.trim_end_matches('/');
-            let normalized = if trimmed.is_empty() { "/" } else { trimmed };
-            if !self.allow_broad_roots && FILESYSTEM_BROAD_ROOTS.contains(&normalized) {
-                anyhow::bail!(
-                    "path '{path}' is a broad system root; set allow_broad_roots = true to watch it"
-                );
-            }
-        }
-        for kind in &self.events {
-            if !matches!(
-                kind.as_str(),
-                "created" | "modified" | "deleted" | "renamed"
-            ) {
-                anyhow::bail!(
-                    "event '{kind}' is invalid; expected created, modified, deleted, or renamed"
-                );
-            }
-        }
-        Ok(())
-    }
-}
-
-impl ChannelConfig for FilesystemConfig {
-    fn name() -> &'static str {
-        "Filesystem"
-    }
-    fn desc() -> &'static str {
-        "Filesystem SOP Listener"
-    }
-}
-
-fn default_filesystem_events() -> Vec<String> {
-    vec![
-        "created".to_string(),
-        "modified".to_string(),
-        "deleted".to_string(),
-        "renamed".to_string(),
-    ]
-}
-
-fn default_filesystem_debounce_ms() -> u64 {
-    500
-}
-
-fn default_filesystem_settle_ms() -> u64 {
-    250
-}
-
-fn default_filesystem_max_content_bytes() -> Option<usize> {
-    Some(65536)
 }
 
 /// Generic AMQP 0-9-1 channel configuration (RabbitMQ, Fedora Messaging, etc.).
@@ -14568,75 +14223,6 @@ pub fn default_nostr_relays() -> Vec<String> {
     ]
 }
 
-// -- Notion --
-
-/// Notion integration configuration (`[notion]`).
-///
-/// When `enabled = true` (and the `channel-notion` feature is compiled in),
-/// the Notion channel polls a Notion database for pending tasks. Requires
-/// `api_key` and `database_id`.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "notion"]
-pub struct NotionConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub api_key: String,
-    #[serde(default)]
-    pub database_id: String,
-    #[serde(default = "default_notion_poll_interval")]
-    pub poll_interval_secs: u64,
-    #[serde(default = "default_notion_status_prop")]
-    pub status_property: String,
-    #[serde(default = "default_notion_input_prop")]
-    pub input_property: String,
-    #[serde(default = "default_notion_result_prop")]
-    pub result_property: String,
-    #[serde(default = "default_notion_max_concurrent")]
-    pub max_concurrent: usize,
-    #[serde(default = "default_notion_recover_stale")]
-    pub recover_stale: bool,
-}
-
-fn default_notion_poll_interval() -> u64 {
-    5
-}
-fn default_notion_status_prop() -> String {
-    "Status".into()
-}
-fn default_notion_input_prop() -> String {
-    "Input".into()
-}
-fn default_notion_result_prop() -> String {
-    "Result".into()
-}
-fn default_notion_max_concurrent() -> usize {
-    4
-}
-fn default_notion_recover_stale() -> bool {
-    true
-}
-
-impl Default for NotionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            api_key: String::new(),
-            database_id: String::new(),
-            poll_interval_secs: default_notion_poll_interval(),
-            status_property: default_notion_status_prop(),
-            input_property: default_notion_input_prop(),
-            result_property: default_notion_result_prop(),
-            max_concurrent: default_notion_max_concurrent(),
-            recover_stale: default_notion_recover_stale(),
-        }
-    }
-}
-
 // ── Security ops config ─────────────────────────────────────────
 
 /// Managed Cybersecurity Service (MCSS) dashboard agent configuration (`[security_ops]`).
@@ -14748,7 +14334,6 @@ impl Default for Config {
             storage: StorageConfig::default(),
             tunnel: TunnelConfig::default(),
             gateway: GatewayConfig::default(),
-            composio: ComposioConfig::default(),
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
             http_request: HttpRequestConfig::default(),
@@ -14778,7 +14363,6 @@ impl Default for Config {
             tachi: crate::tachi::TachiConfig::default(),
             nodes: NodesConfig::default(),
             onboard_state: OnboardStateConfig::default(),
-            notion: NotionConfig::default(),
             node_transport: NodeTransportConfig::default(),
             knowledge: KnowledgeConfig::default(),
             image_gen: ImageGenConfig::default(),
@@ -17574,48 +17158,6 @@ impl Config {
                         reg.name
                     ),
                 }
-            }
-        }
-
-        // Notion
-        if self.notion.enabled {
-            if self.notion.database_id.trim().is_empty() {
-                anyhow::bail!("notion.database_id must not be empty when notion.enabled = true");
-            }
-            if self.notion.poll_interval_secs == 0 {
-                validation_bail!(
-                    InvalidNumericRange,
-                    "notion.poll_interval_secs",
-                    "notion.poll_interval_secs must be greater than 0"
-                );
-            }
-            if self.notion.max_concurrent == 0 {
-                validation_bail!(
-                    InvalidNumericRange,
-                    "notion.max_concurrent",
-                    "notion.max_concurrent must be greater than 0"
-                );
-            }
-            if self.notion.status_property.trim().is_empty() {
-                validation_bail!(
-                    RequiredFieldEmpty,
-                    "notion.status_property",
-                    "notion.status_property must not be empty"
-                );
-            }
-            if self.notion.input_property.trim().is_empty() {
-                validation_bail!(
-                    RequiredFieldEmpty,
-                    "notion.input_property",
-                    "notion.input_property must not be empty"
-                );
-            }
-            if self.notion.result_property.trim().is_empty() {
-                validation_bail!(
-                    RequiredFieldEmpty,
-                    "notion.result_property",
-                    "notion.result_property must not be empty"
-                );
             }
         }
 
