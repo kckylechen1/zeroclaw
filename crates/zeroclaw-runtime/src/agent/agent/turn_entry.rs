@@ -114,6 +114,13 @@ impl Agent {
         }
 
         let provider_messages = active_dispatcher.to_provider_messages(&self.history);
+        let _side_query_turn_guard = self.side_query.enter_turn(&turn_id);
+        self.side_query.update_live_messages(
+            &self.model_provider_name,
+            &effective_model,
+            &provider_messages,
+            Some(&turn_id),
+        );
         let cache_key = self.response_cache_key_for_messages(&provider_messages, &effective_model);
 
         if let (Some(cache), Some(key)) = (&self.response_cache, &cache_key) {
@@ -239,6 +246,7 @@ impl Agent {
                     },
                     Some(&repetition_guard),
                     false,
+                    Some(&self.side_query),
                 ),
             )
             .await;
@@ -435,6 +443,13 @@ impl Agent {
         }
 
         let provider_messages = active_dispatcher.to_provider_messages(&self.history);
+        let _side_query_turn_guard = self.side_query.enter_turn(&turn_id);
+        self.side_query.update_live_messages(
+            &self.model_provider_name,
+            &effective_model,
+            &provider_messages,
+            Some(&turn_id),
+        );
         let cache_key = self.response_cache_key_for_messages(&provider_messages, &effective_model);
 
         if let (Some(cache), Some(key)) = (&self.response_cache, &cache_key) {
@@ -647,6 +662,7 @@ impl Agent {
                     },
                     Some(&repetition_guard),
                     true,
+                    Some(&self.side_query),
                 ),
             );
             // Scope the provider-fallback task-local around the round so the
