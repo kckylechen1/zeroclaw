@@ -43,6 +43,12 @@ enum SearchBackend {
     Internal,
 }
 
+#[derive(Default)]
+struct ContextLines {
+    before: usize,
+    after: usize,
+}
+
 fn detect_search_backend() -> SearchBackend {
     if which::which("rg").is_ok() {
         SearchBackend::Ripgrep
@@ -274,8 +280,10 @@ impl Tool for ContentSearchTool {
                         output_mode,
                         include,
                         case_sensitive,
-                        context_before,
-                        context_after,
+                        ContextLines {
+                            before: context_before,
+                            after: context_after,
+                        },
                         multiline,
                         max_results,
                     )
@@ -388,8 +396,7 @@ impl ContentSearchTool {
         output_mode: &str,
         include: Option<&str>,
         case_sensitive: bool,
-        context_before: usize,
-        context_after: usize,
+        context: ContextLines,
         multiline: bool,
         max_results: usize,
     ) -> Result<(String, bool), ToolResult> {
@@ -403,8 +410,8 @@ impl ContentSearchTool {
                 output_mode,
                 include,
                 case_sensitive,
-                context_before,
-                context_after,
+                context.before,
+                context.after,
                 multiline,
             ),
             SearchBackend::Grep => build_grep_command(
@@ -413,8 +420,8 @@ impl ContentSearchTool {
                 output_mode,
                 include,
                 case_sensitive,
-                context_before,
-                context_after,
+                context.before,
+                context.after,
             ),
             SearchBackend::Internal => unreachable!(),
         };
@@ -432,9 +439,9 @@ impl ContentSearchTool {
         // the collection bound; the formatter counts only positive results.
         let lines_per_result = if output_mode == "content" {
             1_usize
-                .saturating_add(context_before)
-                .saturating_add(context_after)
-                .saturating_add(usize::from(context_before > 0 || context_after > 0))
+                .saturating_add(context.before)
+                .saturating_add(context.after)
+                .saturating_add(usize::from(context.before > 0 || context.after > 0))
         } else {
             1
         };
@@ -1871,8 +1878,7 @@ mod tests {
                     "content",
                     None,
                     true,
-                    0,
-                    0,
+                    ContextLines::default(),
                     false,
                     1,
                 )
