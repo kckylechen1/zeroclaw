@@ -62,6 +62,13 @@ const DEFAULT_NAMESPACE: &str = "default";
 const DEFAULT_LIST_PAGE_SIZE: usize = 512;
 const MAX_LIST_GROW: usize = 1_048_576;
 
+enum KeyLookup {
+    /// Prefer canonical paths; a scope miss still checks legacy metadata.
+    Select,
+    /// Deletes must include legacy duplicates even when a canonical row exists.
+    Complete,
+}
+
 /// Global rows use agent/key identity; session-bound Conversation rows use
 /// agent/session/key identity. Metadata remains authoritative for legacy rows.
 /// Point get/forget follows the same host session rules as SQLite.
@@ -498,6 +505,86 @@ impl TachiMemory {
             .map_err(|e| anyhow::Error::msg(format!("tachi list_recent failed: {e}")))
     }
 
+    fn agent_path_prefix(agent: Option<&str>) -> String {
+        match agent {
+            Some(agent) => format!("/agents/{}/", Self::agent_segment(Some(agent))),
+            None => "/agents/".into(),
+        }
+    }
+
+    fn key_path_pattern(key: &str, agent: Option<&str>) -> String {
+        // Both historical adapter paths and session-aware paths end in this
+        // encoded key. `%` never comes from the caller: encoding allows only
+        // ASCII alphanumerics, '-', '_' and '.'. LIKE's '_' and case folding can
+        // broaden candidates, so path and metadata are rechecked below.
+        format!(
+            "{}%/{}",
+            Self::agent_path_prefix(agent),
+            Self::encode_path_segment(key)
+        )
+    }
+
+    /// Use the admitted live kernel handle and its typed, projected query. No
+    /// independent SQLite connection, raw SQL, schema change or lookup cache.
+    /// Only matching ids load text/vector bodies. The broad legacy fallback
+    /// still scans metadata; it does not promise an indexed/O(1) key lookup.
+    fn rows_matching_key(
+        store: &MemoryStore,
+        key: &str,
+        agent: Option<&str>,
+        pattern: &str,
+    ) -> anyhow::Result<Vec<portable_kernel::MemoryEntry>> {
+        let prefix = Self::agent_path_prefix(agent);
+        let candidates = store
+            .list_memories_by_path_prefix(pattern)
+            .map_err(|error| {
+                ::zeroclaw_log::record!(
+                    ERROR,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"phase": "key_candidate_lookup"})),
+                    "tachi memory key candidate lookup failed"
+                );
+                anyhow::Error::msg(format!("tachi key candidate lookup failed: {error}"))
+            })?;
+        let mut result = Vec::new();
+        for row in candidates {
+            if !row.path.starts_with(&prefix) {
+                continue;
+            }
+            let metadata: serde_json::Value = serde_json::from_str(&row.metadata)
+                .context("invalid tachi key candidate metadata")?;
+            if metadata.get(METADATA_ZC_KEY).and_then(|v| v.as_str()) != Some(key)
+                || agent.is_some_and(|agent| {
+                    metadata.get(METADATA_ZC_AGENT).and_then(|v| v.as_str()) != Some(agent)
+                })
+            {
+                continue;
+            }
+            // The projection includes archived rows. Use the normal typed get
+            // to retain this adapter's active-only visibility.
+            if let Some(entry) = store.get(&row.id).map_err(|error| {
+                ::zeroclaw_log::record!(
+                    ERROR,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"phase": "key_row_lookup"})),
+                    "tachi memory key row lookup failed"
+                );
+                anyhow::Error::msg(format!("tachi key row lookup failed: {error}"))
+            })? {
+                result.push(entry);
+            }
+        }
+        // Match list_by_path's stable ordering for administrative point reads.
+        result.sort_by(|a, b| {
+            a.path
+                .cmp(&b.path)
+                .then_with(|| b.timestamp.cmp(&a.timestamp))
+        });
+        Ok(result)
+    }
+
     async fn store_internal(
         &self,
         key: &str,
@@ -565,8 +652,6 @@ impl TachiMemory {
         let category_c = Self::category_to_memcore(&category);
         let embedding_c = embedding.clone();
         let scope_c = scope;
-        let page_size = self.list_page_size;
-        let max_grow = self.max_list_grow;
         let key_owned = key.to_string();
         // Match SQLite's logical identity, including a Conversation session.
         // Namespace/category changes on global rows still update in place.
@@ -604,14 +689,27 @@ impl TachiMemory {
             let existing = match exact_hit {
                 Some(entry) => Some(entry),
                 None => {
-                    let agent_prefix =
-                        format!("/agents/{}/", Self::agent_segment(Some(&agent_owned)));
-                    // Propagate truncation errors: `.ok()` here would treat an
-                    // incomplete scan as "no existing row" and fork identity
-                    // with a fresh UUID.
-                    Self::list_prefix_complete(&store, &agent_prefix, page_size, max_grow)?
-                        .into_iter()
-                        .find(same_identity)
+                    let agent = Some(agent_owned.as_str());
+                    let canonical = Self::rows_matching_key(
+                        &store,
+                        &key_owned,
+                        agent,
+                        &Self::key_path_pattern(&key_owned, agent),
+                    )?
+                    .into_iter()
+                    .find(&same_identity);
+                    match canonical {
+                        Some(entry) => Some(entry),
+                        None => {
+                            // A new key, or an old row with a non-canonical
+                            // path, needs one projected metadata scan. Keep it
+                            // fallible so an error cannot fork row identity.
+                            let pattern = format!("{}%", Self::agent_path_prefix(agent));
+                            Self::rows_matching_key(&store, &key_owned, agent, &pattern)?
+                                .into_iter()
+                                .find(same_identity)
+                        }
+                    }
                 }
             };
 
@@ -707,26 +805,52 @@ impl TachiMemory {
         &self,
         key: &str,
         agent_id: Option<&str>,
+        scope: PointScope,
+        lookup: KeyLookup,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         let store = self.store.clone();
-        let page_size = self.list_page_size;
-        let max_grow = self.max_list_grow;
         let key = key.to_string();
-        let prefix = match agent_id {
-            Some(aid) => format!("/agents/{}/", Self::agent_segment(Some(aid))),
-            None => "/agents".to_string(),
-        };
+        let agent = agent_id.map(str::to_owned);
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
             let store = store.lock();
-            let rows = Self::list_prefix_complete(&store, &prefix, page_size, max_grow)?;
-            Ok(rows
-                .into_iter()
-                .filter(|row| {
-                    Self::metadata_str(&row.metadata, METADATA_ZC_KEY).as_deref()
-                        == Some(key.as_str())
-                })
-                .map(|row| Self::memcore_to_zeroclaw(row, None))
-                .collect())
+            let include_soul = agent.is_some();
+            let select = |rows: Vec<portable_kernel::MemoryEntry>| {
+                scope.select(
+                    rows.into_iter()
+                        .map(|row| Self::memcore_to_zeroclaw(row, None))
+                        .collect(),
+                    include_soul,
+                )
+            };
+            if matches!(lookup, KeyLookup::Select) && agent.is_some() {
+                let rows = select(Self::rows_matching_key(
+                    &store,
+                    &key,
+                    agent.as_deref(),
+                    &Self::key_path_pattern(&key, agent.as_deref()),
+                )?);
+                // A global candidate cannot hide a legacy Conversation row
+                // for the caller's session. Unscoped administrative queries
+                // use the complete projection across all agents below.
+                if !rows.is_empty()
+                    && (!scope.has_canonical_session()
+                        || rows
+                            .iter()
+                            .all(|row| row.category == MemoryCategory::Conversation))
+                {
+                    return Ok(rows);
+                }
+            }
+            // A scope miss (including a canonical row in another session) must
+            // still find the caller's legacy row. Deletes always scan this
+            // projection once to include non-canonical same-key duplicates.
+            let pattern = format!("{}%", Self::agent_path_prefix(agent.as_deref()));
+            Ok(select(Self::rows_matching_key(
+                &store,
+                &key,
+                agent.as_deref(),
+                &pattern,
+            )?))
         })
         .await?
     }
@@ -949,9 +1073,11 @@ impl Memory for TachiMemory {
 
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
         let scope = PointScope::current();
-        let rows = self.find_rows_by_key(key, None).await?;
         // Ambient get never returns a row from the reserved Soul namespace.
-        Ok(scope.select(rows, false).pop())
+        Ok(self
+            .find_rows_by_key(key, None, scope, KeyLookup::Select)
+            .await?
+            .pop())
     }
 
     async fn get_for_agent(
@@ -960,8 +1086,10 @@ impl Memory for TachiMemory {
         agent_id: &str,
     ) -> anyhow::Result<Option<MemoryEntry>> {
         let scope = PointScope::current();
-        let rows = self.find_rows_by_key(key, Some(agent_id)).await?;
-        Ok(scope.select(rows, true).pop())
+        Ok(self
+            .find_rows_by_key(key, Some(agent_id), scope, KeyLookup::Select)
+            .await?
+            .pop())
     }
 
     async fn list(
@@ -983,22 +1111,22 @@ impl Memory for TachiMemory {
 
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
         let scope = PointScope::current();
-        let rows = self.find_rows_by_key(key, None).await?;
+        let rows = self
+            .find_rows_by_key(key, None, scope, KeyLookup::Complete)
+            .await?;
         // The unscoped delete never reaches the reserved Soul namespace;
         // Soul rows are forgotten only through `forget_for_agent` with the
         // admitted identity.
-        let ids: Vec<String> = scope
-            .select(rows, false)
-            .into_iter()
-            .map(|e| e.id)
-            .collect();
+        let ids: Vec<String> = rows.into_iter().map(|e| e.id).collect();
         Ok(self.delete_ids(ids).await? > 0)
     }
 
     async fn forget_for_agent(&self, key: &str, agent_id: &str) -> anyhow::Result<bool> {
         let scope = PointScope::current();
-        let rows = self.find_rows_by_key(key, Some(agent_id)).await?;
-        let ids: Vec<String> = scope.select(rows, true).into_iter().map(|e| e.id).collect();
+        let rows = self
+            .find_rows_by_key(key, Some(agent_id), scope, KeyLookup::Complete)
+            .await?;
+        let ids: Vec<String> = rows.into_iter().map(|e| e.id).collect();
         Ok(self.delete_ids(ids).await? > 0)
     }
 
@@ -1306,6 +1434,9 @@ impl ::zeroclaw_api::attribution::Attributable for TachiMemory {
         &self.alias
     }
 }
+
+#[cfg(all(test, feature = "tachi"))]
+mod key_lookup_tests;
 
 #[cfg(all(test, feature = "tachi"))]
 mod session_scope_tests;
@@ -1904,17 +2035,12 @@ mod tests {
             "expected truncation error, got: {err}"
         );
 
-        // Storing a NEW key must also fail loud: the (agent, key) fallback scan
-        // is incomplete, and treating that as "no existing row" would fork
-        // identity with a fresh UUID.
-        let err = mem
-            .store("row_new", "payload new", MemoryCategory::Core, None)
+        // Point identity no longer depends on a growing full-entry list. The
+        // complete projected metadata fallback can prove a new key is absent.
+        mem.store("row_new", "payload new", MemoryCategory::Core, None)
             .await
-            .expect_err("upsert fallback over a truncated scan must error");
-        assert!(
-            err.to_string().contains("truncated"),
-            "expected truncation error, got: {err}"
-        );
+            .expect("point upsert must not depend on full-entry list capacity");
+        assert_eq!(mem.count().await.unwrap(), 4);
 
         // Updating an EXISTING key still works at the cap: the exact-path hit
         // short-circuits before the growing scan.
