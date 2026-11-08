@@ -1367,6 +1367,9 @@ impl ::zeroclaw_api::attribution::Attributable for TachiMemory {
 }
 
 #[cfg(all(test, feature = "tachi"))]
+mod key_lookup_profile;
+
+#[cfg(all(test, feature = "tachi"))]
 mod key_lookup_tests;
 
 #[cfg(all(test, feature = "tachi"))]
