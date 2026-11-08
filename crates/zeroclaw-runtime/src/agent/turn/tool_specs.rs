@@ -26,11 +26,21 @@ pub(crate) fn build_iteration_tool_specs(
     excluded_tools: &[String],
     activated_tools: Option<&Arc<Mutex<ActivatedToolSet>>>,
 ) -> Result<IterationToolSpecs> {
+    // Match the executor's exclusion semantics before exposing any schema/name.
+    let is_excluded = |name: &str| {
+        excluded_tools
+            .iter()
+            .any(|excluded| excluded.trim().eq_ignore_ascii_case(name.trim()))
+    };
     // Rebuild tool_specs each iteration so newly activated deferred tools appear.
     let mut tool_specs: Vec<crate::tools::ToolSpec> = tools_registry
         .iter()
-        .filter(|tool| !excluded_tools.iter().any(|ex| ex == tool.name()))
+        .filter(|tool| !is_excluded(tool.name()))
         .map(|tool| tool.spec())
+        .collect();
+    let mut known_tool_names: HashSet<String> = tool_specs
+        .iter()
+        .map(|tool| tool.name.to_ascii_lowercase())
         .collect();
     if let Some(at) = activated_tools {
         let activated_tools = match at.lock() {
@@ -47,15 +57,21 @@ pub(crate) fn build_iteration_tool_specs(
             }
         };
         for spec in activated_tools.tool_specs() {
-            if !excluded_tools.iter().any(|ex| ex == &spec.name) {
+            if !is_excluded(&spec.name) {
+                known_tool_names.insert(spec.name.to_ascii_lowercase());
                 tool_specs.push(spec);
             }
         }
+        // Text fallback must recognize authorized deferred names before they
+        // have schemas. This is discovery only: the executor performs the same
+        // exact catalog lookup after hooks/approval, and rechecks exclusions.
+        known_tool_names.extend(
+            activated_tools
+                .deferred_tool_names()
+                .filter(|name| !is_excluded(name))
+                .map(str::to_ascii_lowercase),
+        );
     }
-    let known_tool_names: HashSet<String> = tool_specs
-        .iter()
-        .map(|tool| tool.name.to_ascii_lowercase())
-        .collect();
     let use_native_tools = model_provider.supports_native_tools() && !tool_specs.is_empty();
 
     Ok(IterationToolSpecs {

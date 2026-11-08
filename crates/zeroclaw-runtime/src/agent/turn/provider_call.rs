@@ -11,6 +11,7 @@ use crate::cost::types::BudgetCheck;
 use crate::observability::ObserverEvent;
 use crate::tools::ToolSpec;
 use anyhow::Result;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use zeroclaw_providers::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, ProviderDispatch};
 
@@ -177,6 +178,7 @@ pub(crate) async fn call_provider(
     active_model: &str,
     prepared_messages: &[ChatMessage],
     request_tools: Option<&[ToolSpec]>,
+    known_tool_names: &HashSet<String>,
     should_consume_provider_stream: bool,
     iteration: usize,
 ) -> Result<ProviderCallOutcome> {
@@ -192,6 +194,7 @@ pub(crate) async fn call_provider(
             active_model_provider,
             prepared_messages,
             request_tools,
+            known_tool_names,
             active_model,
             ctx.temperature,
             ctx.cancellation_token,
@@ -571,6 +574,7 @@ mod fallback_tests {
                 "test-model",
                 &[ChatMessage::user("hello")],
                 None,
+                &HashSet::new(),
                 true,
                 0,
             )
@@ -673,6 +677,7 @@ mod fallback_tests {
             "test-model",
             &[ChatMessage::user("hello")],
             None,
+            &HashSet::new(),
             true,
             0,
         )

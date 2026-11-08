@@ -20,21 +20,16 @@ pub(crate) struct StreamTextGuard {
     pending: String,
     pending_candidate_start: Option<usize>,
     known_tool_names: HashSet<String>,
-    has_active_tools: bool,
+    has_resolvable_tools: bool,
     pub(crate) suppress_forwarding: bool,
     pub(crate) suppressed_protocol: bool,
 }
 
 impl StreamTextGuard {
-    pub(crate) fn new(available_tools: Option<&[crate::tools::ToolSpec]>) -> Self {
-        let available_tools = available_tools.unwrap_or(&[]);
-        let known_tool_names = available_tools
-            .iter()
-            .map(|tool| tool.name.to_ascii_lowercase())
-            .collect();
+    pub(crate) fn new(known_tool_names: &HashSet<String>) -> Self {
         Self {
-            known_tool_names,
-            has_active_tools: !available_tools.is_empty(),
+            known_tool_names: known_tool_names.clone(),
+            has_resolvable_tools: !known_tool_names.is_empty(),
             ..Self::default()
         }
     }
@@ -106,7 +101,7 @@ impl StreamTextGuard {
         if let Some(is_protocol) =
             complete_json_fence_protocol_state(candidate, &self.known_tool_names)
         {
-            if is_protocol && self.has_active_tools {
+            if is_protocol && self.has_resolvable_tools {
                 self.suppress_protocol();
                 return None;
             }
@@ -191,7 +186,7 @@ impl StreamTextGuard {
 
         if let Some(kind) = classify_tool_protocol_envelope(text) {
             return matches!(kind, ToolProtocolEnvelopeKind::TaggedToolCall)
-                || (self.has_active_tools
+                || (self.has_resolvable_tools
                     && (matches!(kind, ToolProtocolEnvelopeKind::ToolResult)
                         || tool_protocol_envelope_mentions_known_tool(
                             text,

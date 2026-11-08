@@ -66,3 +66,14 @@ tool-browser-screenshot-error-sidecar-no-png-data = computer-use 边车未返回
 tool-browser-screenshot-error-sidecar-non-json-success = 对于带路径的截图，computer-use 边车返回了非 JSON 的成功响应；请求的文件未被写入
 tool-browser-screenshot-error-sidecar-not-png = computer-use 边车返回了非 PNG 的截图载荷
 tool-browser-screenshot-error-symlink-target = 无法将截图写入符号链接目标 '{ $target }'
+
+# MCP 延迟发现与不回显输入值的参数恢复。
+tool-mcp-deferred-instructions = 以下工具可用，但完整 schema 尚未加载。需要 schema 时，用 tool_search 的 "select:name1,name2" 或关键词查询。已知参数时也可直接调用列表中的精确名称；运行时在常规 hooks 和审批通过后激活工具。发现工具不会授予未列出或被拒绝工具的权限。
+tool-mcp-search-query-required = 必须提供 query 参数
+tool-mcp-search-no-matches = 没有找到匹配的延迟工具。
+tool-mcp-search-not-found = 未找到：{ $names }
+tool-mcp-arguments-invalid = MCP 参数无效。{ $problem } 预期字段和类型：{ $signature }。如需完整 schema，请用 tool_search 获取后修正参数。此提示不回显输入值。
+tool-mcp-arguments-server-rejected = MCP 服务端拒绝了这些参数。
+tool-mcp-arguments-root-type = 参数必须为 { $expected } 类型，实际为 { $actual }。
+tool-mcp-arguments-missing = 缺少必填字段 { $field }。
+tool-mcp-arguments-field-type = 字段 { $field } 应为 { $expected } 类型，实际为 { $actual }。

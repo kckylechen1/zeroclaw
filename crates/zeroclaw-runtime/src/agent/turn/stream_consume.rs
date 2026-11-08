@@ -5,6 +5,7 @@ use super::outcome::{StreamCancelledAfterOutput, StreamInterruptedAfterOutput, T
 use super::stream_guard::{StreamTextGuard, StreamThinkTagStripper};
 use anyhow::Result;
 use futures_util::StreamExt;
+use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroclaw_api::agent::TurnEvent;
@@ -29,6 +30,7 @@ pub(crate) async fn consume_provider_streaming_response(
     model_provider: &dyn ModelProvider,
     messages: &[ChatMessage],
     request_tools: Option<&[crate::tools::ToolSpec]>,
+    known_tool_names: &HashSet<String>,
     model: &str,
     temperature: Option<f64>,
     cancellation_token: Option<&CancellationToken>,
@@ -51,7 +53,9 @@ pub(crate) async fn consume_provider_streaming_response(
     );
     let mut outcome = StreamedChatOutcome::default();
     let mut delta_sender = on_delta;
-    let mut text_guard = StreamTextGuard::new(request_tools);
+    // Recognition must match the parser's authorized per-iteration names,
+    // including deferred MCP tools whose schemas are not in request_tools yet.
+    let mut text_guard = StreamTextGuard::new(known_tool_names);
     let mut think_stripper = StreamThinkTagStripper::default();
     // Correlates PreExecutedToolCall events with their later results so both
     // TurnEvents share a stable id (FIFO per tool name).
@@ -354,6 +358,7 @@ mod tests {
             &provider,
             &[ChatMessage::user("go")],
             None,
+            &HashSet::new(),
             "mock-model",
             Some(0.0),
             None,

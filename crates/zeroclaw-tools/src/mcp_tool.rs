@@ -9,6 +9,8 @@ use crate::mcp_client::McpRegistry;
 use crate::mcp_protocol::McpToolDef;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult, ToolSpec};
 
+mod arguments;
+
 /// A zeroclaw [`Tool`] backed by an MCP server tool.
 /// The `prefixed_name` (e.g. `filesystem__read_file`) is what the agent loop
 /// sees. The registry knows how to route it to the correct server.
@@ -79,12 +81,24 @@ impl Tool for McpToolWrapper {
             }
             other => other,
         };
+        // Task continuations are validated by McpServer against their owning
+        // handle, not against the original tool's required input fields.
+        let continuation = args
+            .get(crate::mcp_task::TASK_HANDLE_ARG)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(crate::mcp_task::is_our_task_handle);
+        if !continuation && let Some(error) = arguments::shape_error(&self.input_schema, &args) {
+            return Ok(ToolResult::err(error));
+        }
         match self.registry.call_tool(&self.prefixed_name, args).await {
             Ok(output) => Ok(ToolResult {
                 success: true,
                 output: output.into(),
                 error: None,
             }),
+            Err(e) if e.is::<crate::mcp_protocol::McpInvalidParams>() => Ok(ToolResult::err(
+                arguments::server_rejection(&self.input_schema),
+            )),
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
@@ -265,5 +279,28 @@ mod tests {
                 .expect("non-object args must not propagate Err");
             assert!(!result.success, "expected non-fatal failure for {non_obj}");
         }
+    }
+
+    #[tokio::test]
+    async fn execute_preserves_task_continuation_validation_owner() {
+        let registry = empty_registry().await;
+        let def = make_def(
+            "read",
+            None,
+            json!({
+                "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]
+            }),
+        );
+        let wrapper = McpToolWrapper::new("srv__read".into(), def, registry);
+        let result = wrapper
+            .execute(json!({
+                crate::mcp_task::TASK_HANDLE_ARG: "zc-mrtr-00000000000000000000000000000000"
+            }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        // Reaching the registry's ordinary missing-tool error proves the wrapper
+        // did not reject a continuation for omitting the original query field.
+        assert!(result.error.unwrap().contains("unknown MCP tool"));
     }
 }

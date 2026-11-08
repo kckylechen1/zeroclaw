@@ -167,3 +167,14 @@ tool-text-browser-pinned-description = Select a text-based browser (lynx, links,
 tool-text-browser-error-unpinned = External text browser backend { $backend } cannot pin validated destination addresses: independent DNS resolution leaves a validation-to-connection mismatch window. Execution is refused. Use the address-pinned web_fetch tool instead.
 
 tool-http-request-error-secret-host = auth_secret '{ $name }' is not allowed for destination host '{ $host }'
+
+# Deferred MCP discovery and value-free argument recovery.
+tool-mcp-deferred-instructions = The tools below are available but their full schemas are not yet loaded. Use tool_search with "select:name1,name2" or keywords when you need a schema. An exact listed name can also be called directly with known arguments; the runtime activates it after the usual hooks and approval checks. Discovery never grants access to an unlisted or denied tool.
+tool-mcp-search-query-required = query parameter is required
+tool-mcp-search-no-matches = No matching deferred tools found.
+tool-mcp-search-not-found = Not found: { $names }
+tool-mcp-arguments-invalid = Invalid MCP arguments. { $problem } Expected fields/types: { $signature }. Fetch the full schema with tool_search if needed, then correct the arguments. Input values are omitted.
+tool-mcp-arguments-server-rejected = The MCP server rejected the arguments.
+tool-mcp-arguments-root-type = Arguments must have type { $expected }; received { $actual }.
+tool-mcp-arguments-missing = Missing required field { $field }.
+tool-mcp-arguments-field-type = Field { $field } expects { $expected }; received { $actual }.
