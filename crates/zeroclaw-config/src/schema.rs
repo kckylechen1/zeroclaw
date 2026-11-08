@@ -568,7 +568,8 @@ pub struct Config {
     #[group = "Agent"]
     pub verifiable_intent: VerifiableIntentConfig,
 
-    /// Standard Operating Procedures engine configuration (`[sop]`).
+    /// Legacy SOP compatibility settings (`[sop]`); the engine and authoring
+    /// surfaces have been retired. These keys do not enable SOP execution.
     #[serde(default)]
     #[nested]
     #[group = "Agent"]
@@ -19109,30 +19110,23 @@ async fn sync_directory(path: &Path) -> Result<()> {
 
 // ── SOP configuration ──────────────────────────────────────────
 
-/// Standard Operating Procedures configuration (`[sop]`).
+/// Legacy SOP compatibility settings (`[sop]`).
 ///
-/// Definition-side keys (`sops_dir`, `default_execution_mode`) stay live for
-/// SOP.toml loading and authoring. The run-side engine was removed (wall-5
-/// slice 2); the remaining fields are inert retention knobs kept so legacy
-/// `[sop]` tables still parse. SOP runs are Tachi-side ProcedureRuns through
-/// the procedure_v1 seam.
-///
-/// The `default_execution_mode` field uses the `SopExecutionMode` type from
-/// `sop::types` (re-exported via `sop::SopExecutionMode`). To avoid circular
-/// module references, config stores it using the same enum definition.
+/// The run engine, definition loader, authoring RPC/CLI and procedure_v1 seam
+/// have been retired. All fields below are retained only so existing tables
+/// continue to parse; none enables a definition or execution surface. Retained
+/// approval/security values are not reinterpreted as current authority.
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "sop"]
 pub struct SopConfig {
-    /// Directory containing SOP definitions (subdirs with SOP.toml + SOP.md).
-    /// Optional override. When omitted, the runtime and CLI both resolve the
-    /// default `<workspace>/sops`; SOPs load from there whenever it exists.
+    /// RETIRED with the definition loader and authoring surface. No longer
+    /// read; retained so existing `[sop]` tables still parse.
     #[serde(default)]
     pub sops_dir: Option<String>,
 
-    /// Default execution mode for SOPs that omit `execution_mode`.
-    /// Values: `auto`, `supervised` (default), `step_by_step`,
-    /// `priority_based`, `deterministic`.
+    /// RETIRED with the definition loader and authoring surface. No longer
+    /// read; retained so existing `[sop]` tables still parse.
     #[serde(default = "default_sop_execution_mode")]
     pub default_execution_mode: String,
 

@@ -69,11 +69,6 @@ impl ToolOutput {
         self.data.as_ref()
     }
 
-    /// Take the structured value, when the tool declared one.
-    pub fn into_data(self) -> Option<serde_json::Value> {
-        self.data
-    }
-
     pub fn as_str(&self) -> &str {
         &self.text
     }

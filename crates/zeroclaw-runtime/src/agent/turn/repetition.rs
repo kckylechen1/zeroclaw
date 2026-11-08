@@ -202,7 +202,6 @@ mod tests {
     fn outcome(output: &str) -> ToolExecutionOutcome {
         ToolExecutionOutcome {
             output: output.into(),
-            output_data: None,
             success: false,
             error_reason: Some(output.into()),
             duration: std::time::Duration::ZERO,
@@ -328,7 +327,6 @@ mod tests {
 
         let success_one = ToolExecutionOutcome {
             output: "2026-11-08T03:50:07Z pid=41201 status=running elapsed=10ms".into(),
-            output_data: None,
             success: true,
             error_reason: None,
             duration: std::time::Duration::ZERO,
@@ -336,7 +334,6 @@ mod tests {
         };
         let success_two = ToolExecutionOutcome {
             output: "2026-11-08T03:50:08Z pid=41202 status=running elapsed=20ms".into(),
-            output_data: None,
             success: true,
             error_reason: None,
             duration: std::time::Duration::ZERO,
