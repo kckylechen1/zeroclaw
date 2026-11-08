@@ -1,7 +1,7 @@
 //! Deferred MCP tool loading — stubs and activated-tool tracking.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::mcp_client::McpRegistry;
 use crate::mcp_protocol::McpToolDef;
@@ -167,32 +167,115 @@ impl DeferredMcpToolSet {
 
 // ── ActivatedToolSet ─────────────────────────────────────────────────────
 
-/// Per-conversation mutable state tracking which deferred tools have been
-/// activated (i.e. their full schemas have been fetched via `tool_search`).
-/// The agent loop consults this each iteration to decide which tool_specs
-/// to include in the LLM request.
+pub(crate) type ActivationHook = Arc<dyn Fn(Arc<dyn Tool>) + Send + Sync>;
+
+/// Per-conversation owner of deferred MCP discovery, admission and activation.
+/// `tool_search` and exact-name recovery share this catalog and policy; neither
+/// discovery path grants authority. The loop only advertises activated schemas.
 pub struct ActivatedToolSet {
     tools: HashMap<String, Arc<dyn Tool>>,
+    pub(crate) deferred: Option<DeferredMcpToolSet>,
+    access_policy: Option<ToolAccessPolicy>,
+    pub(crate) activation_hook: Option<ActivationHook>,
 }
 
 impl ActivatedToolSet {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            deferred: None,
+            access_policy: None,
+            activation_hook: None,
         }
     }
 
     pub fn activate(&mut self, name: String, tool: Arc<dyn Tool>) {
-        self.tools.insert(name, tool);
+        if self.is_allowed(&name) {
+            self.tools.insert(name, tool);
+        }
+    }
+
+    pub(crate) fn lock(shared: &Mutex<Self>) -> MutexGuard<'_, Self> {
+        shared.lock().unwrap_or_else(|poisoned| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_category(::zeroclaw_log::EventCategory::Tool)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                "activated MCP tool lock poisoned; recovering with admission checks"
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    pub(crate) fn set_access_policy(&mut self, policy: ToolAccessPolicy) {
+        self.tools.retain(|name, _| policy.is_tool_allowed(name));
+        self.access_policy = Some(policy);
+    }
+
+    pub(crate) fn is_allowed(&self, name: &str) -> bool {
+        self.access_policy
+            .as_ref()
+            .is_none_or(|policy| policy.is_tool_allowed(name))
+    }
+
+    /// Names admitted by the same catalog/policy used for exact activation.
+    /// This does not materialize schemas or run activation hooks.
+    pub fn deferred_tool_names(&self) -> impl Iterator<Item = &str> {
+        self.deferred
+            .iter()
+            .flat_map(|deferred| deferred.stubs.iter())
+            .map(|stub| stub.prefixed_name.as_str())
+            .filter(|name| self.is_allowed(name))
+    }
+
+    /// Resolve an exact, already-discovered MCP name and persist its schema.
+    /// Suffixes, case-folded names and arbitrary unknown names never activate a
+    /// tool. The caller must still run its normal approval/hooks/execution path.
+    /// Exclusions are checked before inserting anything into the activation set.
+    pub fn activate_exact(
+        shared: &Mutex<Self>,
+        name: &str,
+        excluded: &[String],
+    ) -> Option<Arc<dyn Tool>> {
+        if excluded
+            .iter()
+            .any(|excluded| excluded.trim().eq_ignore_ascii_case(name.trim()))
+        {
+            return None;
+        }
+        let (tool, hook) = {
+            let mut guard = Self::lock(shared);
+            if !guard.is_allowed(name) {
+                return None;
+            }
+            let deferred = guard.deferred.as_ref()?;
+            // The catalog was constructed from this conversation's connected
+            // registry. An allow-list entry alone cannot manufacture a tool.
+            deferred.get_by_name(name)?;
+            if let Some(tool) = guard.get(name) {
+                return Some(tool);
+            }
+            let tool: Arc<dyn Tool> = Arc::from(deferred.activate(name)?);
+            guard.activate(name.to_string(), Arc::clone(&tool));
+            (tool, guard.activation_hook.clone())
+        };
+        // Hooks can inspect the activation set; never invoke them under its lock.
+        if let Some(hook) = hook {
+            hook(Arc::clone(&tool));
+        }
+        Some(tool)
     }
 
     pub fn is_activated(&self, name: &str) -> bool {
-        self.tools.contains_key(name)
+        self.is_allowed(name) && self.tools.contains_key(name)
     }
 
     /// Clone the Arc so the caller can drop the mutex guard before awaiting.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
+        self.is_allowed(name)
+            .then(|| self.tools.get(name).cloned())
+            .flatten()
     }
 
     pub fn get_resolved(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -205,6 +288,9 @@ impl ActivatedToolSet {
 
         let mut resolved = None;
         for (tool_name, tool) in &self.tools {
+            if !self.is_allowed(tool_name) {
+                continue;
+            }
             let Some((_, suffix)) = tool_name.split_once("__") else {
                 continue;
             };
@@ -221,11 +307,19 @@ impl ActivatedToolSet {
     }
 
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|t| t.spec()).collect()
+        self.tools
+            .iter()
+            .filter(|(name, _)| self.is_allowed(name))
+            .map(|(_, tool)| tool.spec())
+            .collect()
     }
 
     pub fn tool_names(&self) -> Vec<&str> {
-        self.tools.keys().map(|s| s.as_str()).collect()
+        self.tools
+            .keys()
+            .filter(|name| self.is_allowed(name))
+            .map(|name| name.as_str())
+            .collect()
     }
 }
 
@@ -284,13 +378,10 @@ pub fn build_deferred_tools_section_excluding(
     }
     let mut out = String::new();
     out.push_str("## Deferred Tools\n\n");
-    out.push_str(
-        "The tools listed below are available but NOT yet loaded. \
-         To use any of them you MUST first call the `tool_search` tool \
-         to fetch their full schemas. Use `\"select:name1,name2\"` for \
-         exact tools or keywords to search. Once activated, the tools \
-         become callable for the rest of the conversation.\n\n",
-    );
+    out.push_str(&crate::i18n::get_required_tool_string(
+        "tool-mcp-deferred-instructions",
+    ));
+    out.push_str("\n\n");
     out.push_str("<available-deferred-tools>\n");
     let mut count = 0;
     for stub in &deferred.stubs {

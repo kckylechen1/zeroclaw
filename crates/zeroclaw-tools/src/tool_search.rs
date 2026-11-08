@@ -5,14 +5,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::mcp_deferred::{ActivatedToolSet, DeferredMcpToolSet};
+use crate::mcp_deferred::{ActivatedToolSet, ActivationHook, DeferredMcpToolSet};
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::autonomy::McpDiscoveredToolPolicy;
 
 /// Default maximum number of search results.
 const DEFAULT_MAX_RESULTS: usize = 5;
-
-type ActivationHook = Arc<dyn Fn(Arc<dyn Tool>) + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct ToolAccessPolicy {
@@ -84,46 +82,25 @@ impl ToolAccessPolicy {
     }
 }
 
-/// Built-in tool that fetches full schemas for deferred MCP tools.
+/// Built-in tool that fetches full schemas from the conversation's MCP owner.
 pub struct ToolSearchTool {
-    deferred: DeferredMcpToolSet,
     activated: Arc<Mutex<ActivatedToolSet>>,
-    access_policy: Option<ToolAccessPolicy>,
-    activation_hook: Option<ActivationHook>,
 }
 
 impl ToolSearchTool {
     pub fn new(deferred: DeferredMcpToolSet, activated: Arc<Mutex<ActivatedToolSet>>) -> Self {
-        Self {
-            deferred,
-            activated,
-            access_policy: None,
-            activation_hook: None,
-        }
+        ActivatedToolSet::lock(&activated).deferred = Some(deferred);
+        Self { activated }
     }
 
-    pub fn with_access_policy(mut self, policy: ToolAccessPolicy) -> Self {
-        self.access_policy = Some(policy);
+    pub fn with_access_policy(self, policy: ToolAccessPolicy) -> Self {
+        ActivatedToolSet::lock(&self.activated).set_access_policy(policy);
         self
     }
 
-    pub fn with_activation_hook(mut self, hook: ActivationHook) -> Self {
-        self.activation_hook = Some(hook);
+    pub fn with_activation_hook(self, hook: ActivationHook) -> Self {
+        ActivatedToolSet::lock(&self.activated).activation_hook = Some(hook);
         self
-    }
-
-    fn is_allowed(&self, tool_name: &str) -> bool {
-        self.access_policy
-            .as_ref()
-            .is_none_or(|p| p.is_tool_allowed(tool_name))
-    }
-
-    fn notify_activated(&self, tools: Vec<Arc<dyn Tool>>) {
-        if let Some(hook) = &self.activation_hook {
-            for tool in tools {
-                hook(tool);
-            }
-        }
     }
 }
 
@@ -173,7 +150,9 @@ impl Tool for ToolSearchTool {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
-                error: Some("query parameter is required".into()),
+                error: Some(crate::i18n::get_required_tool_string(
+                    "tool-mcp-search-query-required",
+                )),
             });
         }
 
@@ -184,98 +163,30 @@ impl Tool for ToolSearchTool {
             return self.select_tools(&names);
         }
 
-        // Keyword search mode.
-        // When a policy is active, fetch all matches so denied tools don't
-        // consume result slots. The max_results cap is applied after filtering.
-        let search_limit = if self.access_policy.is_some() {
-            usize::MAX
-        } else {
-            max_results
+        // Filter before applying the result cap. Search and exact-name
+        // recovery read the same catalog and admission policy.
+        let (matched, names) = {
+            let guard = ActivatedToolSet::lock(&self.activated);
+            let results = guard
+                .deferred
+                .as_ref()
+                .map(|deferred| deferred.search(query, usize::MAX))
+                .unwrap_or_default();
+            let names: Vec<String> = results
+                .iter()
+                .filter(|stub| guard.is_allowed(&stub.prefixed_name))
+                .take(max_results)
+                .map(|stub| stub.prefixed_name.clone())
+                .collect();
+            (results.len(), names)
         };
-        let results = self.deferred.search(query, search_limit);
-        if results.is_empty() {
-            return Ok(ToolResult {
-                success: true,
-                output: "No matching deferred tools found.".into(),
-                error: None,
-            });
+        if matched == 0 {
+            return Ok(ToolResult::ok(crate::i18n::get_required_tool_string(
+                "tool-mcp-search-no-matches",
+            )));
         }
-
-        // Activate and return full specs (policy-filtered, then capped)
-        let mut output = String::from("<functions>\n");
-        let mut activated_count = 0;
-        let mut returned_count = 0;
-        let mut newly_activated = Vec::new();
-        let mut guard = match self.activated.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({
-                            "query": query,
-                            "mode": "keyword_search",
-                        })),
-                    "tool_search activated-tool lock poisoned during keyword activation; recovering guard"
-                );
-                poisoned.into_inner()
-            }
-        };
-
-        for stub in &results {
-            if returned_count >= max_results {
-                break;
-            }
-            if !self.is_allowed(&stub.prefixed_name) {
-                ::zeroclaw_log::record!(
-                    DEBUG,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                    &format!(
-                        "tool_search: '{}' matched query but denied by access policy",
-                        stub.prefixed_name
-                    )
-                );
-                continue;
-            }
-            if let Some(spec) = self.deferred.tool_spec(&stub.prefixed_name) {
-                if !guard.is_activated(&stub.prefixed_name)
-                    && let Some(tool) = self.deferred.activate(&stub.prefixed_name)
-                {
-                    let tool: Arc<dyn Tool> = Arc::from(tool);
-                    guard.activate(stub.prefixed_name.clone(), Arc::clone(&tool));
-                    newly_activated.push(tool);
-                    activated_count += 1;
-                }
-                let _ = writeln!(
-                    output,
-                    "<function>{{\"name\": \"{}\", \"description\": \"{}\", \"parameters\": {}}}</function>",
-                    spec.name,
-                    spec.description.replace('"', "\\\""),
-                    spec.parameters
-                );
-                returned_count += 1;
-            }
-        }
-
-        output.push_str("</functions>\n");
-        drop(guard);
-        self.notify_activated(newly_activated);
-
-        ::zeroclaw_log::record!(
-            DEBUG,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-            &format!(
-                "tool_search: query={query:?}, matched={}, activated={activated_count}",
-                results.len()
-            )
-        );
-
-        Ok(ToolResult {
-            success: true,
-            output: output.into(),
-            error: None,
-        })
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        self.select_tools(&names)
     }
 }
 
@@ -283,85 +194,33 @@ impl ToolSearchTool {
     fn select_tools(&self, names: &[&str]) -> anyhow::Result<ToolResult> {
         let mut output = String::from("<functions>\n");
         let mut not_found = Vec::new();
-        let mut activated_count = 0;
-        let mut newly_activated = Vec::new();
-        let mut guard = match self.activated.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({
-                            "requested_names": names,
-                            "mode": "select",
-                        })),
-                    "tool_search activated-tool lock poisoned during select activation; recovering guard"
-                );
-                poisoned.into_inner()
-            }
-        };
-
-        for name in names {
-            if name.is_empty() {
-                continue;
-            }
-            if !self.is_allowed(name) {
-                ::zeroclaw_log::record!(
-                    DEBUG,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                    &format!("tool_search select: '{}' denied by access policy", name)
-                );
-                not_found.push(*name);
-                continue;
-            }
-            match self.deferred.tool_spec(name) {
-                Some(spec) => {
-                    if !guard.is_activated(name)
-                        && let Some(tool) = self.deferred.activate(name)
-                    {
-                        let tool: Arc<dyn Tool> = Arc::from(tool);
-                        guard.activate(String::from(*name), Arc::clone(&tool));
-                        newly_activated.push(tool);
-                        activated_count += 1;
-                    }
+        for name in names.iter().copied().filter(|name| !name.is_empty()) {
+            match ActivatedToolSet::activate_exact(&self.activated, name, &[]) {
+                Some(tool) => {
+                    let spec = tool.spec();
                     let _ = writeln!(
                         output,
-                        "<function>{{\"name\": \"{}\", \"description\": \"{}\", \"parameters\": {}}}</function>",
-                        spec.name,
-                        spec.description.replace('"', "\\\""),
-                        spec.parameters
+                        "<function>{{\"name\": {}, \"description\": {}, \"parameters\": {}}}</function>",
+                        serde_json::to_string(&spec.name)?,
+                        serde_json::to_string(&spec.description)?,
+                        spec.parameters,
                     );
                 }
-                None => {
-                    not_found.push(*name);
-                }
+                None => not_found.push(name),
             }
         }
-
         output.push_str("</functions>\n");
-        drop(guard);
-        self.notify_activated(newly_activated);
-
         if !not_found.is_empty() {
-            let _ = write!(output, "\nNot found: {}", not_found.join(", "));
+            let _ = write!(
+                output,
+                "\n{}",
+                crate::i18n::get_required_tool_string_with_args(
+                    "tool-mcp-search-not-found",
+                    &[("names", &not_found.join(", "))],
+                )
+            );
         }
-
-        ::zeroclaw_log::record!(
-            DEBUG,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-            &format!(
-                "tool_search select: requested={}, activated={activated_count}, not_found={}",
-                names.len(),
-                not_found.len()
-            )
-        );
-
-        Ok(ToolResult {
-            success: true,
-            output: output.into(),
-            error: None,
-        })
+        Ok(ToolResult::ok(output))
     }
 }
 
@@ -619,6 +478,133 @@ mod tests {
             .unwrap();
 
         assert_eq!(seen.lock().unwrap().as_slice(), ["srv__tool"]);
+    }
+
+    #[tokio::test]
+    async fn exact_activation_and_search_share_one_catalog_and_hook() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
+        let seen = Arc::new(AtomicUsize::new(0));
+        let hook_seen = Arc::clone(&seen);
+        let hook_activated = Arc::downgrade(&activated);
+        let tool = ToolSearchTool::new(
+            make_deferred_set(vec![make_stub("srv__tool", "A tool")]).await,
+            Arc::clone(&activated),
+        )
+        .with_activation_hook(Arc::new(move |tool| {
+            // Re-entry proves the callback does not hold the activation lock.
+            assert!(
+                hook_activated
+                    .upgrade()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .is_activated(tool.name())
+            );
+            hook_seen.fetch_add(1, Ordering::SeqCst);
+        }));
+        for name in ["tool", "SRV__TOOL", "srv__missing"] {
+            assert!(ActivatedToolSet::activate_exact(&activated, name, &[]).is_none());
+        }
+        assert!(activated.lock().unwrap().tool_specs().is_empty());
+        assert!(ActivatedToolSet::activate_exact(&activated, "srv__tool", &[]).is_some());
+        tool.execute(serde_json::json!({"query": "select:srv__tool"}))
+            .await
+            .unwrap();
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        assert_eq!(activated.lock().unwrap().tool_specs().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn exact_activation_rechecks_policy_exclusions_and_catalog_membership() {
+        let policies = [
+            ToolAccessPolicy {
+                denied: Some(vec!["srv__tool".into()]),
+                ..ToolAccessPolicy::default()
+            },
+            ToolAccessPolicy {
+                allowed: Some(vec![]),
+                ..ToolAccessPolicy::default()
+            },
+            ToolAccessPolicy {
+                caller_allowed: Some(vec![]),
+                ..ToolAccessPolicy::default()
+            },
+            ToolAccessPolicy {
+                allowed: Some(vec!["other".into()]),
+                ..ToolAccessPolicy::default()
+            },
+            ToolAccessPolicy {
+                allowed: Some(vec!["srv__tool".into()]),
+                denied: Some(vec!["srv__tool".into()]),
+                ..ToolAccessPolicy::default()
+            },
+        ];
+        for policy in policies {
+            let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
+            let search = ToolSearchTool::new(
+                make_deferred_set(vec![make_stub("srv__tool", "A tool")]).await,
+                Arc::clone(&activated),
+            )
+            .with_access_policy(policy);
+            assert!(ActivatedToolSet::activate_exact(&activated, "srv__tool", &[]).is_none());
+            let result = search
+                .execute(serde_json::json!({"query": "select:srv__tool"}))
+                .await
+                .unwrap();
+            assert!(!result.output.contains("<function>"));
+            let guard = activated.lock().unwrap();
+            assert!(guard.tool_specs().is_empty());
+            assert_eq!(guard.deferred_tool_names().count(), 0);
+        }
+        let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
+        let _search = ToolSearchTool::new(
+            make_deferred_set(vec![make_stub("srv__tool", "A tool")]).await,
+            Arc::clone(&activated),
+        )
+        .with_access_policy(ToolAccessPolicy {
+            allowed: Some(vec!["srv__tool".into(), "srv__unavailable".into()]),
+            ..ToolAccessPolicy::default()
+        });
+        assert!(
+            ActivatedToolSet::activate_exact(&activated, "srv__tool", &[" SRV__TOOL ".into()])
+                .is_none()
+        );
+        assert!(ActivatedToolSet::activate_exact(&activated, "srv__unavailable", &[]).is_none());
+        assert!(activated.lock().unwrap().tool_specs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn parallel_exact_activation_inserts_one_schema_and_notifies_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
+        let seen = Arc::new(AtomicUsize::new(0));
+        let hook_seen = Arc::clone(&seen);
+        let _search = ToolSearchTool::new(
+            make_deferred_set(vec![make_stub("srv__tool", "A tool")]).await,
+            Arc::clone(&activated),
+        )
+        .with_activation_hook(Arc::new(move |_| {
+            hook_seen.fetch_add(1, Ordering::SeqCst);
+        }));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let activated = Arc::clone(&activated);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ActivatedToolSet::activate_exact(&activated, "srv__tool", &[]).unwrap()
+                })
+            })
+            .collect();
+        let tools: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert!(tools.iter().all(|tool| Arc::ptr_eq(tool, &tools[0])));
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        assert_eq!(activated.lock().unwrap().tool_specs().len(), 1);
     }
 
     #[test]

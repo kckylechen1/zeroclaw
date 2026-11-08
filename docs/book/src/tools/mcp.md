@@ -71,7 +71,35 @@ Per-server fields (`[[mcp.servers]]`), generated from the schema:
 
 ## Deferred loading
 
-`mcp.deferred_loading` is `false` by default, so configured MCP tools are included in the model context eagerly. Set it to `true` to place only MCP tool **names**, each with a one-line summary of its description, in the system prompt; the LLM calls the built-in `tool_search` tool to fetch a tool's full schema before invoking it. This keeps the initial context window small when a server exposes many tools.
+`mcp.deferred_loading` is `false` by default, so configured MCP tools are included in the model context eagerly. Set it to `true` to place only MCP tool **names**, each with a one-line summary of its description, in the system prompt. The agent can use `tool_search` to fetch a tool's full schema when it needs the parameter contract. This keeps the initial context window small when a server exposes many tools.
+
+If the agent already knows the arguments, a call to an exact, authorized
+`<server>__<tool>` name also activates that tool. Native calls and text-protocol
+fallback use the same conversation catalog and policy. Unknown names, suffixes
+of unactivated tools and case variants do not activate tools. Discovery does not
+grant access: risk-profile and caller allowlists, deny rules and current-turn
+exclusions still apply. The original hooks and approval gate run before automatic
+activation and execution. A cancelled or unapproved call does not activate a tool.
+Activated schemas remain available for later iterations of the conversation.
+The streaming text filter uses the same authorized names as fallback parsing,
+so deferred JSON tool calls are withheld from ordinary text chunks before execution.
+
+### Recovering from argument errors
+
+MCP tools return a compact recovery hint for clearly missing required fields or
+incorrect top-level JSON types, and for a server's JSON-RPC `-32602` rejection.
+Hints show field names and types, with at most eight fields and 48 characters per
+field name. They omit argument values, schema descriptions, defaults and enum
+values. The agent can fetch the full schema with `tool_search` and submit a
+corrected call through the normal policy and approval path; no call is replayed
+automatically.
+
+This is a conservative shape check, not a complete JSON Schema validator.
+References, composition schemas, nested constraints, undeclared types and
+business rules remain the MCP server's responsibility. Nullable inputs are
+accepted when the schema declares them. Task continuations keep their existing
+handle validation. Transport failures and `isError` execution failures retain
+their normal error handling and are not guessed to be argument errors.
 
 ## Binary tool results
 
@@ -81,9 +109,14 @@ When a tool result contains an `image` or `audio` item, or an embedded `resource
 
 MCP tool calls go through the same approval gate as every other tool, governed by the agent's risk profile (`risk_profiles.<alias>`). The `tool_search` discovery step is auto-approved so deferred MCP loading can work in non-interactive sessions, but tools discovered from MCP servers still follow the normal approval policy:
 
-- At autonomy `level = full`, no tool call prompts (MCP tools included).
+- At autonomy `level = full`, calls do not prompt unless their name matches `always_ask` (MCP tools included).
 - Otherwise, an MCP tool call prompts for approval unless its **prefixed** name (`<server>__<tool>`) is in the profile's `auto_approve` list. `auto_approve = ["*"]` approves everything; an exact entry like `auto_approve = ["filesystem__read_file"]` approves just that tool.
 - `always_ask` is the inverse: a name (or `"*"`) there always prompts, overriding `auto_approve`.
+
+An already activated tool's unique suffix alias is resolved to its prefixed
+name after `before_tool_call` hooks and before approval. The same canonical
+approval rule therefore covers direct aliases and hook rewrites, including at
+full autonomy. This read-only lookup does not activate a deferred tool.
 
 ### Authorization: `allowed_tools` / `excluded_tools`
 
@@ -97,33 +130,29 @@ Keep the three MCP tool controls on their own axes:
 | `auto_approve` / `always_ask` | Approval policy | Decide whether a selected MCP tool call requires operator approval. |
 | `allowed_tools` / `excluded_tools` | Capability policy | Decide which prefixed tool names the risk profile may use at all. |
 
-For runtime-discovered MCP tools the capability contract has an MCP-specific exception:
+Runtime-discovered MCP tools use the same explicit capability policy:
 
-- If the risk profile's `allowed_tools` is empty or omitted, no authorization constraint applies; every discovered tool (MCP or built-in) is reachable. The TOML config does not distinguish an omitted field from `allowed_tools = []`; both deserialize to the same "no authorization constraint" state at the risk-profile level. If you need an explicit deny-all gate, do it on the caller-supplied per-run `allowed_tools` (cron jobs and other narrowers pass that list in directly) or via `excluded_tools` covering the specific tools you want blocked.
-- If `allowed_tools` is non-empty, any MCP tool whose name contains `__` (the `<server>__<tool>` convention) is auto-admitted into the effective allow-list without being listed there individually. Non-MCP built-ins still need an exact entry.
-- `excluded_tools` always subtracts, including from the auto-admitted MCP set. To block a single MCP tool like `filesystem__write_file` while keeping the rest of the `filesystem` server reachable, put it in `excluded_tools`.
+- Omitted `allowed_tools` imposes no allowlist constraint. An explicit
+  `allowed_tools = []` denies every tool.
+- With a non-empty allowlist, the default `mcp_discovered_tool_policy =
+  "explicit_only"` admits only listed MCP names. Discovery and automatic schema
+  activation cannot add permissions.
+- An operator can explicitly select `mcp_discovered_tool_policy = "auto_admit"`
+  to admit unlisted `<server>__<tool>` names under a non-empty risk-profile
+  allowlist. An empty allowlist still denies all tools.
+- `excluded_tools` always wins. Caller-supplied per-run allowlists, including
+  cron scopes, are strict intersections and never inherit the auto-admit
+  exception.
 
-The rationale: before this exception, every agent that pinned an `allowed_tools` list to lock down its built-in surface would silently lose every MCP tool, even ones the operator explicitly configured. The cost is that the deny-list is now the operator's primary lever for blocking destructive MCP capabilities under an allow-list-pinned profile.
-
-If you want the strict pattern from before this change, where you only admit MCP tools you list explicitly with no `__` auto-admit, combine an explicit `allowed_tools` entry with an `excluded_tools` entry per destructive sibling you need blocked:
+For example, this profile admits a read tool without admitting its write sibling:
 
 ```toml
 [risk_profiles.assistant]
-allowed_tools = [
-  "file_read",
-  "filesystem__read_file",
-]
-# Block the destructive sibling that would otherwise be auto-admitted via
-# the `__` exception above.
-excluded_tools = [
-  "filesystem__write_file",
-]
-auto_approve = [
-  "filesystem__read_file",
-]
+allowed_tools = ["tool_search", "filesystem__read_file"]
+mcp_discovered_tool_policy = "explicit_only"
+excluded_tools = ["filesystem__write_file"]
+auto_approve = ["filesystem__read_file"]
 ```
-
-The MCP `__` auto-admit exception is scoped to the **risk profile**'s `allowed_tools` only. Caller-supplied per-run allow-lists, like a cron job `allowed_tools` or any other narrowed invocation that passes an explicit list into the runtime, are still treated as strict explicit-list intersections, with no `__` auto-admit on top. A cron job that narrows itself to `allowed_tools = ["cron_add"]` will not surface `filesystem__write_file` to the model even when the agent's risk profile would otherwise auto-admit it via the `__` convention; the per-run narrowing remains a reliable capability boundary regardless of how many MCP servers are configured.
 
 `auto_approve` alone does not hide a tool from the model; it only answers the approval question after the model selects that tool. Use `tool_filter_groups` to reduce prompt noise and `allowed_tools` / `excluded_tools` to enforce a capability boundary.
 

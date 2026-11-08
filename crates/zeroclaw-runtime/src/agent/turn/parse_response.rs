@@ -175,7 +175,10 @@ pub(crate) async fn interpret_chat_response(
     // Fall back to text-based parsing (XML tags, markdown blocks,
     // GLM format) only if the model_provider returned no native calls —
     // this ensures we support both native and prompt-guided models.
-    let mut calls: Vec<ParsedToolCall> = if specs.tool_specs.is_empty() {
+    // An authorized deferred MCP catalog can exist without exposed schemas
+    // (for example when the caller did not admit the tool_search helper).
+    let has_resolvable_tools = !specs.known_tool_names.is_empty();
+    let mut calls: Vec<ParsedToolCall> = if !has_resolvable_tools {
         Vec::new()
     } else {
         resp.tool_calls
@@ -191,7 +194,7 @@ pub(crate) async fn interpret_chat_response(
     let mut parsed_text = String::new();
 
     if calls.is_empty()
-        && !specs.tool_specs.is_empty()
+        && has_resolvable_tools
         && !ctx.strict_tool_parsing
         && !looks_like_tool_protocol_example(&response_text)
     {
@@ -212,7 +215,7 @@ pub(crate) async fn interpret_chat_response(
 
     let parse_issue = if ctx.strict_tool_parsing {
         None
-    } else if specs.tool_specs.is_empty() {
+    } else if !has_resolvable_tools {
         // Knob-gated (embedders return model text verbatim); a live stream
         // suppression already altered the visible text, so it is always
         // reported regardless of the knob.

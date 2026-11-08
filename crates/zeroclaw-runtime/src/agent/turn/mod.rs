@@ -763,6 +763,7 @@ async fn run_tool_call_loop_turn(
             active_model,
             &prepared_messages.messages,
             request_tools,
+            &iteration_tool_specs.known_tool_names,
             should_consume_provider_stream,
             iteration,
         )
@@ -1008,6 +1009,12 @@ async fn run_tool_call_loop_turn(
         } = prepare_tool_calls(
             &ctx,
             &tool_calls,
+            crate::agent::tool_execution::ToolDispatchContext {
+                tools_registry,
+                activated_tools,
+                excluded_tools,
+                model_switch_callback: model_switch_callback.as_ref(),
+            },
             &mut seen_tool_signatures,
             &mut prompt_approval_tool_signatures,
             iteration,

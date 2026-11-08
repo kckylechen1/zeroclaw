@@ -194,3 +194,32 @@ owners and extend their transport boundary; do not port a second runtime.
 The extension's bounded in-process replay cache is owned by ConversationHub.
 It is not a durable input queue or an execution-retry promise. Missing recovery
 state is unknown, never permission to repeat effects.
+
+## Deferred MCP exact-name recovery
+
+The #382/#376 leaf compares upstream `zeroclaw-labs/zeroclaw` at
+`641b766030805edfa999bb5aa6ff19a9ffd4339b` against fork baseline
+`fc9c8698b8f2558ac0d4e40320c756be27614b42`. Upstream's
+[tool executor](https://github.com/zeroclaw-labs/zeroclaw/blob/641b766030805edfa999bb5aa6ff19a9ffd4339b/crates/zeroclaw-runtime/src/agent/tool_execution.rs)
+resolves static and already-activated tools; its
+[MCP wrapper](https://github.com/zeroclaw-labs/zeroclaw/blob/641b766030805edfa999bb5aa6ff19a9ffd4339b/crates/zeroclaw-tools/src/mcp_tool.rs)
+forwards arguments to the server. This fork already owns deferred MCP stubs,
+activation, tool search and access policy. The bounded gap is recovery when a
+model calls a known, authorized deferred name before searching, plus compact
+argument feedback. No upstream catalog or runtime is wholesale-ported.
+
+The existing conversation `ActivatedToolSet` now owns the deferred set, policy
+and activation notification shared by `tool_search` and exact-name recovery.
+The MCP registry remains the connection/dispatch owner; the runtime retains
+approval, hooks, current-turn exclusion and execution ownership. No new store,
+configuration or default tool is added. Node/native catalogs are outside this
+leaf. No consumer or dependency is retired.
+
+OpenClaw's
+[tool-search contract](https://github.com/openclaw/openclaw/blob/fe2b1a51b41b80941fe93cfb0dfbdc0def2401d1/docs/tools/tool-search.md)
+is a mechanism reference for bounded discovery and recovery, not a code port.
+OpenClaw's dispatcher contract differs; ZeroClaw keeps its existing tool loop and
+only activates exact MCP names already admitted by its own policy. See
+[MCP loading and argument recovery](../tools/mcp.md#deferred-loading) for behavior
+and validation limits. Reverting this leaf restores search-first loading; no
+persistent data migration is required.

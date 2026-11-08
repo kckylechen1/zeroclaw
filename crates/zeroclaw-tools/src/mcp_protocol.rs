@@ -74,6 +74,13 @@ pub struct JsonRpcError {
     pub data: Option<serde_json::Value>,
 }
 
+/// A server-classified argument error. Do not retain its free-form message:
+/// it may echo credentials or arbitrary input values. The MCP wrapper renders
+/// a bounded recovery hint from its already-discovered parameter schema.
+#[derive(Debug, thiserror::Error)]
+#[error("MCP server rejected tool arguments (-32602)")]
+pub(crate) struct McpInvalidParams;
+
 /// A tool advertised by an MCP server (from `tools/list` response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolDef {

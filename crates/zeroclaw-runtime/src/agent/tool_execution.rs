@@ -17,6 +17,10 @@ use super::turn::redact::scrub_credentials_json;
 use super::turn::redact::scrub_credentials_value;
 use super::turn::{ModelSwitchCallback, TurnMeta, scope_model_switch_state};
 
+#[cfg(test)]
+#[path = "mcp_recovery_tests.rs"]
+mod mcp_recovery_tests;
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// If a just-completed tool call was a successful `TodoWrite`, build the
@@ -237,7 +241,14 @@ async fn execute_one_tool_with_provenance(
         });
     }
 
-    let resolved = resolve_tool(dispatch, call_name, tool_call_id);
+    let resolved = resolve_tool(dispatch, call_name, tool_call_id).or_else(|| {
+        // Only actual dispatch may hydrate an authorized exact deferred name.
+        // Admission's shared canonical resolver stays read-only, and hooks and
+        // approval have already completed before this execution boundary.
+        let activated = dispatch.activated_tools?;
+        ActivatedToolSet::activate_exact(activated, call_name, dispatch.excluded_tools)
+            .map(ResolvedTool::Activated)
+    });
     let Some(resolved) = resolved else {
         let reason = format!("Unknown tool: {call_name}");
         let duration = start.elapsed();

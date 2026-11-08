@@ -1239,6 +1239,9 @@ impl McpServer {
             .await?;
 
         if let Some(err) = resp.error {
+            if err.code == -32602 {
+                return Err(crate::mcp_protocol::McpInvalidParams.into());
+            }
             bail!("MCP tool `{tool_name}` error {}: {}", err.code, err.message);
         }
 

@@ -8,7 +8,7 @@ use super::delivery_defaults::maybe_inject_channel_delivery_defaults;
 use super::events::{StreamDelta, emit_tool_call_pair};
 use super::redact::scrub_credentials;
 use super::redact::scrub_credentials_json;
-use crate::agent::tool_execution::ToolExecutionOutcome;
+use crate::agent::tool_execution::{ToolDispatchContext, ToolExecutionOutcome, dispatch_tool_name};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -74,6 +74,7 @@ async fn record_duplicate_tool_call(
 pub(crate) async fn prepare_tool_calls(
     ctx: &TurnCtx<'_>,
     tool_calls: &[ParsedToolCall],
+    dispatch: ToolDispatchContext<'_>,
     seen_tool_signatures: &mut HashSet<(String, String)>,
     prompt_approval_tool_signatures: &mut HashSet<(String, String)>,
     iteration: usize,
@@ -144,6 +145,14 @@ pub(crate) async fn prepare_tool_calls(
                     tool_args = args;
                 }
             }
+        }
+
+        // Resolve existing aliases after hook rewrites, before approval. This
+        // lookup is read-only: an exact deferred name is already canonical and
+        // must not activate until the approved execution boundary. Approval and
+        // execution must agree on the actual tool identity (including always_ask).
+        if let Some(canonical_name) = dispatch_tool_name(&tool_name, dispatch) {
+            tool_name = canonical_name;
         }
 
         maybe_inject_channel_delivery_defaults(
