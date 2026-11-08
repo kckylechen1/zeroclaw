@@ -822,7 +822,12 @@ async fn s2_wire_session_delete_resets_shared_history_and_preserves_other_sessio
     )
     .await;
     assert_eq!(status, 101);
-    other.connected(json!({"type":"connect"})).await;
+    assert_eq!(
+        other.until("session_start").await["session_id"],
+        "unaffected-session"
+    );
+    other.send(json!({"type":"connect"})).await;
+    other.until("connected").await;
     assert_eq!(negotiate(&mut other).await, epoch);
     let other_id = uuid::Uuid::new_v4().to_string();
     other
@@ -962,7 +967,10 @@ async fn s2_wire_session_delete_during_connect_cannot_restore_old_snapshot() {
     )
     .await;
     assert_eq!(status, 200);
-    connecting.connected(json!({"type":"connect"})).await;
+    // session_start was consumed before DELETE; complete that handshake rather
+    // than waiting for another session_start that the server does not send.
+    connecting.send(json!({"type":"connect"})).await;
+    connecting.until("connected").await;
     assert_eq!(negotiate(&mut connecting).await, epoch);
     let fresh_id = uuid::Uuid::new_v4().to_string();
     connecting
