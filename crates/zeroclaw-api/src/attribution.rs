@@ -159,12 +159,6 @@ pub enum ToolKind {
     Search,
     Memory,
     SpawnSubagent,
-    SopList,
-    SopExecute,
-    SopApprove,
-    SopAdvance,
-    SopStatus,
-    SopHistory,
     Wait,
     Plugin,
 }

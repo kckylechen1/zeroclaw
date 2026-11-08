@@ -137,7 +137,6 @@ fn unavailable_tool_outcome(
         error_reason: Some(reason),
         duration,
         receipt: None,
-        output_data: None,
     }
 }
 
@@ -145,10 +144,6 @@ fn unavailable_tool_outcome(
 
 pub struct ToolExecutionOutcome {
     pub output: String,
-    /// Structured output when the tool declared one (`ToolOutput::data`).
-    /// Feeds SOP step capture and data-flow surfaces; the LLM sees only
-    /// `output`.
-    pub output_data: Option<serde_json::Value>,
     pub success: bool,
     /// Raw failure text on the data path. Credential scrubbing is a rendering
     /// concern applied at each human-facing surface (observer events,
@@ -272,7 +267,6 @@ async fn execute_one_tool_with_provenance(
                 error_reason: Some(reason),
                 duration,
                 receipt: None,
-                output_data: None,
             },
         });
     };
@@ -418,7 +412,6 @@ async fn execute_one_tool_with_provenance(
                     });
                     Ok(ToolExecutionOutcome {
                         output: normalized_output.to_string(),
-                        output_data: r.output.into_data(),
                         success: true,
                         error_reason: None,
                         duration,
@@ -444,7 +437,6 @@ async fn execute_one_tool_with_provenance(
                         error_reason: Some(reason),
                         duration,
                         receipt: None,
-                        output_data: None,
                     })
                 }
             }
@@ -483,7 +475,6 @@ async fn execute_one_tool_with_provenance(
                     error_reason: Some(reason),
                     duration,
                     receipt: None,
-                    output_data: None,
                 })
             }
         }

@@ -102,8 +102,9 @@ acceptance is tracked in [#374](https://github.com/kckylechen1/zeroclaw/issues/3
 still runs through an interim adapter; switching that brain to ZeroClaw (S5)
 and enabling its face capability as a Node (S8) are pending.
 
-Also still in progress: moving channels out of process into gateway bridges
-(ADR-013), so `crates/zeroclaw-channels` remains in the workspace for now.
+The in-process `zeroclaw-channels` crate has been removed (#579). External
+channel ingress follows the gateway-client and bridge boundary in ADR-013;
+the retained Email and Discord search tools still have live consumers.
 
 ## Install
 

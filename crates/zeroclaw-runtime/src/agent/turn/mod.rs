@@ -1089,7 +1089,6 @@ async fn run_tool_call_loop_turn(
                         output: crate::i18n::get_required_cli_string(
                             "turn-repeated-failure-retry-skipped",
                         ),
-                        output_data: None,
                         success: false,
                         error_reason: None,
                         duration: std::time::Duration::ZERO,
@@ -1217,7 +1216,6 @@ async fn run_tool_call_loop_turn(
                             error_reason: None,
                             duration: std::time::Duration::ZERO,
                             receipt: None,
-                            output_data: None,
                         },
                     ));
                 }
@@ -1242,7 +1240,6 @@ async fn run_tool_call_loop_turn(
                         error_reason: None,
                         duration: std::time::Duration::ZERO,
                         receipt: None,
-                        output_data: None,
                     };
                     events::emit_tool_result(tx, &call_id, &call.name, &interrupted).await;
                 }

@@ -219,7 +219,6 @@ pub(crate) async fn gate_tool_approval(
                 error_reason: Some(denied),
                 duration: Duration::ZERO,
                 receipt: None,
-                output_data: None,
             });
         }
 
@@ -254,7 +253,6 @@ pub(crate) async fn gate_tool_approval(
                 error_reason: None,
                 duration: Duration::ZERO,
                 receipt: None,
-                output_data: None,
             });
         }
 
@@ -306,7 +304,6 @@ pub(crate) async fn gate_tool_approval(
                     error_reason: Some(reason),
                     duration: Duration::ZERO,
                     receipt: None,
-                    output_data: None,
                 });
             }
 

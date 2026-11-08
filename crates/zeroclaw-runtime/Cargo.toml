@@ -3,7 +3,7 @@ name = "zeroclaw-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Miscellaneous ZeroClaw subsystems: security, observability, gateway, cron, SOP, skills, hardware, TUI, and more."
+description = "Personal agent runtime, security, observability, cron, skills, and authorized tool assembly."
 publish = false
 
 [dependencies]
@@ -24,12 +24,10 @@ fluent = "0.16"
 anyhow = "1.0"
 async-trait = "0.1"
 base64 = "0.22"
-chacha20poly1305 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 chrono-tz = "0.10"
 console = "0.16"
 cron = "0.15"
-dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 directories = "6.0"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 glob = "0.3"
@@ -37,23 +35,16 @@ hex = "0.4"
 hmac = "0.12"
 hostname = "0.4.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-indicatif = "0.18"
-lru = "0.18"
-nanohtml2text = "0.2"
 parking_lot = "0.12"
-portable-atomic = "1"
 pulldown-cmark = "0.13"
 rand = "0.10"
 regex = "1.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider", "__rustls-ring", "blocking", "multipart", "stream", "socks"] }
 ring = "0.17"
 rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
-rustls-pki-types = "1.14.0"
 schemars = { version = "1.2", optional = true }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
-strum = "0.28"
-strum_macros = "0.28"
 sha2 = "0.10"
 shellexpand = "3.1"
 sys-locale.workspace = true
@@ -62,19 +53,13 @@ sys-locale.workspace = true
 # Linux, macOS, Windows, and FreeBSD. `default-features = false` drops the
 # multi-threaded refresh path (we sample a single pid).
 sysinfo = { version = "0.36", default-features = false, features = ["system"] }
-tar = "0.4"
 tempfile = "3.26"
 thiserror = "2.0"
 tokio = { version = "1.50", default-features = false, features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "process", "io-std", "fs", "signal"] }
-tokio-stream = { version = "0.1.19", default-features = false, features = ["fs", "sync"] }
 tokio-util = { version = "0.7", default-features = false }
 toml = "1.0"
-tower = { optional = true, version = "0.5", default-features = false, features = ["util"] }
-tower-http = { optional = true, version = "0.6", default-features = false, features = ["limit", "timeout"] }
-urlencoding = "2.1"
 url = "2.5"
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
-webpki-roots = "1.0.6"
 which = "8.0"
 zeroclaw-macros.workspace = true
 
@@ -116,7 +101,7 @@ schema-export = ["dep:schemars", "zeroclaw-config/schema-export"]
 integrations-saas = ["zeroclaw-tools/integrations-saas"]
 email-tools = ["zeroclaw-tools/email-tools"]
 sandbox-bubblewrap = []
-# Heavy agent/SOP behavioral suites. Gated so lib-test
+# Heavy agent behavioral suites. Gated so lib-test
 # iteration does not compile them; CI runtime leg enables this feature.
 heavy-tests = []
 
@@ -133,8 +118,6 @@ wiremock = "0.6"
 # retry-regression tests. Not in default deps so
 # the helper is unreachable from production builds.
 zeroclaw-tools = { workspace = true, features = ["test-helpers"] }
-
-# Channel features (forwarded to zeroclaw-channels)
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(zeroclaw_root_crate)'] }
