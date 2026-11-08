@@ -1037,8 +1037,8 @@ Pass a single locale. By default every catalogue is fetched; restrict with \
 --catalog (comma-separated): cli, tools.
 
 Examples:
-  zeroclaw locales fetch ja
-  zeroclaw locales fetch fr --catalog cli,tools")]
+  zeroclaw locales fetch zh-CN
+  zeroclaw locales fetch zh-CN --catalog cli,tools")]
     Locales {
         #[command(subcommand)]
         locales_command: LocalesCommands,
