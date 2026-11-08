@@ -30,7 +30,7 @@ cli-migrate-about = 从其他智能体运行时迁移数据
 cli-auth-about = 管理提供商订阅认证配置文件
 cli-memory-about = 管理智能体记忆条目
 cli-config-about = 管理 ZeroClaw 配置
-cli-update-about = 检查并应用 ZeroClaw 更新
+cli-update-about = 从源码更新此 Fork
 cli-self-test-about = 运行诊断自检
 cli-completions-about = 生成 shell 补全脚本
 cli-desktop-about = 启动 ZeroClaw 伴侣桌面应用
@@ -243,19 +243,8 @@ cli-config-long-about =
 
     属性路径 Tab 补全会自动包含在 `zeroclaw completions <shell>` 中。
 cli-update-long-about =
-    检查并应用 ZeroClaw 更新。
+    此 Fork 尚无经过验证的二进制更新渠道。请更新 https://github.com/kckylechen1/zeroclaw 的源码检出，并使用原有 preset/features 运行 ./install.sh --source。上游发行包不能用于更新此 Fork。
 
-    默认情况下，使用 6 阶段流水线下载并安装最新版本：预检、下载、备份、验证、交换和冒烟测试。失败时自动回滚。
-
-    使用 --check 仅检查更新而不安装。
-    使用 --force 跳过确认提示。
-    使用 --version 指定特定版本而非最新版本。
-
-    示例：
-    zeroclaw update                      # 下载并安装最新版本
-    zeroclaw update --check              # 仅检查，不安装
-    zeroclaw update --force              # 不确认直接安装
-    zeroclaw update --version 0.6.0      # 安装特定版本
 cli-self-test-long-about =
     运行诊断自检以验证 ZeroClaw 安装。
 
@@ -675,12 +664,6 @@ cli-locales-installed = 已为“{$locale}”在 {$dir} 下安装 {$count} 个�
 cli-browse-header = {$path}（{$count} 个条目）
 cli-browse-empty = （空）
 cli-browse-file-bytes = {$name}（{$bytes} 字节）
-cli-update-already-current = 已是最新版本（v{$version}）。
-cli-update-success = 已成功更新至 v{$version}！
-cli-update-prebuilt-channel-note = 预构建更新使用精简的标准发行集。如需 Slack 和其他未包含在该发行集中的通道，请从源码构建：`./install.sh --source --preset full`、`--features channels-full`，或指定对应的 `channel-*` 功能。
-cli-update-available = 有可用更新：v{$current} -> v{$latest}
-cli-update-forcing-reinstall = 强制重新安装：v{$current} -> v{$latest}
-cli-update-not-writable = 安装目录 {$dir} 不可写（{$error}）；请使用更高权限重新运行 `zeroclaw update`（在 macOS/Linux 上使用 sudo，在 Windows 上使用管理员控制台）
 cli-selftest-all-passed = 全部 {$total} 项检查通过。
 cli-selftest-some-failed = {$failed}/{$total} 项检查失败。
 cli-selftest-channel-config-uncompiled = {$compiled} 个通道类型已编译，{$configured} 个已编译且已配置；已配置但未编译：{$names}。请从源码构建：`./install.sh --source --preset full`、`--features channels-full`，或指定对应的 `channel-*` 功能。
@@ -897,3 +880,5 @@ turn-repeated-success-advisory = 相同工具调用已多次返回相同的成�
 turn-repeated-failure-recovery = 相同工具调用已多次返回相同的失败结果。请调整方法或说明阻碍；本回合还允许一次相同的重试。
 turn-repeated-failure-exhausted = 恢复重试仍返回相同的失败结果，本回合已停止。已完成的工具结果已保留，可在新回合中重试。
 turn-repeated-failure-retry-skipped = 已跳过本批次中额外的相同调用；恢复阶段只允许一次重试。
+
+cli-update-source-only = 此 Fork 尚无经过验证的二进制更新渠道。请更新 https://github.com/kckylechen1/zeroclaw 的源码检出，并使用原有 preset/features 运行 ./install.sh --source。上游发行包不能用于更新此 Fork。

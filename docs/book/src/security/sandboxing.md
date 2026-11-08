@@ -19,6 +19,13 @@ Sandbox settings live on a risk profile. Each agent points at a risk profile via
 
 To force a specific backend, set `sandbox_backend` to one of the literal values listed above.
 
+An explicitly selected backend is required: if the platform, build, or host
+cannot provide it, shell tool execution is blocked and security status reports
+`blocked`. Automatic selection retains its fallback behavior, including
+application-layer-only operation when no backend is available. Explicit
+`sandbox_enabled = false` and `sandbox_backend = "none"` retain their disabling
+behavior.
+
 ## What the sandbox confines
 
 ### Filesystem
@@ -65,6 +72,12 @@ Only applies to the native runtime kind. Docker uses its container's shell, and 
 ### Landlock
 
 The Linux-native path. Zero setup, kernel-enforced, very low overhead. Requires kernel 5.13+.
+
+Availability requires actual kernel support; a kernel version alone does not
+prove that the hosting environment exposes Landlock. The backend rejects
+unsupported or disabled Landlock, and a child cannot execute when the ruleset
+reports that no restriction was enforced. Older supported ABIs retain the
+existing best-effort policy for newer rights such as truncation.
 
 Limitations:
 

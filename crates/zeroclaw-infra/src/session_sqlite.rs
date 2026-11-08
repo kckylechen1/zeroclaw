@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::Mutex;
 use rusqlite::{Connection, params};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use zeroclaw_api::model_provider::ChatMessage;
 
 pub mod agent_tasks;
@@ -37,6 +37,10 @@ pub struct SqliteSessionBackend {
 }
 
 impl SqliteSessionBackend {
+    fn database_path(workspace_dir: &Path) -> PathBuf {
+        workspace_dir.join("sessions").join("sessions.db")
+    }
+
     /// Open or create the sessions database.
     ///
     /// The daemon's gateway, channels and bridge intake each open this
@@ -48,7 +52,7 @@ impl SqliteSessionBackend {
     pub fn new(workspace_dir: &Path) -> Result<Self> {
         let sessions_dir = workspace_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).context("Failed to create sessions directory")?;
-        let db_path = sessions_dir.join("sessions.db");
+        let db_path = Self::database_path(workspace_dir);
 
         let mut conn = Connection::open(&db_path)
             .with_context(|| format!("Failed to open session DB: {}", db_path.display()))?;

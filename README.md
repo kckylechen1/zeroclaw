@@ -120,6 +120,13 @@ cd zeroclaw
 > (`curl -fsSL https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/master/install.sh | bash`)
 > installs **upstream ZeroClaw**, not this fork.
 
+To update this fork, update its source checkout and run `./install.sh --source`
+with the same preset and features as your existing installation. The legacy
+`zeroclaw update` command (including `--check`, `--force`, and `--version`)
+returns source-update instructions without accessing a release server or
+replacing the executable. This fork does not yet publish a verified binary
+update channel.
+
 When run from a clone in an interactive terminal, `./install.sh --source` lets you pick
 apps and optional features. For an unconfigured install, it then offers CLI or
 browser-based Quickstart. Use `--skip-quickstart` when you only want to install.
