@@ -1765,6 +1765,9 @@ async fn max_iteration_summary_refreshes_committed_task_context() {
 
     let tmp = tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
+    // Production registry/session startup owns initialization; prompt
+    // projection only reads the existing store on each model request.
+    let _backend = SqliteSessionBackend::new(&data_dir).unwrap();
     let identity = uuid::Uuid::new_v4().to_string();
     let owner: TaskOwnerResolver = {
         let identity = identity.clone();
