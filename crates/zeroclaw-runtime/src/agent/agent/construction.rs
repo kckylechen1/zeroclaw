@@ -347,6 +347,7 @@ impl Agent {
         }
         .with_store_at(&config.data_dir);
 
+        let live_pacing_config = live_config.clone();
         let structured_history_cap_resolver: Arc<dyn Fn() -> usize + Send + Sync> =
             if let Some(cap_config) = live_config {
                 let cap_agent_alias = agent_alias.to_string();
@@ -424,6 +425,8 @@ impl Agent {
                 config: Some(std::sync::Arc::new(config.clone())),
             })
             .build()?;
+
+        agent.live_pacing_config = live_pacing_config;
 
         // Wire per-tool channel-map handles into the agent so callers (e.g.
         // the ACP server) can register back-channels after construction.

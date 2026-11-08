@@ -137,6 +137,8 @@ pub struct Agent {
     /// the full conversation history on every turn and tool iteration.
     image_cache: zeroclaw_providers::multimodal::LocalImageCache,
     provider_switch_config: Option<ProviderSwitchConfig>,
+    /// Existing daemon config handle; read once at each API turn boundary.
+    live_pacing_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
     /// Channel name stamped onto observer events to identify the calling surface
     /// (e.g. "agent", "wss", "gateway"). Defaults to "agent" for direct Agent callers.
     channel_name: String,
@@ -716,6 +718,7 @@ impl AgentBuilder {
             channel_handles: AgentChannelHandles::default(),
             image_cache: zeroclaw_providers::multimodal::LocalImageCache::new(),
             provider_switch_config: self.provider_switch_config,
+            live_pacing_config: None,
             turn_context: self.turn_context,
             user_model_section: String::new(),
             channel_name: self.channel_name.unwrap_or_else(|| "agent".to_string()),
@@ -741,6 +744,18 @@ impl Agent {
         self.provider_switch_config
             .as_ref()
             .and_then(|cfg| cfg.config.as_deref())
+    }
+
+    fn turn_pacing(&self) -> zeroclaw_config::schema::PacingConfig {
+        self.live_pacing_config
+            .as_ref()
+            .map(|config| config.read().pacing.clone())
+            .or_else(|| self.full_config().map(|config| config.pacing.clone()))
+            .unwrap_or_else(|| zeroclaw_config::schema::PacingConfig {
+                // Configless embedders retain the existing builder contract.
+                loop_detection_enabled: false,
+                ..zeroclaw_config::schema::PacingConfig::default()
+            })
     }
 
     fn tool_loop_cost_tracking_context(&self) -> crate::agent::loop_::ToolLoopCostTrackingContext {

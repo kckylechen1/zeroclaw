@@ -17,6 +17,7 @@ pub(crate) mod post_exec;
 pub(crate) mod protocol_detect;
 pub(crate) mod provider_call;
 pub(crate) mod redact;
+pub(crate) mod repetition;
 pub(crate) mod results_collect;
 pub(crate) mod steering;
 pub(crate) mod stream_consume;
@@ -269,6 +270,15 @@ impl<'a> TurnState<'a> {
 }
 
 pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
+    run_tool_call_loop_with_guard(p, None).await
+}
+
+/// Agent owns this guard for the full API turn, including steering and model
+/// switch rounds. Low-level/channel callers keep their legacy detector.
+pub(crate) async fn run_tool_call_loop_with_guard(
+    p: ToolLoop<'_>,
+    repetition_guard: Option<&std::sync::Mutex<repetition::RepetitionGuard>>,
+) -> Result<String> {
     // One loop invocation is one agent turn: advisor consultations made by
     // its tools count against a fresh per-turn budget (#405).
     // Use the same canonical IDs as memory injection/autosave. For example,
@@ -292,13 +302,19 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
             memory_sessions,
             zeroclaw_api::TOOL_LOOP_MEMORY_READ_POLICY.scope(
                 read_policy,
-                crate::subagent_v1::scope_advisor_turn(run_tool_call_loop_turn(p)),
+                crate::subagent_v1::scope_advisor_turn(run_tool_call_loop_turn(
+                    p,
+                    repetition_guard,
+                )),
             ),
         )
         .await
 }
 
-async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
+async fn run_tool_call_loop_turn(
+    mut p: ToolLoop<'_>,
+    repetition_guard: Option<&std::sync::Mutex<repetition::RepetitionGuard>>,
+) -> Result<String> {
     let model_switch_state = p
         .exec
         .model_switch_callback
@@ -447,7 +463,7 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
 
     let mut loop_detector = crate::agent::loop_detector::LoopDetector::new(
         crate::agent::loop_detector::LoopDetectorConfig {
-            enabled: pacing.loop_detection_enabled,
+            enabled: pacing.loop_detection_enabled && repetition_guard.is_none(),
             window_size: pacing.loop_detection_window_size,
             max_repeats: pacing.loop_detection_max_repeats,
         },
@@ -987,8 +1003,8 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
             parallel_tools && should_execute_tools_in_parallel(&tool_calls, approval);
         let PreparedToolCalls {
             mut ordered_results,
-            executable_indices,
-            executable_calls,
+            mut executable_indices,
+            mut executable_calls,
         } = prepare_tool_calls(
             &ctx,
             &tool_calls,
@@ -998,6 +1014,58 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
             knobs.dedup_enabled,
         )
         .await?;
+
+        // Preparation has applied approval and hooks. Resolve aliases with the
+        // same dispatcher used for execution, admitting only one recovery
+        // retry for this identity even when the provider batches duplicates.
+        if let Some(warned_call) = repetition_guard
+            .filter(|_| pacing.loop_detection_enabled)
+            .and_then(|guard| {
+                guard
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .recovery_call_hash()
+            })
+        {
+            let dispatch = ToolDispatchContext {
+                tools_registry,
+                activated_tools,
+                excluded_tools,
+                model_switch_callback: model_switch_callback.as_ref(),
+            };
+            let mut recovery_admitted = false;
+            let mut retained_indices = Vec::new();
+            let mut retained_calls = Vec::new();
+            for (idx, call) in executable_indices.drain(..).zip(executable_calls.drain(..)) {
+                let recovery =
+                    crate::agent::tool_execution::dispatch_tool_name(&call.name, dispatch)
+                        .is_some_and(|name| {
+                            repetition::call_signature(&name, &call.arguments) == warned_call
+                        });
+                if recovery && recovery_admitted {
+                    let outcome = crate::agent::tool_execution::ToolExecutionOutcome {
+                        output: crate::i18n::get_required_cli_string(
+                            "turn-repeated-failure-retry-skipped",
+                        ),
+                        output_data: None,
+                        success: false,
+                        error_reason: None,
+                        duration: std::time::Duration::ZERO,
+                        receipt: None,
+                    };
+                    if let Some(tx) = ctx.event_tx {
+                        events::emit_tool_call_pair(tx, &call, &outcome).await;
+                    }
+                    ordered_results[idx] = Some((call.name, call.tool_call_id, outcome));
+                } else {
+                    recovery_admitted |= recovery;
+                    retained_indices.push(idx);
+                    retained_calls.push(call);
+                }
+            }
+            executable_indices = retained_indices;
+            executable_calls = retained_calls;
+        }
 
         let execution_result = if allow_parallel_execution && executable_calls.len() > 1 {
             let meta = ctx.meta();
@@ -1062,11 +1130,33 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
             }
         }
 
+        // Synthetic approval/hook/unavailable outcomes are not execution
+        // evidence. Observe the complete batch before choosing a disposition
+        // so another completed approach can clear an outstanding warning.
+        let repetition_disposition = if let Some(guard) =
+            repetition_guard.filter(|_| pacing.loop_detection_enabled && !cancelled_mid_batch)
+        {
+            guard
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .observe_round(
+                    &executed_completed_calls,
+                    &executed_completed_outcomes,
+                    &loop_ignore_tools,
+                    pacing.loop_detection_max_repeats,
+                )
+        } else {
+            repetition::RepetitionDisposition::default()
+        };
+
         record_executed_outcomes(
             &ctx,
             &executed_completed_indices,
             &executed_completed_calls,
-            executed_completed_outcomes,
+            executed_completed_outcomes
+                .into_iter()
+                .map(|completed| completed.outcome)
+                .collect(),
             &mut ordered_results,
             iteration,
         )
@@ -1134,7 +1224,7 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
             turn_id,
         )?;
 
-        if !cancelled_mid_batch {
+        if !cancelled_mid_batch && repetition_guard.is_none() {
             check_identical_output_abort(
                 &detection_relevant_output,
                 loop_started_at,
@@ -1157,6 +1247,32 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
 
         if cancelled_mid_batch {
             return Err(ToolLoopCancelled.into());
+        }
+
+        if let Some(key) = repetition_disposition.message_key {
+            if cancellation_token
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(ToolLoopCancelled.into());
+            }
+            let reason = crate::i18n::get_required_cli_string(key);
+            let visible_reason = format!("{reason}\n\n");
+            events::emit_posthoc_turn_chunk(event_tx.as_ref(), &visible_reason).await;
+            if let Some(ref tx) = on_delta {
+                events::stream_text_posthoc_chunks(
+                    tx,
+                    &visible_reason,
+                    cancellation_token.as_ref(),
+                )
+                .await?;
+            }
+            accumulated_display_text.push_str(&visible_reason);
+            if repetition_disposition.close {
+                turn_state.push_dual(ChatMessage::assistant(reason));
+                return Ok(accumulated_display_text);
+            }
+            turn_state.push_dual(ChatMessage::system(reason));
         }
 
         if let Some(reported) = reported_input_tokens {
