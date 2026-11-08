@@ -350,6 +350,10 @@ jobs:
 
           & $guardBinary
           exit $LASTEXITCODE
+      - name: Test Windows source installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/install_source_smoke.ps1
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         id: rust-cache
         with:
@@ -779,9 +783,9 @@ jobs:
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Test installer target detection
+      - name: Test POSIX source installer
         if: steps.changed.outputs.run == 'true'
-        run: bash scripts/ci/install_target_triple_test.sh
+        run: bash scripts/ci/install_source_smoke.sh
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         if: steps.changed.outputs.run == 'true'
         with:
