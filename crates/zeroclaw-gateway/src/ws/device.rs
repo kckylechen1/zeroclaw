@@ -90,7 +90,7 @@ pub(super) fn authenticated_mode(state: &AppState, config: &Config) -> bool {
 
 pub(super) fn frame_operation(frame: &serde_json::Value) -> &'static str {
     match frame["type"].as_str() {
-        Some("message")
+        Some("message" | "btw")
             if frame.get("source").is_none()
                 && frame
                     .get("attachments")

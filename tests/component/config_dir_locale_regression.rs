@@ -7,13 +7,24 @@
 //! for every CLI string. These tests spawn the real binary (each invocation is a
 //! fresh process, which is required because the resolved locale lives in a
 //! process-global `OnceLock`) and assert the flag now selects the locale.
+//!
+//! Locale support converged to `en` + `zh-CN` (issue #584 Slice 1): the first
+//! test drives the embedded `zh-CN` catalog; the second pins the compatibility
+//! guarantee for configurations that still select a retired locale (`ja`,
+//! `es`, `fr`) with catalogs fetched before retirement — the on-disk overlay
+//! keeps rendering while the embedded English fallback covers the rest.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Command;
 
-const JA_CLI_FTL: &str = include_str!("../../crates/zeroclaw-runtime/locales/ja/cli.ftl");
-const ES_CLI_FTL: &str = include_str!("../../crates/zeroclaw-runtime/locales/es/cli.ftl");
+const ZH_CN_CLI_FTL: &str = include_str!("../../crates/zeroclaw-runtime/locales/zh-CN/cli.ftl");
+
+/// Minimal catalog a user could still have on disk from a pre-retirement
+/// `zeroclaw locales fetch ja`. Only the key under test is needed;
+/// `--help` renders the long about, so that is the key overridden here.
+const RETIRED_JA_DISK_CATALOG: &str =
+    "cli-status-long-about =\n    ディスク上の引退済みロケール カタログによる状態説明。\n";
 
 fn catalog_message<'a>(catalog: &'a str, key: &str) -> &'a str {
     catalog
@@ -51,23 +62,26 @@ where
 #[test]
 fn config_dir_flag_drives_cli_locale_space_form() {
     let tmp = tempfile::tempdir().unwrap();
-    write_locale_config(tmp.path(), "ja");
+    write_locale_config(tmp.path(), "zh-CN");
     let help = help_stdout([
         OsString::from("--config-dir"),
         tmp.path().as_os_str().to_owned(),
         OsString::from("--help"),
     ]);
-    let expected = catalog_message(JA_CLI_FTL, "cli-about");
+    let expected = catalog_message(ZH_CN_CLI_FTL, "cli-about");
     assert!(
         help.contains(expected),
-        "`--config-dir <ja-dir> --help` must render Japanese; got:\n{help}"
+        "`--config-dir <zh-CN-dir> --help` must render Chinese; got:\n{help}"
     );
 }
 
 #[test]
 fn config_dir_equals_flag_after_subcommand_drives_locale() {
     let tmp = tempfile::tempdir().unwrap();
-    write_locale_config(tmp.path(), "es");
+    write_locale_config(tmp.path(), "ja");
+    let disk_catalog = tmp.path().join("data/ftl/ja/cli.ftl");
+    std::fs::create_dir_all(disk_catalog.parent().unwrap()).unwrap();
+    std::fs::write(&disk_catalog, RETIRED_JA_DISK_CATALOG).unwrap();
     let mut config_arg = OsString::from("--config-dir=");
     config_arg.push(tmp.path());
     let help = help_stdout([
@@ -75,9 +89,9 @@ fn config_dir_equals_flag_after_subcommand_drives_locale() {
         config_arg,
         OsString::from("--help"),
     ]);
-    let expected = catalog_message(ES_CLI_FTL, "cli-status-about");
+    let expected = "ディスク上の引退済みロケール";
     assert!(
         help.contains(expected),
-        "`status --config-dir=<es-dir> --help` must render Spanish; got:\n{help}"
+        "`status --config-dir=<ja-dir> --help` must render the on-disk retired-locale overlay; got:\n{help}"
     );
 }

@@ -7,7 +7,7 @@ use super::context::TurnCtx;
 use super::delivery_defaults::maybe_inject_channel_delivery_defaults;
 use super::events::{StreamDelta, emit_tool_call_pair};
 use super::redact::scrub_credentials;
-use super::redact::scrub_credentials_json;
+use super::tool_logging::tool_log_attributes;
 use crate::agent::tool_execution::{ToolDispatchContext, ToolExecutionOutcome, dispatch_tool_name};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
@@ -40,15 +40,18 @@ async fn record_duplicate_tool_call(
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Skip)
             .with_category(::zeroclaw_log::EventCategory::Tool)
             .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-            .with_attrs(::serde_json::json!({
-                "model": ctx.model,
-                "iteration": iteration + 1,
-                "tool": tool_name,
-                "arguments": scrub_credentials_json(tool_args),
-                "result": duplicate,
-                "deduplicated": true,
-                "trace_id": ctx.turn_id,
-            })),
+            .with_attrs(tool_log_attributes(
+                tool_name,
+                ::serde_json::json!({
+                    "model": ctx.model,
+                    "iteration": iteration + 1,
+                    "tool": tool_name,
+                    "arguments": tool_args.to_string(),
+                    "result": duplicate,
+                    "deduplicated": true,
+                    "trace_id": ctx.turn_id,
+                })
+            )),
         "tool_call_result"
     );
     if let Some(tx) = ctx.on_delta {
@@ -96,21 +99,38 @@ pub(crate) async fn prepare_tool_calls(
                 .await
             {
                 crate::hooks::HookResult::Cancel(reason) => {
-                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Cancel).with_category(::zeroclaw_log::EventCategory::Tool).with_attrs(::serde_json::json!({"tool": call.name, "reason": reason.to_string()})), "tool call cancelled by hook");
+                    let log_tool_name = dispatch_tool_name(&call.name, dispatch)
+                        .unwrap_or_else(|| call.name.clone());
+                    ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Cancel)
+                            .with_category(::zeroclaw_log::EventCategory::Tool)
+                            .with_attrs(tool_log_attributes(
+                                &log_tool_name,
+                                ::serde_json::json!({
+                                    "tool": call.name,
+                                    "reason": reason,
+                                })
+                            )),
+                        "tool call cancelled by hook"
+                    );
                     let cancelled = format!("Cancelled by hook: {reason}");
                     ::zeroclaw_log::record!(
                         WARN,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Cancel)
                             .with_category(::zeroclaw_log::EventCategory::Tool)
                             .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "model": ctx.model,
-                                "iteration": iteration + 1,
-                                "tool": call.name,
-                                "arguments": scrub_credentials_json(&tool_args),
-                                "result": cancelled,
-                                "trace_id": ctx.turn_id,
-                            })),
+                            .with_attrs(tool_log_attributes(
+                                &log_tool_name,
+                                ::serde_json::json!({
+                                    "model": ctx.model,
+                                    "iteration": iteration + 1,
+                                    "tool": call.name,
+                                    "arguments": tool_args.to_string(),
+                                    "result": cancelled,
+                                    "trace_id": ctx.turn_id,
+                                })
+                            )),
                         "tool_call_result"
                     );
                     if let Some(tx) = ctx.on_delta {
@@ -187,14 +207,17 @@ pub(crate) async fn prepare_tool_calls(
                     WARN,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
                         .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "model": ctx.model,
-                            "iteration": iteration + 1,
-                            "tool": tool_name.clone(),
-                            "arguments": scrub_credentials_json(&tool_args),
-                            "result": repeated,
-                            "trace_id": ctx.turn_id,
-                        })),
+                        .with_attrs(tool_log_attributes(
+                            &tool_name,
+                            ::serde_json::json!({
+                                "model": ctx.model,
+                                "iteration": iteration + 1,
+                                "tool": tool_name.clone(),
+                                "arguments": tool_args.to_string(),
+                                "result": repeated,
+                                "trace_id": ctx.turn_id,
+                            })
+                        )),
                     "tool_call_result"
                 );
                 if let Some(tx) = ctx.on_delta {
@@ -240,13 +263,16 @@ pub(crate) async fn prepare_tool_calls(
             INFO,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Start)
                 .with_category(::zeroclaw_log::EventCategory::Tool)
-                .with_attrs(::serde_json::json!({
-                    "model": ctx.model,
-                    "iteration": iteration + 1,
-                    "tool": tool_name.clone(),
-                    "arguments": scrub_credentials_json(&tool_args),
-                    "trace_id": ctx.turn_id,
-                })),
+                .with_attrs(tool_log_attributes(
+                    &tool_name,
+                    ::serde_json::json!({
+                        "model": ctx.model,
+                        "iteration": iteration + 1,
+                        "tool": tool_name.clone(),
+                        "arguments": tool_args.to_string(),
+                        "trace_id": ctx.turn_id,
+                    })
+                )),
             "tool_call_start"
         );
 
