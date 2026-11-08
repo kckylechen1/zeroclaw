@@ -603,7 +603,9 @@ mod tests {
             (
                 "cli-update-prebuilt-channel-note",
                 &[][..],
-                ["Slack", "channel-*"].as_slice(),
+                // Locale-agnostic fragment; the semantics guard below pins
+                // the "rebuilding adds nothing" invariant in both locales.
+                ["channel-*"].as_slice(),
             ),
             (
                 "cli-channels-not-compiled-entry",
@@ -626,9 +628,12 @@ mod tests {
                     );
                 }
                 if key == "cli-update-prebuilt-channel-note" {
+                    // The note must never imply that rebuilding adds
+                    // channels: every live surface ships in the lean
+                    // distribution, and the channel-* features are stubs.
                     assert!(
-                        !value.contains("Discord"),
-                        "{key} in {locale} should not mention Discord because it is in default-channels"
+                        value.contains("does not add channels") || value.contains("不会增加通道"),
+                        "{key} in {locale} should state that rebuilding does not add channels"
                     );
                 }
             }
