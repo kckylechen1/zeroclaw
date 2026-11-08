@@ -34,6 +34,7 @@ use super::traits::{
     is_recent_recall_query,
 };
 use crate::kernel_store::{KernelStoreKind, MIGRATE_CLI_HINT};
+use crate::point_scope::PointScope;
 use anyhow::Context;
 use async_trait::async_trait;
 use chrono::Local;
@@ -45,7 +46,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const METADATA_ZC_KEY: &str = "zeroclaw_key";
-const METADATA_ZC_CATEGORY: &str = "zeroclaw_category";
+pub(crate) const METADATA_ZC_CATEGORY: &str = "zeroclaw_category";
 // pub(crate): tachi_governance partitions near-dup on these same keys; a
 // rename drifting between the two files would silently re-enable
 // cross-agent/namespace merges.
@@ -61,6 +62,9 @@ const DEFAULT_NAMESPACE: &str = "default";
 const DEFAULT_LIST_PAGE_SIZE: usize = 512;
 const MAX_LIST_GROW: usize = 1_048_576;
 
+/// Global rows use agent/key identity; session-bound Conversation rows use
+/// agent/session/key identity. Metadata remains authoritative for legacy rows.
+/// Point get/forget follows the same host session rules as SQLite.
 #[derive(Clone)]
 pub struct TachiMemory {
     alias: String,
@@ -265,6 +269,34 @@ impl TachiMemory {
             Self::category_to_segment(category),
             Self::encode_path_segment(key)
         )
+    }
+
+    fn scoped_storage_path(
+        agent_id: Option<&str>,
+        namespace: Option<&str>,
+        category: &MemoryCategory,
+        key: &str,
+        conversation_session: Option<&str>,
+    ) -> String {
+        match conversation_session {
+            Some(session) => format!(
+                "/agents/{}/{}/{}/sessions/{}/{}",
+                Self::agent_segment(agent_id),
+                Self::namespace_segment(namespace),
+                Self::category_to_segment(category),
+                Self::encode_path_segment(session),
+                Self::encode_path_segment(key),
+            ),
+            None => Self::storage_path(agent_id, namespace, category, key),
+        }
+    }
+
+    pub(crate) fn conversation_session(metadata: &serde_json::Value) -> Option<&str> {
+        if metadata.get(METADATA_ZC_CATEGORY).and_then(|v| v.as_str()) == Some("conversation") {
+            metadata.get(METADATA_SESSION_ID).and_then(|v| v.as_str())
+        } else {
+            None
+        }
     }
 
     fn build_metadata(
@@ -495,7 +527,20 @@ impl TachiMemory {
                 crate::SOUL_KEY_PREFIX
             );
         }
-        let path = Self::storage_path(agent_id, namespace, &category, key);
+        // Only Conversation sessions split the global identity. A Core/Daily
+        // row can carry session provenance without becoming a scoped row.
+        let conversation_session = if category.to_string() == "conversation" {
+            session_id.map(str::to_owned)
+        } else {
+            None
+        };
+        let path = Self::scoped_storage_path(
+            agent_id,
+            namespace,
+            &category,
+            key,
+            conversation_session.as_deref(),
+        );
         // Soul persistence does not authorize external embedding of its content.
         let embedding = if ns == crate::SOUL_NAMESPACE {
             None
@@ -523,19 +568,30 @@ impl TachiMemory {
         let page_size = self.list_page_size;
         let max_grow = self.max_list_grow;
         let key_owned = key.to_string();
-        // Sqlite upsert identity is `(agent_id, key)` — see
-        // `sqlite.rs` `ON CONFLICT(agent_id, key)`. Namespace/category update
-        // in place; they are not part of the identity tuple.
+        // Match SQLite's logical identity, including a Conversation session.
+        // Namespace/category changes on global rows still update in place.
         let agent_owned = agent_id.unwrap_or(DEFAULT_AGENT).to_string();
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let mut store = store.lock();
-            // Exact-path hit first; fall back to sqlite identity (agent, key)
-            // so category/namespace changes update the same row.
+            let same_identity = |entry: &portable_kernel::MemoryEntry| {
+                entry.metadata.get(METADATA_ZC_KEY).and_then(|v| v.as_str())
+                    == Some(key_owned.as_str())
+                    && entry
+                        .metadata
+                        .get(METADATA_ZC_AGENT)
+                        .and_then(|v| v.as_str())
+                        == Some(agent_owned.as_str())
+                    && Self::conversation_session(&entry.metadata)
+                        == conversation_session.as_deref()
+            };
+            // Old session rows have an unscoped path. Resolve them by metadata
+            // and retain their UUID; another session must never adopt them.
             let exact_hit = store
                 .list_by_path(&path_c, 8, false)
-                .ok()
-                .and_then(|rows| rows.into_iter().find(|e| e.path == path_c));
+                .map_err(|e| anyhow::anyhow!("tachi identity lookup failed: {e}"))?
+                .into_iter()
+                .find(|entry| entry.path == path_c && same_identity(entry));
             let existing = match exact_hit {
                 Some(entry) => Some(entry),
                 None => {
@@ -546,12 +602,7 @@ impl TachiMemory {
                     // with a fresh UUID.
                     Self::list_prefix_complete(&store, &agent_prefix, page_size, max_grow)?
                         .into_iter()
-                        .find(|e| {
-                            Self::metadata_str(&e.metadata, METADATA_ZC_KEY).as_deref()
-                                == Some(key_owned.as_str())
-                                && Self::metadata_str(&e.metadata, METADATA_ZC_AGENT).as_deref()
-                                    == Some(agent_owned.as_str())
-                        })
+                        .find(same_identity)
                 }
             };
 
@@ -888,10 +939,10 @@ impl Memory for TachiMemory {
     }
 
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
-        let mut rows = self.find_rows_by_key(key, None).await?;
+        let scope = PointScope::current();
+        let rows = self.find_rows_by_key(key, None).await?;
         // Ambient get never returns a row from the reserved Soul namespace.
-        rows.retain(|e| e.namespace != crate::SOUL_NAMESPACE);
-        Ok(rows.pop())
+        Ok(scope.select(rows, false).pop())
     }
 
     async fn get_for_agent(
@@ -899,8 +950,9 @@ impl Memory for TachiMemory {
         key: &str,
         agent_id: &str,
     ) -> anyhow::Result<Option<MemoryEntry>> {
-        let mut rows = self.find_rows_by_key(key, Some(agent_id)).await?;
-        Ok(rows.pop())
+        let scope = PointScope::current();
+        let rows = self.find_rows_by_key(key, Some(agent_id)).await?;
+        Ok(scope.select(rows, true).pop())
     }
 
     async fn list(
@@ -921,21 +973,23 @@ impl Memory for TachiMemory {
     }
 
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
+        let scope = PointScope::current();
         let rows = self.find_rows_by_key(key, None).await?;
         // The unscoped delete never reaches the reserved Soul namespace;
         // Soul rows are forgotten only through `forget_for_agent` with the
         // admitted identity.
-        let ids: Vec<String> = rows
+        let ids: Vec<String> = scope
+            .select(rows, false)
             .into_iter()
-            .filter(|e| e.namespace != crate::SOUL_NAMESPACE)
             .map(|e| e.id)
             .collect();
         Ok(self.delete_ids(ids).await? > 0)
     }
 
     async fn forget_for_agent(&self, key: &str, agent_id: &str) -> anyhow::Result<bool> {
+        let scope = PointScope::current();
         let rows = self.find_rows_by_key(key, Some(agent_id)).await?;
-        let ids: Vec<String> = rows.into_iter().map(|e| e.id).collect();
+        let ids: Vec<String> = scope.select(rows, true).into_iter().map(|e| e.id).collect();
         Ok(self.delete_ids(ids).await? > 0)
     }
 
@@ -1243,6 +1297,9 @@ impl ::zeroclaw_api::attribution::Attributable for TachiMemory {
         &self.alias
     }
 }
+
+#[cfg(all(test, feature = "tachi"))]
+mod session_scope_tests;
 
 #[cfg(all(test, feature = "tachi"))]
 mod tests {

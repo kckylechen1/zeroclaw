@@ -31,6 +31,7 @@ pub mod merge;
 pub mod migration;
 pub mod none;
 pub mod normalize;
+mod point_scope;
 pub mod policy;
 pub mod policy_gate;
 #[cfg(feature = "tachi")]
