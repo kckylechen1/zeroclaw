@@ -1,0 +1,31 @@
+name: Windows Bootstrap Contract
+
+on:
+  pull_request:
+    paths:
+      - "setup.bat"
+      - "scripts/ci/install_source_smoke.ps1"
+      - "xtask/src/generate/mod.rs"
+      - "xtask/src/generate/spec.rs"
+      - "xtask/src/generate/setup_bat.rs"
+      - ".github/workflows/windows-bootstrap-contract.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-bootstrap:
+    name: Windows source installer contract
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # This supplements Quality Gate, which still runs the same smoke and all
+      # of its required checks. Native script evidence needs no Rust/tool download.
+      - name: Test Windows source installer
+        shell: pwsh
+        run: ./scripts/ci/install_source_smoke.ps1

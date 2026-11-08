@@ -1,5 +1,5 @@
 //! setup.bat renderer. The hand-written imperative glue (toolchain bootstrap,
-//! PATH, copy, quickstart, prebuilt download) stays in setup.bat; only the
+//! PATH, copy, quickstart) stays in setup.bat; only the
 //! drift-prone data lives in sentinel-delimited regions this renderer owns.
 //! setup.bat has two such zones - the build-mode menu/routing and the per-mode
 
@@ -18,50 +18,24 @@ fn end(id: &str) -> String {
 const ZONE_MENU: &str = "menu";
 const ZONE_PRESETS: &str = "presets";
 
-/// Render the menu/routing zone body: non-interactive MODE routing plus the
-/// interactive numbered menu, walked from `Selection::menu()`. Option 1 is the
-/// hand-written prebuilt path; generated options start at 2.
+/// Render source-build routing from the existing canonical selections. An
+/// omitted mode chooses the recommended distribution without an install-method
+/// prompt; bootstrap has no prebuilt branch in this fork.
 fn render_menu(_manifest_dir: &Path) -> String {
-    let menu = Selection::menu();
     let mut out = String::new();
     out.push_str(":choose_mode\n");
-    out.push_str("if \"%MODE%\"==\"prebuilt\" goto :install_prebuilt\n");
-    for sel in &menu {
+    out.push_str(&format!(
+        "if \"%MODE%\"==\"\" goto :build_{}\n",
+        Selection::Dist.id()
+    ));
+    for sel in Selection::menu() {
         out.push_str(&format!(
             "if \"%MODE%\"==\"{id}\" goto :build_{id}\n",
             id = sel.id()
         ));
     }
-    out.push('\n');
-    out.push_str("echo %BOLD%[2/5] Choose installation method:%RESET%\n");
-    out.push_str("echo.\n");
-    out.push_str("echo   1) Prebuilt binary - Download pre-compiled release (fastest)\n");
-    for (i, sel) in menu.iter().enumerate() {
-        out.push_str(&format!(
-            "echo   {n}) {id} build - {desc}\n",
-            n = i + 2,
-            id = sel.id(),
-            desc = sel.describe()
-        ));
-    }
-    let last = menu.len() + 1;
-    out.push_str("echo.\n");
-    out.push_str(&format!(
-        "set /p \"CHOICE=  Select [1-{last}] (default: 1): \"\n"
-    ));
-    out.push_str("if \"%CHOICE%\"==\"\" set \"CHOICE=1\"\n");
-    out.push_str("if \"%CHOICE%\"==\"1\" goto :install_prebuilt\n");
-    for (i, sel) in menu.iter().enumerate() {
-        out.push_str(&format!(
-            "if \"%CHOICE%\"==\"{n}\" goto :build_{id}\n",
-            n = i + 2,
-            id = sel.id()
-        ));
-    }
-    out.push_str(&format!(
-        "echo   %RED%Invalid choice. Please enter 1-{last}.%RESET%\n"
-    ));
-    out.push_str("goto :choose_mode");
+    out.push_str("echo   %RED%Unknown source build mode.%RESET%\n");
+    out.push_str("goto :error_exit");
     out
 }
 
@@ -85,12 +59,6 @@ fn render_presets(manifest_dir: &Path) -> anyhow::Result<String> {
         }
     }
     Ok(out)
-}
-
-/// The recommended default selection's id - what the prebuilt-fallback path
-/// jumps to. Derived, not hardcoded: `Dist` is the recommended build.
-pub fn fallback_build_id() -> &'static str {
-    Selection::Dist.id()
 }
 
 /// Splice both generated zones into the current setup.bat, leaving all
@@ -163,9 +131,11 @@ mod tests {
     }
 
     #[test]
-    fn menu_routes_prebuilt_and_every_selection() {
+    fn source_routing_defaults_to_recommended_dist_and_keeps_every_selection() {
         let m = render_menu(&root());
-        assert!(m.contains("if \"%MODE%\"==\"prebuilt\" goto :install_prebuilt"));
+        assert!(m.contains("if \"%MODE%\"==\"\" goto :build_dist"));
+        assert!(!m.contains("prebuilt"));
+        assert!(!m.contains("set /p"));
         for sel in Selection::menu() {
             assert!(m.contains(&format!("goto :build_{}", sel.id())));
         }
@@ -188,10 +158,5 @@ mod tests {
     #[test]
     fn splice_errors_without_zone() {
         assert!(splice("nothing", ZONE_MENU, "x").is_err());
-    }
-
-    #[test]
-    fn fallback_is_recommended_dist() {
-        assert_eq!(fallback_build_id(), "dist");
     }
 }
