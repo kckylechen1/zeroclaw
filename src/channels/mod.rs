@@ -61,6 +61,21 @@ pub async fn handle_command(command: crate::ChannelCommands, config: &Config) ->
                 }
                 println!("{}", get_required_cli_string("cli-channels-build-hint"));
             }
+            let retired = listing::configured_retired_channels(&config.channels);
+            if !retired.is_empty() {
+                println!();
+                println!("{}", get_required_cli_string("cli-channels-retired-header"));
+                for entry in &retired {
+                    println!(
+                        "{}",
+                        get_required_cli_string_with_args(
+                            "cli-channels-retired-entry",
+                            &[("name", entry.name)]
+                        )
+                    );
+                }
+                println!("{}", get_required_cli_string("cli-channels-retired-hint"));
+            }
             println!();
             println!("{}", get_required_cli_string("cli-channels-start-hint"));
             println!("{}", get_required_cli_string("cli-channels-doctor-hint"));

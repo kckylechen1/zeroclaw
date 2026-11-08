@@ -25,10 +25,11 @@ If the channel is not paired or the user isn't allowed, the event is dropped bef
 `src/commands/chat.rs`, so they share the Gateway conversation lifecycle.
 `zeroclaw agent --message` continues to use the local runtime directly.
 
-The unused stdin/stdout `CliChannel` adapter and its Rust exports have been
-removed from the non-published `zeroclaw-channels` crate. This internal API
-removal does not retire the channel package: daemon startup, platform tool
-routing, cron delivery, and channel configuration still use it.
+The `zeroclaw-channels` crate has since been retired outright (#579/#581):
+in-process channel runners are gone, channel surfaces run through the
+gateway (bridges, webhook ingress) or as tool configuration (Email,
+Discord), and cron/heartbeat delivery runs through the gateway bridge
+outbox.
 
 ## Agent loop
 
@@ -93,7 +94,9 @@ Outbound messages go back through the same channel adapter. Adapters with multi-
 - Agent loop: `crates/zeroclaw-runtime/src/agent/turn/` (`run_tool_call_loop`), with entry points in `crates/zeroclaw-runtime/src/agent/loop_/` (`process_message.rs`, `run.rs`)
 - Memory-context injection: `crates/zeroclaw-runtime/src/agent/memory_inject.rs` (`resolve_inject_policy`, `render_memory_context`), keyed on `TurnOrigin` from `zeroclaw-api`'s ingress types and invoked by the turn engine
 - Tool-call access checks: `crates/zeroclaw-runtime/src/security/` (`iam_policy.rs` `evaluate_tool_access`)
-- Channel orchestration: `crates/zeroclaw-channels/src/orchestrator/`
+- Channel surfaces: gateway bridges (`bridges/telegram`), webhook ingress
+  (`crates/zeroclaw-gateway/src/`), and the retained tool configuration
+  (`crates/zeroclaw-runtime/src/tools/mod.rs`)
 - Provider streaming: `crates/zeroclaw-api/src/model_provider.rs` (`StreamEvent` enum, re-exported from `zeroclaw-providers`), `compatible.rs` (SSE parser)
 
 Since #7415, every transport (channels, CLI, cron, gateway WebSocket, ACP, and the embedded `Agent` API) runs the same turn engine: `run_tool_call_loop` in `crates/zeroclaw-runtime/src/agent/turn/`. The streaming and embedded entry points are thin wrappers in `agent.rs` that set per-caller knobs (dedup, iteration-cap behavior, event emission) around the shared loop. The `turn/` module is one file per step:

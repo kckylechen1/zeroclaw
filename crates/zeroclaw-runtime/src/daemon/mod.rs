@@ -1782,10 +1782,10 @@ fn load_jsonl_messages(path: &std::path::Path) -> Vec<zeroclaw_providers::traits
 /// Auto-detect the best channel for heartbeat delivery by checking which
 /// channels are configured. Returns the first match in priority order.
 fn auto_detect_heartbeat_channel(config: &Config) -> Option<(String, String)> {
-    // Priority order: telegram > discord > slack > mattermost
-    // Find the first external peer authorized on a telegram channel
-    // (peer authorization lives in peer_groups in V3, not on the
-    // channel block).
+    // Priority order: telegram > discord. Retired transports are never
+    // auto-detected: no delivery path exists for them. Find the first
+    // external peer authorized on a telegram channel (peer authorization
+    // lives in peer_groups in V3, not on the channel block).
     if !config.channels.telegram.is_empty() {
         for alias in config.channels.telegram.keys() {
             let peers = config.channel_external_peers("telegram", alias);
@@ -1798,14 +1798,6 @@ fn auto_detect_heartbeat_channel(config: &Config) -> Option<(String, String)> {
         // Discord requires explicit target — can't auto-detect
         return None;
     }
-    if !config.channels.slack.is_empty() {
-        // Slack requires explicit target
-        return None;
-    }
-    if !config.channels.mattermost.is_empty() {
-        // Mattermost requires explicit target
-        return None;
-    }
     None
 }
 
@@ -1816,6 +1808,13 @@ fn validate_heartbeat_channel_config(config: &Config, channel: &str) -> Result<(
     }
     if !config.channels.is_known_channel(channel) {
         anyhow::bail!("unsupported heartbeat.target channel: {channel}");
+    }
+    if config.channels.is_retired_channel(channel) {
+        anyhow::bail!(
+            "heartbeat.target is set to {channel} but its transport runner is retired \
+             (#584) — no delivery path exists; target the Telegram bridge, webhook \
+             ingress, or another bridge name instead"
+        );
     }
     if !config.channels.is_channel_configured(channel) {
         anyhow::bail!(

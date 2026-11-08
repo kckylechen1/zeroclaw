@@ -7,19 +7,25 @@ use zeroclaw_config::presets::{
 use zeroclaw_config::schema::Config;
 
 #[test]
-fn channel_type_options_cover_every_schema_channel() {
+fn channel_type_options_cover_every_retained_schema_channel() {
     let cfg = Config::default();
     let picker = build_channel_type_options(&cfg.channels);
-    let schema = cfg.channels.channels();
+    let retained: Vec<_> = cfg
+        .channels
+        .channels()
+        .into_iter()
+        .filter(|info| !info.retired)
+        .collect();
     assert_eq!(
         picker.len(),
-        schema.len(),
-        "Quickstart channel-type picker count diverged from \
-         ChannelsConfig::channels(); picker has {} rows, schema has {}",
+        retained.len(),
+        "Quickstart channel-type picker count diverged from the retained \
+         (non-retired) ChannelsConfig::channels() rows; picker has {} rows, \
+         retained schema rows: {}",
         picker.len(),
-        schema.len(),
+        retained.len(),
     );
-    for (picked, expected) in picker.iter().zip(schema.iter()) {
+    for (picked, expected) in picker.iter().zip(retained.iter()) {
         assert_eq!(
             picked.kind, expected.kind,
             "kind mismatch at {} — picker `{}`, schema `{}`",
@@ -31,6 +37,11 @@ fn channel_type_options_cover_every_schema_channel() {
             picked.kind, picked.display_name, expected.name,
         );
     }
+    // Retired transports must never reach the first-run picker.
+    assert!(
+        picker.iter().all(|p| p.kind != "slack" && p.kind != "matrix"),
+        "retired transports leaked into the quickstart picker"
+    );
 }
 
 #[test]

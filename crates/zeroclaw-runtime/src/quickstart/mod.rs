@@ -548,9 +548,14 @@ fn memory_kind_keys() -> Vec<String> {
 fn build_channel_type_options(
     channels_cfg: &zeroclaw_config::schema::ChannelsConfig,
 ) -> Vec<QuickstartTypeOption> {
+    // First-run setup may only offer live surfaces: the Telegram bridge,
+    // webhook ingress, and the Email/Discord tool configuration. Retired
+    // transports (no runner since #579/#581) must not be offered even
+    // though their config sections still parse (#584).
     channels_cfg
         .channels()
         .into_iter()
+        .filter(|info| !info.retired)
         .map(|info| QuickstartTypeOption {
             kind: info.kind.to_string(),
             display_name: info.name.to_string(),

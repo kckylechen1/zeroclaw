@@ -728,6 +728,7 @@ cli-status-word-none = (none)
 cli-status-word-configured = configured
 cli-status-word-not-configured = not configured
 cli-status-channel-not-compiled = 🚫 configured, not compiled
+cli-status-channel-retired = ⚠️ section parses, nothing runs; remove it
 
 # ── desktop / config / estop / auth ──
 cli-desktop-not-installed = ZeroClaw companion app is not installed.
@@ -798,6 +799,7 @@ cli-update-not-writable = install directory {$dir} is not writable ({$error}); r
 cli-selftest-all-passed = All {$total} checks passed.
 cli-selftest-some-failed = {$failed}/{$total} checks failed.
 cli-selftest-channel-config-uncompiled = {$compiled} compiled channel types, {$configured} compiled/configured; configured but not compiled: {$names}. Build from source with `./install.sh --source --preset full`, `--features channels-full`, or the specific `channel-*` feature.
+cli-selftest-channel-config-retired = {$compiled} channel types, {$configured} configured; configured sections of retired transports (nothing runs): {$names}. Remove those [channels.*] sections; live surfaces are the Telegram bridge, webhook ingress, Email tools, and Discord archive search.
 
 # ── channels (zeroclaw channel list) ──
 cli-channels-header = Channels:
@@ -809,6 +811,9 @@ cli-channels-build-hint = {"  "}Build from source with `./install.sh --source --
 cli-channels-start-hint = To start channels: zeroclaw channel start
 cli-channels-doctor-hint = To check health:    zeroclaw channel doctor
 cli-channels-configure-hint = To configure:      zeroclaw config set channels.<name>.<field>=<value>
+cli-channels-retired-header = {"  "}Configured sections of retired transports (no runner exists):
+cli-channels-retired-entry = {"  "}⚠️ {$name} (section parses, nothing runs; remove it)
+cli-channels-retired-hint = {"  "}Live surfaces: Telegram bridge, webhook ingress, Email tools, Discord archive search.
 
 cli-models-set-ok = Default model set to "{ $model }" on { $provider }.
 cli-models-status-current = Default model: { $model } (provider: { $provider })

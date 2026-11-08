@@ -1142,12 +1142,32 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
     // and predicate in sync.
     check_web_dist_dir(config, items);
 
-    // Channel: at least one configured
+    // Channel: at least one live surface configured. Retired transports
+    // (runners removed with #579/#581) do not count: a config that only
+    // populates them would otherwise pass this check while nothing runs.
     let cc = &config.channels;
-    let has_channel = cc.channels().iter().any(|info| info.configured);
+    let all_channels = cc.channels();
+    let live_configured = all_channels
+        .iter()
+        .any(|info| info.configured && !info.retired);
+    let retired_configured: Vec<&str> = all_channels
+        .iter()
+        .filter(|info| info.configured && info.retired)
+        .map(|info| info.kind)
+        .collect();
 
-    if has_channel {
-        items.push(DiagItem::ok(cat, "at least one channel configured"));
+    if live_configured {
+        items.push(DiagItem::ok(cat, "at least one live channel surface configured"));
+    } else if !retired_configured.is_empty() {
+        items.push(DiagItem::warn(
+            cat,
+            format!(
+                "only retired transports configured ({}): their sections parse but no \
+                 runner exists — live surfaces are the Telegram bridge, webhook ingress, \
+                 Email tools, and Discord archive search; run `zeroclaw quickstart`",
+                retired_configured.join(", ")
+            ),
+        ));
     } else {
         items.push(DiagItem::warn(
             cat,

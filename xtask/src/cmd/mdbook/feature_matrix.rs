@@ -118,9 +118,17 @@ fn channels_rows(parity: &Parity) -> Result<Vec<Row>> {
     for info in cfg.channels() {
         walked.insert(info.kind.to_string());
         let (openclaw, hermes) = external_cells(parity.channels.get(info.kind));
+        // Retired transports (runners removed with #579/#581) are not
+        // supported ZeroClaw transports; the matrix must not present them
+        // as available channels (#584).
+        let (zeroclaw, suffix) = if info.retired {
+            (Status::None, " (retired)")
+        } else {
+            (Status::Supported, "")
+        };
         rows.push(Row {
-            label: info.name.to_string(),
-            zeroclaw: Status::Supported,
+            label: format!("{}{}", info.name, suffix),
+            zeroclaw,
             openclaw,
             hermes,
         });
@@ -208,10 +216,32 @@ mod tests {
     }
 
     #[test]
-    fn channel_column_is_all_supported_from_walk() {
+    fn channel_column_matches_retirement_from_walk() {
         let parity = load_parity(&root()).unwrap();
+        let cfg = ChannelsConfig::default();
+        let retired: Vec<&str> = cfg
+            .channels()
+            .into_iter()
+            .filter(|info| info.retired)
+            .map(|info| info.name)
+            .collect();
         for r in channels_rows(&parity).unwrap() {
-            assert_eq!(r.zeroclaw, Status::Supported);
+            let is_retired = retired.contains(&r.label.trim_end_matches(" (retired)"));
+            assert_eq!(
+                r.zeroclaw,
+                if is_retired { Status::None } else { Status::Supported },
+                "row {} status must follow the retired flag",
+                r.label
+            );
+            assert_eq!(
+                r.label.ends_with(" (retired)"),
+                is_retired,
+                "row {} label must mark retirement",
+                r.label
+            );
         }
+        // Spot-check one retired and one retained row.
+        assert!(retired.contains(&"Slack"));
+        assert!(!retired.contains(&"Telegram"));
     }
 }

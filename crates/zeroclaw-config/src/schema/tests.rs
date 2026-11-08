@@ -13317,20 +13317,69 @@ fn carded(cfg: &mut Config, agent_alias: &str, card_alias: &str) {
 async fn channel_presence_names_are_unique_and_undeliverable_set_is_fixed() {
     let presence = ChannelsConfig::default().channel_presence();
     let mut seen = std::collections::HashSet::new();
-    for (name, _, _) in presence {
+    for (name, _, _, _) in presence {
         assert!(seen.insert(name), "duplicate channel_presence name: {name}");
     }
+    // Non-deliverable = retired transports + the input-only voice_duplex.
     let mut undeliverable: Vec<&str> = presence
         .iter()
-        .filter(|(_, _, deliverable)| !*deliverable)
-        .map(|(name, _, _)| *name)
+        .filter(|(_, _, deliverable, _)| !*deliverable)
+        .map(|(name, _, _, _)| *name)
         .collect();
     undeliverable.sort_unstable();
+    let mut expected: Vec<&str> = crate::schema::RETIRED_TRANSPORT_KINDS.to_vec();
+    expected.extend_from_slice(&["voice_duplex"]);
+    expected.sort_unstable();
     assert_eq!(
-        undeliverable,
-        ["amqp", "voice_duplex", "voice_wake"],
-        "only input-only transports may be non-deliverable; update channel_presence and is_channel_deliverable together"
+        undeliverable, expected,
+        "only retired transports and input-only transports may be non-deliverable; \
+         update channel_presence and is_channel_deliverable together"
     );
+}
+
+#[test]
+async fn retired_transport_kinds_complement_the_live_surfaces() {
+    let presence = ChannelsConfig::default().channel_presence();
+    let mut live: Vec<&str> = presence
+        .iter()
+        .filter(|(_, _, _, retired)| !*retired)
+        .map(|(name, _, _, _)| *name)
+        .collect();
+    live.sort_unstable();
+    assert_eq!(
+        live,
+        ["discord", "email", "telegram", "voice_duplex", "webhook"],
+        "the non-retired registry must be exactly the retained surfaces: \
+         telegram bridge, webhook ingress, email/discord tool config, and \
+         the voice-duplex Node path (#584)"
+    );
+
+    // Every RETIRED_TRANSPORT_KINDS entry is a real registry row, and
+    // channels()' display kinds resolve through the same predicate.
+    for kind in crate::schema::RETIRED_TRANSPORT_KINDS {
+        assert!(
+            presence.iter().any(|(name, _, _, _)| name == kind),
+            "RETIRED_TRANSPORT_KINDS entry {kind} has no channel_presence row"
+        );
+        assert!(crate::schema::is_retired_transport(kind), "{kind}");
+    }
+    for info in ChannelsConfig::default().channels() {
+        assert_eq!(
+            info.retired,
+            crate::schema::is_retired_transport(info.kind),
+            "channels() retired flag drifted for {}",
+            info.kind
+        );
+    }
+    // The kebab-case display kinds channels() emits for two-word sections
+    // normalize back to their section keys.
+    assert!(crate::schema::is_retired_transport("whatsapp-web"));
+    assert!(crate::schema::is_retired_transport("wecom-ws"));
+    assert!(crate::schema::is_retired_transport("voice-wake"));
+    assert!(!crate::schema::is_retired_transport("telegram"));
+    let cfg = ChannelsConfig::default();
+    assert!(cfg.is_retired_channel("Slack"));
+    assert!(!cfg.is_known_channel("linq"));
 }
 
 // ── Serde-default vs struct-Default drift guards ──────────────
