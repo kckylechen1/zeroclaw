@@ -186,3 +186,14 @@ tool-mcp-arguments-server-rejected = The MCP server rejected the arguments.
 tool-mcp-arguments-root-type = Arguments must have type { $expected }; received { $actual }.
 tool-mcp-arguments-missing = Missing required field { $field }.
 tool-mcp-arguments-field-type = Field { $field } expects { $expected }; received { $actual }.
+
+# Bounded local command and search resources.
+tool-git-operations-error-timeout = Git command timed out after { $seconds }s and was stopped; repository state may have changed. Inspect it before retrying.
+tool-git-operations-error-output-stopped = Git command was stopped at its output limit; inspect repository state before retrying.
+tool-git-operations-error-incomplete-output = Git command completed but its output was truncated at { $bytes } bytes. Narrow the query; this is not a complete repository result.
+tool-git-operations-completed-truncated = [Git command completed; output truncated]
+tool-process-stderr-truncated = [stderr truncated]
+tool-content-search-capture-limit = [Search stopped at the capture limit; results may be incomplete]
+tool-content-search-resource-limit = [Search stopped at a resource limit; results may be incomplete]
+tool-content-search-no-scanned-matches = No matches found in scanned content.
+tool-content-search-cancelled = Search cancelled.

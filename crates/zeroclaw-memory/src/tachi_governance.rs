@@ -76,14 +76,25 @@ pub fn run_tachi_governance_on_handle(
 // Partition on the same metadata keys the TachiMemory write path uses —
 // shared consts so a rename cannot drift between store and governance.
 use crate::tachi::{
-    METADATA_ZC_AGENT as META_ZC_AGENT, METADATA_ZC_NAMESPACE as META_ZC_NAMESPACE,
+    METADATA_ZC_AGENT as META_ZC_AGENT, METADATA_ZC_CATEGORY as META_ZC_CATEGORY,
+    METADATA_ZC_NAMESPACE as META_ZC_NAMESPACE, TachiMemory,
 };
 
-/// Scope key for near-dup partitions: `(zeroclaw_agent, zeroclaw_namespace)`.
+/// Scope key for near-dup partitions. Conversation rows never merge across
+/// sessions or into a global fact; non-Conversation session provenance does not
+/// split the global partition.
 ///
 /// Missing metadata fields are `None` and form their own bucket — a metadata-less
 /// row must not merge with a `default` / named-agent row.
-fn near_dup_scope_key(entry: &MemoryEntry) -> (Option<String>, Option<String>) {
+#[derive(Hash, PartialEq, Eq)]
+struct NearDupScope {
+    agent: Option<String>,
+    namespace: Option<String>,
+    // Outer None: global. Some(None): legacy Conversation without a session.
+    conversation_session: Option<Option<String>>,
+}
+
+fn near_dup_scope_key(entry: &MemoryEntry) -> NearDupScope {
     let agent = entry
         .metadata
         .get(META_ZC_AGENT)
@@ -94,7 +105,17 @@ fn near_dup_scope_key(entry: &MemoryEntry) -> (Option<String>, Option<String>) {
         .get(META_ZC_NAMESPACE)
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    (agent, namespace)
+    let conversation_session = (entry
+        .metadata
+        .get(META_ZC_CATEGORY)
+        .and_then(|v| v.as_str())
+        == Some("conversation"))
+    .then(|| TachiMemory::conversation_session(&entry.metadata).map(str::to_owned));
+    NearDupScope {
+        agent,
+        namespace,
+        conversation_session,
+    }
 }
 
 /// Near-dup light-sleep: collapse connected components of raw-tier text twins
@@ -103,10 +124,11 @@ fn near_dup_scope_key(entry: &MemoryEntry) -> (Option<String>, Option<String>) {
 ///
 /// **Scope rule (unattended vs Sigil):** Sigil's `near_dup_merge` is a
 /// human-reviewed proposal flow. ZeroClaw governance auto-applies archival, so
-/// merges must stay inside a single `(zeroclaw_agent, zeroclaw_namespace)`
-/// partition. Crossing namespaces would drop a `user:kyle` row from
+/// merges must stay inside one agent, namespace and Conversation scope.
+/// Crossing namespaces would drop a `user:kyle` row from
 /// `recall_namespaced("user:kyle")` after fold-into-`default`; crossing agents
-/// would fold one RomanBath character's memory into another's.
+/// would fold one RomanBath character's memory into another's. Crossing a
+/// Conversation session could archive the only fact visible to that session.
 ///
 /// **Scan window:** the intake list is a single global
 /// [`NEAR_DUP_RAW_SCAN_CAP`] scan over `/agents` (path-ASC, so path-early
@@ -124,8 +146,7 @@ fn run_near_dup_light_sleep(
         return Ok((0, 0));
     }
 
-    let mut partitions: HashMap<(Option<String>, Option<String>), Vec<MemoryEntry>> =
-        HashMap::new();
+    let mut partitions: HashMap<NearDupScope, Vec<MemoryEntry>> = HashMap::new();
     for entry in entries {
         partitions
             .entry(near_dup_scope_key(&entry))
@@ -146,7 +167,7 @@ fn run_near_dup_light_sleep(
     Ok((archived, survivors_updated))
 }
 
-/// Run memcore near-dup + star-collapse within one agent/namespace partition.
+/// Run memcore near-dup + star-collapse within one admitted memory scope.
 fn collapse_near_dups_in_partition(
     store: &mut MemoryStore,
     entries: &[MemoryEntry],

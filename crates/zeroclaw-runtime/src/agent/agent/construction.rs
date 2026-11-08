@@ -427,6 +427,7 @@ impl Agent {
             .build()?;
 
         agent.live_pacing_config = live_pacing_config;
+        agent.sync_side_query_snapshot(None);
 
         // Wire per-tool channel-map handles into the agent so callers (e.g.
         // the ACP server) can register back-channels after construction.
