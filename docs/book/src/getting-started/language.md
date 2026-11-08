@@ -1,46 +1,39 @@
 # Language & translations
 
-ZeroClaw's interface strings (CLI messages and command help) can be shown in languages other than English. English is always built in;
-other languages are downloaded on demand.
+ZeroClaw's interface strings (CLI messages and command help) can be shown in
+Simplified Chinese. English is always built in; Simplified Chinese CLI strings
+are also embedded, and translated tool descriptions are downloaded on demand.
+
+> Retired locales: `es`, `fr`, and `ja` were removed from the selectable
+> registry. If your config still selects one, ZeroClaw logs a fallback notice
+> and renders in English, except for catalogues you fetched before retirement:
+> those on-disk files keep overriding as before. See
+> [Troubleshooting](#troubleshooting) below.
 
 ## Set your language
 
-ZeroClaw reads a top-level `locale` key from your config. Set it to a locale
-code such as `ja`, `fr`, or `zh-CN`. If `locale` is unset, ZeroClaw uses your
-operating system's language and falls back to English when no translation is
-available.
+ZeroClaw reads a top-level `locale` key from your config. Set it to `en` or
+`zh-CN`. If `locale` is unset, ZeroClaw uses your operating system's language
+and falls back to English when no translation is available.
 
 ## Fetch your language files
 
-English ships inside the binary. For any other language you fetch the
-translated files once:
+English ships inside the binary. For Simplified Chinese tool descriptions you
+fetch the translated files once:
 
 <div class="os-tabs-src">
 
 #### sh
 
 ```sh
-zeroclaw locales fetch ja
+zeroclaw locales fetch zh-CN
 ```
 
 </div>
 
-This downloads the Japanese translation files from the ZeroClaw project and
-installs them under `~/.zeroclaw/data/ftl/ja/`, where ZeroClaw looks for them
-at startup. Restart ZeroClaw afterward to pick them up.
-
-Fetch any locale the same way:
-
-<div class="os-tabs-src">
-
-#### sh
-
-```sh
-zeroclaw locales fetch fr        # French
-zeroclaw locales fetch zh-CN     # Simplified Chinese
-```
-
-</div>
+This downloads the Simplified Chinese translation files from the ZeroClaw
+project and installs them under `~/.zeroclaw/data/ftl/zh-CN/`, where ZeroClaw
+looks for them at startup. Restart ZeroClaw afterward to pick them up.
 
 ### Fetching only part of a language
 
@@ -57,7 +50,7 @@ some, pass `--catalog` with a comma-separated list:
 #### sh
 
 ```sh
-zeroclaw locales fetch ja --catalog cli   # just CLI strings
+zeroclaw locales fetch zh-CN --catalog tools   # just tool descriptions
 ```
 
 </div>
@@ -81,6 +74,11 @@ instead.
 - **Still seeing English after fetching.** Confirm `locale` in your config
   matches the locale you fetched, and restart the process. ZeroClaw loads
   language files at startup.
+- **Config selects `es`, `fr`, or `ja`.** Those locales are retired from the
+  registry: `zeroclaw locales fetch` rejects them, and without on-disk
+  catalogues every string renders in English with a fallback notice in the
+  log. Catalogues fetched before retirement under `data/ftl/<locale>/` keep
+  working unchanged.
 - **`fetch` reports a catalogue was skipped.** That catalogue has not been
   translated for your locale yet. The available catalogues are still installed;
   untranslated strings fall back to English.

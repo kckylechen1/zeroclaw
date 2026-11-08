@@ -4,8 +4,8 @@
 
 #[cfg(all(feature = "sandbox-landlock", target_os = "linux"))]
 use landlock::{
-    AccessFs, Errno, PathBeneath, PathFd, PathFdError, Ruleset, RulesetAttr, RulesetCreated,
-    RulesetCreatedAttr,
+    AccessFs, CompatLevel, Compatible, Errno, PathBeneath, PathFd, PathFdError, Ruleset,
+    RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus,
 };
 #[cfg(all(feature = "sandbox-landlock", target_os = "linux"))]
 use std::os::unix::process::CommandExt;
@@ -30,8 +30,12 @@ impl LandlockSandbox {
 
     /// Create a Landlock sandbox with a specific workspace directory
     pub fn with_workspace(workspace_dir: Option<std::path::PathBuf>) -> std::io::Result<Self> {
-        // Test if Landlock is available by trying to create a minimal ruleset
+        // Require a real ruleset for the ABI 1 minimum. BestEffort can return
+        // a dummy success when Landlock is unavailable (ENOSYS/EOPNOTSUPP).
+        // Keep the full ruleset below best-effort: newer rights such as
+        // Truncate must not make this probe require a newer kernel ABI.
         let test_ruleset = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
             .handle_access(AccessFs::ReadFile | AccessFs::WriteFile)
             .and_then(|ruleset| ruleset.create());
 
@@ -55,6 +59,16 @@ impl LandlockSandbox {
     /// Probe if Landlock is available (for auto-detection)
     pub fn probe() -> std::io::Result<Self> {
         Self::new()
+    }
+
+    /// Check the child-side outcome without allocating after fork.
+    /// Partial enforcement retains the existing compatibility policy for
+    /// older ABIs; no enforcement must never permit the child to execute.
+    fn require_enforcement(status: RulesetStatus) -> std::io::Result<()> {
+        match status {
+            RulesetStatus::FullyEnforced | RulesetStatus::PartiallyEnforced => Ok(()),
+            RulesetStatus::NotEnforced => Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP)),
+        }
     }
 
     /// Build a Landlock ruleset with all configured access rules.
@@ -252,6 +266,12 @@ impl Sandbox for LandlockSandbox {
         //    `spawn()`. `std` installs `always_abort()` before invoking
         //    `pre_exec` as a safety net, but the closure does not rely on it
         //    for normal operation.
+        //    A successful call can still report `NotEnforced` in best-effort
+        //    mode. `require_enforcement` checks that status and returns the
+        //    raw EOPNOTSUPP errno without allocating or formatting. It accepts
+        //    partial enforcement to preserve the older-ABI compatibility
+        //    policy; the earlier availability probe is not an enforcement
+        //    guarantee for a later child.
         //
         // 3. Same-child defensive guard — `ruleset.take()` returns `None` only
         //    if `pre_exec` were invoked twice within the *same* forked child.
@@ -270,8 +290,10 @@ impl Sandbox for LandlockSandbox {
         unsafe {
             cmd.pre_exec(move || {
                 if let Some(rs) = ruleset.take() {
-                    rs.restrict_self()
+                    let status = rs
+                        .restrict_self()
                         .map_err(|e| std::io::Error::from_raw_os_error(*Errno::from(e)))?;
+                    Self::require_enforcement(status.ruleset)?;
                 } else {
                     // Unreachable: `pre_exec` is called exactly once per
                     // fork, and each forked child receives its own copy of
@@ -287,11 +309,7 @@ impl Sandbox for LandlockSandbox {
     }
 
     fn is_available(&self) -> bool {
-        // Try to create a minimal ruleset to verify availability
-        Ruleset::default()
-            .handle_access(AccessFs::ReadFile)
-            .and_then(|ruleset| ruleset.create())
-            .is_ok()
+        Self::probe().is_ok()
     }
 
     fn name(&self) -> &str {
@@ -353,6 +371,10 @@ impl Sandbox for LandlockSandbox {
         "Linux kernel LSM sandboxing (not available on this platform)"
     }
 }
+
+#[cfg(all(test, feature = "sandbox-landlock", target_os = "linux"))]
+#[path = "landlock_unavailable_tests.rs"]
+mod unavailable_tests;
 
 #[cfg(test)]
 mod tests {
