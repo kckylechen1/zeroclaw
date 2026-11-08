@@ -68,6 +68,7 @@ pub use subscriber::{install_global_subscriber, try_install_capture_subscriber};
 pub use tool_io::{ToolIoCapture, capture_llm_request, capture_tool_input, capture_tool_output};
 pub use writer::{
     flush_for_test, init_from_config, llm_request_payload_policy, record_event, runtime_trace_path,
+    tool_io_policy,
 };
 
 mod r#macro;

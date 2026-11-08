@@ -4,6 +4,7 @@
 use super::context::TurnCtx;
 use super::events::StreamDelta;
 use super::redact::scrub_credentials;
+use super::tool_logging::tool_log_attributes;
 use crate::agent::tool_execution::ToolExecutionOutcome;
 use crate::util::truncate_with_ellipsis;
 use zeroclaw_tool_call_parser::ParsedToolCall;
@@ -40,14 +41,17 @@ pub(crate) async fn record_executed_outcomes(
                     ::zeroclaw_log::EventOutcome::Failure
                 })
                 .with_duration(u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX))
-                .with_attrs(::serde_json::json!({
-                    "model": ctx.model,
-                    "iteration": iteration + 1,
-                    "tool": call.name.clone(),
-                    "error_reason": outcome.error_reason.as_deref().map(scrub_credentials),
-                    "output": scrub_credentials(&outcome.output),
-                    "trace_id": ctx.turn_id,
-                })),
+                .with_attrs(tool_log_attributes(
+                    &call.name,
+                    ::serde_json::json!({
+                        "model": ctx.model,
+                        "iteration": iteration + 1,
+                        "tool": call.name.clone(),
+                        "error_reason": outcome.error_reason,
+                        "output": outcome.output,
+                        "trace_id": ctx.turn_id,
+                    })
+                )),
             "tool_call_result"
         );
 

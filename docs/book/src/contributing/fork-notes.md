@@ -195,6 +195,28 @@ The extension's bounded in-process replay cache is owned by ConversationHub.
 It is not a durable input queue or an execution-retry promise. Missing recovery
 state is unknown, never permission to repeat effects.
 
+## Shared session deletion
+
+Deleting a persisted gateway session also clears the live Agent history shared
+by every socket on that session. ConversationHub owns a short-lived per-session
+lifecycle mutex; the existing session execution queue still serializes turns
+and their persistence. Deletion cancels active turns, waits for their writes,
+then clears the backend and each live Agent under those guards. Local reset
+revisions reject pre-deletion claims, continuations and unread conversation
+frames for both legacy and negotiated sockets. Bytes already written to a
+client cannot be retracted. Request tombstones and
+the process-wide turn-control epoch are preserved; other sessions are unaffected.
+With persistence disabled, DELETE retains its existing 404 response and does not
+implicitly reset an in-memory conversation. This does not delete Soul, User Model
+or the agent's long-term memory.
+
+Upstream `zeroclaw-labs/zeroclaw` at
+`641b766030805edfa999bb5aa6ff19a9ffd4339b`,
+`crates/zeroclaw-gateway/src/ws.rs`, constructs an Agent per socket and has no
+ConversationHub. The fork already owns shared conversations and replay receipts;
+the gap is deletion of their retained live history. This is a bounded local fix,
+with no upstream code port, new durable store, protocol or configuration key.
+
 ## Deferred MCP exact-name recovery
 
 The #382/#376 leaf compares upstream `zeroclaw-labs/zeroclaw` at
