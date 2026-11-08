@@ -292,8 +292,10 @@ mod tests {
         // Webhook is a live surface: with its feature off it is exactly
         // "configured but not compiled" — a rebuild genuinely fixes it.
         let mut cfg = ChannelsConfig::default();
-        cfg.webhook
-            .insert("default".to_string(), Default::default());
+        cfg.webhook.insert(
+            "default".to_string(),
+            zeroclaw_config::schema::WebhookConfig::default(),
+        );
 
         let names: BTreeSet<_> = configured_uncompiled_channels(&cfg)
             .into_iter()
