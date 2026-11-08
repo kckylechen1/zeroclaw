@@ -19,6 +19,20 @@ This repository is an independent project (decision 2026-08-16). Upstream `zeroc
 - **Porting:** read the upstream diff, adapt it, validate it at the touched surface's risk level, and record provenance in the commit message ("ported from upstream #NNNN").
 - **Dependency CVEs** stay covered by `cargo audit` and `cargo deny`.
 
+### Completed tool failure recovery (#382)
+
+Boundedly adapted from upstream [#11507](https://github.com/zeroclaw-labs/zeroclaw/pull/11507),
+merged as `fcc23a22f6eaf199408fbb58377abe551c7d3e51`. Configured Agent turns use
+completed canonical dispatch evidence: repeated identical failures prompt a
+correction and allow one recovery retry before a visible, recoverable stop.
+Completed results and receipts remain in the existing turn history. Successful
+polling is advisory only; approvals, hooks and cancellation keep their existing
+authority. The fork retains its extracted turn modules, raw outcome data path,
+legacy channel detector and outer steering behavior. Only the existing live
+daemon config handle is retained for pacing refresh; no upstream lifecycle,
+additional configuration key, durable ledger or orchestration layer is imported.
+See [runtime internals](../agents/internals.md#repeated-tool-failure-recovery).
+
 ### Deliberate behavioral divergences
 
 | Divergence | Upstream | Status |

@@ -891,3 +891,9 @@ cli-paircode-local-only = 配对码请求只能发往本机回环地址。请在
 cli-paircode-admin-token-missing = { $path } 中没有网关管理令牌。请在网关运行时，以运行网关的用户在网关主机上执行。
 delegation-result-notice = 委派任务 {$request} 已结束，结果为 {$outcome}。可询问代理，或对调度 {$dispatch} 查询 tachi_result。
 task-reminder-notice = 提醒：{$task}
+
+# 同一 Agent API 回合内，基于已完成调度的重复失败恢复。
+turn-repeated-success-advisory = 相同工具调用已多次返回相同的成功结果。请判断继续调用是否有帮助；需要时仍可继续轮询。
+turn-repeated-failure-recovery = 相同工具调用已多次返回相同的失败结果。请调整方法或说明阻碍；本回合还允许一次相同的重试。
+turn-repeated-failure-exhausted = 恢复重试仍返回相同的失败结果，本回合已停止。已完成的工具结果已保留，可在新回合中重试。
+turn-repeated-failure-retry-skipped = 已跳过本批次中额外的相同调用；恢复阶段只允许一次重试。

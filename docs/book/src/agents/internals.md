@@ -7,6 +7,32 @@ attributes logs. For configuring and running agents, start at
 [Config](../reference/config.md); for live setup steps, see
 [Multi-agent setup](../contributing/multi-agent-setup.md).
 
+## Repeated tool failure recovery
+
+Configured `Agent::turn` and streamed Agent turns read root `[pacing]` at the
+start of each API turn. Daemon-backed agents use their existing live config
+handle, so a reload applies to the next turn. Configless builders keep loop
+detection disabled. The guard spans steering and model-switch rounds within
+that API call; a new call starts with fresh evidence.
+
+With `loop_detection_enabled`, identical completed failures reach an advisory
+at `loop_detection_max_repeats` (default 3). The model then receives one further
+identical retry. If it fails identically and the batch has no other completed
+progress, the turn stops visibly while retaining all completed tool results
+and receipts. Parallel duplicates beyond that one recovery retry are skipped.
+A changed result, changed approach or successful completed call clears the
+pending failure warning. Successful identical calls receive at most one
+advisory per turn and may continue polling, including Tachi status/watch calls.
+
+Evidence uses the actual canonical executed tool name, canonical arguments
+without runtime-injected `approved`, and the complete credential-scrubbed
+result before display truncation. `loop_ignore_tools` applies to that canonical
+name. Approval denials, hook short circuits, unavailable tools and cancelled
+batches do not consume this recovery budget. The existing maximum-iteration,
+shared-budget and cancellation controls still apply. Low-level/channel callers
+retain the legacy detector; its window/no-progress/minimum-elapsed settings do
+not delay this Agent failure-recovery contract.
+
 ## Permissions model
 
 Each agent's effective `SecurityPolicy` is built by `SecurityPolicy::for_agent(config, alias)`:

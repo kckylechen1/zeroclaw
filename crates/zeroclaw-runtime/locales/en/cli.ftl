@@ -1091,3 +1091,9 @@ cli-paircode-local-only = Pairing-code requests must target loopback. Run this o
 cli-paircode-admin-token-missing = No gateway admin token at { $path }. Run this on the gateway host, as the user running it, while the gateway is running.
 delegation-result-notice = Delegated task {$request} finished with outcome {$outcome}. Ask the agent or query tachi_result for dispatch {$dispatch}.
 task-reminder-notice = Reminder: {$task}
+
+# Completed-dispatch repetition recovery within one Agent API turn.
+turn-repeated-success-advisory = The same tool call returned the same successful result repeatedly. Reconsider whether another call will help. Polling may continue when needed.
+turn-repeated-failure-recovery = The same tool call failed with the same result repeatedly. Change the approach or explain the blocker. One further identical retry is available before this turn stops.
+turn-repeated-failure-exhausted = The recovery retry failed with the same result, so this turn has stopped. Completed tool results have been preserved. You can retry in a new turn.
+turn-repeated-failure-retry-skipped = Skipped an additional identical call in this recovery batch. Only one recovery retry is available.
