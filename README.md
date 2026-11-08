@@ -2,7 +2,7 @@
   <img src="docs/assets/zeroclaw-banner.png" alt="ZeroClaw" width="600" />
 </p>
 
-<h1 align="center">🦀 ZeroClaw — Personal AI Assistant</h1>
+<h1 align="center">🦀 ZeroClaw: Personal AI Assistant</h1>
 
 <p align="center">
   <strong>You own the agent. You own the data. You own the machine it runs on.</strong>
@@ -159,7 +159,7 @@ zeroclaw service install          # register as systemd/launchctl/Windows Servic
 zeroclaw service start            # run it always-on in the background
 ```
 
-Full walkthrough: [Quick start](docs/book/src/getting-started/quickstart.md) — or skip the safety gates with [YOLO mode](docs/book/src/getting-started/yolo.md) for dev boxes.
+Full walkthrough: [Quick start](docs/book/src/getting-started/quickstart.md); or skip the safety gates with [YOLO mode](docs/book/src/getting-started/yolo.md) for dev boxes.
 
 To enable delegation, run a Tachi daemon on the same machine, enable `[tachi]`
 with a loopback endpoint, and map at least one harness in `[tachi.harnesses]`.
@@ -170,27 +170,27 @@ To try a local read-only Node, build with the `nodes` feature and follow
 
 ## Capabilities
 
-- **Gateway-first target** — Clients share the gateway conversation through
+- **Gateway-first target**: Clients share the gateway conversation through
   REST and `/ws/chat`; authorized channel bridges also use `/ws/bridge` for
   proactive delivery. Legacy channel and ACP entry points remain during the
   consumer migration in #378 (ADR-013).
-- **Soul and User Model** — a lasting identity and owner model with protected
+- **Soul and User Model**: a lasting identity and owner model with protected
   authority (ADR-014/015/016/018).
-- **Provider-agnostic** — [model providers](docs/book/src/providers/overview.md) are pluggable: Anthropic, OpenAI, local Ollama, or any OpenAI-compatible endpoint, with [fallback chains and routing](docs/book/src/providers/routing.md).
-- **Security-first** — default autonomy is `supervised`: medium-risk ops require approval, high-risk blocked. Workspace boundaries, command policy, OS-level sandboxes (Landlock / Bubblewrap / Seatbelt / Docker), and [tool receipts](docs/book/src/security/tool-receipts.md). This fork keeps several deliberately stricter defaults than upstream; see [fork notes](docs/book/src/contributing/fork-notes.md#deliberate-behavioral-divergences).
-- **Edge devices as Nodes** — signed Ed25519 device identity, the v2 handshake,
+- **Provider-agnostic**: [model providers](docs/book/src/providers/overview.md) are pluggable: Anthropic, OpenAI, local Ollama, or any OpenAI-compatible endpoint, with [fallback chains and routing](docs/book/src/providers/routing.md).
+- **Security-first**: default autonomy is `supervised`: medium-risk ops require approval, high-risk blocked. Workspace boundaries, command policy, OS-level sandboxes (Landlock / Bubblewrap / Seatbelt / Docker), and [tool receipts](docs/book/src/security/tool-receipts.md). This fork keeps several deliberately stricter defaults than upstream; see [fork notes](docs/book/src/contributing/fork-notes.md#deliberate-behavioral-divergences).
+- **Edge devices as Nodes**: signed Ed25519 device identity, the v2 handshake,
   owner-set capability ceilings, and bounded invocation of safe capabilities
   through the opt-in `zeroclaw-node-host` (#514). Each call is bound to the
   device, connection and capability revision; unknown outcomes are never
   replayed. High-risk capabilities stay unavailable.
-- **Delegation through Tachi** — L2 work uses `tachi_start`, `tachi_status`,
+- **Delegation through Tachi**: L2 work uses `tachi_start`, `tachi_status`,
   `tachi_result`, `tachi_cancel` and bounded `tachi_watch` over the Staff MCP
   interface, with typed unsupported/unknown outcomes and no local fallback.
-- **SOP definitions** — [Standard Operating Procedures](docs/book/src/sop/index.md)
+- **SOP definitions**: [Standard Operating Procedures](docs/book/src/sop/index.md)
   can still be authored and validated. The former local runner is retired;
   the retained Procedure/TaskIntent seam has no production Tachi peer.
   Production delegated execution uses the Staff interface above.
-- **ACP** — the optional [gateway-backed ACP bridge](docs/book/src/gateway/api.md)
+- **ACP**: the optional [gateway-backed ACP bridge](docs/book/src/gateway/api.md)
   supports new Zed text sessions (#517). Legacy `zeroclaw acp` and its
   [session store](docs/book/src/channels/acp.md) remain until their consumers
   migrate under #378.
@@ -199,12 +199,12 @@ To try a local read-only Node, build with the `nodes` feature and follow
 
 One TOML file at `~/.zeroclaw/config.toml`. Pointers:
 
-- [Provider configuration](docs/book/src/providers/configuration.md) — the universal `[providers.models.<type>.<alias>]` schema
-- [Security overview](docs/book/src/security/overview.md) — autonomy, sandboxing, tool receipts
-- [Delegation and SubAgents](docs/book/src/agents/delegation.md) — `[tachi]` and `[tachi.harnesses]`
+- [Provider configuration](docs/book/src/providers/configuration.md): the universal `[providers.models.<type>.<alias>]` schema
+- [Security overview](docs/book/src/security/overview.md): autonomy, sandboxing, tool receipts
+- [Delegation and SubAgents](docs/book/src/agents/delegation.md): `[tachi]` and `[tachi.harnesses]`
 - [Portable memory kernel](docs/book/src/setup/portable-memory.md): optional `memory-tachi` stores and explicit offline upgrades
 
-A V3 config has at minimum four section headers (`<type>.<alias>` shaped) — a provider entry, an agent that references it, and a risk profile the agent gates against. See [Provider Configuration → Minimal working example](docs/book/src/providers/configuration.md#minimal-working-example).
+A V3 config has at minimum four section headers (`<type>.<alias>` shaped): a provider entry, an agent that references it, and a risk profile the agent gates against. See [Provider Configuration → Minimal working example](docs/book/src/providers/configuration.md#minimal-working-example).
 
 For standard OpenAI Codex subscription auth, Quickstart can write the provider
 entry for you:
@@ -290,7 +290,7 @@ fork-specific.
 
 ## License
 
-Dual-licensed: [MIT](LICENSE-MIT) OR [Apache 2.0](LICENSE-APACHE). You may choose either. Contributors automatically grant rights under both — see [CLA](docs/book/src/contributing/cla.md). The **ZeroClaw** name and logo are trademarks of ZeroClaw Labs.
+Dual-licensed: [MIT](LICENSE-MIT) OR [Apache 2.0](LICENSE-APACHE). You may choose either. Contributors automatically grant rights under both; see [CLA](docs/book/src/contributing/cla.md). The **ZeroClaw** name and logo are trademarks of ZeroClaw Labs.
 
 Tachi is AGPL-3.0-only. Calling it over MCP as a separate process leaves this
 project's license unchanged. The optional `memory-tachi` feature links the shared portable kernel
@@ -299,4 +299,4 @@ AGPL (see ADR-017 §6).
 
 ## Credits
 
-Upstream ZeroClaw is built and maintained by its community — original creator [@theonlyhennygod](https://github.com/theonlyhennygod); project lead [@JordanTheJet](https://github.com/JordanTheJet). Thanks to the communities that incubated early work: **Harvard University**, **MIT**, **Sundai Club**, and every upstream contributor.
+Upstream ZeroClaw is built and maintained by its community: original creator [@theonlyhennygod](https://github.com/theonlyhennygod); project lead [@JordanTheJet](https://github.com/JordanTheJet). Thanks to the communities that incubated early work: **Harvard University**, **MIT**, **Sundai Club**, and every upstream contributor.
