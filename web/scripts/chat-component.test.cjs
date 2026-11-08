@@ -100,6 +100,85 @@ const event = (request, seq, inner, turn = turnId) => ({ type: 'turn_event', req
 const sentMessages = () => sockets.flatMap(socket => socket.sent).filter(frame => frame.op === 'message' || frame.type === 'message');
 const restAborts = () => requests.filter(request => request.path.endsWith('/abort'));
 
+test('explicit steering is negotiated, scoped and never replaces ordinary turn correlation', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive({ ...ready(), capabilities: ['steer'] }));
+  await update(() => ctx.value.sendMessage('original task'));
+  const parent = sentMessages().at(-1).request_id;
+  assert.equal(ctx.value.canSteer, false, 'wait for authoritative turn identity');
+  await update(() => ctx.wire.receive({ type: 'turn_ack', request_id: parent, turn_id: turnId, status: 'accepted' }));
+  assert.equal(ctx.value.canSteer, true);
+  await update(() => assert.equal(ctx.value.steerMessage('correct destination', ['scoped-file']), true));
+  const correction = ctx.wire.sent.at(-1);
+  assert.equal(correction.op, 'steer');
+  assert.equal(correction.parent_request_id, parent);
+  assert.equal(correction.turn_id, turnId);
+  assert.equal(correction.epoch, 'epoch-1');
+  assert.deepEqual(correction.attachments, ['scoped-file']);
+  assert.notEqual(correction.request_id, parent);
+  assert.equal(ctx.value.steeringPending, true);
+  await update(() => ctx.value.sendMessage('ordinary busy input'));
+  assert.equal(sentMessages().length, 1);
+  await update(() => ctx.wire.receive({ ...correction, type: 'turn_steer_ack', turn_id: otherTurnId, status: 'accepted' }));
+  assert.equal(ctx.value.steeringPending, true, 'wrong target ACK is inert');
+  await update(() => ctx.wire.receive({ ...correction, type: 'turn_steer_ack', status: 'accepted' }));
+  assert.equal(ctx.value.steeringPending, false);
+  assert.equal(ctx.value.typing, true, 'steer ACK cannot settle the task');
+  await update(() => ctx.value.abortSession());
+  assert.equal(ctx.wire.sent.at(-1).request_id, parent, 'Stop keeps the original admission identity');
+  assert.equal(ctx.value.canSteer, false);
+  await update(() => assert.equal(ctx.value.steerMessage('after cancel'), false));
+}));
+
+test('steering is unavailable without server opt-in and late receipts cannot affect a successor', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive(ready()));
+  await update(() => ctx.value.sendMessage('original task'));
+  const parent = sentMessages().at(-1).request_id;
+  await update(() => ctx.wire.receive({ type: 'turn_ack', request_id: parent, turn_id: turnId, status: 'accepted' }));
+  assert.equal(ctx.value.canSteer, false);
+  await update(() => assert.equal(ctx.value.steerMessage('unsupported'), false));
+  await update(() => ctx.wire.close());
+  await update(() => tick(1_000));
+  const reconnected = sockets.at(-1);
+  await update(() => reconnected.open());
+  await update(() => reconnected.receive({ ...ready(), capabilities: ['steer'] }));
+  await update(() => assert.equal(ctx.value.steerMessage('receipt lost'), true));
+  const correction = reconnected.sent.at(-1);
+  await update(() => tick(5_000));
+  assert.equal(ctx.value.steeringPending, false);
+  assert.equal(sockets.flatMap(socket => socket.sent).filter(frame => frame.op === 'steer').length, 1, 'unknown receipt is never resent');
+  await update(() => reconnected.receive(event(parent, 1, { type: 'turn_terminal', outcome: 'done' })));
+  await update(() => ctx.value.sendMessage('successor'));
+  const successor = sentMessages().at(-1).request_id;
+  await update(() => reconnected.receive({ type: 'turn_ack', request_id: successor, turn_id: otherTurnId, status: 'accepted' }));
+  await update(() => assert.equal(ctx.value.steerMessage('new correction'), true));
+  await update(() => reconnected.receive({ ...correction, type: 'turn_steer_ack', status: 'accepted' }));
+  assert.equal(ctx.value.steeringPending, true, 'old receipt cannot clear a new pending correction');
+  await update(() => reconnected.close());
+  assert.equal(ctx.value.steeringPending, false, 'disconnect settles as unknown without queueing');
+}));
+
+test('Clear chat retires pending steering before a new attachment can send', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive({ ...ready(), capabilities: ['steer'] }));
+  await update(() => ctx.value.sendMessage('old task'));
+  const parent = sentMessages().at(-1).request_id;
+  await update(() => ctx.wire.receive({ type: 'turn_ack', request_id: parent, turn_id: turnId, status: 'accepted' }));
+  await update(() => assert.equal(ctx.value.steerMessage('pending old correction'), true));
+  const oldCorrection = ctx.wire.sent.at(-1);
+  await update(() => ctx.value.clearAllMessages());
+  assert.equal(ctx.value.steeringPending, false);
+  assert.equal(ctx.value.canSteer, false);
+  const replacement = sockets.at(-1);
+  await update(() => replacement.open());
+  await update(() => replacement.receive({ ...ready(), capabilities: ['steer'] }));
+  await update(() => ctx.value.sendMessage('new task'));
+  assert.equal(sentMessages().at(-1).content, 'new task');
+  const successor = sentMessages().at(-1).request_id;
+  await update(() => replacement.receive({ type: 'turn_ack', request_id: successor, turn_id: otherTurnId, status: 'accepted' }));
+  await update(() => assert.equal(ctx.value.steerMessage('new correction'), true));
+  await update(() => ctx.wire.receive({ ...oldCorrection, type: 'turn_steer_ack', status: 'accepted' }));
+  assert.equal(ctx.value.steeringPending, true, 'retired attachment cannot settle a replacement control');
+}));
+
 test('anonymous pairing-disabled chat uses its supported legacy contract', async () => withAgent(false, async ({ value, wire }) => {
   assert.equal(wire.sent.length, 0, 'S2 cannot negotiate without an authenticated subject');
   await update(() => value.sendMessage('anonymous chat', ['scoped-handle']));

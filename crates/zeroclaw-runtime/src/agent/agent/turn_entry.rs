@@ -238,6 +238,7 @@ impl Agent {
                         turn_id: &turn_id,
                     },
                     Some(&repetition_guard),
+                    false,
                 ),
             )
             .await;
@@ -627,7 +628,7 @@ impl Agent {
                             .as_ref()
                             .map(crate::agent::tool_receipts::ReceiptScope::collector),
                         event_tx: Some(event_tx.clone()),
-                        steering: None,
+                        steering: steering_rx.as_deref_mut(),
                         new_messages_out: Some(&mut round_added),
                         image_cache: Some(&mut self.image_cache),
                         // Direct embedded Agent::turn call; source/transport/
@@ -645,6 +646,7 @@ impl Agent {
                         turn_id: &turn_id,
                     },
                     Some(&repetition_guard),
+                    true,
                 ),
             );
             // Scope the provider-fallback task-local around the round so the
@@ -716,6 +718,14 @@ impl Agent {
                     if has_more_steering && !repetition_exhausted {
                         continue;
                     }
+                    // Refuse late senders before terminal delivery awaits.
+                    // Include any input that raced the first emptiness check.
+                    if let Some(rx) = steering_rx.as_deref_mut() {
+                        rx.close();
+                        if !rx.is_empty() && !repetition_exhausted {
+                            continue;
+                        }
+                    }
 
                     // Cache put only when the turn was a single tool-free
                     // exchange, mirroring the old "no tool calls" condition.
@@ -742,6 +752,15 @@ impl Agent {
                     });
                 }
                 Err(error) => {
+                    if let Some(pending) =
+                        error.downcast_ref::<crate::agent::turn::SteeringPending>()
+                    {
+                        // The existing drain above owns autosave, timestamping,
+                        // user provenance and round-local before-LLM input.
+                        // No tool is interrupted and no second loop is spawned.
+                        committed_response.push_str(&pending.display_text);
+                        continue;
+                    }
                     // Model switch requested mid-turn: the unified loop
                     // signals a pending `model_switch` by returning
                     // `ModelSwitchRequested`. The
@@ -763,6 +782,9 @@ impl Agent {
                         forward_history_trim_notice(&event_tx, notice).await;
                         effective_model = new_effective_model;
                         continue;
+                    }
+                    if let Some(rx) = steering_rx.as_deref_mut() {
+                        rx.close();
                     }
                     // Rebuild the committed text from the failed round's plain
                     // assistant output (e.g. a persisted stream partial) when

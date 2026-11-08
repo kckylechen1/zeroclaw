@@ -38,7 +38,145 @@ zeroclaw_api::mock_tool_attribution!(
     MockTool,
     SlowTool,
     ModelSwitchTriggerTool,
+    BoundarySteeringTool,
 );
+
+struct BoundarySteeringTool {
+    steering: tokio::sync::mpsc::Sender<String>,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+}
+
+#[async_trait]
+impl Tool for BoundarySteeringTool {
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "Send a correction during the tool batch"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object"})
+    }
+    async fn execute(&self, _: serde_json::Value) -> Result<crate::tools::ToolResult> {
+        self.steering
+            .try_send("use the corrected destination".into())?;
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
+        Ok(crate::tools::ToolResult {
+            success: true,
+            output: "tool finished safely".into(),
+            error: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn steering_at_tool_boundary_keeps_enrichment_and_cancellation_precedence() {
+    for cancel_at_boundary in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory: Arc<dyn Memory> =
+            Arc::new(zeroclaw_memory::SqliteMemory::new("sqlite", tmp.path()).unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observer = Arc::new(CapturingObserver::default());
+        let (steering_tx, mut steering_rx) = tokio::sync::mpsc::channel(4);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let fixed = chrono::DateTime::parse_from_rfc3339("2026-01-01T12:00:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let mut agent = Agent::builder()
+            .model_provider(Box::new(TranscriptCaptureModelProvider {
+                seen_messages: seen.clone(),
+                responses: Mutex::new(vec![zeroclaw_providers::ChatResponse {
+                    text: Some("checking first".into()),
+                    tool_calls: vec![zeroclaw_providers::ToolCall {
+                        id: "boundary-tool".into(),
+                        name: "echo".into(),
+                        arguments: "{}".into(),
+                        extra_content: None,
+                    }],
+                    usage: None,
+                    reasoning_content: None,
+                }]),
+            }))
+            .tools(vec![Box::new(BoundarySteeringTool {
+                steering: steering_tx,
+                cancel: cancel_at_boundary.then(|| cancel.clone()),
+            })])
+            .memory(memory.clone())
+            .memory_session_id(Some("steering-session".into()))
+            .auto_save(true)
+            .observer(observer.clone())
+            .tool_dispatcher(Box::new(NativeToolDispatcher))
+            .workspace_dir(tmp.path().to_path_buf())
+            .turn_datetime(move || fixed)
+            .build()
+            .unwrap();
+        let (events, _rx) = tokio::sync::mpsc::channel(64);
+        let result = agent
+            .turn_streamed_with_steering_state(
+                "check destination",
+                events,
+                Some(cancel),
+                Some(&mut steering_rx),
+            )
+            .await;
+        let captured = seen.lock().clone();
+        if cancel_at_boundary {
+            assert!(result.is_err());
+            assert_eq!(
+                captured.len(),
+                1,
+                "cancel must win before a steered model call"
+            );
+            assert!(
+                !memory
+                    .get("user_msg")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .content
+                    .contains("corrected")
+            );
+        } else {
+            let result = result.unwrap();
+            assert_eq!(
+                captured.len(),
+                2,
+                "steering must reach the next call, before any stale continuation"
+            );
+            let expected = format!(
+                "[{}] use the corrected destination",
+                fixed.format("%Y-%m-%d %H:%M:%S %Z")
+            );
+            assert!(
+                captured[1]
+                    .iter()
+                    .any(|message| message.role == "user" && message.content == expected)
+            );
+            assert!(
+                captured[1]
+                    .iter()
+                    .any(|message| message.content.contains("tool finished safely")),
+                "completed tool results precede steering"
+            );
+            assert_eq!(result.new_messages.iter().filter(|message| matches!(message, ConversationMessage::Chat(message) if message.role == "user" && message.content == expected)).count(), 1);
+            let stored = memory.get("user_msg").await.unwrap().unwrap();
+            assert_eq!(
+                stored.content, "use the corrected destination",
+                "autosave stores the raw user correction, not its prompt wrapper"
+            );
+            assert_eq!(stored.session_id.as_deref(), Some("steering-session"));
+        }
+        let stores = observer
+            .events
+            .lock()
+            .iter()
+            .filter(|event| matches!(event, ObserverEvent::MemoryStore { .. }))
+            .count();
+        assert_eq!(stores, if cancel_at_boundary { 1 } else { 2 });
+    }
+}
 
 struct MockModelProvider {
     responses: Mutex<Vec<zeroclaw_providers::ChatResponse>>,
