@@ -1,6 +1,7 @@
 //! Auto-detection of available security features
 
 use crate::security::traits::Sandbox;
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 use zeroclaw_config::schema::{SandboxBackend, SandboxConfig};
@@ -17,7 +18,7 @@ const SEATBELT_DESCRIPTION: &str = "macOS Seatbelt sandbox (built-in sandbox-exe
 pub struct SandboxPosture {
     pub requested_backend: &'static str,
     pub active_backend: &'static str,
-    pub active_description: &'static str,
+    pub active_description: Cow<'static, str>,
     pub fallback: bool,
 }
 
@@ -36,6 +37,17 @@ pub fn sandbox_posture(
     let active_backend =
         configured_backend_selection(&sandbox.backend, runtime_kind, workspace_dir);
 
+    if SelectedSandboxBackend::from_config(&sandbox.backend).is_some()
+        && active_backend == SelectedSandboxBackend::None
+    {
+        return SandboxPosture {
+            requested_backend,
+            active_backend: "blocked",
+            active_description: unavailable_backend_description(requested_backend).into(),
+            fallback: false,
+        };
+    }
+
     sandbox_posture_result(
         requested_backend,
         active_backend.name(),
@@ -51,10 +63,45 @@ fn sandbox_posture_result(
     SandboxPosture {
         requested_backend,
         active_backend,
-        active_description,
+        active_description: active_description.into(),
         fallback: !matches!(requested_backend, "auto" | "none")
             && active_backend != requested_backend,
     }
+}
+
+/// An explicitly required backend cannot be replaced by an unconfined command.
+/// Keep this denial in the existing Sandbox owner so every ShellTool caller
+/// reaches the normal wrap_command error path without a parallel policy gate.
+struct UnavailableSandbox {
+    description: String,
+}
+
+impl Sandbox for UnavailableSandbox {
+    fn wrap_command(&self, _cmd: &mut std::process::Command) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            self.description.clone(),
+        ))
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
+
+    fn name(&self) -> &str {
+        "blocked"
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+}
+
+fn unavailable_backend_description(requested_backend: &str) -> String {
+    crate::i18n::get_required_cli_string_with_args(
+        "cli-security-sandbox-backend-unavailable",
+        &[("backend", requested_backend)],
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +303,9 @@ pub fn create_sandbox(
                 return sandbox;
             }
             log_requested_backend_unavailable(selected_backend_label(requested));
-            Arc::new(super::traits::NoopSandbox)
+            Arc::new(UnavailableSandbox {
+                description: unavailable_backend_description(sandbox_backend_name(requested)),
+            })
         }
     }
 }
@@ -366,8 +415,8 @@ fn log_requested_backend_unavailable(label: &'static str) {
     ::zeroclaw_log::record!(
         WARN,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-        &format!("{label} requested but not available, falling back to application-layer")
+            .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+        &format!("{label} requested but not available; command execution is blocked")
     );
 }
 
@@ -549,9 +598,59 @@ mod tests {
             backend: SandboxBackend::Docker,
             firejail_args: Vec::new(),
         };
+        let available = sandbox_backend_available(SelectedSandboxBackend::Docker, None);
         let sandbox = create_sandbox(&sandbox_cfg, "native", None);
-        // If Docker is available, it will be selected; if not, NoopSandbox fallback.
+        assert_eq!(sandbox.name(), if available { "docker" } else { "blocked" });
+        assert_eq!(sandbox.is_available(), available);
+    }
+
+    #[test]
+    fn explicit_unavailable_backend_blocks_commands_and_reports_posture() {
+        // These backends are unavailable by platform, independent of which
+        // sandbox utilities happen to be installed on the test host.
+        #[cfg(target_os = "macos")]
+        let backend = SandboxBackend::Landlock;
+        #[cfg(not(target_os = "macos"))]
+        let backend = SandboxBackend::SandboxExec;
+        let sandbox_cfg = SandboxConfig {
+            enabled: Some(true),
+            backend,
+            firejail_args: Vec::new(),
+        };
+        let sandbox = create_sandbox(&sandbox_cfg, "native", None);
+        assert_eq!(sandbox.name(), "blocked");
+        assert!(!sandbox.is_available());
+        let mut command = std::process::Command::new("unreachable-test-command");
+        let error = sandbox.wrap_command(&mut command).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+
+        let posture = sandbox_posture(&sandbox_cfg, "native", None);
+        assert_eq!(posture.active_backend, sandbox.name());
+        assert_eq!(posture.active_description, sandbox.description());
+        assert_eq!(
+            posture.requested_backend,
+            sandbox_backend_name(&sandbox_cfg.backend)
+        );
+        assert!(!posture.fallback);
+    }
+
+    #[test]
+    fn explicitly_disabled_backend_preserves_noop_behavior() {
+        let sandbox_cfg = SandboxConfig {
+            enabled: Some(false),
+            backend: SandboxBackend::Landlock,
+            firejail_args: Vec::new(),
+        };
+        let sandbox = create_sandbox(&sandbox_cfg, "native", None);
+        assert_eq!(sandbox.name(), "none");
         assert!(sandbox.is_available());
+        let mut command = std::process::Command::new("unchanged-test-command");
+        sandbox.wrap_command(&mut command).unwrap();
+        assert_eq!(command.get_program(), "unchanged-test-command");
+        assert_eq!(
+            sandbox_posture(&sandbox_cfg, "native", None).active_backend,
+            "none"
+        );
     }
 
     #[test]
