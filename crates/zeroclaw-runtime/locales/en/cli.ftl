@@ -33,7 +33,7 @@ cli-migrate-about = Migrate data from other agent runtimes
 cli-auth-about = Manage provider subscription authentication profiles
 cli-memory-about = Manage agent memory entries
 cli-config-about = Manage ZeroClaw configuration
-cli-update-about = Check for and apply ZeroClaw updates
+cli-update-about = Update this fork from source
 cli-self-test-about = Run diagnostic self-tests
 cli-completions-about = Generate shell completion scripts
 cli-desktop-about = Launch the ZeroClaw companion desktop app
@@ -297,19 +297,7 @@ cli-config-long-about =
     Property path tab completion is included automatically in `zeroclaw completions <shell>`.
 
 cli-update-long-about =
-    Check for and apply ZeroClaw updates.
-
-    By default, downloads and installs the latest release with a 6-phase pipeline: preflight, download, backup, validate, swap, and smoke test. Automatic rollback on failure.
-
-    Use --check to only check for updates without installing.
-    Use --force to skip the confirmation prompt.
-    Use --version to target a specific release instead of latest.
-
-    Examples:
-      zeroclaw update                      # download and install latest
-      zeroclaw update --check              # check only, don't install
-      zeroclaw update --force              # install without confirmation
-      zeroclaw update --version 0.6.0      # install specific version
+    This fork has no verified binary update channel. Update a checkout of https://github.com/kckylechen1/zeroclaw and run ./install.sh --source with your existing preset/features. Upstream releases cannot update this fork.
 
 cli-self-test-long-about =
     Run diagnostic self-tests to verify the ZeroClaw installation.
@@ -788,12 +776,6 @@ cli-browse-empty = (empty)
 cli-browse-file-bytes = {$name} ({$bytes} bytes)
 
 # ── update (zeroclaw update) ──
-cli-update-already-current = Already up to date (v{$version}).
-cli-update-success = Successfully updated to v{$version}!
-cli-update-prebuilt-channel-note = Pre-built updates use the lean standard distribution. Build from source with `./install.sh --source --preset full`, `--features channels-full`, or a specific `channel-*` feature for Slack and other channels outside that distribution.
-cli-update-available = Update available: v{$current} -> v{$latest}
-cli-update-forcing-reinstall = Forcing reinstall: v{$current} -> v{$latest}
-cli-update-not-writable = install directory {$dir} is not writable ({$error}); re-run `zeroclaw update` with elevated privileges (sudo on macOS/Linux, an Administrator console on Windows)
 
 # ── self-test (zeroclaw self-test) ──
 cli-selftest-all-passed = All {$total} checks passed.
@@ -1098,3 +1080,5 @@ turn-repeated-success-advisory = The same tool call returned the same successful
 turn-repeated-failure-recovery = The same tool call failed with the same result repeatedly. Change the approach or explain the blocker. One further identical retry is available before this turn stops.
 turn-repeated-failure-exhausted = The recovery retry failed with the same result, so this turn has stopped. Completed tool results have been preserved. You can retry in a new turn.
 turn-repeated-failure-retry-skipped = Skipped an additional identical call in this recovery batch. Only one recovery retry is available.
+
+cli-update-source-only = This fork has no verified binary update channel. Update a checkout of https://github.com/kckylechen1/zeroclaw and run ./install.sh --source with your existing preset/features. Upstream releases cannot update this fork.
