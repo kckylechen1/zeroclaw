@@ -24,6 +24,9 @@ struct Entry {
     conversation: String,
     subject: String,
     request: String,
+    /// Present only for an explicit steer receipt. It shares this bounded
+    /// process-epoch journal but never owns execution or replay events.
+    parent_request: Option<String>,
     turn: String,
     content: String,
     attachments: Vec<String>,
@@ -150,6 +153,11 @@ fn ack(store: &Store, request: &str, turn: Option<&str>, status: &str) -> Value 
         "request_id":request, "turn_id":turn, "status":status})
 }
 
+fn steer_ack(store: &Store, request: &str, parent: &str, turn: &str, status: &str) -> Value {
+    json!({"type":"turn_steer_ack", "version":VERSION, "epoch":store.epoch,
+        "request_id":request, "parent_request_id":parent, "turn_id":turn, "status":status})
+}
+
 /// Unknown operations are parsed/refused before taking any admission action.
 /// A negotiated socket cannot fall through to legacy message/cancel semantics.
 pub(super) fn handle(
@@ -157,6 +165,7 @@ pub(super) fn handle(
     conversation: &Arc<Conversation<WsSession>>,
     scope: &WsTurnScope,
     negotiated: &mut bool,
+    steering_negotiated: &mut bool,
     text: &str,
 ) -> (Option<Value>, Option<TurnClaim>) {
     let parsed = match serde_json::from_str::<Value>(text) {
@@ -177,13 +186,24 @@ pub(super) fn handle(
         return (Some(error("UNSUPPORTED_VERSION")), None);
     }
     let operation = parsed["op"].as_str().unwrap_or("");
-    if !matches!(operation, "negotiate" | "message" | "resume" | "cancel") {
+    if !matches!(
+        operation,
+        "negotiate" | "message" | "resume" | "cancel" | "steer"
+    ) {
         return (Some(error("UNKNOWN_OPERATION")), None);
     }
     // Errors past this point name the operation so a client can tell an
     // admission failure (its turn will never start) from a failed control.
     let error_op = |code: &str| -> Value {
-        json!({"type":"turn_error", "version":VERSION, "op":operation, "code":code})
+        let mut reply =
+            json!({"type":"turn_error", "version":VERSION, "op":operation, "code":code});
+        if operation == "steer" {
+            reply["request_id"] = parsed["request_id"].clone();
+            reply["parent_request_id"] = parsed["parent_request_id"].clone();
+            reply["turn_id"] = parsed["turn_id"].clone();
+            reply["epoch"] = parsed["epoch"].clone();
+        }
+        reply
     };
     let alias = conversation
         .key()
@@ -197,7 +217,7 @@ pub(super) fn handle(
     // "unsupported" wholesale.
     let permission = match operation {
         "cancel" => "cancel",
-        "message" => device::frame_operation(&json!({
+        "message" | "steer" => device::frame_operation(&json!({
             "type": "message",
             "attachments": parsed.get("attachments"),
         })),
@@ -214,6 +234,11 @@ pub(super) fn handle(
     let store = &state.ws_conversations.turn_control;
     if operation == "negotiate" {
         *negotiated = true;
+        *steering_negotiated = parsed["capabilities"]
+            .as_array()
+            .is_some_and(|capabilities| {
+                capabilities.iter().any(|capability| capability == "steer")
+            });
         ::zeroclaw_log::record!(
             DEBUG,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Connect)
@@ -233,13 +258,17 @@ pub(super) fn handle(
             "limits":{"requests_per_epoch":MAX_REQUESTS,"content_bytes":MAX_CONTENT,
                 "replay_bytes":MAX_REPLAY_BYTES,"replay_events":MAX_EVENTS,
                 "write_timeout_ms":WRITE_TIMEOUT.as_millis()},
-            "recovery":"process_epoch", "busy":"reject"}),
+            "recovery":"process_epoch", "busy":"reject",
+            "capabilities": if *steering_negotiated { vec!["steer"] } else { Vec::<&str>::new() }}),
             ),
             None,
         );
     }
     if !*negotiated {
         return (Some(error_op("NEGOTIATION_REQUIRED")), None);
+    }
+    if operation == "steer" && !*steering_negotiated {
+        return (Some(error_op("STEERING_NOT_NEGOTIATED")), None);
     }
     if parsed["epoch"].as_str() != Some(store.epoch.as_str()) {
         return (Some(error_op("EPOCH_MISMATCH")), None);
@@ -251,6 +280,22 @@ pub(super) fn handle(
         return (Some(error_op("INVALID_REQUEST_ID")), None);
     };
     let receipt_key = key(conversation.key(), subject, &store.epoch, request);
+    let steer_target = if operation == "steer" {
+        let valid_id = |field: &str| {
+            parsed[field]
+                .as_str()
+                .filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
+        };
+        let Some(parent) = valid_id("parent_request_id") else {
+            return (Some(error_op("INVALID_PARENT_REQUEST_ID")), None);
+        };
+        let Some(turn) = valid_id("turn_id") else {
+            return (Some(error_op("INVALID_TURN_ID")), None);
+        };
+        Some((parent, turn))
+    } else {
+        None
+    };
     let mut entries = store.entries.lock();
     if operation == "resume" {
         let Some(after) = parsed["after_seq"].as_u64() else {
@@ -272,7 +317,9 @@ pub(super) fn handle(
         return (
             Some(match entries.get(&receipt_key) {
                 None => ack(store, request, None, "unknown"),
-                Some(entry) if entry.redacted => ack(store, request, None, "unknown"),
+                Some(entry) if entry.redacted || entry.parent_request.is_some() => {
+                    ack(store, request, None, "unknown")
+                }
                 Some(entry) if after > entry.sequence => error_op("INVALID_SEQUENCE"),
                 Some(entry) => {
                     let mut events: Vec<_> = entry
@@ -303,7 +350,7 @@ pub(super) fn handle(
         };
         let status = match entries.get(&receipt_key) {
             None => "unknown",
-            Some(entry) if entry.redacted => "unknown",
+            Some(entry) if entry.redacted || entry.parent_request.is_some() => "unknown",
             Some(entry) if entry.turn != target => "stale",
             Some(_) => conversation.cancel_turn(target),
         };
@@ -369,23 +416,43 @@ pub(super) fn handle(
             return (Some(error_op("INVALID_ATTACHMENTS")), None);
         }
     };
-    if content.is_empty() && attachments.is_empty() {
+    if (content.is_empty() || (operation == "steer" && content.trim().is_empty()))
+        && attachments.is_empty()
+    {
         log_refusal(scope, alias, request, "INVALID_CONTENT", 0);
         return (Some(error_op("INVALID_CONTENT")), None);
     }
     // Unsupported input fields must not silently acquire source/attachment authority.
     if parsed.as_object().is_none_or(|fields| {
         fields.keys().any(|field| {
-            !matches!(
+            !(matches!(
                 field.as_str(),
                 "type" | "version" | "op" | "epoch" | "request_id" | "content" | "attachments"
-            )
+            ) || operation == "steer"
+                && matches!(field.as_str(), "parent_request_id" | "turn_id"))
         })
     }) {
         log_refusal(scope, alias, request, "UNSUPPORTED_FIELD", 0);
         return (Some(error_op("UNSUPPORTED_FIELD")), None);
     }
     if let Some(entry) = entries.get(&receipt_key) {
+        if let Some((parent, target)) = steer_target {
+            let status = if entry.redacted {
+                "unknown"
+            } else if entry.parent_request.as_deref() == Some(parent)
+                && entry.turn == target
+                && entry.content == content
+                && entry.attachments == attachments
+            {
+                "duplicate"
+            } else {
+                "conflict"
+            };
+            return (
+                Some(steer_ack(store, request, parent, target, status)),
+                None,
+            );
+        }
         if entry.redacted {
             log_admission(
                 scope,
@@ -398,7 +465,10 @@ pub(super) fn handle(
             );
             return (Some(ack(store, request, None, "unknown")), None);
         }
-        let status = if entry.content == content && entry.attachments == attachments {
+        let status = if entry.parent_request.is_none()
+            && entry.content == content
+            && entry.attachments == attachments
+        {
             "duplicate"
         } else {
             "conflict"
@@ -419,6 +489,22 @@ pub(super) fn handle(
     if entries.len() >= MAX_REQUESTS {
         log_refusal(scope, alias, request, "REQUEST_CAPACITY", 0);
         return (Some(error_op("REQUEST_CAPACITY")), None);
+    }
+    if let Some((parent, target)) = steer_target {
+        let parent_key = key(conversation.key(), subject, &store.epoch, parent);
+        let status = match entries.get(&parent_key) {
+            None => Some("unknown"),
+            Some(entry) if entry.redacted || entry.parent_request.is_some() => Some("unknown"),
+            Some(entry) if entry.turn != target => Some("stale"),
+            Some(entry) if entry.terminal.is_some() => Some("terminal"),
+            Some(_) => None,
+        };
+        if let Some(status) = status {
+            return (
+                Some(steer_ack(store, request, parent, target, status)),
+                None,
+            );
+        }
     }
     // Resolve #491 scoped handles exactly as the legacy message path does:
     // the attachments store owns materialization; authorization is consulted
@@ -480,6 +566,51 @@ pub(super) fn handle(
             return (Some(error_op("UNAUTHORIZED_ATTACHMENTS")), None);
         }
     }
+    if let Some((parent, target)) = steer_target {
+        // Materialization can take time: recheck live authorization before
+        // handing input to the existing bounded Conversation queue.
+        if !device::permitted(state, scope, alias, permission)
+            || !question_answer_authorized(state, scope)
+        {
+            return (Some(error_op("BRIDGE_OPERATION_DENIED")), None);
+        }
+        let status = conversation.steer_turn(target, input);
+        if status == "accepted" {
+            entries.insert(
+                receipt_key,
+                Entry {
+                    redacted: false,
+                    conversation: conversation.key().to_string(),
+                    subject: subject.to_string(),
+                    request: request.to_string(),
+                    parent_request: Some(parent.to_string()),
+                    turn: target.to_string(),
+                    content: content.to_string(),
+                    attachments: attachments.clone(),
+                    sequence: 0,
+                    events: Vec::new(),
+                    bytes: 0,
+                    gap: false,
+                    terminal: None,
+                },
+            );
+        }
+        log_admission(
+            scope,
+            alias,
+            request,
+            status,
+            content.len(),
+            attachments.len(),
+            Some(target),
+        );
+        // Accepted means buffered for this turn, never "applied". Cancellation,
+        // budget exhaustion or terminal settlement can win before consumption.
+        return (
+            Some(steer_ack(store, request, parent, target, status)),
+            None,
+        );
+    }
     let Some(mut claim) = conversation.start_if_idle(input) else {
         log_admission(
             scope,
@@ -540,6 +671,7 @@ pub(super) fn handle(
             conversation: conversation.key().to_string(),
             subject: subject.to_string(),
             request: request.to_string(),
+            parent_request: None,
             turn: turn.clone(),
             content: content.to_string(),
             attachments: attachments.clone(),
@@ -592,6 +724,7 @@ impl Store {
                 conversation: String::new(),
                 subject: String::new(),
                 request: String::new(),
+                parent_request: None,
                 turn: String::new(),
                 content: String::new(),
                 attachments: Vec::new(),

@@ -231,6 +231,33 @@ impl<A> Conversation<A> {
         }
     }
 
+    /// Explicit steering can address only the observed live turn. Check and
+    /// reserve under the same lock as start/finish/cancel, so an old control
+    /// can never be delivered to a successor turn.
+    pub(crate) fn steer_turn(&self, target: &str, content: String) -> &'static str {
+        let turn = self.turn.lock();
+        let Some(active) = turn.as_ref() else {
+            return "no_active";
+        };
+        if active.id != target {
+            return "stale";
+        }
+        if active.cancel.is_cancelled() {
+            return "cancelling";
+        }
+        match active.steering.try_reserve() {
+            Ok(permit) => {
+                // A mid-turn correction cannot inherit the initial owner's
+                // evidence grant, including when delivered from another socket.
+                active.correction_invalidated.store(true, Ordering::Release);
+                permit.send(content);
+                "accepted"
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => "full",
+            Err(mpsc::error::TrySendError::Closed(_)) => "closed",
+        }
+    }
+
     fn start_locked(&self, turn: &mut Option<ActiveTurn>, content: String) -> Submitted {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let turn_id = uuid::Uuid::new_v4().to_string();
@@ -630,6 +657,63 @@ mod tests {
         assert!(!old.cancel.is_cancelled());
         conv.finish_turn(new.generation);
         assert!(!conv.cancel_current());
+    }
+
+    #[tokio::test]
+    async fn explicit_steering_is_scoped_bounded_and_cancel_dominates() {
+        let hub = Arc::new(ConversationHub::<()>::default());
+        let (subscription, _) = attach(&hub, "gw_steering").await;
+        let conversation = &subscription.conversation;
+        let mut old = conversation.start_if_idle("first".into()).unwrap();
+        let evidence = conversation
+            .correction_invalidation(old.generation)
+            .unwrap();
+        assert_eq!(
+            conversation.steer_turn("wrong-turn", "wrong".into()),
+            "stale"
+        );
+        assert!(!evidence.load(Ordering::Acquire));
+        assert_eq!(
+            conversation.steer_turn(&old.turn_id, "accepted".into()),
+            "accepted"
+        );
+        assert!(
+            evidence.load(Ordering::Acquire),
+            "steering must revoke the initial ingress evidence"
+        );
+        assert_eq!(old.steering.try_recv().unwrap(), "accepted");
+        for _ in 0..STEERING_BUFFER {
+            assert_eq!(
+                conversation.steer_turn(&old.turn_id, "bounded".into()),
+                "accepted"
+            );
+        }
+        assert_eq!(
+            conversation.steer_turn(&old.turn_id, "overflow".into()),
+            "full"
+        );
+        assert_eq!(conversation.cancel_turn(&old.turn_id), "requested");
+        assert_eq!(
+            conversation.steer_turn(&old.turn_id, "after cancel".into()),
+            "cancelling"
+        );
+        conversation.finish_turn(old.generation);
+        let mut next = conversation.start_if_idle("next".into()).unwrap();
+        assert_eq!(
+            conversation.steer_turn(&old.turn_id, "late".into()),
+            "stale"
+        );
+        assert!(next.steering.try_recv().is_err());
+        next.steering.close();
+        assert_eq!(
+            conversation.steer_turn(&next.turn_id, "closed".into()),
+            "closed"
+        );
+        conversation.finish_turn(next.generation);
+        assert_eq!(
+            conversation.steer_turn(&next.turn_id, "terminal".into()),
+            "no_active"
+        );
     }
 
     #[tokio::test]

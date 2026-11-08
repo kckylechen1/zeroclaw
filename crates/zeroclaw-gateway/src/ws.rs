@@ -604,6 +604,7 @@ async fn handle_socket(
     let mut broadcast_rx = state.event_tx.subscribe();
     let mut next_text = first_msg_fallback;
     let mut turn_negotiated = false;
+    let mut steering_negotiated = false;
 
     loop {
         let text = match next_text.take() {
@@ -731,6 +732,7 @@ async fn handle_socket(
                 &subscription.conversation,
                 &scope,
                 &mut turn_negotiated,
+                &mut steering_negotiated,
                 &text,
             )
         } else {
@@ -1500,8 +1502,8 @@ fn start_ws_turns(
     zeroclaw_spawn::spawn!(turns);
 }
 
-/// Run a claimed turn to completion, then any messages that arrived as
-/// steering too late for it to read, as one follow-up turn.
+/// Run a claimed turn to completion. Only legacy admissions may turn unread
+/// steering into a follow-up; S2 steering remains bound to its admitted turn.
 async fn run_ws_turns(
     state: AppState,
     conversation: Arc<Conversation<WsSession>>,
@@ -1524,6 +1526,16 @@ async fn run_ws_turns(
         surface,
     }) = next.take()
     {
+        // Snapshot the admitted contract before any awaits or settlement.
+        // Check the scoped receipt AND turn, never a caller-chosen id prefix.
+        // A terminal S2 turn cannot promote unread steering to new work, even
+        // on provider error, budget exhaustion, or failed admission rechecks.
+        let scoped_steering = request_id.as_deref().is_some_and(|request| {
+            state
+                .ws_conversations
+                .turn_control
+                .owns_request_for_turn(request, &turn_id)
+        });
         scope.surface = surface;
         let mut intake_started = intake.is_none();
         let mut allow_resume = false;
@@ -1612,7 +1624,8 @@ async fn run_ws_turns(
             &turn_id,
             outcome,
         );
-        if !late.is_empty()
+        if !scoped_steering
+            && !late.is_empty()
             && let Submitted::Start(mut claim) = conversation.submit(late.join("\n\n"))
         {
             claim.surface = scope.surface;

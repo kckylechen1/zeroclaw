@@ -235,6 +235,7 @@ export interface WsMessage {
     // `turn_event.event` and `turn_replay.events[]`.
     | "turn_ready"
     | "turn_ack"
+    | "turn_steer_ack"
     | "turn_event"
     | "turn_replay"
     | "turn_cancel_ack"
@@ -278,6 +279,10 @@ export interface WsMessage {
   // S2 turn-control transport fields (#549).
   /** Gateway process epoch; changes when the gateway restarts. */
   epoch?: string;
+  /** Explicit opt-in operations enabled on this attachment. */
+  capabilities?: string[];
+  /** Original admission targeted by an explicit steering request. */
+  parent_request_id?: string;
   /** The failing operation on `turn_error` (negotiate | message | cancel | resume). */
   op?: string;
   /** Negotiated bounds on `turn_ready`: the server's replay-cache size. */

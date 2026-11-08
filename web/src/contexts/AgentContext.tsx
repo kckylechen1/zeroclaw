@@ -69,6 +69,9 @@ const HOLE_GRACE_MS = 3_000;
 interface AgentContextValue {
   messages: ChatMessage[];
   sendMessage: (content: string, attachments?: string[]) => void;
+  steerMessage: (content: string, attachments?: string[]) => boolean;
+  canSteer: boolean;
+  steeringPending: boolean;
   connected: boolean;
   error: string | null;
   typing: boolean;
@@ -159,6 +162,12 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   const [contextInputTokens, setContextInputTokens] = useState<number | null>(null);
   // S2 (#549): between a scoped Stop being requested and its terminal confirm.
   const [stopRequested, setStopRequested] = useState(false);
+  const [steeringAvailable, setSteeringAvailable] = useState(false);
+  const [steeringPending, setSteeringPending] = useState(false);
+  const pendingSteerRef = useRef<{
+    requestId: string; parentRequestId: string; turnId: string; epoch: string;
+    timer: ReturnType<typeof setTimeout> | null;
+  } | null>(null);
 
   const wsRef = useRef<WebSocketClient | null>(null);
   const pendingContentRef = useRef('');
@@ -263,14 +272,25 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     ]);
   }, []);
 
+  const settleSteering = useCallback((notice?: string) => {
+    const pending = pendingSteerRef.current;
+    if (!pending) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    pendingSteerRef.current = null;
+    setSteeringPending(false);
+    if (notice) addNotice(notice);
+  }, [addNotice]);
+
   const finalizeActiveTurn = useCallback(() => {
     if (activeTurnRef.current?.holeTimer) {
       clearTimeout(activeTurnRef.current.holeTimer);
     }
     activeTurnRef.current = null;
+    setSteeringAvailable(false);
+    settleSteering(t('agent.steer_unknown'));
     setStopRequested(false);
     setTyping(false);
-  }, []);
+  }, [settleSteering]);
 
   /** Resolve (without waiting) any model-switch waiter parked on this turn. */
   const releaseTerminalWaiter = useCallback((turnId: string) => {
@@ -363,6 +383,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     const offerTurnEvent = (active: ActiveTurn, wrapper: WsMessage) => {
       if (wrapper.event?.type === 'turn_terminal') {
         active.terminalSeen = true;
+        setSteeringAvailable(false);
       }
       if (typeof wrapper.seq !== 'number') {
         // Unsequenced (legacy) frame: no ordering contract to honour.
@@ -375,6 +396,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     const bindTurn = (active: ActiveTurn, turnId: string | null | undefined) => {
       if (active.turnId !== null || typeof turnId !== 'string') return;
       active.turnId = turnId;
+      setSteeringAvailable(wsRef.current?.canSteer === true && !active.cancelRequested);
       if (active.cancelRequested) {
         wsRef.current?.cancelTurn(active.requestId, turnId);
       }
@@ -402,6 +424,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         const previous = lastEpochRef.current;
         lastEpochRef.current = epoch;
         const active = activeTurnRef.current;
+        setSteeringAvailable(wsRef.current?.canSteer === true && !!active?.turnId && !active.cancelRequested && !active.terminalSeen);
         // The transport calls us before flushing unsent messages. A request
         // queued on this attachment has no outcome in the previous epoch.
         if (active && wsRef.current?.isMessageQueued(active.requestId)) break;
@@ -416,6 +439,19 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
           }
           finalizeActiveTurn();
         }
+        break;
+      }
+
+      case 'turn_steer_ack': {
+        const pending = pendingSteerRef.current;
+        const active = activeTurnRef.current;
+        if (!pending || !active || active.requestId !== pending.parentRequestId
+          || active.turnId !== pending.turnId || active.terminalSeen
+          || msg.request_id !== pending.requestId || msg.parent_request_id !== pending.parentRequestId
+          || msg.turn_id !== pending.turnId || msg.epoch !== pending.epoch) break;
+        settleSteering(msg.status === 'accepted' || msg.status === 'duplicate'
+          ? t('agent.steer_accepted')
+          : t('agent.steer_refused').replace('{status}', msg.status ?? 'unknown'));
         break;
       }
 
@@ -516,6 +552,14 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       }
 
       case 'turn_error': {
+        if (msg.op === 'steer') {
+          const pending = pendingSteerRef.current;
+          if (pending && msg.request_id === pending.requestId && msg.epoch === pending.epoch
+            && msg.parent_request_id === pending.parentRequestId && msg.turn_id === pending.turnId) {
+            settleSteering(t('agent.steer_refused').replace('{status}', msg.code ?? 'UNKNOWN'));
+          }
+          break;
+        }
         // The error names its operation: an admission failure (`op: message`)
         // means our turn will never start and must settle now; a failed
         // cancel/resume control leaves any running turn to its own frames.
@@ -775,7 +819,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         setPendingApproval(null);
         break;
     }
-  }, [addNotice, finalizeActiveTurn, releaseTerminalWaiter]);
+  }, [addNotice, finalizeActiveTurn, releaseTerminalWaiter, settleSteering]);
 
   // Wire up a WebSocketClient instance with version-guarded callbacks.
   const attachSocketCallbacks = useCallback((ws: WebSocketClient) => {
@@ -807,6 +851,8 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setPendingApproval(null);
       if (version !== wsVersionRef.current) return;
       setConnected(false);
+      setSteeringAvailable(false);
+      settleSteering(t('agent.steer_unknown'));
 
       if (pendingModelSwitchRef.current) {
         // We intentionally closed the old socket; non-normal codes mean the reconnect failed.
@@ -850,7 +896,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       if (version !== wsVersionRef.current) return;
       handleWsMessage(msg);
     };
-  }, [handleWsMessage, addNotice, finalizeActiveTurn]);
+  }, [handleWsMessage, addNotice, finalizeActiveTurn, settleSteering]);
 
   // WebSocket bound to the configured agent. Re-keys (via the outer
   // <AgentProvider key={alias}>) when the alias changes.
@@ -861,6 +907,9 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     wsRef.current = ws;
 
     return () => {
+      const pending = pendingSteerRef.current;
+      if (pending?.timer) clearTimeout(pending.timer);
+      pendingSteerRef.current = null;
       ws.disconnect();
     };
   }, [attachSocketCallbacks, agentAlias]);
@@ -934,6 +983,9 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
 
   const sendMessage = useCallback((content: string, attachments?: string[]) => {
     if (!wsRef.current?.connected) return;
+    // Explicit steer is the only busy-turn input path; never replace the
+    // active request's event/cancel correlation with an ordinary message.
+    if (activeTurnRef.current) return;
     try {
       // S2 (#549): admission carries a client-minted request_id; every later
       // turn frame for this bubble correlates against it.
@@ -966,6 +1018,30 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setError(t('agent.send_error'));
     }
   }, []);
+
+  const steerMessage = useCallback((content: string, attachments?: string[]): boolean => {
+    const ws = wsRef.current;
+    const active = activeTurnRef.current;
+    if (!ws?.canSteer || !ws.epoch || !active?.turnId || active.terminalSeen
+      || active.cancelRequested || pendingSteerRef.current) return false;
+    const epoch = ws.epoch;
+    try {
+      const requestId = ws.steerTurn(active.requestId, active.turnId, epoch, content, attachments);
+      if (!requestId) return false;
+      const pending = { requestId, parentRequestId: active.requestId, turnId: active.turnId, epoch, timer: null as ReturnType<typeof setTimeout> | null };
+      pendingSteerRef.current = pending;
+      pending.timer = setTimeout(() => {
+        if (pendingSteerRef.current === pending) settleSteering(t('agent.steer_unknown'));
+      }, 5_000);
+      setSteeringPending(true);
+      localMessageMutationVersionRef.current += 1;
+      setMessages((prev) => [...prev, { id: generateUUID(), role: 'user', content, timestamp: new Date(), local: true }]);
+      return true;
+    } catch {
+      setError(t('agent.send_error'));
+      return false;
+    }
+  }, [settleSteering]);
 
   const switchModel = useCallback(async (model: string) => {
     if (modelLoading) return; // debounce
@@ -1111,6 +1187,9 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   }, []);
 
   const clearAllMessages = useCallback(() => {
+    // Retire this pane's request/control correlation before rebuilding its
+    // attachment. A late receipt or timer cannot bind to the cleared view.
+    finalizeActiveTurn();
     // Optimistically wipe the rendered transcript and any in-flight streaming
     // state. Bumping the mutation version fences off a racing hydration fetch
     // so it can't repopulate the just-cleared view.
@@ -1167,7 +1246,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         ws.connect();
       }
     })();
-  }, [agentAlias, attachSocketCallbacks]);
+  }, [agentAlias, attachSocketCallbacks, finalizeActiveTurn]);
 
   const addLocalMessage = useCallback((content: string) => {
     localMessageMutationVersionRef.current += 1;
@@ -1199,6 +1278,9 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   const value: AgentContextValue = {
     messages,
     sendMessage,
+    steerMessage,
+    canSteer: connected && steeringAvailable && !stopRequested,
+    steeringPending,
     connected,
     error,
     typing,
