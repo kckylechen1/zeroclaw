@@ -91,7 +91,7 @@
   - [Webhooks](./channels/webhook.md)
   - [ACP (Agent Client Protocol)](./channels/acp.md)
   - [Voice & telephony](./channels/voice.md)
-  - [Retired transports](./channels/overview.md#retired-transports)
+  - [Retired transports](./channels/retired.md)
     - [Matrix](./channels/matrix.md)
     - [Slack](./channels/slack.md)
     - [Mattermost](./channels/mattermost.md)
