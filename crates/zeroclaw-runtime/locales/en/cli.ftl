@@ -673,6 +673,7 @@ cli-security-status-warning-agent-disabled = agent is disabled
 cli-security-status-warning-sandbox-disabled = sandboxing is disabled for this agent risk profile
 cli-security-status-warning-sandbox-none = active sandbox is application-layer only
 cli-security-status-warning-sandbox-fallback = requested sandbox backend `{$requested}` fell back to `{$active}`
+cli-security-sandbox-backend-unavailable = Requested sandbox backend `{$backend}` is unavailable; command execution is blocked.
 cli-security-status-warning-workspace-not-restricted = workspace-only filesystem policy is disabled
 cli-security-status-warning-shell-env-passthrough = {$count} shell environment variable(s) are passed through
 cli-security-status-warning-secrets-unencrypted = config secret encryption is disabled
