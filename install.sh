@@ -6,7 +6,7 @@ set -eu
 # All feature lists and version info read from Cargo.toml — nothing hardcoded.
 # POSIX sh — no bash required. Works on Alpine, Debian, macOS, everywhere.
 
-REPO_URL="https://github.com/zeroclaw-labs/zeroclaw.git"
+REPO_URL="https://github.com/kckylechen1/zeroclaw.git"
 
 # ── Output helpers (terminal-aware) ──────────────────────────────
 
@@ -182,149 +182,18 @@ shell_export_syntax() {
   esac
 }
 
-# ── Platform / target triple detection ───────────────────────────
-
-detect_libc() {
-  if [ -e /lib/ld-musl-*.so.1 ] 2>/dev/null || \
-     ldd --version 2>&1 | grep -qi musl || \
-     { [ -r /etc/os-release ] && grep -qiE 'alpine|postmarket' /etc/os-release; }; then
-    echo "musl"
-  else
-    echo "gnu"
-  fi
-}
-
-detect_target_triple() {
-  local os arch libc
-  os=$(uname -s)
-  arch=$(uname -m)
-
-  case "$os" in
-  Darwin)
-    # Apple Silicon reports arm64; Intel reports x86_64. A Rosetta-translated
-    # shell on Apple Silicon also reports x86_64 from `uname -m`, so consult
-    # `sysctl hw.optional.arm64` to recover the true CPU. Without this an Intel
-    # Mac (or an M-series Mac run under Rosetta) is handed the wrong-arch
-    # binary and hits "bad CPU type in executable".
-    if [ "$arch" = "arm64" ] || [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
-      echo "aarch64-apple-darwin"
-    else
-      echo "x86_64-apple-darwin"
-    fi
-    ;;
-  Linux)
-    libc=$(detect_libc)
-    case "$arch" in
-    x86_64) echo "x86_64-unknown-linux-${libc}" ;;
-    aarch64 | arm64) echo "aarch64-unknown-linux-${libc}" ;;
-    armv7l) echo "armv7-unknown-linux-gnueabihf" ;;
-    armv6l | arm*) echo "arm-unknown-linux-gnueabihf" ;;
-    *) echo "" ;;
-    esac
-    ;;
-  *) echo "" ;;
+# Verify checkout identity before any source update or toolchain bootstrap.
+# Never print the configured remote: URLs may contain credentials.
+require_fork_origin() {
+  local origin
+  origin=$(git -C "$1" remote get-url origin 2>/dev/null) ||
+    die "Cannot verify source checkout. Clone $REPO_URL into a new directory and run ./install.sh --source there."
+  case "$origin" in
+  https://github.com/kckylechen1/zeroclaw | https://github.com/kckylechen1/zeroclaw.git | \
+    git@github.com:kckylechen1/zeroclaw | git@github.com:kckylechen1/zeroclaw.git | \
+    ssh://git@github.com/kckylechen1/zeroclaw | ssh://git@github.com/kckylechen1/zeroclaw.git) ;;
+  *) die "Source origin is not this fork. Clone $REPO_URL into a new directory and run ./install.sh --source there. Existing checkout was not changed." ;;
   esac
-}
-
-# ── Pre-built binary install ──────────────────────────────────────
-
-install_prebuilt() {
-  local triple version asset_name asset_url sha256_url tmp_dir web_data_dir
-  triple=$(detect_target_triple)
-
-  if [ -z "$triple" ]; then
-    warn "No pre-built binary for this platform — falling back to source build"
-    return 1
-  fi
-
-  # Resolve latest release version via GitHub API
-  version=$(curl -fsSL "https://api.github.com/repos/zeroclaw-labs/zeroclaw/releases/latest" |
-    grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\(.*\)".*/\1/')
-
-  if [ -z "$version" ]; then
-    warn "Could not resolve latest release — falling back to source build"
-    return 1
-  fi
-
-  asset_name="zeroclaw-${triple}.tar.gz"
-  asset_url="https://github.com/zeroclaw-labs/zeroclaw/releases/download/${version}/${asset_name}"
-  sha256_url="https://github.com/zeroclaw-labs/zeroclaw/releases/download/${version}/SHA256SUMS"
-
-  echo
-  printf "%s\n" "$(bold "Installing ZeroClaw ${version} (pre-built)")"
-  info "Platform: $triple"
-  info "Source:   $asset_url"
-  info "Channels: pre-built binaries ship the lean standard distribution set; availability is target-specific."
-  info "Run 'zeroclaw channel list' to inspect this binary. The live channel surfaces (Telegram bridge, webhook ingress, Email/Discord tools) ship in every distribution."
-  echo
-
-  # Resolve platform-correct web data directory to match gateway auto-detect
-  web_data_dir=$(resolve_web_data_dir)
-
-  if [ "$DRY_RUN" = true ]; then
-    info "[dry-run] Would download $asset_url"
-    info "[dry-run] Would install to $CARGO_HOME/bin/zeroclaw"
-    info "[dry-run] Would install web dashboard to $web_data_dir"
-    return 0
-  fi
-
-  tmp_dir=$(mktemp -d)
-  trap 'rm -rf "$tmp_dir"' EXIT
-
-  # Fetch the checksum manifest first — it lists every published asset, so we
-  # can tell "no pre-built binary for this platform" (e.g. Intel macOS, which
-  # ships no release tarball) from a genuine download failure, and we never
-  # pull a tarball we couldn't verify anyway. All failure modes fall back to
-  # source rather than install unverified.
-  if ! curl -fsSL "$sha256_url" -o "$tmp_dir/SHA256SUMS" 2>/dev/null; then
-    warn "Could not fetch SHA256SUMS — falling back to source build"
-    rm -rf "$tmp_dir"
-    return 1
-  fi
-
-  expected=$(grep "$asset_name" "$tmp_dir/SHA256SUMS" | awk '{print $1}')
-  if [ -z "$expected" ]; then
-    warn "No pre-built binary published for $triple — falling back to source build"
-    rm -rf "$tmp_dir"
-    return 1
-  fi
-
-  curl -fSL --progress-bar "$asset_url" -o "$tmp_dir/$asset_name" ||
-    {
-      warn "Download failed — falling back to source build"
-      rm -rf "$tmp_dir"
-      return 1
-    }
-
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual=$(sha256sum "$tmp_dir/$asset_name" | awk '{print $1}')
-  elif command -v shasum >/dev/null 2>&1; then
-    actual=$(shasum -a 256 "$tmp_dir/$asset_name" | awk '{print $1}')
-  else
-    warn "No checksum tool available (sha256sum/shasum) — falling back to source build"
-    rm -rf "$tmp_dir"
-    return 1
-  fi
-
-  if [ "$actual" != "$expected" ]; then
-    die "Checksum mismatch — download may be corrupt. Expected: $expected  Got: $actual"
-  fi
-  info "Checksum verified"
-
-  tar -xzf "$tmp_dir/$asset_name" -C "$tmp_dir"
-  mkdir -p "$CARGO_HOME/bin"
-  install -m 755 "$tmp_dir/zeroclaw" "$CARGO_HOME/bin/zeroclaw"
-
-  # Install web dashboard assets bundled in the release tarball
-  if [ -d "$tmp_dir/web/dist" ]; then
-    mkdir -p "$web_data_dir"
-    cp -r "$tmp_dir/web/dist/." "$web_data_dir/"
-    info "Web dashboard installed to $web_data_dir"
-  fi
-
-  rm -rf "$tmp_dir"
-  trap - EXIT
-  return 0
 }
 
 # ── Usage ─────────────────────────────────────────────────────────
@@ -336,13 +205,13 @@ $(bold "ZeroClaw installer")
 Usage: $0 [options]
 
 Options:
-  --prebuilt           Download and install a pre-built binary (default when asked)
-  --source             Build from source (skips the pre-built prompt)
+  --source             Build this fork from source (default)
+  --prebuilt           Unsupported: this fork has no verified binary channel
   --preset NAME        Named feature preset: 'minimal' (kernel only, ~6.6MB) or
                        'full' (all heavyweight extras; the legacy channel-*
                        features are empty stubs, so no preset adds channels).
                        Source builds only.
-  --full               Alias for --preset full (implies --source)
+  --full               Alias for --preset full
   --minimal            Alias for --preset minimal
   --features X,Y       Select specific features — source only (comma-separated)
   --with-gateway       Force the gateway feature on (overrides preset/feature default)
@@ -359,8 +228,7 @@ Options:
   -V, --version        Show version from Cargo.toml
 
 Examples:
-  $0                                           # interactive: asks prebuilt or source
-  $0 --prebuilt                                # download pre-built binary (fast)
+  $0                                           # build this fork from source
   $0 --source                                  # always build from source
   $0 --source --minimal                        # smallest possible binary
   $0 --source --features agent-runtime,channel-discord  # custom feature set
@@ -368,7 +236,7 @@ Examples:
   $0 --full                                    # same as --preset full
   $0 --skip-quickstart                            # install only, configure later
   $0 --prefix /tmp/zc-test --skip-quickstart      # isolated test install
-  $0 --dry-run --prebuilt                      # preview without installing
+  $0 --dry-run --source                       # preview without installing
   $0 --uninstall                               # remove ZeroClaw
 
 Environment:
@@ -380,6 +248,14 @@ EOF
 # ── Uninstall ─────────────────────────────────────────────────────
 
 do_uninstall() {
+  if [ "$DRY_RUN" = true ]; then
+    info "[dry-run] Would stop and uninstall the service, then remove $CARGO_HOME/bin/zeroclaw if present"
+    info "[dry-run] Would preserve configuration/data at $PREFIX/.zeroclaw unless you confirm removal during an interactive uninstall"
+    info "[dry-run] Would remove the installer PATH block from $(detect_shell_profile)"
+    info "[dry-run] No service, binary, configuration, or shell profile was changed"
+    exit 0
+  fi
+
   echo
   printf "%s\n" "$(bold "Uninstalling ZeroClaw")"
   echo
@@ -554,8 +430,7 @@ interactive_feature_picker() {
 }
 
 # Resolve the platform data directory the gateway auto-detects for the
-# dashboard bundle. Single source of truth so the prebuilt and source
-# install paths cannot drift.
+# dashboard bundle copied by a source install.
 resolve_web_data_dir() {
   case "$(uname -s)" in
   Darwin)
@@ -676,7 +551,6 @@ UNINSTALL=false
 DRY_RUN=false
 MODIFY_PATH=true # append PATH export to the shell profile; --no-modify-path opts out
 PREFIX="$HOME"
-INSTALL_MODE="" # ""=ask, "prebuilt"=force prebuilt, "source"=force source
 PRESET=""       # ""=unset, "minimal"=alias for --minimal, "full"=default-features
 WITH_GATEWAY="" # ""=unset (preset/feature default applies), "true"/"false"=explicit toggle
 
@@ -723,8 +597,8 @@ while [ $# -gt 0 ]; do
   --dry-run) DRY_RUN=true ;;
   --no-modify-path) MODIFY_PATH=false ;;
   --skip-quickstart) SKIP_QUICKSTART=true ;;
-  --prebuilt) INSTALL_MODE="prebuilt" ;;
-  --source) INSTALL_MODE="source" ;;
+  --prebuilt) die "This fork has no verified prebuilt binary channel. Clone $REPO_URL and run ./install.sh --source." ;;
+  --source) ;;
   --uninstall) UNINSTALL=true ;;
   -h | --help)
     usage
@@ -768,68 +642,9 @@ if [ "$LIST_FEATURES" = true ]; then
   exit 0
 fi
 
-# ── Decide: pre-built or source ───────────────────────────────────
-
-# --minimal, --features, --without-gateway, or --preset full imply source.
-# Prebuilt binaries always ship with default features, so any flag that
-# changes the feature set must force a source build.
-if [ "$MINIMAL" = true ] || [ -n "$USER_FEATURES" ] ||
-  [ "$WITH_GATEWAY" = "false" ] || [ "$PRESET" = "full" ]; then
-  INSTALL_MODE="source"
-fi
-
-if [ "$INSTALL_MODE" = "" ]; then
-  triple=$(detect_target_triple)
-  if [ -n "$triple" ]; then
-    if [ -t 0 ]; then
-      echo
-      printf "  %s\n" "$(bold "How would you like to install ZeroClaw?")"
-      printf "  [P] Pre-built binary  — fast, no Rust required  %s\n" "$(bold "(default)")"
-      printf "  [s] Build from source — custom features, latest code\n"
-      printf "\n  Choice [P/s]: "
-      read -r install_choice
-      case "$install_choice" in
-      [Ss]*) INSTALL_MODE="source" ;;
-      *) INSTALL_MODE="prebuilt" ;;
-      esac
-    else
-      # Non-interactive (curl | bash): default to pre-built silently
-      INSTALL_MODE="prebuilt"
-    fi
-  else
-    INSTALL_MODE="source"
-  fi
-fi
-
-if [ "$INSTALL_MODE" = "prebuilt" ]; then
-  if install_prebuilt; then
-    PREBUILT_OK=true
-  else
-    warn "Pre-built install failed — continuing with source build"
-    INSTALL_MODE="source"
-    PREBUILT_OK=false
-  fi
-fi
-
-[ "${PREBUILT_OK:-false}" = true ] && [ "$DRY_RUN" != true ] && {
-  BIN="$CARGO_HOME/bin/zeroclaw"
-  if [ -f "$BIN" ]; then
-    NEW_VERSION=$("$BIN" --version 2>/dev/null | awk '{print $NF}' || echo "?")
-    SIZE=$(du -h "$BIN" | awk '{print $1}')
-    echo
-    info "Installed: $BIN (v$NEW_VERSION, $SIZE)"
-  fi
-}
-
 # ── Locate source ─────────────────────────────────────────────────
 
-[ "${PREBUILT_OK:-false}" = true ] && {
-  # Jump past the source build to PATH + quickstart
-  SOURCE_SKIPPED=true
-}
-
-if [ "${SOURCE_SKIPPED:-false}" != true ]; then
-
+{
   echo
   printf "%s\n" "$(bold "ZeroClaw — source install")"
   if [ "$PREFIX" != "$HOME" ]; then
@@ -839,19 +654,31 @@ if [ "${SOURCE_SKIPPED:-false}" != true ]; then
 
   if [ -f "Cargo.toml" ] && grep -q "zeroclaw" "Cargo.toml" 2>/dev/null; then
     INSTALL_DIR="$(pwd)"
-    info "Building from $(pwd)"
-  elif [ -d "$INSTALL_DIR/.git" ]; then
-    info "Updating source in $INSTALL_DIR"
-    git -C "$INSTALL_DIR" pull --ff-only --quiet 2>/dev/null || {
-      warn "Fast-forward pull failed — resetting to origin/master"
-      git -C "$INSTALL_DIR" fetch origin master --quiet
-      git -C "$INSTALL_DIR" reset --hard origin/master --quiet
-    }
+    require_fork_origin "$INSTALL_DIR"
+    info "Building from $INSTALL_DIR"
+  elif [ -e "$INSTALL_DIR/.git" ]; then
+    require_fork_origin "$INSTALL_DIR"
+    if [ "$DRY_RUN" = true ]; then
+      info "[dry-run] Would fast-forward $INSTALL_DIR from this fork's origin/master"
+    else
+      info "Updating source in $INSTALL_DIR"
+      git -C "$INSTALL_DIR" pull --ff-only --quiet origin master ||
+        die "Source update could not fast-forward. Resolve local changes in $INSTALL_DIR and retry; no reset was attempted."
+    fi
     cd "$INSTALL_DIR"
   else
+    [ ! -e "$INSTALL_DIR" ] ||
+      die "Source directory exists but is not a verified checkout: $INSTALL_DIR. Choose an empty ZEROCLAW_INSTALL_DIR."
+    if [ "$DRY_RUN" = true ]; then
+      info "[dry-run] Would clone $REPO_URL into $INSTALL_DIR"
+      info "[dry-run] Would install from source with the requested features after reading that checkout's Cargo.toml"
+      info "[dry-run] No checkout, toolchain, binary, or profile was changed"
+      exit 0
+    fi
     info "Cloning into $INSTALL_DIR"
     mkdir -p "$(dirname "$INSTALL_DIR")"
     git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+    require_fork_origin "$INSTALL_DIR"
     cd "$INSTALL_DIR"
   fi
 
@@ -941,6 +768,13 @@ See all available features:
   # source of truth the release workflow consumes, and build with
   # --no-default-features against it so the advertised set is exact.
   if [ "$PRESET" = "full" ]; then
+    if [ "$DRY_RUN" = true ]; then
+      info "[dry-run] Would resolve the full preset with: cargo generate features --selection all"
+      info "[dry-run] Would run: cargo install --path . --locked --force --no-default-features --features <resolved-full-preset-and-requested-features>"
+      info "[dry-run] Would build/install the dashboard when the resolved features enable it, then apply the requested PATH settings"
+      info "[dry-run] Feature resolution is deferred because it can compile xtask; no checkout, toolchain, binary, or profile was changed"
+      exit 0
+    fi
     preset_features=$(cargo run --quiet -p xtask --bin generate -- features --selection all 2>/dev/null || true)
     if [ -n "$preset_features" ]; then
       CARGO_FLAGS="--no-default-features"
@@ -1107,7 +941,7 @@ See all available features:
     fi
   fi
 
-fi # end source build block
+} # end source build block
 
 BIN="$CARGO_HOME/bin/zeroclaw"
 

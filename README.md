@@ -125,7 +125,18 @@ with the same preset and features as your existing installation. The legacy
 `zeroclaw update` command (including `--check`, `--force`, and `--version`)
 returns source-update instructions without accessing a release server or
 replacing the executable. This fork does not yet publish a verified binary
-update channel.
+update channel. Both bootstrap scripts now default to source builds;
+`--prebuilt` exits with source-install instructions before downloading or
+installing anything. On Windows, run `setup.bat` from the fork checkout.
+
+Source installs verify that the checkout's `origin` is this fork before any
+update or toolchain bootstrap. A cached upstream checkout is rejected and
+left in place; clone this fork into a new directory. Cached fork updates use
+`git pull --ff-only origin master` and stop on conflicts without resetting
+local work. `--dry-run` previews source installation without cloning,
+pulling, compiling, installing, or changing shell profiles.
+`--dry-run --uninstall` likewise previews removal without stopping a service or
+changing its binary, configuration, data, or shell profile.
 
 When run from a clone in an interactive terminal, `./install.sh --source` lets you pick
 apps and optional features. For an unconfigured install, it then offers CLI or
