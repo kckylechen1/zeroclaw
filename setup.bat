@@ -86,7 +86,10 @@ if errorlevel 1 (
     echo   Install Git from https://git-scm.com/download/win
     goto :error_exit
 )
-git remote get-url origin 2>nul | findstr /I /X /L /C:"%REPO%" /C:"%REPO%.git" /C:"git@github.com:kckylechen1/zeroclaw" /C:"git@github.com:kckylechen1/zeroclaw.git" /C:"ssh://git@github.com/kckylechen1/zeroclaw" /C:"ssh://git@github.com/kckylechen1/zeroclaw.git" >nul
+:: Read Git output as data: exact one-line membership must not depend on the
+:: byte-level LF/CRLF behavior of Git's stdout and FINDSTR /X. PowerShell's
+:: default string membership is case-insensitive, matching the former /I policy.
+powershell -NoProfile -NonInteractive -Command "$origin = @(git remote get-url origin 2>$null); if ($LASTEXITCODE -ne 0 -or $origin.Count -ne 1) { exit 1 }; $allowed = @('%REPO%', '%REPO%.git', 'git@github.com:kckylechen1/zeroclaw', 'git@github.com:kckylechen1/zeroclaw.git', 'ssh://git@github.com/kckylechen1/zeroclaw', 'ssh://git@github.com/kckylechen1/zeroclaw.git'); if ($allowed -notcontains $origin[0]) { exit 1 }; exit 0" >nul 2>nul
 if errorlevel 1 (
     echo   %RED%ERROR: Source origin is not this fork or could not be verified.%RESET%
     echo   Clone %REPO%.git into a new directory and run setup.bat --source there.

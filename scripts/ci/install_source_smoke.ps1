@@ -28,11 +28,11 @@ function New-Checkout {
     Add-Content -LiteralPath (Join-Path $Path 'local-marker') -Value 'uncommitted local edit'
 }
 
-function Invoke-Setup {
-    param([string] $Directory, [bool] $Success, [string[]] $Flags)
+function Invoke-Capture {
+    param([string] $FileName, [string] $Arguments, [string] $Directory)
     $start = [System.Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = $env:ComSpec
-    $start.Arguments = '/d /s /c ""' + $installer + '" ' + ($Flags -join ' ') + '"'
+    $start.FileName = $FileName
+    $start.Arguments = $Arguments
     $start.WorkingDirectory = $Directory
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
@@ -40,25 +40,67 @@ function Invoke-Setup {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $start
     try {
-        if (-not $process.Start()) { throw 'Could not start setup.bat' }
+        if (-not $process.Start()) { throw 'Could not start fixture process' }
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit(30000)) {
             $process.Kill($true)
-            throw 'setup.bat hung or attempted an interactive install'
+            throw 'Fixture process hung or attempted an interactive install'
         }
-        $output = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
-        if (($process.ExitCode -eq 0) -ne $Success) {
-            throw "Unexpected setup.bat exit $($process.ExitCode): $output"
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Stdout = $stdout.GetAwaiter().GetResult()
+            Stderr = $stderr.GetAwaiter().GetResult()
         }
-        if ((Get-Item -LiteralPath $env:ZEROCLAW_SMOKE_LOG).Length -ne 0) {
-            throw "Unexpected mutation: $(Get-Content -Raw -LiteralPath $env:ZEROCLAW_SMOKE_LOG)"
-        }
-        $script:checks++
-        return $output
     } finally {
         $process.Dispose()
     }
+}
+
+function Invoke-Setup {
+    param([string] $Directory, [bool] $Success, [string[]] $Flags)
+    $arguments = '/d /s /c ""' + $installer + '" ' + ($Flags -join ' ') + '"'
+    $result = Invoke-Capture $env:ComSpec $arguments $Directory
+    $output = $result.Stdout + $result.Stderr
+    if (($result.ExitCode -eq 0) -ne $Success) {
+        throw "Unexpected setup.bat exit $($result.ExitCode), fixture $(Split-Path $Directory -Leaf), flags $($Flags -join ' '): $output"
+    }
+    if ((Get-Item -LiteralPath $env:ZEROCLAW_SMOKE_LOG).Length -ne 0) {
+        throw "Unexpected mutation: $(Get-Content -Raw -LiteralPath $env:ZEROCLAW_SMOKE_LOG)"
+    }
+    $script:checks++
+    return $output
+}
+
+function Get-LineEnding {
+    param([string] $Text)
+    if ($Text.EndsWith("`r`n")) { return 'CRLF' }
+    if ($Text.EndsWith("`n")) { return 'LF' }
+    return 'none'
+}
+
+function Assert-FixtureOrigin {
+    param([string] $Directory, [string] $Expected)
+    # Only the two synthetic fixture origins are accepted by this diagnostic;
+    # never print an inherited/re-written URL or global credential configuration.
+    if ($Expected -notin @('https://github.com/kckylechen1/zeroclaw.git', 'https://github.com/zeroclaw-labs/zeroclaw.git')) {
+        throw 'Origin diagnostic requires a known synthetic fixture'
+    }
+    $configured = Invoke-Git @('-C', $Directory, 'config', '--local', '--get', 'remote.origin.url')
+    $native = Invoke-Capture $realGit 'remote get-url origin' $Directory
+    $wrapped = Invoke-Capture $env:ComSpec '/d /s /c "git remote get-url origin"' $Directory
+    $configuredMatches = $configured -ceq $Expected
+    $nativeMatches = $native.Stdout.TrimEnd([char[]]"`r`n") -ceq $Expected
+    $wrappedMatches = $wrapped.Stdout.TrimEnd([char[]]"`r`n") -ceq $Expected
+    Write-Output "Fixture $(Split-Path $Directory -Leaf): configured_match=$configuredMatches; native_exit=$($native.ExitCode); native_match=$nativeMatches; native_eol=$(Get-LineEnding $native.Stdout); wrapper_exit=$($wrapped.ExitCode); wrapper_match=$wrappedMatches; wrapper_eol=$(Get-LineEnding $wrapped.Stdout)"
+    if (-not $configuredMatches -or $native.ExitCode -ne 0 -or -not $nativeMatches -or $wrapped.ExitCode -ne 0 -or -not $wrappedMatches) {
+        throw 'Synthetic origin read differs before installer validation; URL values are withheld'
+    }
+    # Reproduce the old matcher independently for native Windows evidence.
+    # Its result is diagnostic; the installer still must pass every real test.
+    $legacyCommand = '/d /s /c "git remote get-url origin 2>nul | findstr /I /X /L /C:"https://github.com/kckylechen1/zeroclaw" /C:"https://github.com/kckylechen1/zeroclaw.git" /C:"git@github.com:kckylechen1/zeroclaw" /C:"git@github.com:kckylechen1/zeroclaw.git" /C:"ssh://git@github.com/kckylechen1/zeroclaw" /C:"ssh://git@github.com/kckylechen1/zeroclaw.git" >nul"'
+    $legacy = Invoke-Capture $env:ComSpec $legacyCommand $Directory
+    Write-Output "Fixture $(Split-Path $Directory -Leaf): legacy_findstr_exit=$($legacy.ExitCode)"
 }
 
 function Assert-Contains {
@@ -98,6 +140,8 @@ exit /b 97
     $upstreamHead = Invoke-Git @('-C', $upstream, 'rev-parse', 'HEAD')
     $marker = Get-Content -Raw -LiteralPath (Join-Path $upstream 'local-marker')
     $env:PATH = "$shim;$originalPath"
+    Assert-FixtureOrigin $fork 'https://github.com/kckylechen1/zeroclaw.git'
+    Assert-FixtureOrigin $upstream 'https://github.com/zeroclaw-labs/zeroclaw.git'
 
     foreach ($flags in @('--prebuilt', '--dry-run --prebuilt', '--prebuilt --source', '--source --prebuilt', '--minimal --prebuilt')) {
         $output = Invoke-Setup $outside $false ($flags -split ' ')
@@ -131,10 +175,16 @@ exit /b 97
 
     $output = Invoke-Setup $outside $false @('--dry-run')
     Assert-Contains $output 'Run this script from the fork repository root'
-    foreach ($origin in @('https://github.com/kckylechen1/zeroclaw', 'git@github.com:kckylechen1/zeroclaw.git', 'ssh://git@github.com/kckylechen1/zeroclaw.git')) {
+    foreach ($origin in @('https://github.com/kckylechen1/zeroclaw', 'git@github.com:kckylechen1/zeroclaw', 'git@github.com:kckylechen1/zeroclaw.git', 'ssh://git@github.com/kckylechen1/zeroclaw', 'ssh://git@github.com/kckylechen1/zeroclaw.git', 'HTTPS://GITHUB.COM/KCKYLECHEN1/ZEROCLAW.GIT')) {
         $null = Invoke-Git @('-C', $fork, 'remote', 'set-url', 'origin', $origin)
         $output = Invoke-Setup $fork $true @('--dry-run')
         Assert-Contains $output '[dry-run] Would run: cargo build --release --locked'
+    }
+    foreach ($origin in @('https://github.com/kckylechen1/zeroclaw.git/extra', 'https://github.com/kckylechen1/zeroclaw.git ', "https://github.com/kckylechen1/zeroclaw.git`nhttps://example.invalid/extra")) {
+        $null = Invoke-Git @('-C', $fork, 'remote', 'set-url', 'origin', $origin)
+        $output = Invoke-Setup $fork $false @('--dry-run')
+        Assert-Contains $output 'Source origin is not this fork'
+        if ($output.Contains('Checking prerequisites')) { throw 'Invalid origin reached prerequisites' }
     }
     Write-Output "Windows source installer smoke: $checks scenarios passed."
 } finally {
