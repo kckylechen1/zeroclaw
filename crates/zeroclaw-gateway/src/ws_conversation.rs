@@ -754,24 +754,26 @@ mod tests {
         };
         let revision = conversation.reset_revision();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        // Model the relay after it found the request but before it published.
-        let mut pending = conversation.pending_approvals.lock();
-        pending.insert("old-approval".into(), tx);
-        let resetting = Arc::clone(&conversation);
-        let reset = std::thread::spawn(move || resetting.reset());
-        // Cancellation proves reset has entered its turn-locked section; the
-        // held map guard prevents it from completing revocation.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !claim.cancel.is_cancelled() {
-            assert!(std::time::Instant::now() < deadline, "reset did not enter");
-            std::thread::yield_now();
-        }
-        let observed_revision = conversation.reset_revision();
-        conversation.publish(&serde_json::json!({
-            "type": "approval_request", "request_id": "old-approval",
-            "arguments_summary": "deleted private prompt"
-        }));
-        drop(pending);
+        let (reset, observed_revision) = {
+            // Model the relay after it found the request but before it published.
+            let mut pending = conversation.pending_approvals.lock();
+            pending.insert("old-approval".into(), tx);
+            let resetting = Arc::clone(&conversation);
+            let reset = std::thread::spawn(move || resetting.reset());
+            // Cancellation proves reset has entered its turn-locked section; the
+            // held map guard prevents it from completing revocation.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !claim.cancel.is_cancelled() {
+                assert!(std::time::Instant::now() < deadline, "reset did not enter");
+                std::thread::yield_now();
+            }
+            let observed_revision = conversation.reset_revision();
+            conversation.publish(&serde_json::json!({
+                "type": "approval_request", "request_id": "old-approval",
+                "arguments_summary": "deleted private prompt"
+            }));
+            (reset, observed_revision)
+        };
         reset.join().unwrap();
         assert_eq!(observed_revision, revision);
         assert_eq!(conversation.reset_revision(), revision + 1);
