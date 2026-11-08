@@ -828,6 +828,7 @@ impl Agent {
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.history_has_trim_breadcrumb = false;
+        self.image_cache.clear();
     }
 
     fn encode_response_cache_transcript(messages: &[ChatMessage]) -> String {

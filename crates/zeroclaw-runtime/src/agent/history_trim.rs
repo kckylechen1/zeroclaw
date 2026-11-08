@@ -117,11 +117,17 @@ pub(crate) fn trim_conversation_to_recent_turns(
 }
 
 fn is_turn_boundary(msg: &ChatMessage) -> bool {
-    msg.role == "user" && !msg.content.starts_with(TOOL_RESULTS_PREFIX)
+    msg.role == "user" && !msg.content.trim_start().starts_with(TOOL_RESULTS_PREFIX)
 }
 
 fn is_system(msg: &ChatMessage) -> bool {
     msg.role == "system"
+}
+
+fn has_leading_chat_breadcrumb(body: &[ChatMessage]) -> bool {
+    let crumb = breadcrumb();
+    body.first()
+        .is_some_and(|m| m.role == crumb.role && m.content == crumb.content)
 }
 
 /// Drop oldest whole turns until the history fits `budget_tokens`, always
@@ -145,11 +151,13 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, budget_tokens: usize) -> 
     let leading_system = history.iter().take_while(|m| is_system(m)).count();
     let system: Vec<ChatMessage> = history[..leading_system].to_vec();
     let body = &history[leading_system..];
+    let has_leading_breadcrumb = has_leading_chat_breadcrumb(body);
+    let synthetic_messages = usize::from(has_leading_breadcrumb);
 
     let boundaries: Vec<usize> = body
         .iter()
         .enumerate()
-        .filter(|(_, m)| is_turn_boundary(m))
+        .filter(|(i, m)| !(*i == 0 && has_leading_breadcrumb) && is_turn_boundary(m))
         .map(|(i, _)| i)
         .collect();
 
@@ -188,7 +196,7 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, budget_tokens: usize) -> 
         };
     }
 
-    let dropped_messages = start;
+    let dropped_messages = start.saturating_sub(synthetic_messages);
     let dropped_turns = boundaries.iter().filter(|&&b| b < start).count();
     let mut kept = system;
     kept.extend_from_slice(&body[start..]);
@@ -244,7 +252,13 @@ fn next_boundary_after(boundaries: &[usize], current: usize) -> usize {
 }
 
 fn count_turns(history: &[ChatMessage]) -> usize {
-    history.iter().filter(|m| is_turn_boundary(m)).count()
+    let leading_system = history.iter().take_while(|m| is_system(m)).count();
+    let body = &history[leading_system..];
+    let has_leading_breadcrumb = has_leading_chat_breadcrumb(body);
+    body.iter()
+        .enumerate()
+        .filter(|(i, m)| !(*i == 0 && has_leading_breadcrumb) && is_turn_boundary(m))
+        .count()
 }
 
 /// Front breadcrumb injected after the system messages so the model SEES that
@@ -975,5 +989,38 @@ mod tests {
         assert_eq!(h[1].role, "system");
         assert_eq!(h[2].role, breadcrumb().role);
         assert_eq!(h[2].content, breadcrumb().content);
+    }
+
+    #[test]
+    fn trim_to_recent_turns_does_not_treat_leading_breadcrumb_as_droppable_turn() {
+        let big = "x".repeat(4000);
+        let single_turn_with_crumb = vec![
+            sys("system"),
+            breadcrumb(),
+            user(&format!("only real turn {big}")),
+            asst("reply"),
+        ];
+        let r = trim_to_recent_turns(single_turn_with_crumb, 100);
+        assert!(
+            !r.trimmed,
+            "a leading trim breadcrumb plus one real turn must not pretend it dropped a turn"
+        );
+        assert_eq!(r.dropped_turns, 0);
+        assert_eq!(r.dropped_messages, 0);
+        assert_eq!(r.kept_turns, 1);
+
+        let two_turns_with_crumb = vec![
+            sys("system"),
+            breadcrumb(),
+            user(&format!("turn1 {big}")),
+            asst("a1"),
+            user("turn2 short"),
+            asst("a2"),
+        ];
+        let r2 = trim_to_recent_turns(two_turns_with_crumb, 200);
+        assert!(r2.trimmed);
+        assert_eq!(r2.dropped_turns, 1);
+        assert_eq!(r2.dropped_messages, 2);
+        assert_eq!(r2.kept_turns, 1);
     }
 }

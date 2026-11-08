@@ -15,14 +15,28 @@ pub fn image_data_uri(mime: &str, bytes: &[u8]) -> String {
     format!("data:{mime};base64,{}", STANDARD.encode(bytes))
 }
 
-/// Per-path cache for resolved local image data URIs. Keyed by absolute
-/// path; stores `(len, mtime)` for freshness checks (`(0, 0)` sentinel
-/// = immutable upload). LRU evicts by both entry count and total bytes.
+/// Default provider prompt-cache TTL window (5 minutes, matching Anthropic
+/// and OpenAI ephemeral prompt cache lifetime). While the cache is warm,
+/// the compacted tool-result cutoff stays frozen so previously sent prefix
+/// messages remain byte-for-byte identical.
+pub const DEFAULT_PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Maximum character budget for a stale tool-result payload once it falls
+/// behind the compacted prompt-cache boundary.
+pub const STALE_TOOL_RESULT_MAX_CHARS: usize = 4_096;
+
+/// Per-path cache for resolved local image data URIs and per-session
+/// prompt-cache compaction window state. Keyed by absolute path; stores
+/// `(len, mtime)` for freshness checks (`(0, 0)` sentinel = immutable upload).
+/// LRU evicts by both entry count and total bytes.
 #[derive(Debug, Default)]
 pub struct LocalImageCache {
     entries: HashMap<String, (u64, i64, String)>,
     order: std::collections::VecDeque<String>,
     bytes: usize,
+    last_prepared_at: Option<std::time::Instant>,
+    compacted_prefix_len: usize,
+    compacted_prefix_fingerprint: u64,
 }
 
 const LOCAL_IMAGE_CACHE_MAX_ENTRIES: usize = 32;
@@ -31,6 +45,64 @@ const LOCAL_IMAGE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 impl LocalImageCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Mark the current prompt-cache window expired so the next provider
+    /// preparation advances the stale tool-result compaction boundary to the
+    /// latest real user turn.
+    pub fn expire_prompt_cache_window(&mut self) {
+        self.last_prepared_at = None;
+    }
+
+    /// Clear cached image entries and reset prompt-cache compaction window
+    /// state.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+        self.reset_prompt_cache_window();
+    }
+
+    /// Reset all prompt-cache compaction window state (e.g. when session
+    /// history is cleared).
+    pub fn reset_prompt_cache_window(&mut self) {
+        self.last_prepared_at = None;
+        self.compacted_prefix_len = 0;
+        self.compacted_prefix_fingerprint = 0;
+    }
+
+    pub fn compacted_prefix_len(&self) -> usize {
+        self.compacted_prefix_len
+    }
+
+    fn resolve_compacted_prefix_len(&mut self, messages: &[ChatMessage]) -> usize {
+        let Some(latest_user_idx) = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, message)| is_real_user_turn_message(message))
+            .map(|(index, _)| index)
+        else {
+            self.reset_prompt_cache_window();
+            return 0;
+        };
+
+        let now = std::time::Instant::now();
+        let is_warm = self
+            .last_prepared_at
+            .is_some_and(|last| now.saturating_duration_since(last) < DEFAULT_PROMPT_CACHE_TTL);
+        let prefix_valid = is_warm
+            && self.compacted_prefix_len <= latest_user_idx
+            && non_system_prefix_fingerprint(messages, self.compacted_prefix_len)
+                == self.compacted_prefix_fingerprint;
+
+        if !prefix_valid {
+            self.compacted_prefix_len = latest_user_idx;
+            self.compacted_prefix_fingerprint =
+                non_system_prefix_fingerprint(messages, self.compacted_prefix_len);
+        }
+        self.last_prepared_at = Some(now);
+        self.compacted_prefix_len
     }
 
     fn get(&mut self, path: &str, len: u64, mtime: i64) -> Option<&str> {
@@ -586,13 +658,40 @@ pub(crate) fn is_prompt_tool_result_message(message: &ChatMessage) -> bool {
     message.role == "user" && message.content.trim_start().starts_with("[Tool results]")
 }
 
+fn is_real_user_turn_message(message: &ChatMessage) -> bool {
+    message.role == "user" && !is_prompt_tool_result_message(message)
+}
+
 fn is_tool_result_carrier(message: &ChatMessage) -> bool {
     message.role == "tool" || is_prompt_tool_result_message(message)
 }
 
+fn non_system_prefix_fingerprint(messages: &[ChatMessage], cutoff: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let end = cutoff.saturating_add(1).min(messages.len());
+    end.hash(&mut hasher);
+    for (idx, msg) in messages[..end].iter().enumerate() {
+        if msg.role != "system" {
+            idx.hash(&mut hasher);
+            msg.role.hash(&mut hasher);
+            msg.content.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 fn latest_tool_result_indices(messages: &[ChatMessage]) -> HashSet<usize> {
     let mut indices = HashSet::new();
-    let Some((last_index, last_message)) = messages.iter().enumerate().next_back() else {
+    // Skip trailing mid-turn system advisories (e.g. repetition or loop-detection
+    // guidance appended after a tool round) so they do not hide the just-executed
+    // tool results and strip their images before the model sees them.
+    let Some((last_index, last_message)) = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.role != "system")
+    else {
         return indices;
     };
 
@@ -602,7 +701,7 @@ fn latest_tool_result_indices(messages: &[ChatMessage]) -> HashSet<usize> {
     }
 
     if last_message.role == "tool" {
-        for (index, message) in messages.iter().enumerate().rev() {
+        for (index, message) in messages[..=last_index].iter().enumerate().rev() {
             if message.role != "tool" {
                 break;
             }
@@ -666,13 +765,106 @@ fn strip_tool_result_image_markers(message: &ChatMessage) -> ChatMessage {
     }
 }
 
+fn floor_utf8_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut pos = index;
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
+fn ceil_utf8_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut pos = index;
+    while pos < s.len() && !s.is_char_boundary(pos) {
+        pos += 1;
+    }
+    pos
+}
+
+/// Deterministically compact a stale tool-result payload for the provider
+/// request view once its turn falls behind the prompt-cache boundary, while
+/// keeping head context, tail context (including trailing HMAC receipts or
+/// closing XML tags), and idempotence (`output.len() <= max_chars`).
+pub fn compact_stale_tool_result_text(content: &str, max_chars: usize) -> String {
+    const MARKER_RESERVE: usize = 64;
+    if max_chars == 0 || content.len() <= max_chars {
+        return content.to_string();
+    }
+    let keep_budget = max_chars.saturating_sub(MARKER_RESERVE).max(max_chars / 2);
+    let head_budget = keep_budget * 2 / 3;
+    let tail_budget = keep_budget.saturating_sub(head_budget);
+    let head_end = floor_utf8_char_boundary(content, head_budget);
+    let tail_start = ceil_utf8_char_boundary(content, content.len().saturating_sub(tail_budget));
+    if head_end >= tail_start {
+        return content.to_string();
+    }
+    let truncated_chars = tail_start - head_end;
+    let compacted = format!(
+        "{}\n\n[... {} characters truncated ...]\n\n{}",
+        &content[..head_end],
+        truncated_chars,
+        &content[tail_start..]
+    );
+    if compacted.len() >= content.len() {
+        content.to_string()
+    } else {
+        compacted
+    }
+}
+
+fn compact_stale_tool_result_message(message: &ChatMessage, max_chars: usize) -> ChatMessage {
+    if max_chars == 0 || message.content.len() <= max_chars {
+        return message.clone();
+    }
+
+    if message.role == "tool"
+        && let Ok(serde_json::Value::Object(mut obj)) =
+            serde_json::from_str::<serde_json::Value>(&message.content)
+    {
+        let Some(serde_json::Value::String(inner)) = obj.get("content").cloned() else {
+            return message.clone();
+        };
+        let compacted = compact_stale_tool_result_text(&inner, max_chars);
+        if compacted == inner {
+            return message.clone();
+        }
+        obj.insert("content".to_string(), serde_json::Value::String(compacted));
+        return ChatMessage {
+            role: message.role.clone(),
+            content: serde_json::Value::Object(obj).to_string(),
+        };
+    }
+
+    let compacted = compact_stale_tool_result_text(&message.content, max_chars);
+    if compacted == message.content {
+        message.clone()
+    } else {
+        ChatMessage {
+            role: message.role.clone(),
+            content: compacted,
+        }
+    }
+}
+
 fn replay_message_without_stale_tool_images(
     index: usize,
     message: &ChatMessage,
     latest_tool_result_indices: &HashSet<usize>,
+    compacted_prefix_len: usize,
 ) -> ChatMessage {
     if is_tool_result_carrier(message) && !latest_tool_result_indices.contains(&index) {
-        strip_tool_result_image_markers(message)
+        let stripped = strip_tool_result_image_markers(message);
+        if index < compacted_prefix_len {
+            compact_stale_tool_result_message(&stripped, STALE_TOOL_RESULT_MAX_CHARS)
+        } else {
+            stripped
+        }
     } else {
         message.clone()
     }
@@ -753,6 +945,9 @@ async fn prepare_messages_inner(
     let max_bytes = max_image_size_mb.saturating_mul(1024 * 1024);
 
     let latest_tool_indices = latest_tool_result_indices(messages);
+    let compacted_prefix_len = cache
+        .as_deref_mut()
+        .map_or(0, |c| c.resolve_compacted_prefix_len(messages));
     let total_images = count_image_markers_with_latest_tool_results(messages, &latest_tool_indices);
 
     if total_images == 0 {
@@ -761,7 +956,12 @@ async fn prepare_messages_inner(
                 .iter()
                 .enumerate()
                 .map(|(index, message)| {
-                    replay_message_without_stale_tool_images(index, message, &latest_tool_indices)
+                    replay_message_without_stale_tool_images(
+                        index,
+                        message,
+                        &latest_tool_indices,
+                        compacted_prefix_len,
+                    )
                 })
                 .collect(),
             contains_images: false,
@@ -777,7 +977,6 @@ async fn prepare_messages_inner(
     // prevents conversations from sticking once the cumulative count crosses
     // the threshold, so no pre-normalization trim is needed here.
     let remote_client = build_runtime_proxy_client_with_timeouts("model_provider.ollama", 30, 10);
-    let latest_tool_indices = latest_tool_result_indices(messages);
 
     let mut normalized_messages = Vec::with_capacity(messages.len());
     let mut has_successful_images = false;
@@ -787,6 +986,7 @@ async fn prepare_messages_inner(
                 index,
                 message,
                 &latest_tool_indices,
+                compacted_prefix_len,
             ));
             continue;
         }
@@ -894,11 +1094,12 @@ async fn prepare_messages_inner(
     })
 }
 fn trim_images_by_age(messages: &[ChatMessage], max_turns: usize) -> Vec<ChatMessage> {
-    // Count user messages from the end to find the cutoff index.
+    // Count real user turns (excluding prompt-mode `[Tool results]` carriers)
+    // from the end to find the cutoff index.
     let mut user_turn_count = 0usize;
     let mut cutoff = 0usize; // messages at index < cutoff are "too old"
     for (i, m) in messages.iter().enumerate().rev() {
-        if m.role == "user" {
+        if is_real_user_turn_message(m) {
             user_turn_count += 1;
             if user_turn_count > max_turns {
                 // Everything up to and including this index is too old.
@@ -916,7 +1117,7 @@ fn trim_images_by_age(messages: &[ChatMessage], max_turns: usize) -> Vec<ChatMes
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            if i < cutoff && m.role == "user" {
+            if i < cutoff && is_real_user_turn_message(m) {
                 let (cleaned, refs) = parse_image_markers(&m.content);
                 if refs.is_empty() {
                     return m.clone();
@@ -982,7 +1183,7 @@ fn trim_old_images(messages: &[ChatMessage], max_images: usize) -> Vec<ChatMessa
         .enumerate()
         .map(|(i, m)| {
             let Some(&drop_here) = drop_counts.get(&i) else {
-                return replay_message_without_stale_tool_images(i, m, &latest_tool_indices);
+                return replay_message_without_stale_tool_images(i, m, &latest_tool_indices, 0);
             };
 
             trim_message_images(m, drop_here)

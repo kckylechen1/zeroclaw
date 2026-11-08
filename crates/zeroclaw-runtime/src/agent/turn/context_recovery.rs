@@ -86,14 +86,9 @@ pub(crate) async fn try_recover_context_overflow(
         let mut recovered_history = result.history;
         if trimmed {
             // Insert the same model-visible breadcrumb the turn-boundary path
-            // uses, after the leading system messages, so the retried provider
-            // call tells the model earlier turns were dropped (never silent to
-            // the model, not just to clients).
-            let system_count = recovered_history
-                .iter()
-                .take_while(|m| m.role == "system")
-                .count();
-            recovered_history.insert(system_count, crate::agent::history_trim::breadcrumb());
+            // uses, after the leading system messages, deduplicating when a
+            // prior trim already placed one there.
+            crate::agent::history_trim::insert_breadcrumb_deduped(&mut recovered_history);
         }
         *history = recovered_history;
         if trimmed {
@@ -351,5 +346,43 @@ mod tests {
         );
 
         zeroclaw_log::clear_broadcast_hook();
+    }
+
+    #[tokio::test]
+    async fn repeated_overflow_recovery_dedupes_breadcrumb_and_stops_at_last_real_turn() {
+        let big = "x".repeat(4000);
+        let mut history = vec![
+            ChatMessage::system("system"),
+            crate::agent::history_trim::breadcrumb(),
+            ChatMessage::user(format!("turn 1 {big}").as_str()),
+            ChatMessage::assistant(format!("reply 1 {big}").as_str()),
+            ChatMessage::user(format!("turn 2 {big}").as_str()),
+            ChatMessage::assistant("reply 2"),
+        ];
+        let err = anyhow::Error::msg("maximum context length exceeded");
+        let observer = NoopObserver;
+        let breadcrumb_text = crate::i18n::get_required_cli_string("history-trim-breadcrumb");
+
+        let first =
+            try_recover_context_overflow(&mut history, &err, 1, None, &observer, 32_000).await;
+        assert!(first, "first recovery should drop turn 1");
+        let crumb_count = history
+            .iter()
+            .filter(|m| m.role == "user" && m.content == breadcrumb_text)
+            .count();
+        assert_eq!(
+            crumb_count, 1,
+            "overflow recovery must not stack duplicate breadcrumbs"
+        );
+
+        // Now only 1 real turn ("turn 2") remains behind the breadcrumb; a second
+        // overflow recovery must return false instead of dropping and re-inserting
+        // the breadcrumb in an infinite retry loop.
+        let second =
+            try_recover_context_overflow(&mut history, &err, 1, None, &observer, 32_000).await;
+        assert!(
+            !second,
+            "overflow recovery must stop when only one real turn remains behind the breadcrumb"
+        );
     }
 }
