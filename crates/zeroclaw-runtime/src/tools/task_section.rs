@@ -153,19 +153,14 @@ impl TaskListSection {
                 );
             }
         };
-        let backend = match SqliteSessionBackend::new(&data_dir) {
-            Ok(backend) => backend,
-            Err(_) => {
-                return Ok(
-                    "## Tasks\n\nTask list unavailable (storage not reachable). Do not assume it is empty."
-                        .to_string(),
-                );
-            }
-        };
         // A query failure renders unavailable (never a fake empty list and
         // never a build error that would kill the turn); the empty list
         // carries its revision so the model can echo it without guessing.
-        let TaskList { revision, items } = match backend.task_list(&owner) {
+        // Session startup/writers own initialization. Rendering must neither
+        // acquire migration write locks nor recreate a disappeared store.
+        let TaskList { revision, items } = match SqliteSessionBackend::read_task_list(
+            &data_dir, &owner,
+        ) {
             Ok(list) => list,
             Err(_) => {
                 return Ok(
@@ -298,6 +293,21 @@ mod tests {
         // refresh_into replaces exactly that region.
         let prompt = format!("## Doc\n\n## Tasks\n\nprose\n\n{built}");
         assert_eq!(section.refresh_into(&prompt), prompt);
+    }
+
+    #[test]
+    fn missing_task_storage_is_unavailable_and_is_not_recreated_by_projection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("missing-store");
+        let resolved_dir = data_dir.clone();
+        let section = TaskListSection {
+            resolve: std::sync::Arc::new(move || Ok(("owner-a".into(), resolved_dir.clone()))),
+        };
+        let prompt = section.refresh_into("## Identity\n\nKeep this text.");
+        assert!(prompt.contains("unavailable"));
+        assert!(!prompt.contains("No committed tasks"));
+        assert!(!data_dir.exists());
+        assert!(prompt.starts_with("## Identity\n\nKeep this text."));
     }
 
     #[test]

@@ -173,11 +173,20 @@ pub(super) fn handle(
         Err(_) => return (Some(error("INVALID_JSON")), None),
     };
     if parsed["type"] != "turn_control" {
-        // Owner question/approval capabilities retain their established gate.
-        if matches!(
+        // Owner question/approval capabilities and read-only /btw side queries
+        // retain their established gate without entering the turn journal.
+        // Reject any `source` or `attachments` envelope on this legacy path so a
+        // negotiated socket can never fall through to `intake::receive`.
+        if (matches!(
             parsed["type"].as_str(),
-            Some("answer" | "approval_response")
-        ) {
+            Some("answer" | "approval_response" | "btw")
+        ) || (parsed["type"].as_str() == Some("message")
+            && parsed["content"]
+                .as_str()
+                .is_some_and(|c| super::parse_btw_command(c).is_some())))
+            && parsed.get("source").is_none()
+            && parsed.get("attachments").is_none()
+        {
             return handle_client_text(state, conversation, scope, text);
         }
         return (Some(error("UNKNOWN_OPERATION")), None);
@@ -434,6 +443,46 @@ pub(super) fn handle(
     }) {
         log_refusal(scope, alias, request, "UNSUPPORTED_FIELD", 0);
         return (Some(error_op("UNSUPPORTED_FIELD")), None);
+    }
+    if operation == "message"
+        && let Some(question) = super::parse_btw_command(content)
+    {
+        if !attachments.is_empty() {
+            log_refusal(
+                scope,
+                alias,
+                request,
+                "INVALID_ATTACHMENTS",
+                attachments.len(),
+            );
+            return (Some(error_op("INVALID_ATTACHMENTS")), None);
+        }
+        if question.is_empty()
+            || question.len() > zeroclaw_runtime::agent::side_query::MAX_SIDE_QUERY_QUESTION_BYTES
+        {
+            log_refusal(scope, alias, request, "INVALID_CONTENT", question.len());
+            return (Some(error_op("INVALID_CONTENT")), None);
+        }
+        drop(entries);
+        let Some(side_query) = conversation.side_query.clone() else {
+            return (Some(error_op("BTW_UNAVAILABLE")), None);
+        };
+        let Some(permit) = side_query.try_acquire_slot() else {
+            return (Some(error_op("BTW_BUSY")), None);
+        };
+        let active_turn = conversation.active_turn_id();
+        super::spawn_ws_btw_query(
+            state,
+            conversation,
+            side_query,
+            permit,
+            question.to_string(),
+            Some(request.to_string()),
+        );
+        return (
+            Some(ack(store, request, active_turn.as_deref(), "btw")),
+            None,
+        );
     }
     if let Some(entry) = entries.get(&receipt_key) {
         if let Some((parent, target)) = steer_target {

@@ -235,10 +235,28 @@ fn occupied_database_sidecars_and_source_aliases_are_never_overwritten() {
 
 #[test]
 fn publication_refuses_injected_sidecars_without_adopting_or_removing_them() {
+    assert_publication_refuses_injected_sidecars(false);
+}
+
+#[test]
+fn publication_under_parent_alias_preserves_injected_sidecars() {
+    assert_publication_refuses_injected_sidecars(true);
+}
+
+fn assert_publication_refuses_injected_sidecars(aliased_parent: bool) {
     for suffix in ["-wal", "-shm", "-journal", ".identity.json"] {
         let root = tempfile::TempDir::new().unwrap();
+        let parent = if aliased_parent {
+            let real = root.path().join("real");
+            std::fs::create_dir(&real).unwrap();
+            let alias = root.path().join("alias");
+            symlink(&real, &alias).unwrap();
+            alias
+        } else {
+            root.path().to_path_buf()
+        };
         let source_path = root.path().join("legacy.db");
-        let destination = root.path().join("new.db");
+        let destination = parent.join("new.db");
         restore_fixture(&source_path, KernelStoreKind::Memory);
         let before = source::census(&source_path).unwrap();
         let foreign = source::suffixed(&destination, suffix);
@@ -250,7 +268,8 @@ fn publication_refuses_injected_sidecars_without_adopting_or_removing_them() {
             "fixture-operator",
             || Ok(()),
             |published| {
-                assert_eq!(published, destination);
+                // Publication resolves parent aliases, including macOS /var.
+                assert_eq!(published, std::fs::canonicalize(&destination)?);
                 let mut file = create_private_file(&foreign)?;
                 file.write_all(b"foreign-publication-sidecar")?;
                 file.sync_all()?;
@@ -274,7 +293,7 @@ fn publication_refuses_injected_sidecars_without_adopting_or_removing_them() {
         assert!(!destination.exists());
         assert!(!source::suffixed(&destination, ".migration-marker").exists());
         assert_eq!(source::census(&source_path).unwrap(), before);
-        assert_stage_removed(root.path());
+        assert_stage_removed(&parent);
     }
 }
 

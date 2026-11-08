@@ -89,6 +89,32 @@ fn render_frame(
                     .into();
             }
         }
+        Some("btw_response") => {
+            for field in ["question", "content", "full_response"] {
+                if let Some(text) = frame[field].as_str() {
+                    frame[field] =
+                        zeroclaw_runtime::security::outbound::redact_channel_outbound_leaks(
+                            &zeroclaw_runtime::spoken::render(text),
+                            policy,
+                            zeroclaw_runtime::security::outbound::OutboundContentFormat::PlainText,
+                        )
+                        .into();
+                }
+            }
+        }
+        Some("btw_error") => {
+            for field in ["question", "message"] {
+                if let Some(text) = frame[field].as_str() {
+                    frame[field] =
+                        zeroclaw_runtime::security::outbound::redact_channel_outbound_leaks(
+                            &zeroclaw_runtime::spoken::render(text),
+                            policy,
+                            zeroclaw_runtime::security::outbound::OutboundContentFormat::PlainText,
+                        )
+                        .into();
+                }
+            }
+        }
         Some("turn_event") => render_frame(&mut frame["event"], policy),
         Some("turn_replay") => {
             if let Some(events) = frame["events"].as_array_mut() {
