@@ -7,21 +7,19 @@ async fn nested_cron_child_stays_tracked_after_its_parent_is_aborted() {
     let nested_ended = Arc::clone(&ended);
     let (started, started_rx) = tokio::sync::oneshot::channel();
     let (release, release_rx) = std::sync::mpsc::channel();
-    let parent = CRON_CHILDREN
-        .scope(children.clone(), async move {
-            spawn_owned_cron_task(async move {
-                let _nested = spawn_owned_cron_task(async move {
-                    started.send(()).unwrap();
-                    // Keep this child alive past its parent's destruction to
-                    // prove tracking is inherited, not just abort requested.
-                    let _ = release_rx.recv();
-                    tokio::task::yield_now().await;
-                    nested_ended.store(true, std::sync::atomic::Ordering::SeqCst);
-                });
-                std::future::pending::<()>().await;
-            })
+    let parent = CRON_CHILDREN.sync_scope(children.clone(), || {
+        spawn_owned_cron_task(async move {
+            let _nested = spawn_owned_cron_task(async move {
+                started.send(()).unwrap();
+                // Keep this child alive past its parent's destruction to
+                // prove tracking is inherited, not just abort requested.
+                let _ = release_rx.recv();
+                tokio::task::yield_now().await;
+                nested_ended.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            std::future::pending::<()>().await;
         })
-        .await;
+    });
     started_rx.await.unwrap();
     parent.abort();
     assert!(parent.await.unwrap_err().is_cancelled());
