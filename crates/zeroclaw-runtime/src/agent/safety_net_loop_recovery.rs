@@ -12,6 +12,8 @@ struct RecordingProvider {
     requests: Requests,
     /// Queues one steering message while serving this 1-based request.
     steering: Option<(mpsc::Sender<String>, usize)>,
+    /// Fails once with a context-overflow error on this 1-based request number.
+    fail_overflow_at: Option<usize>,
 }
 
 impl zeroclaw_api::attribution::Attributable for RecordingProvider {
@@ -56,6 +58,9 @@ impl ModelProvider for RecordingProvider {
                 .await
                 .expect("queue steering");
         }
+        if self.fail_overflow_at == Some(request_number) {
+            anyhow::bail!("HTTP 400: context_length_exceeded: maximum context length exceeded");
+        }
         zeroclaw_providers::ProviderDispatch::from_ref(&self.scripted)
             .chat(request, model, temperature)
             .await
@@ -67,6 +72,7 @@ struct OutcomeTool {
     calls: Arc<AtomicUsize>,
     recover_at: Option<usize>,
     changing_output: bool,
+    volatile_failure_telemetry: bool,
     success: bool,
     return_error: bool,
     cancel_on_attempt: Option<(tokio_util::sync::CancellationToken, usize)>,
@@ -92,8 +98,20 @@ impl Tool for OutcomeTool {
         {
             token.cancel();
         }
+        let failure_message = if self.volatile_failure_telemetry {
+            format!(
+                "[2026-11-08T03:50:0{attempt}.120Z] pid=4100{attempt} request_id=req-{attempt} \
+                 (attempt {attempt}/4) connect ECONNREFUSED 10.0.0.8:443 failed in {attempt}2ms [{attempt}2.4ms]"
+            )
+        } else if self.changing_output {
+            format!(
+                "[2026-11-08T03:50:0{attempt}.120Z] pid=4100{attempt} exit status {attempt}: missing shard-{attempt}.db"
+            )
+        } else {
+            "failed fetch".into()
+        };
         if self.return_error {
-            anyhow::bail!("failed fetch");
+            anyhow::bail!("{failure_message}");
         }
         let success =
             self.success || self.recover_at == Some(attempt) || args["url"] == "alternate";
@@ -105,7 +123,7 @@ impl Tool for OutcomeTool {
                 "same result".into()
             }
             .into(),
-            error: (!success).then(|| "failed fetch".into()),
+            error: (!success).then_some(failure_message),
         })
     }
 }
@@ -130,12 +148,23 @@ fn agent_for_with_steering(
     pacing: Option<zeroclaw_config::schema::PacingConfig>,
     steering: Option<(mpsc::Sender<String>, usize)>,
 ) -> (TestAgent, Requests) {
+    agent_for_with_options(responses, tool, pacing, steering, None)
+}
+
+fn agent_for_with_options(
+    responses: Vec<ChatResponse>,
+    tool: OutcomeTool,
+    pacing: Option<zeroclaw_config::schema::PacingConfig>,
+    steering: Option<(mpsc::Sender<String>, usize)>,
+    fail_overflow_at: Option<usize>,
+) -> (TestAgent, Requests) {
     let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut agent = build_agent(
         Box::new(RecordingProvider {
             scripted: ScriptedProvider::new(responses),
             requests: Arc::clone(&requests),
             steering,
+            fail_overflow_at,
         }),
         vec![Box::new(tool)],
     );
@@ -157,6 +186,7 @@ fn failing(calls: &Arc<AtomicUsize>) -> OutcomeTool {
         calls: Arc::clone(calls),
         recover_at: None,
         changing_output: false,
+        volatile_failure_telemetry: false,
         success: false,
         return_error: false,
         cancel_on_attempt: None,
@@ -758,6 +788,137 @@ async fn activated_aliases_share_recovery_admission_and_canonical_ignore() {
                     2
                 );
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn repeated_failures_with_volatile_telemetry_close_while_distinct_failure_reasons_continue() {
+    let correction = crate::i18n::get_required_cli_string("turn-repeated-failure-recovery");
+    let stop = crate::i18n::get_required_cli_string("turn-repeated-failure-exhausted");
+
+    for streamed in [false, true] {
+        for return_error in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut tool = failing(&calls);
+            tool.volatile_failure_telemetry = true;
+            tool.return_error = return_error;
+            let (mut agent, requests) = agent_for(script(8), tool, Some(Default::default()));
+            let (response, _) = run(&mut agent, streamed).await;
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                4,
+                "changing timestamps, PIDs, request IDs, durations, and attempt counters must still trip repeated-failure recovery"
+            );
+            let requests = requests.lock();
+            assert_eq!(requests.len(), 4);
+            assert!(
+                requests[3].iter().any(
+                    |message| message.role == "system" && message.content.contains(&correction)
+                )
+            );
+            assert!(response.contains(&stop));
+        }
+
+        for return_error in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut tool = failing(&calls);
+            tool.changing_output = true;
+            tool.return_error = return_error;
+            let mut responses = script(4);
+            responses.push(text_response("inspected four distinct shard failures"));
+            let (mut agent, requests) = agent_for(responses, tool, Some(Default::default()));
+            let (response, _) = run(&mut agent, streamed).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            assert_eq!(response, "inspected four distinct shard failures");
+            let requests = requests.lock();
+            assert_eq!(requests.len(), 5);
+            assert!(requests.iter().all(|request| {
+                request.iter().all(|message| {
+                    !message.content.contains(&correction) && !message.content.contains(&stop)
+                })
+            }));
+        }
+    }
+}
+
+#[tokio::test]
+async fn repeated_failure_warning_survives_mid_turn_reported_budget_trim_and_context_overflow_recovery()
+ {
+    let correction = crate::i18n::get_required_cli_string("turn-repeated-failure-recovery");
+    let stop = crate::i18n::get_required_cli_string("turn-repeated-failure-exhausted");
+
+    for streamed in [false, true] {
+        for overflow_recovery in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut responses = script(6);
+            if !overflow_recovery {
+                responses[2].usage = Some(zeroclaw_api::model_provider::TokenUsage {
+                    input_tokens: Some(1_000),
+                    output_tokens: Some(50),
+                    cached_input_tokens: None,
+                });
+            }
+            let (mut agent, requests) = agent_for_with_options(
+                responses,
+                failing(&calls),
+                Some(Default::default()),
+                None,
+                overflow_recovery.then_some(4),
+            );
+            if !overflow_recovery {
+                agent.config.resolved.max_context_tokens = 64;
+            }
+            agent
+                .history
+                .push(ConversationMessage::Chat(ChatMessage::user(
+                    "earlier turn 1",
+                )));
+            agent
+                .history
+                .push(ConversationMessage::Chat(ChatMessage::assistant(
+                    "earlier answer 1",
+                )));
+            agent
+                .history
+                .push(ConversationMessage::Chat(ChatMessage::user(
+                    "earlier turn 2",
+                )));
+            agent
+                .history
+                .push(ConversationMessage::Chat(ChatMessage::assistant(
+                    "earlier answer 2",
+                )));
+
+            let (response, _) = run(&mut agent, streamed).await;
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                4,
+                "mid-turn history trim or context-overflow recovery must not reset RepetitionGuard warning budget"
+            );
+            assert!(response.contains(&stop));
+
+            let requests = requests.lock();
+            assert!(
+                requests[0]
+                    .iter()
+                    .any(|message| message.content == "earlier turn 1"),
+                "older turn must be present before mid-turn trim/overflow recovery runs"
+            );
+            let final_request = requests.last().expect("final provider request recorded");
+            assert!(
+                final_request
+                    .iter()
+                    .all(|message| message.content != "earlier turn 1"),
+                "older turn should have been trimmed before the recovery retry completes"
+            );
+            assert!(
+                final_request.iter().any(
+                    |message| message.role == "system" && message.content.contains(&correction)
+                ),
+                "repeated-failure recovery prompt must remain visible in the post-trim retry request"
+            );
+            assert_eq!(requests.len(), if overflow_recovery { 5 } else { 4 });
         }
     }
 }
