@@ -77,9 +77,25 @@ pub fn scrub_credentials_value(value: serde_json::Value) -> serde_json::Value {
         serde_json::Value::Array(items) => {
             serde_json::Value::Array(items.into_iter().map(scrub_credentials_value).collect())
         }
-        serde_json::Value::String(s) => serde_json::Value::String(scrub_credentials(&s)),
+        serde_json::Value::String(s) => serde_json::Value::String(scrub_json_text(&s)),
         other => other,
     }
+}
+
+/// Structured tool outputs can include a JSON text rendering alongside their
+/// data. Scan that rendering structurally too, otherwise a composite secret
+/// hidden from the text regex can survive in the duplicated `text` field.
+/// Preserve formatting when no redaction is needed.
+fn scrub_json_text(input: &str) -> String {
+    if input.trim_start().starts_with(['{', '['])
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(input)
+    {
+        let redacted = scrub_credentials_value(value.clone());
+        if redacted != value {
+            return redacted.to_string();
+        }
+    }
+    scrub_credentials(input)
 }
 
 /// Redact a value sitting under a credential-named key. Every value — string

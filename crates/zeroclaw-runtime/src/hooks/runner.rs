@@ -238,7 +238,14 @@ impl HookRunner {
                     args = a;
                 }
                 Ok(HookResult::Cancel(reason)) => {
-                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"hook": hook_name, "reason": reason.to_string()})), "before_tool_call cancelled by hook");
+                    // The turn owns logging the cancellation body under the
+                    // tool's live I/O policy. Keep only hook identity here.
+                    ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({"hook": hook_name})),
+                        "before_tool_call cancelled by hook"
+                    );
                     return HookResult::Cancel(reason);
                 }
                 Err(_) => {
