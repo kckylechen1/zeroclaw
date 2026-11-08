@@ -8,6 +8,8 @@ use zeroclaw_config::schema::Config;
 
 const TEST_AGENT: &str = "test-agent";
 
+mod lifecycle;
+
 #[test]
 fn is_no_reply_sentinel_matches_bare_form_case_insensitively() {
     assert!(is_no_reply_sentinel("NO_REPLY"));
@@ -258,7 +260,9 @@ async fn run_job_command_success() {
     let job = test_job("echo scheduler-ok");
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(success);
     assert!(output.contains("scheduler-ok"));
     assert!(output.contains("status=exit status: 0"));
@@ -339,7 +343,9 @@ async fn run_job_command_failure() {
     let job = test_job("ls definitely_missing_file_for_scheduler_test");
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(!success);
     assert!(output.contains("definitely_missing_file_for_scheduler_test"));
     assert!(output.contains("status=exit status:"));
@@ -359,7 +365,9 @@ async fn run_job_command_times_out() {
     let security = test_security(&config);
 
     let (success, output) =
-        run_job_command_with_timeout(&config, &security, &job, Duration::from_millis(50)).await;
+        run_job_command_with_timeout(&config, &security, &job, Duration::from_millis(50))
+            .await
+            .into_result();
     assert!(!success);
     assert!(output.contains("job timed out after"));
 }
@@ -376,7 +384,9 @@ async fn run_job_command_blocks_disallowed_command() {
     let job = test_job("curl https://evil.example");
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.to_lowercase().contains("not allowed"));
@@ -395,7 +405,9 @@ async fn run_job_command_blocks_forbidden_path_argument() {
     let job = test_job(&format!("cat {outside_path}"));
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.contains("forbidden path argument"));
@@ -415,7 +427,9 @@ async fn run_job_command_blocks_forbidden_option_assignment_path_argument() {
     let job = test_job(&format!("grep --file={outside_path} root ./src"));
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.contains("forbidden path argument"));
@@ -435,7 +449,9 @@ async fn run_job_command_blocks_forbidden_short_option_attached_path_argument() 
     let job = test_job(&format!("grep -f{outside_path} root ./src"));
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.contains("forbidden path argument"));
@@ -455,7 +471,9 @@ async fn run_job_command_blocks_tilde_user_path_argument() {
     let job = test_job("cat ~root/.ssh/id_rsa");
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.contains("forbidden path argument"));
@@ -475,7 +493,9 @@ async fn run_job_command_blocks_input_redirection_path_bypass() {
     let job = test_job("cat </etc/passwd");
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.to_lowercase().contains("not allowed"));
@@ -493,7 +513,9 @@ async fn run_job_command_blocks_readonly_mode() {
     let job = test_job("echo should-not-run");
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.contains("read-only"));
@@ -511,7 +533,9 @@ async fn run_job_command_blocks_rate_limited() {
     let job = test_job("echo should-not-run");
     let security = test_security(&config);
 
-    let (success, output) = run_job_command(&config, &security, &job).await;
+    let (success, output) = run_job_command(&config, &security, &job)
+        .await
+        .into_result();
     assert!(!success);
     assert!(output.contains("blocked by security policy"));
     assert!(output.contains("rate limit exceeded"));

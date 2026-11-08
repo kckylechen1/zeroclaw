@@ -472,6 +472,9 @@ cli-memory-deleted-key = Deleted key: {$key}
 
 # ── cron (zeroclaw cron) ──
 cli-cron-none = No scheduled tasks yet.
+cron-shell-output-truncated = ...[output truncated]
+cron-shell-output-limit = Shell job stopped at its output limit; it will not be retried automatically.
+daemon-cron-shutdown-incomplete = Cron tasks did not stop before the shutdown deadline. Reload is stopped to prevent overlapping scheduled jobs; restart the daemon process.
 cli-cron-usage = Usage:
 cli-cron-jobs-header = 🕒 Scheduled jobs ({$count}):
 cli-cron-list-cmd = {"    "}cmd: {$cmd}

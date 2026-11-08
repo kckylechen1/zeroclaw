@@ -3,6 +3,7 @@ use chrono::Utc;
 use std::path::PathBuf;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
+use tokio_util::task::TaskTracker;
 use zeroclaw_config::schema::Config;
 
 use crate::tools::task_context::TaskIdentity;
@@ -11,6 +12,8 @@ mod registry;
 pub use registry::{DaemonRegistry, GatewayReloadControls};
 
 const STATUS_FLUSH_SECONDS: u64 = 5;
+const COMPONENT_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+const CRON_CHILD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonExit {
@@ -263,6 +266,9 @@ pub async fn run(
     let (reload_tx, reload_rx) = tokio::sync::watch::channel::<bool>(false);
 
     let channels_cancel = tokio_util::sync::CancellationToken::new();
+    // Retained outside the scheduler supervisor so aborting that parent cannot
+    // turn an outstanding abort request into permission to reload/clear claims.
+    let cron_children = TaskTracker::new();
     let (gateway_shutdown_tx, _) = tokio::sync::watch::channel::<bool>(false);
 
     if let Some(gateway_start) = registry.take_gateway_start() {
@@ -371,6 +377,7 @@ pub async fn run(
         let scheduler_event_tx = event_tx.clone();
         let scheduler_cancel = channels_cancel.clone();
         let scheduler_task_identities = task_identities;
+        let scheduler_children = cron_children.clone();
         handles.push(spawn_component_supervisor(
             "scheduler",
             initial_backoff,
@@ -381,12 +388,14 @@ pub async fn run(
                 let tx = scheduler_event_tx.clone();
                 let cancel = scheduler_cancel.clone();
                 let task_identities = scheduler_task_identities.clone();
+                let children = scheduler_children.clone();
                 async move {
-                    Box::pin(crate::cron::scheduler::run(
+                    Box::pin(crate::cron::scheduler::run_tracked(
                         cfg,
                         Some(tx),
                         cancel,
                         task_identities,
+                        children,
                     ))
                     .await
                 }
@@ -432,8 +441,29 @@ pub async fn run(
 
     channels_cancel.cancel();
 
-    const GRACE_WINDOW: Duration = Duration::from_millis(500);
-    let deadline = tokio::time::Instant::now() + GRACE_WINDOW;
+    stop_components(
+        handles,
+        &cron_children,
+        COMPONENT_SHUTDOWN_GRACE,
+        CRON_CHILD_SHUTDOWN_TIMEOUT,
+    )
+    .await?;
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+
+    Ok(exit)
+}
+
+async fn stop_components(
+    handles: Vec<JoinHandle<()>>,
+    cron_children: &TaskTracker,
+    grace: Duration,
+    cron_shutdown_timeout: Duration,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + grace;
     let mut remaining: Vec<JoinHandle<()>> = Vec::new();
     for mut handle in handles {
         tokio::select! {
@@ -455,12 +485,19 @@ pub async fn run(
         let _ = handle.await;
     }
 
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    unsafe {
-        libc::malloc_trim(0);
+    cron_children.close();
+    if tokio::time::timeout(cron_shutdown_timeout, cron_children.wait())
+        .await
+        .is_err()
+    {
+        // A synchronous section can defer Tokio cancellation. Do not return
+        // Reload: main's existing error propagation then prevents a new
+        // scheduler from clearing locks while old jobs can still act.
+        anyhow::bail!(crate::i18n::get_required_cli_string(
+            "daemon-cron-shutdown-incomplete"
+        ));
     }
-
-    Ok(exit)
+    Ok(())
 }
 
 pub fn state_file_path(config: &Config) -> PathBuf {
