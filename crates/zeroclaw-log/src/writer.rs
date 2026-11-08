@@ -468,6 +468,15 @@ pub fn llm_request_payload_policy() -> Option<(LlmRequestPayloadPolicy, usize)> 
     })
 }
 
+/// Snapshot of the current tool-I/O capture policy for rendering-boundary
+/// producers. An uninitialized or reloading writer returns `None`, so callers
+/// omit I/O rather than fall back to unrestricted capture. This also applies
+/// when persistence is disabled: broadcast consumers use the same policy.
+#[must_use]
+pub fn tool_io_policy() -> Option<ResolvedPolicy> {
+    current_state().map(|state| state.policy.clone())
+}
+
 /// Emit one event. Always fans out to the broadcast hook + tracing event.
 /// If persistence is enabled, hands the serialized value to the disk
 /// worker via a bounded `try_send`. The hot path performs no file I/O.

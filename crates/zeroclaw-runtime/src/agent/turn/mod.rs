@@ -22,6 +22,7 @@ pub(crate) mod results_collect;
 pub(crate) mod steering;
 pub(crate) mod stream_consume;
 pub(crate) mod stream_guard;
+pub(crate) mod tool_logging;
 pub(crate) mod tool_specs;
 pub(crate) mod vision_route;
 
