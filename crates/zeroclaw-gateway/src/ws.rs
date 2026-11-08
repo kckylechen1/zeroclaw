@@ -328,6 +328,7 @@ async fn handle_socket(
     // Resolve session ID: use provided or generate a new UUID
     let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let session_key = format!("{GW_SESSION_PREFIX}{session_id}");
+    let lifecycle = state.ws_conversations.session_lifecycle(&session_key);
     // Match the sanitized form persisted by memory backend migrations.
     let mut memory_session_id = zeroclaw_api::session_keys::sanitize_session_key(&session_id);
 
@@ -362,21 +363,22 @@ async fn handle_socket(
     let mut resumed = false;
     let mut message_count: usize = 0;
     let mut effective_name: Option<String> = None;
-    let mut stored_messages = Vec::new();
-    if let Some(ref backend) = state.session_backend {
-        let messages = backend.load(&session_key);
-        if !messages.is_empty() {
-            message_count = messages.len();
-            stored_messages = messages;
-            resumed = true;
-        }
-        if !restricted {
-            effective_name = stamp_session(
-                backend.as_ref(),
-                &session_key,
-                &agent_alias,
-                session_name.as_deref(),
-            );
+    {
+        let _lifecycle = lifecycle.lock().await;
+        if let Some(ref backend) = state.session_backend {
+            let messages = backend.load(&session_key);
+            if !messages.is_empty() {
+                message_count = messages.len();
+                resumed = true;
+            }
+            if !restricted {
+                effective_name = stamp_session(
+                    backend.as_ref(),
+                    &session_key,
+                    &agent_alias,
+                    session_name.as_deref(),
+                );
+            }
         }
     }
 
@@ -498,10 +500,6 @@ async fn handle_socket(
             .await;
         return;
     }
-    if restricted && let Some(backend) = &state.session_backend {
-        stamp_session(backend.as_ref(), &session_key, &agent_alias, None);
-    }
-
     let session_cwd = match resolve_ws_session_cwd(requested_cwd.as_deref(), &config, &agent_alias)
     {
         Ok(cwd) => cwd,
@@ -523,6 +521,26 @@ async fn handle_socket(
 
     // Every socket that opens this session with this agent shares one
     // conversation: one agent, one history, one running turn (#376).
+    // The client handshake must not hold the lifecycle guard. Re-read history
+    // under it so DELETE cannot be undone by a pre-deletion history snapshot.
+    let lifecycle_guard = lifecycle.lock().await;
+    if let Some(backend) = &state.session_backend {
+        stamp_session(
+            backend.as_ref(),
+            &session_key,
+            &agent_alias,
+            if restricted {
+                None
+            } else {
+                session_name.as_deref()
+            },
+        );
+    }
+    let stored_messages = state
+        .session_backend
+        .as_ref()
+        .map(|backend| backend.load(&session_key))
+        .unwrap_or_default();
     let conversation_key = format!("{session_key}\u{1f}{agent_alias}");
     let attached = state
         .ws_conversations
@@ -539,6 +557,7 @@ async fn handle_socket(
             )
         })
         .await;
+    drop(lifecycle_guard);
     let (mut subscription, restore_trim_event) = match attached {
         Ok(attached) => attached,
         Err(e) => {
@@ -623,6 +642,11 @@ async fn handle_socket(
                 frame = subscription.frames.recv() => {
                     match frame {
                         Ok(frame) => {
+                            let current = {
+                                let _lifecycle = lifecycle.lock().await;
+                                frame.is_current(subscription.conversation.reset_revision())
+                            };
+                            if !current { continue; }
                             if !device::permitted(&state, &scope, &agent_alias, "chat") { break; }
                             if turn_negotiated && !serde_json::from_str::<serde_json::Value>(&frame).is_ok_and(|frame| {
                                 matches!(frame["type"].as_str(), Some("approval_request" | "question" | "answer_ack" | "btw_response" | "btw_error"))
@@ -658,9 +682,14 @@ async fn handle_socket(
                         || !question_answer_authorized(&state, &scope) { break; }
                     match frame {
                         Ok(frame) => {
-                            if !serde_json::from_str::<serde_json::Value>(&frame).is_ok_and(|frame| {
-                                state.ws_conversations.turn_control.visible(subscription.conversation.key(), scope.auth_subject.as_deref(), &frame)
-                            }) { continue; }
+                            let visible = {
+                                let _lifecycle = lifecycle.lock().await;
+                                frame.is_current(subscription.conversation.reset_revision())
+                                    && serde_json::from_str::<serde_json::Value>(&frame).is_ok_and(|frame| {
+                                        state.ws_conversations.turn_control.visible(subscription.conversation.key(), scope.auth_subject.as_deref(), &frame)
+                                    })
+                            };
+                            if !visible { continue; }
                             if !turn_control::send(&mut sender, Message::Text(surface::wire(&state, scope.surface, &frame).into()), true).await { break; }
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -726,6 +755,7 @@ async fn handle_socket(
         let extension = turn_negotiated
             || serde_json::from_str::<serde_json::Value>(&text)
                 .is_ok_and(|frame| frame["type"] == "turn_control");
+        let lifecycle_guard = lifecycle.lock().await;
         let (reply, start) = if extension {
             turn_control::handle(
                 &state,
@@ -738,6 +768,7 @@ async fn handle_socket(
         } else {
             handle_client_text(&state, &subscription.conversation, &scope, &text)
         };
+        drop(lifecycle_guard);
         // Acceptance is independent of delivering its ACK. Even a failed/slow
         // writer must release the admitted claim to execution and recovery.
         let sent = match reply {
@@ -765,6 +796,12 @@ pub struct WsSession {
     agent: zeroclaw_runtime::agent::Agent,
     /// Per-agent memory for turn-end consolidation; `None` disables it.
     ws_memory: Option<Arc<dyn zeroclaw_memory::Memory>>,
+}
+
+impl WsSession {
+    pub(crate) fn clear_history(&mut self) {
+        self.agent.clear_history();
+    }
 }
 
 impl crate::ws_conversation::ConversationAgent for WsSession {
@@ -903,6 +940,13 @@ async fn relay_approval_requests(
         };
         if !frames.has_subscribers() {
             pending_approvals.lock().remove(&request_id);
+            continue;
+        }
+        // Reset/timeout can revoke the request before this relay is scheduled.
+        // Hold the map guard through publication so deletion either invalidates
+        // its frame revision or removes the request before we publish it.
+        let pending = pending_approvals.lock();
+        if !pending.contains_key(&request_id) {
             continue;
         }
         frames.publish(&approval_request_ws_frame(
@@ -1730,6 +1774,7 @@ async fn run_ws_turns(
     claim: TurnClaim,
 ) {
     let mut next = Some(claim);
+    let lifecycle = state.ws_conversations.session_lifecycle(&scope.session_key);
     // Each idle socket submission starts its own invocation with that
     // socket's scope. Joined late steering does not inherit its authorship.
     let mut initial_claim = true;
@@ -1739,6 +1784,7 @@ async fn run_ws_turns(
         request_id,
         intake,
         generation,
+        reset_revision,
         turn_id,
         cancel,
         mut steering,
@@ -1767,7 +1813,9 @@ async fn run_ws_turns(
                     .map(|(_, alias)| alias)
                     .unwrap_or("");
                 let permitted = device::permitted(&state, &scope, alias, "chat");
-                let admitted = if !permitted {
+                let admitted = if reset_revision != conversation.reset_revision() {
+                    Ok(false)
+                } else if !permitted {
                     let mut denied = device::refusal("BRIDGE_OPERATION_DENIED");
                     stamp_request_id(&mut denied, request_id.as_deref());
                     turn_control::publish(
@@ -1825,6 +1873,15 @@ async fn run_ws_turns(
                 (Vec::new(), "error")
             }
         };
+        // Execution releases its queue guard before taking this lock: DELETE
+        // takes the lifecycle guard first, then waits for execution to settle.
+        let _lifecycle = lifecycle.lock().await;
+        if reset_revision != conversation.reset_revision() {
+            if let Some(claim) = &intake {
+                intake::release(&state, claim);
+            }
+            break;
+        }
         if let Some(claim) = &intake {
             if intake_started {
                 intake::finish(&state, &conversation, claim, outcome);
