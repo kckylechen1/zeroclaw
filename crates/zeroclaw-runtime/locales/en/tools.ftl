@@ -52,6 +52,7 @@ tool-file-download-error-write-body = Failed while writing downloaded bytes: { $
 tool-file-download-error-flush = Failed to flush downloaded file: { $err }
 tool-file-download-error-move = Failed to move downloaded file into place: { $err }
 tool-file-download-success = Downloaded { $written } bytes to { $dest_path } ({ $status })
+tool-http-response-preview-truncated = { $body }... [truncated]
 
 tool-file-read = Read file contents with line numbers. Supports partial reading via offset and limit. Binary and image files are rejected (use the image_info tool for images). Set encoding="base64" to return raw bytes base64-encoded (for binary files such as .pdf/.xlsx/.docx); offset/limit are ignored in that mode.
 
@@ -162,6 +163,13 @@ memory-store-conversation-scope-required = Conversation memory requires a curren
 tool-web-fetch-error-proxy = web_fetch cannot use a configured proxy while enforcing validated destination addresses. Disable the proxy for tool.web_fetch to use this tool.
 tool-web-fetch-error-cross-host = Cross-host redirects are blocked so DNS validation remains pinned.
 tool-web-fetch-error-resolution = Unable to resolve and validate the web_fetch destination.
+tool-web-fetch-response-truncated =
+    { $body }
+
+    { "..." } [Response truncated due to size limit] ...
+tool-web-fetch-firecrawl-error-status = Firecrawl API error: HTTP { $status } - { $body }
+tool-web-fetch-firecrawl-error-read = Failed to read bounded Firecrawl response: { $err }
+tool-web-fetch-firecrawl-error-size = Firecrawl response exceeds the JSON body limit of { $limit } bytes
 tool-web-fetch-pinned-description = Fetch a web page and return its content as clean plain text. HTML pages are converted to readable text; JSON and plain text are returned as-is. Only GET requests; follows same-host redirects using the validated destination addresses and blocks cross-host redirects. Falls back to Firecrawl for JS-heavy/bot-blocked sites if enabled, except after redirect policy rejection. Subject to configured domain and private-host policy.
 tool-text-browser-pinned-description = Select a text-based browser (lynx, links, or w3m) using an explicit request, configured preference, or auto-detection. Execution is currently refused because these external backends cannot pin validated destination addresses. Use web_fetch for pinned retrieval and plain-text rendering.
 tool-text-browser-error-unpinned = External text browser backend { $backend } cannot pin validated destination addresses: independent DNS resolution leaves a validation-to-connection mismatch window. Execution is refused. Use the address-pinned web_fetch tool instead.
@@ -178,3 +186,14 @@ tool-mcp-arguments-server-rejected = The MCP server rejected the arguments.
 tool-mcp-arguments-root-type = Arguments must have type { $expected }; received { $actual }.
 tool-mcp-arguments-missing = Missing required field { $field }.
 tool-mcp-arguments-field-type = Field { $field } expects { $expected }; received { $actual }.
+
+# Bounded local command and search resources.
+tool-git-operations-error-timeout = Git command timed out after { $seconds }s and was stopped; repository state may have changed. Inspect it before retrying.
+tool-git-operations-error-output-stopped = Git command was stopped at its output limit; inspect repository state before retrying.
+tool-git-operations-error-incomplete-output = Git command completed but its output was truncated at { $bytes } bytes. Narrow the query; this is not a complete repository result.
+tool-git-operations-completed-truncated = [Git command completed; output truncated]
+tool-process-stderr-truncated = [stderr truncated]
+tool-content-search-capture-limit = [Search stopped at the capture limit; results may be incomplete]
+tool-content-search-resource-limit = [Search stopped at a resource limit; results may be incomplete]
+tool-content-search-no-scanned-matches = No matches found in scanned content.
+tool-content-search-cancelled = Search cancelled.

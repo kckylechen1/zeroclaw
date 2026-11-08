@@ -6,7 +6,7 @@
 
 use super::SqliteSessionBackend;
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 /// Hard bounds keep a whole list renderable in one prompt section.
@@ -121,12 +121,30 @@ impl SqliteSessionBackend {
     /// writer cannot split them.
     pub fn task_list(&self, agent_identity: &str) -> Result<TaskList> {
         let mut conn = self.conn.lock();
-        let tx = conn
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .context("opening a task list read")?;
-        let list = read_list(&tx, agent_identity)?;
-        tx.commit().context("closing a task list read")?;
-        Ok(list)
+        read_committed_list(&mut conn, agent_identity)
+    }
+
+    /// Read an already-initialized store without any schema, journal-mode or
+    /// filesystem setup. Prompt projection uses this per request; startup and
+    /// mutation owners retain `new()` and its migrations. No handle or list is
+    /// cached, so the next call observes newly committed state.
+    ///
+    /// Missing/old/corrupt stores are errors, never fabricated empty lists.
+    /// A WAL writer does not block this read. Other lock contention fails
+    /// immediately so a synchronous prompt render cannot spend the normal
+    /// five-second initialization timeout blocking an executor worker.
+    pub fn read_task_list(
+        workspace_dir: &std::path::Path,
+        agent_identity: &str,
+    ) -> Result<TaskList> {
+        let mut conn = Connection::open_with_flags(
+            Self::database_path(workspace_dir),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .context("opening the existing task store for projection")?;
+        conn.busy_timeout(std::time::Duration::ZERO)
+            .context("setting the task projection read timeout")?;
+        read_committed_list(&mut conn, agent_identity)
     }
 
     /// Apply one batched, transactional mutation. The caller must echo a
@@ -301,6 +319,15 @@ impl SqliteSessionBackend {
     }
 }
 
+fn read_committed_list(conn: &mut Connection, agent_identity: &str) -> Result<TaskList> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .context("opening a task list read")?;
+    let list = read_list(&tx, agent_identity)?;
+    tx.commit().context("closing a task list read")?;
+    Ok(list)
+}
+
 fn read_list(tx: &rusqlite::Transaction, agent_identity: &str) -> Result<TaskList> {
     let revision: Option<i64> = tx
         .query_row(
@@ -394,6 +421,72 @@ mod tests {
             ApplyOutcome::Applied(list) => list,
             ApplyOutcome::Conflict(_) => panic!("first write must apply"),
         }
+    }
+
+    #[test]
+    fn projection_does_not_create_or_migrate_a_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        assert!(SqliteSessionBackend::read_task_list(&missing, "owner-a").is_err());
+        assert!(
+            !missing.exists(),
+            "reading must not create storage directories"
+        );
+
+        let sessions = tmp.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        let old = Connection::open(sessions.join("sessions.db")).unwrap();
+        old.execute_batch(
+            "CREATE TABLE legacy_marker (value TEXT); INSERT INTO legacy_marker VALUES ('keep');",
+        )
+        .unwrap();
+        assert!(SqliteSessionBackend::read_task_list(tmp.path(), "owner-a").is_err());
+        let tables: i64 = old
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1, "projection must not run schema setup");
+        let journal: String = old
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "delete", "projection must not change journal mode");
+        drop(old);
+
+        // The existing startup/mutation owner still performs initialization.
+        let _initialized = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let empty = SqliteSessionBackend::read_task_list(tmp.path(), "owner-a").unwrap();
+        assert_eq!(empty.revision, 0);
+        assert!(empty.items.is_empty());
+    }
+
+    #[test]
+    fn projection_reads_committed_owner_snapshot_while_a_wal_writer_is_active() {
+        let (tmp, backend) = backend();
+        add(&backend, "owner-a", "committed-a");
+        add(&backend, "owner-b", "committed-b");
+        let writer = Connection::open(SqliteSessionBackend::database_path(tmp.path())).unwrap();
+        writer
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+             UPDATE agent_tasks SET description = 'next-commit' WHERE agent_identity = 'owner-a';
+             UPDATE agent_task_revisions SET revision = 2 WHERE agent_identity = 'owner-a';",
+            )
+            .unwrap();
+
+        let before = SqliteSessionBackend::read_task_list(tmp.path(), "owner-a").unwrap();
+        assert_eq!(before.revision, 1);
+        assert_eq!(before.items[0].description, "committed-a");
+        let other = SqliteSessionBackend::read_task_list(tmp.path(), "owner-b").unwrap();
+        assert_eq!(other.revision, 1);
+        assert_eq!(other.items[0].description, "committed-b");
+
+        writer.execute_batch("COMMIT").unwrap();
+        let after = SqliteSessionBackend::read_task_list(tmp.path(), "owner-a").unwrap();
+        assert_eq!(after.revision, 2);
+        assert_eq!(after.items[0].description, "next-commit");
     }
 
     #[test]

@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde_json::json;
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult, with_ephemeral_workspace_warning};
 use zeroclaw_config::schema::FileDownloadConfig;
@@ -43,21 +42,16 @@ impl FileDownloadTool {
         }
     }
 
-    /// Stream a response body into `temp_path`, treating `max_bytes` as a hard
+    /// Stream a response body into an already-owned temp file, treating `max_bytes` as a hard
     /// ceiling so an unbounded or oversized body never fully buffers in memory.
     /// Returns the number of bytes written, or an error message. The caller is
-    /// responsible for removing `temp_path` on any error.
+    /// responsible for keeping its TempPath alive across this future.
     async fn stream_to_temp(
         response: reqwest::Response,
-        temp_path: &Path,
+        file: std::fs::File,
         max_bytes: u64,
     ) -> Result<u64, String> {
-        let mut file = tokio::fs::File::create(temp_path).await.map_err(|e| {
-            Self::tool_msg_with_args(
-                "tool-file-download-error-temp-create",
-                &[("err", &e.to_string())],
-            )
-        })?;
+        let mut file = tokio::fs::File::from_std(file);
 
         let mut stream = response.bytes_stream();
         let mut written: u64 = 0;
@@ -323,23 +317,16 @@ impl Tool for FileDownloadTool {
         let status = response.status();
 
         if !status.is_success() {
-            let raw_body = response.text().await.unwrap_or_default();
-            let truncated = if raw_body.len() > RESPONSE_BODY_LIMIT_BYTES {
-                let mut cut = RESPONSE_BODY_LIMIT_BYTES;
-                while cut > 0 && !raw_body.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                format!(
-                    "{}... [truncated {} bytes]",
-                    &raw_body[..cut],
-                    raw_body.len() - cut
-                )
-            } else {
-                raw_body
-            };
+            let prefix = crate::helpers::http_body::read_response_body_prefix(
+                response,
+                RESPONSE_BODY_LIMIT_BYTES,
+            )
+            .await;
+            let preview =
+                crate::helpers::http_body::response_preview(&prefix, RESPONSE_BODY_LIMIT_BYTES);
             return Ok(ToolResult {
                 success: false,
-                output: truncated.into(),
+                output: preview.into(),
                 error: Some(Self::tool_msg_with_args(
                     "tool-file-download-error-status",
                     &[("status", &status.to_string())],
@@ -368,14 +355,34 @@ impl Tool for FileDownloadTool {
         // Stream into a temp file in the destination directory so a failed or
         // oversized transfer never leaves a partial artifact at `dest`; on
         // success the rename is atomic within the same directory.
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let temp_path = canonical_parent.join(format!(".{file_name}.part-{nanos}"));
+        // Create and own the unique path synchronously, before any await. An
+        // async create can finish after its future is cancelled and recreate a
+        // path that an earlier cleanup already removed. TempPath owns cleanup
+        // on every error and on cancellation while streaming/flushing.
+        // On Unix, tempfile starts with 0600 (subject to umask); persist keeps
+        // those private permissions instead of File::create's 0666 baseline.
+        let staged = match tempfile::Builder::new()
+            .prefix(&format!(".{file_name}.part-"))
+            .tempfile_in(&canonical_parent)
+        {
+            Ok(staged) => staged,
+            Err(error) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(Self::tool_msg_with_args(
+                        "tool-file-download-error-temp-create",
+                        &[("err", &error.to_string())],
+                    )),
+                });
+            }
+        };
+        let (file, temp_path) = staged.into_parts();
 
-        match Self::stream_to_temp(response, &temp_path, self.config.max_file_size_bytes).await {
-            Ok(written) => match tokio::fs::rename(&temp_path, &dest).await {
+        match Self::stream_to_temp(response, file, self.config.max_file_size_bytes).await {
+            // Commit the completed file without an async rename continuing
+            // after cancellation. persist consumes the cleanup owner on success.
+            Ok(written) => match temp_path.persist(&dest) {
                 Ok(()) => {
                     let output = Self::tool_msg_with_args(
                         "tool-file-download-success",
@@ -399,36 +406,34 @@ impl Tool for FileDownloadTool {
                         error: None,
                     })
                 }
-                Err(e) => {
-                    let _ = tokio::fs::remove_file(&temp_path).await;
-                    Ok(ToolResult {
-                        success: false,
-                        output: ToolOutput::default(),
-                        error: Some(Self::tool_msg_with_args(
-                            "tool-file-download-error-move",
-                            &[("err", &e.to_string())],
-                        )),
-                    })
-                }
-            },
-            Err(msg) => {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                Ok(ToolResult {
+                Err(e) => Ok(ToolResult {
                     success: false,
                     output: ToolOutput::default(),
-                    error: Some(msg),
-                })
-            }
+                    error: Some(Self::tool_msg_with_args(
+                        "tool-file-download-error-move",
+                        &[("err", &e.error.to_string())],
+                    )),
+                }),
+            },
+            Err(msg) => Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(msg),
+            }),
         }
     }
 }
+
+#[cfg(test)]
+#[path = "file_download_bounds_tests.rs"]
+mod bounds_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
