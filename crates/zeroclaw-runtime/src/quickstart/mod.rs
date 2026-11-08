@@ -507,8 +507,10 @@ pub fn snapshot_state(cfg: &Config) -> QuickstartState {
             .iter_entries()
             .map(|(family, alias, _)| format!("{family}.{alias}"))
             .collect(),
-        channels: collect_aliased_refs(&cfg.channels),
-        unassigned_channels: collect_aliased_refs(&cfg.channels)
+        // Retired transports never surface as assignable channels even when
+        // their sections still parse (#584).
+        channels: live_channel_refs(cfg),
+        unassigned_channels: live_channel_refs(cfg)
             .into_iter()
             .filter(|ch| cfg.agent_for_channel(ch).is_none())
             .collect(),
@@ -608,6 +610,20 @@ fn collect_aliased_refs<T: serde::Serialize>(value: &T) -> Vec<String> {
     }
     out.sort();
     out
+}
+
+/// Configured channel refs excluding retired transports: quickstart may
+/// only offer live surfaces for assignment (#584). Only the leading family
+/// segment names a transport; alias segments are operator-chosen.
+fn live_channel_refs(cfg: &zeroclaw_config::schema::Config) -> Vec<String> {
+    collect_aliased_refs(&cfg.channels)
+        .into_iter()
+        .filter(|r| {
+            r.split('.')
+                .next()
+                .is_none_or(|family| !zeroclaw_config::schema::is_retired_transport(family))
+        })
+        .collect()
 }
 
 /// Selector kinds that the Quickstart "field shape" descriptor

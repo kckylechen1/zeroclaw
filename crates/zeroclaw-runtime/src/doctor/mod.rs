@@ -1161,20 +1161,23 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
             cat,
             "at least one live channel surface configured",
         ));
-    } else if !retired_configured.is_empty() {
-        items.push(DiagItem::warn(
-            cat,
-            format!(
-                "only retired transports configured ({}): their sections parse but no \
-                 runner exists — live surfaces are the Telegram bridge, webhook ingress, \
-                 Email tools, and Discord archive search; run `zeroclaw quickstart`",
-                retired_configured.join(", ")
-            ),
-        ));
     } else {
         items.push(DiagItem::warn(
             cat,
-            "no channels configured — run `zeroclaw quickstart` to set one up",
+            "no live channel configured — run `zeroclaw quickstart` to set one up",
+        ));
+    }
+    // A populated retired section is dead weight even next to live ones:
+    // always name it so the operator removes it (#584).
+    if !retired_configured.is_empty() {
+        items.push(DiagItem::warn(
+            cat,
+            format!(
+                "retired transports configured ({}): their sections parse but no \
+                 runner exists — remove them; live surfaces are the Telegram bridge, \
+                 webhook ingress, Email tools, and Discord archive search",
+                retired_configured.join(", ")
+            ),
         ));
     }
 

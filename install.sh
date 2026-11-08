@@ -255,7 +255,7 @@ install_prebuilt() {
   info "Platform: $triple"
   info "Source:   $asset_url"
   info "Channels: pre-built binaries ship the lean standard distribution set; availability is target-specific."
-  info "Run 'zeroclaw channel list' to inspect this binary. For other channels such as Slack, build from source with --preset full."
+  info "Run 'zeroclaw channel list' to inspect this binary. The live channel surfaces (Telegram bridge, webhook ingress, Email/Discord tools) ship in every distribution."
   echo
 
   # Resolve platform-correct web data directory to match gateway auto-detect
@@ -339,8 +339,9 @@ Options:
   --prebuilt           Download and install a pre-built binary (default when asked)
   --source             Build from source (skips the pre-built prompt)
   --preset NAME        Named feature preset: 'minimal' (kernel only, ~6.6MB) or
-                       'full' (every channel plus heavyweight extras such as
-                       whatsapp-web and channel-matrix). Source builds only.
+                       'full' (all heavyweight extras; the legacy channel-*
+                       features are empty stubs, so no preset adds channels).
+                       Source builds only.
   --full               Alias for --preset full (implies --source)
   --minimal            Alias for --preset minimal
   --features X,Y       Select specific features — source only (comma-separated)
@@ -363,7 +364,7 @@ Examples:
   $0 --source                                  # always build from source
   $0 --source --minimal                        # smallest possible binary
   $0 --source --features agent-runtime,channel-discord  # custom feature set
-  $0 --source --preset full                   # every channel plus heavyweight extras
+  $0 --source --preset full                   # all heavyweight extras (no preset adds channels)
   $0 --full                                    # same as --preset full
   $0 --skip-quickstart                            # install only, configure later
   $0 --prefix /tmp/zc-test --skip-quickstart      # isolated test install
@@ -932,8 +933,9 @@ See all available features:
     esac
   fi
 
-  # `--preset full` must actually deliver the broad bundle the installer
-  # advertises (whatsapp-web, channel-matrix, the heavyweight extras), not
+  # `--preset full` must actually deliver the broad feature bundle the
+  # installer advertises (whatsapp-web, channel-matrix, the heavyweight
+  # extras), not
   # Cargo's lean `default`. Resolve the explicit feature list from the
   # canonical registry (`cargo generate features --selection all`), the same
   # source of truth the release workflow consumes, and build with
@@ -1010,7 +1012,7 @@ See all available features:
       fi
     fi
     if [ "$PRESET" = "full" ] && [ "$DRY_RUN" != true ] && [ -t 1 ]; then
-      info "--preset full: building from source with the complete feature set (every channel plus heavyweight extras) resolved from the registry."
+      info "--preset full: building from source with the complete feature set (heavyweight extras; legacy channel features are empty stubs) resolved from the registry."
     fi
   fi
 

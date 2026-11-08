@@ -665,6 +665,62 @@ fn config_validation_surfaces_dangling_fallback_ref() {
 }
 
 #[test]
+fn doctor_flags_retired_transports_alongside_live_channels() {
+    // A configured retired section is named even when a live surface is
+    // also configured (#584): it is dead weight the operator should
+    // remove, not a pass condition.
+    let mut config = Config::default();
+    config.channels.telegram.insert(
+        "default".to_string(),
+        zeroclaw_config::schema::TelegramConfig {
+            enabled: true,
+            ..Default::default()
+        },
+    );
+    config.channels.slack.insert(
+        "default".to_string(),
+        zeroclaw_config::schema::SlackConfig::default(),
+    );
+
+    let mut items = Vec::new();
+    check_config_semantics(&config, &mut items);
+    let live = items
+        .iter()
+        .find(|i| i.message.contains("at least one live channel surface"))
+        .expect("live surface should pass");
+    assert_eq!(live.severity, Severity::Ok);
+    let retired = items
+        .iter()
+        .find(|i| i.message.contains("retired transports configured"))
+        .expect("retired section should be named");
+    assert!(retired.message.contains("slack"));
+    assert_eq!(retired.severity, Severity::Warn);
+}
+
+#[test]
+fn doctor_warns_when_only_retired_transports_are_configured() {
+    let mut config = Config::default();
+    config.channels.matrix.insert(
+        "default".to_string(),
+        zeroclaw_config::schema::MatrixConfig::default(),
+    );
+
+    let mut items = Vec::new();
+    check_config_semantics(&config, &mut items);
+    assert!(
+        items
+            .iter()
+            .any(|i| i.message.contains("no live channel configured")),
+        "retired-only config must not pass the live-channel check"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| i.message.contains("retired transports configured (matrix)"))
+    );
+}
+
+#[test]
 fn config_validation_warns_enabled_tokenless_bot_channels() {
     // A partial (tokenless) alias survives the resilient load and
     // never reaches degraded_sections, so doctor must flag the unset

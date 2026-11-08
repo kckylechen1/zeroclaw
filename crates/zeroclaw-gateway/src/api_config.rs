@@ -530,13 +530,18 @@ pub async fn handle_api_channel_bind(
     let channel_type = body.channel_type.trim();
     let alias = body.alias.trim();
 
-    // Closed-set gate: only telegram/wechat/line have an operator-bind surface.
-    if zeroclaw_config::multi_agent::channel_identity_normalizer(channel_type).is_none() {
+    // Closed-set gate: only telegram has an operator-bind surface on a live
+    // transport. wechat/line identity parsing still exists for legacy
+    // configs, but binding NEW identities for retired transports would
+    // write peer-group state nothing can ever deliver (#584).
+    if zeroclaw_config::schema::is_retired_transport(channel_type)
+        || zeroclaw_config::multi_agent::channel_identity_normalizer(channel_type).is_none()
+    {
         return error_response(ConfigApiError::new(
             ConfigApiCode::ValidationFailed,
             format!(
                 "channel type `{channel_type}` does not support identity binding \
-                 (supported: telegram, wechat, line)"
+                 (supported: telegram)"
             ),
         ));
     }
@@ -5043,6 +5048,44 @@ mod tests {
                 .channel_external_peers("telegram", "alerts")
                 .is_empty(),
             "a rejected bind must not mutate the peer group"
+        );
+    }
+
+    /// Retired transports must not accept new identity binds: the peer
+    /// group would gate an identity nothing can ever deliver (#584).
+    #[tokio::test]
+    async fn channel_bind_rejects_retired_transport() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config_with_telegram_alias(&tmp, "alerts");
+        let mut state = test_state(config);
+        state.pairing = Arc::new(PairingGuard::new(
+            true,
+            &[PairingGuard::token_hash("paired-fixture")],
+        ));
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "Bearer paired-fixture".parse().unwrap());
+
+        let (status, json) = response_json(
+            handle_api_channel_bind(
+                axum::extract::State(state.clone()),
+                headers,
+                axum::Json(ChannelBindBody {
+                    channel_type: "wechat".to_string(),
+                    alias: "alerts".to_string(),
+                    identity: "wx-id".to_string(),
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not support identity binding"),
+            "expected retired-transport rejection, got: {json}"
         );
     }
 

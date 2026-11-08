@@ -655,10 +655,20 @@ mod tests {
             .expect("patch.delivery.channel must have an enum");
         let channel_strs: Vec<&str> = channel_enum.iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(channel_strs.as_slice(), cron::CRON_DELIVERY_SCHEMA_CHANNELS);
-        assert!(channel_strs.contains(&"dingtalk"));
-        assert!(channel_strs.contains(&"wechat"));
-        assert!(channel_strs.contains(&"signal"));
+        assert!(channel_strs.contains(&"telegram"));
+        assert!(channel_strs.contains(&"webhook"));
         assert!(channel_strs.contains(&"email"));
+        // Retired transports must never be offered as delivery targets.
+        for retired in [
+            "slack",
+            "mattermost",
+            "matrix",
+            "dingtalk",
+            "wechat",
+            "signal",
+        ] {
+            assert!(!channel_strs.contains(&retired), "{retired} is retired");
+        }
 
         // patch.delivery exposes thread_id so the webhook channel can route callbacks
         // back to the originating conversation.
@@ -710,7 +720,10 @@ mod tests {
 
         assert_eq!(add_channels, update_channels);
         assert_eq!(add_channels.as_slice(), cron::CRON_DELIVERY_SCHEMA_CHANNELS);
-        assert!(add_channels.contains(&"dingtalk"));
+        assert!(
+            !add_channels.contains(&"dingtalk"),
+            "retired transports must not appear"
+        );
     }
 
     #[tokio::test]

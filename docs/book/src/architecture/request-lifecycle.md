@@ -74,7 +74,7 @@ sequenceDiagram
 
 Key properties:
 
-- **Streaming is end-to-end.** The provider streams tokens. If the channel adapter reports `supports_draft_updates()`, the runtime edits a sent message in place as text arrives. Discord, Slack, and Telegram support this.
+- **Streaming is end-to-end.** The provider streams tokens. If the channel adapter reports `supports_draft_updates()`, the runtime edits a sent message in place as text arrives. Telegram (bridge) supports this.
 - **Tool calls are mid-stream.** The model can emit a tool call while still generating text. The runtime reads the stream to completion, flushing visible text as it arrives, then recovers the tool calls, validates, invokes, feeds the result back, and starts a fresh stream for the next turn.
 - **Streaming completion follows protocol events.** Providers finish a successful stream when its terminal SSE event arrives rather than waiting for the server to close the connection. Silent response bodies fail after the provider's byte-idle timeout, while active generations may outlive the non-streaming request timeout.
 - **Security gates every tool call.** `evaluate_tool_access` consults the [autonomy level](../security/autonomy.md), allow/deny lists, and path boundaries. Medium-risk calls under `Supervised` autonomy go to the operator-approval path.
@@ -87,7 +87,7 @@ Successful tool executions can receive an HMAC-SHA256 receipt that is appended t
 
 ## Outbound
 
-Outbound messages go back through the same channel adapter. Adapters with multi-message support (Discord, Slack) can stream long replies as a sequence of messages; others (email, SMS) flush on stream completion.
+Outbound messages go back through the same channel adapter. Adapters with multi-message support (Telegram bridge) can stream long replies as a sequence of messages; others (email, SMS) flush on stream completion.
 
 ## Where it lives in code
 

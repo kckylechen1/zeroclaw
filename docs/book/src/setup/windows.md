@@ -64,7 +64,7 @@ Flags:
 |---|---|
 | `--prebuilt` | Download prebuilt binary from GitHub Releases (fastest once reached; current script still checks for `cargo` first) |
 | `--minimal`  | Build core only (no channels) |
-| `--standard` | Build with common channels (Telegram, Discord, Slack, Matrix) |
+| `--standard` | Build with the standard feature set (live channel surfaces included) |
 | `--full`     | Build everything |
 
 > ⚠️ **Known issue (current).** `setup.bat --prebuilt` still checks for `cargo` before it reaches the prebuilt branch, so Option 2 does not honor a no-Rust promise. If you don't have a Rust toolchain, use **Option 1** above.

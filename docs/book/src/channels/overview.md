@@ -12,7 +12,7 @@ A **bridge** is a channel that runs as its own process and attaches to the gatew
 
 | Surface | Where it runs | Guide |
 |---|---|---|
-| CLI | Local stdin/stdout, always on |; |
+| CLI | Local stdin/stdout, always on | always on (no page) |
 | Telegram | Gateway bridge (`zeroclaw-bridge-telegram`) | [Other chat platforms](./chat-others.md) |
 | Webhook | Gateway ingress (`[channels.webhook]`) | [Webhooks](./webhook.md) |
 | ACP (Agent Client Protocol) | JSON-RPC 2.0 over stdio: editor/IDE sessions | [ACP](./acp.md) |

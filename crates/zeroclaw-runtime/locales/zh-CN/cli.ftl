@@ -172,7 +172,7 @@ cli-acp-long-about =
 cli-daemon-long-about =
     启动长期运行的自主守护进程。
 
-    启动完整的 ZeroClaw 运行时：网关服务器、所有已配置的通道（Telegram、Discord、Slack 等）、心跳监视器以及 cron 调度器。这是在生产环境中或作为始终在线助手运行 ZeroClaw 的推荐方式。
+    启动完整的 ZeroClaw 运行时：网关服务器、所有已配置的通道面（Telegram bridge、webhook 接入、Email/Discord 工具）、心跳监视器以及 cron 调度器。这是在生产环境中或作为始终在线助手运行 ZeroClaw 的推荐方式。
 
     使用 'zeroclaw service install' 将守护进程注册为操作系统服务（systemd/launchd），以便开机自动启动。
 
@@ -200,7 +200,7 @@ cli-cron-long-about =
 cli-channel-long-about =
     管理通信通道。
 
-    添加、删除、列出、发送以及对将 ZeroClaw 连接到消息平台的通道进行健康检查。支持的通道类型：telegram、discord、slack、whatsapp、matrix、imessage、email。
+    添加、删除、列出、发送以及对将 ZeroClaw 连接到消息平台的通道进行健康检查。可用通道类型：telegram、discord、email、webhook（其余旧分节均已退役）。
 
     示例：
     zeroclaw channel list
@@ -678,7 +678,7 @@ cli-browse-empty = （空）
 cli-browse-file-bytes = {$name}（{$bytes} 字节）
 cli-update-already-current = 已是最新版本（v{$version}）。
 cli-update-success = 已成功更新至 v{$version}！
-cli-update-prebuilt-channel-note = 预构建更新使用精简的标准发行集。如需 Slack 和其他未包含在该发行集中的通道，请从源码构建：`./install.sh --source --preset full`、`--features channels-full`，或指定对应的 `channel-*` 功能。
+cli-update-prebuilt-channel-note = 预构建更新使用精简的标准发行集。可用通道面（Telegram bridge、webhook 接入、Email/Discord 工具）均已包含；旧的 `channel-*` 功能只是空的兼容 stub，用 `--preset full` 重新构建不会增加通道。
 cli-update-available = 有可用更新：v{$current} -> v{$latest}
 cli-update-forcing-reinstall = 强制重新安装：v{$current} -> v{$latest}
 cli-update-not-writable = 安装目录 {$dir} 不可写（{$error}）；请使用更高权限重新运行 `zeroclaw update`（在 macOS/Linux 上使用 sudo，在 Windows 上使用管理员控制台）

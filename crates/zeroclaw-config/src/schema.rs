@@ -4101,6 +4101,12 @@ impl Config {
     /// macro emits them) so adding a new channel type via the macro
     /// surfaces here without touching this code. Alias keys are HashMap
     /// keys; not kebab-converted.
+    ///
+    /// Retired transports (`RETIRED_TRANSPORT_KINDS`) are excluded: every
+    /// consumer of this walk is a presentation surface (dashboard channel
+    /// rows, agent channel pickers, tool channel-ref options), and a
+    /// populated retired section must not surface as a usable channel
+    /// alias (#584).
     #[must_use]
     pub fn channels_by_alias(&self) -> Vec<ChannelAliasInfo> {
         use std::collections::BTreeMap;
@@ -4117,6 +4123,7 @@ impl Config {
             }
         }
         seen.into_iter()
+            .filter(|((channel_type, _), _)| !is_retired_transport(channel_type))
             .map(|((channel_type, alias), enabled)| {
                 let composite = format!("{channel_type}.{alias}");
                 let owning_agent = self.agent_for_channel(&composite).map(str::to_string);

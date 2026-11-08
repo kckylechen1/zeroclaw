@@ -221,7 +221,7 @@ cli-acp-long-about =
 cli-daemon-long-about =
     Start the long-running autonomous daemon.
 
-    Launches the full ZeroClaw runtime: gateway server, all configured channels (Telegram, Discord, Slack, etc.), heartbeat monitor, and the cron scheduler. This is the recommended way to run ZeroClaw in production or as an always-on assistant.
+    Launches the full ZeroClaw runtime: gateway server, all configured channel surfaces (Telegram bridge, webhook ingress, Email/Discord tools), heartbeat monitor, and the cron scheduler. This is the recommended way to run ZeroClaw in production or as an always-on assistant.
 
     Use 'zeroclaw service install' to register the daemon as an OS service (systemd/launchd) for auto-start on boot.
 
@@ -251,7 +251,7 @@ cli-cron-long-about =
 cli-channel-long-about =
     Manage communication channels.
 
-    Add, remove, list, send, and health-check channels that connect ZeroClaw to messaging platforms. Supported channel types: telegram, discord, slack, whatsapp, matrix, imessage, email.
+    Add, remove, list, send, and health-check channels that connect ZeroClaw to messaging platforms. Live channel types: telegram, discord, email, webhook (other legacy sections are retired).
 
     Examples:
       zeroclaw channel list
@@ -790,7 +790,7 @@ cli-browse-file-bytes = {$name} ({$bytes} bytes)
 # ── update (zeroclaw update) ──
 cli-update-already-current = Already up to date (v{$version}).
 cli-update-success = Successfully updated to v{$version}!
-cli-update-prebuilt-channel-note = Pre-built updates use the lean standard distribution. Build from source with `./install.sh --source --preset full`, `--features channels-full`, or a specific `channel-*` feature for Slack and other channels outside that distribution.
+cli-update-prebuilt-channel-note = Pre-built updates use the lean standard distribution. The live channel surfaces (Telegram bridge, webhook ingress, Email/Discord tools) are all included; the old `channel-*` features are empty compatibility stubs, so rebuilding with `--preset full` does not add channels.
 cli-update-available = Update available: v{$current} -> v{$latest}
 cli-update-forcing-reinstall = Forcing reinstall: v{$current} -> v{$latest}
 cli-update-not-writable = install directory {$dir} is not writable ({$error}); re-run `zeroclaw update` with elevated privileges (sudo on macOS/Linux, an Administrator console on Windows)

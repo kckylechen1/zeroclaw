@@ -32,7 +32,7 @@ fn update_success_message(version: &str) -> String {
 }
 
 #[cfg(any(test, not(feature = "agent-runtime")))]
-const PREBUILT_CHANNEL_NOTE_FALLBACK: &str = "Pre-built updates use the lean standard distribution. Build from source with `./install.sh --source --preset full`, `--features channels-full`, or a specific `channel-*` feature for Slack and other channels outside that distribution.";
+const PREBUILT_CHANNEL_NOTE_FALLBACK: &str = "Pre-built updates use the lean standard distribution. The live channel surfaces (Telegram bridge, webhook ingress, Email/Discord tools) are all included; the old `channel-*` features are empty compatibility stubs, so rebuilding with `--preset full` does not add channels.";
 
 fn prebuilt_channel_note_message() -> String {
     #[cfg(feature = "agent-runtime")]
@@ -1156,7 +1156,10 @@ mod tests {
     #[test]
     fn prebuilt_channel_note_describes_the_lean_distribution() {
         assert!(PREBUILT_CHANNEL_NOTE_FALLBACK.contains("lean standard distribution"));
-        assert!(PREBUILT_CHANNEL_NOTE_FALLBACK.contains("Slack"));
+        // Retired transports are no longer advertised as rebuild-away:
+        // the stub features add nothing.
+        assert!(!PREBUILT_CHANNEL_NOTE_FALLBACK.contains("Slack"));
+        assert!(PREBUILT_CHANNEL_NOTE_FALLBACK.contains("compatibility stubs"));
         assert!(!PREBUILT_CHANNEL_NOTE_FALLBACK.contains("lean default channel bundle"));
     }
 
