@@ -75,19 +75,26 @@ COPY xtask/Cargo.toml xtask/Cargo.toml
 # Bridges are workspace members outside crates/; manifests only, stubbed below.
 COPY bridges/telegram/Cargo.toml bridges/telegram/Cargo.toml
 # Create dummy targets for all workspace members so manifest parsing succeeds.
-RUN mkdir -p src benches tests tools/fill-translations/src xtask/src/bin bridges/telegram/src \
+RUN mkdir -p src/bin benches tests tools/fill-translations/src xtask/src/bin bridges/telegram/src \
     && echo "" > bridges/telegram/src/lib.rs \
     && echo "fn main() {}" > bridges/telegram/src/main.rs \
     && echo "fn main() {}" > src/main.rs \
+    && echo "fn main() {}" > src/bin/zeroclaw-acp-bridge.rs \
+    && echo "fn main() {}" > src/bin/zeroclaw-node-host.rs \
     && echo "" > src/lib.rs \
     && printf '' > tests/node_v2_process.rs \
+    && for t in architecture component integration system; do printf '' > "tests/test_${t}.rs"; done \
     && echo "fn main() {}" > benches/agent_benchmarks.rs \
     && echo "fn main() {}" > tools/fill-translations/src/main.rs \
     && echo "" > xtask/src/lib.rs \
     && echo "fn main() {}" > xtask/src/bin/mdbook.rs \
     && echo "fn main() {}" > xtask/src/bin/fluent.rs \
     && echo "fn main() {}" > xtask/src/bin/web.rs \
+    && echo "fn main() {}" > xtask/src/bin/generate.rs \
     && for d in crates/*/; do mkdir -p "${d}src" && printf '' > "${d}src/lib.rs"; done \
+    && echo "fn main() {}" > crates/zeroclaw-yonbo-node/src/main.rs \
+    && mkdir -p crates/zeroclaw-yonbo-node/tests \
+    && printf '' > crates/zeroclaw-yonbo-node/tests/system.rs \
     && mkdir -p crates/zeroclaw-gateway/tests \
     && printf '' > crates/zeroclaw-gateway/tests/nodes_mdns.rs
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
