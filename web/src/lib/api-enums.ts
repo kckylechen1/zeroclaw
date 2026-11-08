@@ -68,12 +68,6 @@ export const enumValues: EnumValues = {
     "own",
     "all"
   ],
-  "FilesystemEventKind": [
-    "created",
-    "modified",
-    "deleted",
-    "renamed"
-  ],
   "FirecrawlMode": [
     "scrape",
     "crawl"
@@ -246,36 +240,9 @@ export const enumValues: EnumValues = {
     "global",
     "guild"
   ],
-  "SopAdmissionPolicy": [
-    "parallel",
-    "hold",
-    "coalesce",
-    "drop"
-  ],
-  "SopExecutionMode": [
-    "auto",
-    "supervised",
-    "step_by_step",
-    "priority_based",
-    "deterministic"
-  ],
-  "SopPriority": [
-    "low",
-    "normal",
-    "high",
-    "critical"
-  ],
   "SopRunStoreBackend": [
     "sqlite",
     "memory"
-  ],
-  "SopStepKind": [
-    "execute",
-    "checkpoint",
-    "capability"
-  ],
-  "StepFailure": [
-    "fail"
   ],
   "StepfunEndpoint": [
     "cn",
