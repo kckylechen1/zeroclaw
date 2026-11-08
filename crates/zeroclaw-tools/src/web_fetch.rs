@@ -13,6 +13,8 @@ use zeroclaw_policy::SecurityPolicy;
 /// Minimum body length to consider a standard fetch successful.
 /// Bodies shorter than this are treated as JS-only pages that need Firecrawl.
 const FIRECRAWL_MIN_BODY_LEN: usize = 100;
+const FIRECRAWL_JSON_ENVELOPE_BYTES: usize = 64 * 1024;
+const ERROR_BODY_PREVIEW_BYTES: usize = 4 * 1024;
 
 pub struct WebFetchTool {
     security: Arc<SecurityPolicy>,
@@ -158,12 +160,14 @@ impl WebFetchTool {
             return text.to_string();
         }
         if text.len() > self.max_response_size {
-            let mut truncated = text
-                .chars()
-                .take(self.max_response_size)
-                .collect::<String>();
-            truncated.push_str("\n\n... [Response truncated due to size limit] ...");
-            truncated
+            let mut end = self.max_response_size;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            crate::i18n::get_required_tool_string_with_args(
+                "tool-web-fetch-response-truncated",
+                &[("body", &text[..end])],
+            )
         } else {
             text.to_string()
         }
@@ -225,6 +229,25 @@ impl WebFetchTool {
             ))
         })?;
 
+        self.fetch_via_firecrawl_with_key(url, &api_key).await
+    }
+
+    fn firecrawl_body_limit(&self) -> Option<usize> {
+        // Bound JSON before parsing, allowing worst-case JSON string escaping
+        // (six wire bytes per content byte) plus a finite metadata envelope.
+        // Keep the existing explicit unlimited setting (`0`) unchanged.
+        (self.max_response_size != 0).then(|| {
+            self.max_response_size
+                .saturating_mul(6)
+                .saturating_add(FIRECRAWL_JSON_ENVELOPE_BYTES)
+        })
+    }
+
+    async fn fetch_via_firecrawl_with_key(
+        &self,
+        url: &str,
+        api_key: &str,
+    ) -> anyhow::Result<ToolResult> {
         let endpoint = format!("{}/scrape", self.firecrawl.api_url.trim_end_matches('/'));
 
         let client = reqwest::Client::builder()
@@ -269,19 +292,49 @@ impl WebFetchTool {
 
         let status = response.status();
         if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
+            let prefix = crate::helpers::http_body::read_response_body_prefix(
+                response,
+                ERROR_BODY_PREVIEW_BYTES,
+            )
+            .await;
+            let error_body =
+                crate::helpers::http_body::response_preview(&prefix, ERROR_BODY_PREVIEW_BYTES);
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
-                error: Some(format!(
-                    "Firecrawl API error: HTTP {} - {}",
-                    status.as_u16(),
-                    error_body
+                error: Some(crate::i18n::get_required_tool_string_with_args(
+                    "tool-web-fetch-firecrawl-error-status",
+                    &[
+                        ("status", &status.as_u16().to_string()),
+                        ("body", &error_body),
+                    ],
                 )),
             });
         }
 
-        let resp_json: serde_json::Value = response.json().await.map_err(|e| {
+        let limit = self.firecrawl_body_limit();
+        // One sentinel byte admits a complete chunked JSON document exactly at
+        // the budget while still stopping an oversized stream before EOF.
+        let (bytes, truncated) =
+            zeroclaw_http::read_bounded_body(response, limit.map(|cap| cap.saturating_add(1)))
+                .await
+                .map_err(|error| {
+                    anyhow::Error::msg(crate::i18n::get_required_tool_string_with_args(
+                        "tool-web-fetch-firecrawl-error-read",
+                        &[("err", &error.to_string())],
+                    ))
+                })?;
+        if truncated || limit.is_some_and(|cap| bytes.len() > cap) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(crate::i18n::get_required_tool_string_with_args(
+                    "tool-web-fetch-firecrawl-error-size",
+                    &[("limit", &limit.unwrap_or(usize::MAX).to_string())],
+                )),
+            });
+        }
+        let resp_json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             ::zeroclaw_log::record!(
                 ERROR,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
@@ -1924,3 +1977,7 @@ mod tests {
 #[cfg(test)]
 #[path = "web_fetch_pin_tests.rs"]
 mod pin_contract;
+
+#[cfg(test)]
+#[path = "web_fetch_bounds_tests.rs"]
+mod bounds_tests;

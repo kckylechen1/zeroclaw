@@ -328,6 +328,7 @@ async fn handle_socket(
     // Resolve session ID: use provided or generate a new UUID
     let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let session_key = format!("{GW_SESSION_PREFIX}{session_id}");
+    let lifecycle = state.ws_conversations.session_lifecycle(&session_key);
     // Match the sanitized form persisted by memory backend migrations.
     let mut memory_session_id = zeroclaw_api::session_keys::sanitize_session_key(&session_id);
 
@@ -362,21 +363,22 @@ async fn handle_socket(
     let mut resumed = false;
     let mut message_count: usize = 0;
     let mut effective_name: Option<String> = None;
-    let mut stored_messages = Vec::new();
-    if let Some(ref backend) = state.session_backend {
-        let messages = backend.load(&session_key);
-        if !messages.is_empty() {
-            message_count = messages.len();
-            stored_messages = messages;
-            resumed = true;
-        }
-        if !restricted {
-            effective_name = stamp_session(
-                backend.as_ref(),
-                &session_key,
-                &agent_alias,
-                session_name.as_deref(),
-            );
+    {
+        let _lifecycle = lifecycle.lock().await;
+        if let Some(ref backend) = state.session_backend {
+            let messages = backend.load(&session_key);
+            if !messages.is_empty() {
+                message_count = messages.len();
+                resumed = true;
+            }
+            if !restricted {
+                effective_name = stamp_session(
+                    backend.as_ref(),
+                    &session_key,
+                    &agent_alias,
+                    session_name.as_deref(),
+                );
+            }
         }
     }
 
@@ -498,10 +500,6 @@ async fn handle_socket(
             .await;
         return;
     }
-    if restricted && let Some(backend) = &state.session_backend {
-        stamp_session(backend.as_ref(), &session_key, &agent_alias, None);
-    }
-
     let session_cwd = match resolve_ws_session_cwd(requested_cwd.as_deref(), &config, &agent_alias)
     {
         Ok(cwd) => cwd,
@@ -523,6 +521,26 @@ async fn handle_socket(
 
     // Every socket that opens this session with this agent shares one
     // conversation: one agent, one history, one running turn (#376).
+    // The client handshake must not hold the lifecycle guard. Re-read history
+    // under it so DELETE cannot be undone by a pre-deletion history snapshot.
+    let lifecycle_guard = lifecycle.lock().await;
+    if let Some(backend) = &state.session_backend {
+        stamp_session(
+            backend.as_ref(),
+            &session_key,
+            &agent_alias,
+            if restricted {
+                None
+            } else {
+                session_name.as_deref()
+            },
+        );
+    }
+    let stored_messages = state
+        .session_backend
+        .as_ref()
+        .map(|backend| backend.load(&session_key))
+        .unwrap_or_default();
     let conversation_key = format!("{session_key}\u{1f}{agent_alias}");
     let attached = state
         .ws_conversations
@@ -539,6 +557,7 @@ async fn handle_socket(
             )
         })
         .await;
+    drop(lifecycle_guard);
     let (mut subscription, restore_trim_event) = match attached {
         Ok(attached) => attached,
         Err(e) => {
@@ -623,9 +642,14 @@ async fn handle_socket(
                 frame = subscription.frames.recv() => {
                     match frame {
                         Ok(frame) => {
+                            let current = {
+                                let _lifecycle = lifecycle.lock().await;
+                                frame.is_current(subscription.conversation.reset_revision())
+                            };
+                            if !current { continue; }
                             if !device::permitted(&state, &scope, &agent_alias, "chat") { break; }
                             if turn_negotiated && !serde_json::from_str::<serde_json::Value>(&frame).is_ok_and(|frame| {
-                                matches!(frame["type"].as_str(), Some("approval_request" | "question" | "answer_ack"))
+                                matches!(frame["type"].as_str(), Some("approval_request" | "question" | "answer_ack" | "btw_response" | "btw_error"))
                             }) { continue; }
                             if turn_negotiated && !question_answer_authorized(&state, &scope) { break; }
                             if !turn_control::send(&mut sender, Message::Text(surface::wire(&state, scope.surface, &frame).into()), turn_negotiated).await {
@@ -658,9 +682,14 @@ async fn handle_socket(
                         || !question_answer_authorized(&state, &scope) { break; }
                     match frame {
                         Ok(frame) => {
-                            if !serde_json::from_str::<serde_json::Value>(&frame).is_ok_and(|frame| {
-                                state.ws_conversations.turn_control.visible(subscription.conversation.key(), scope.auth_subject.as_deref(), &frame)
-                            }) { continue; }
+                            let visible = {
+                                let _lifecycle = lifecycle.lock().await;
+                                frame.is_current(subscription.conversation.reset_revision())
+                                    && serde_json::from_str::<serde_json::Value>(&frame).is_ok_and(|frame| {
+                                        state.ws_conversations.turn_control.visible(subscription.conversation.key(), scope.auth_subject.as_deref(), &frame)
+                                    })
+                            };
+                            if !visible { continue; }
                             if !turn_control::send(&mut sender, Message::Text(surface::wire(&state, scope.surface, &frame).into()), true).await { break; }
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -726,6 +755,7 @@ async fn handle_socket(
         let extension = turn_negotiated
             || serde_json::from_str::<serde_json::Value>(&text)
                 .is_ok_and(|frame| frame["type"] == "turn_control");
+        let lifecycle_guard = lifecycle.lock().await;
         let (reply, start) = if extension {
             turn_control::handle(
                 &state,
@@ -738,6 +768,7 @@ async fn handle_socket(
         } else {
             handle_client_text(&state, &subscription.conversation, &scope, &text)
         };
+        drop(lifecycle_guard);
         // Acceptance is independent of delivering its ACK. Even a failed/slow
         // writer must release the admitted claim to execution and recovery.
         let sent = match reply {
@@ -765,6 +796,18 @@ pub struct WsSession {
     agent: zeroclaw_runtime::agent::Agent,
     /// Per-agent memory for turn-end consolidation; `None` disables it.
     ws_memory: Option<Arc<dyn zeroclaw_memory::Memory>>,
+}
+
+impl WsSession {
+    pub(crate) fn clear_history(&mut self) {
+        self.agent.clear_history();
+    }
+}
+
+impl crate::ws_conversation::ConversationAgent for WsSession {
+    fn side_query_handle(&self) -> Option<zeroclaw_runtime::agent::SideQueryHandle> {
+        Some(self.agent.side_query_handle())
+    }
 }
 
 /// Identifies the session a turn runs for. Cloned into each turn task.
@@ -897,6 +940,13 @@ async fn relay_approval_requests(
         };
         if !frames.has_subscribers() {
             pending_approvals.lock().remove(&request_id);
+            continue;
+        }
+        // Reset/timeout can revoke the request before this relay is scheduled.
+        // Hold the map guard through publication so deletion either invalidates
+        // its frame revision or removes the request before we publish it.
+        let pending = pending_approvals.lock();
+        if !pending.contains_key(&request_id) {
             continue;
         }
         frames.publish(&approval_request_ws_frame(
@@ -1135,6 +1185,7 @@ fn handle_client_text(
             }
         }
         "message" => handle_message_frame(state, conversation, scope, &parsed),
+        "btw" => handle_btw_frame(state, conversation, scope, &parsed),
         other => error(
             format!(
                 "Unsupported message type \"{other}\". Send {{\"type\":\"message\",\"content\":\"your text\"}}"
@@ -1251,6 +1302,9 @@ fn handle_message_frame(
     };
 
     let mut content = parsed["content"].as_str().unwrap_or("").to_string();
+    if parse_btw_command(&content).is_some() {
+        return handle_btw_frame(state, conversation, scope, parsed);
+    }
     let original_input = content.clone();
     let ids = match parsed.get("attachments") {
         None | Some(serde_json::Value::Null) => Vec::new(),
@@ -1430,6 +1484,215 @@ fn handle_message_frame(
     }
 }
 
+/// Extract the question body from a leading `/btw` slash command.
+///
+/// Returns `Some("")` for a bare `"/btw"` so callers reject it as an empty
+/// side query rather than forwarding `"/btw"` as a regular user turn.
+pub(super) fn parse_btw_command(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    let rest = trimmed.strip_prefix("/btw")?;
+    if rest.is_empty() {
+        Some("")
+    } else if rest.starts_with(char::is_whitespace) {
+        Some(rest.trim())
+    } else {
+        None
+    }
+}
+
+/// Handle a read-only `/btw` side query (`{"type":"btw","content":"..."}` or
+/// `{"type":"message","content":"/btw ..."}`).
+///
+/// Side queries run against a lock-free snapshot of the conversation's `Agent`
+/// without acquiring `conversation.agent` or `state.session_queue`, and without
+/// mutating conversation history, session storage, request receipts, steering
+/// queues, or owner correction authority.
+fn handle_btw_frame(
+    state: &AppState,
+    conversation: &Arc<Conversation<WsSession>>,
+    _scope: &WsTurnScope,
+    parsed: &serde_json::Value,
+) -> (Option<serde_json::Value>, Option<TurnClaim>) {
+    let request_id = match parsed.get("id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id))
+            if !id.is_empty()
+                && id.len() <= MAX_REQUEST_ID_LEN
+                && !id.chars().any(char::is_control) =>
+        {
+            Some(id.as_str())
+        }
+        Some(_) => {
+            return (
+                Some(serde_json::json!({
+                    "type": "error",
+                    "message": format!(
+                        "message id must be a non-empty string of at most {MAX_REQUEST_ID_LEN} characters without control characters"
+                    ),
+                    "code": "INVALID_REQUEST_ID",
+                })),
+                None,
+            );
+        }
+    };
+    let reject = |message: &str, code: &str| {
+        let mut frame = serde_json::json!({ "type": "error", "message": message, "code": code });
+        stamp_request_id(&mut frame, request_id);
+        (Some(frame), None)
+    };
+
+    if parsed.get("source").is_some() {
+        return reject(
+            "/btw side queries do not accept source envelopes",
+            "UNSUPPORTED_FIELD",
+        );
+    }
+    let has_attachments = parsed
+        .get("attachments")
+        .is_some_and(|v| !v.is_null() && !v.as_array().is_some_and(Vec::is_empty));
+    if has_attachments {
+        return reject(
+            "/btw side queries do not accept attachments",
+            "INVALID_ATTACHMENTS",
+        );
+    }
+
+    let raw = parsed["content"]
+        .as_str()
+        .or_else(|| parsed["question"].as_str())
+        .unwrap_or("");
+    let question = parse_btw_command(raw).unwrap_or_else(|| raw.trim());
+    if question.is_empty() {
+        return reject(
+            "Side query (/btw) question cannot be empty",
+            "EMPTY_CONTENT",
+        );
+    }
+    if question.len() > zeroclaw_runtime::agent::side_query::MAX_SIDE_QUERY_QUESTION_BYTES {
+        return reject(
+            "Side query (/btw) question exceeds maximum length",
+            "CONTENT_TOO_LARGE",
+        );
+    }
+
+    let Some(side_query) = conversation.side_query.clone() else {
+        return reject(
+            "Side query (/btw) is unavailable for this conversation",
+            "BTW_UNAVAILABLE",
+        );
+    };
+    let Some(permit) = side_query.try_acquire_slot() else {
+        return reject(
+            "Too many concurrent /btw side queries in flight for this conversation",
+            "BTW_BUSY",
+        );
+    };
+
+    spawn_ws_btw_query(
+        state,
+        conversation,
+        side_query,
+        permit,
+        question.to_string(),
+        request_id.map(str::to_owned),
+    );
+
+    let ack = request_id.map(|id| {
+        serde_json::json!({
+            "type": "ack",
+            "id": id,
+            "status": "accepted",
+            "turn": "btw",
+            "durable": false,
+        })
+    });
+    (ack, None)
+}
+
+pub(super) fn spawn_ws_btw_query(
+    state: &AppState,
+    conversation: &Arc<Conversation<WsSession>>,
+    side_query: zeroclaw_runtime::agent::SideQueryHandle,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    question: String,
+    request_id: Option<String>,
+) {
+    let state = state.clone();
+    let conversation = Arc::clone(conversation);
+    let observed_turn_id = conversation.active_turn_id();
+    let (_, agent_alias) = conversation
+        .key()
+        .rsplit_once('\u{1f}')
+        .unwrap_or((conversation.key(), ""));
+    let cost_tracking_context = state.cost_tracker.as_ref().map(|tracker| {
+        let config = state.config.read();
+        let pricing = zeroclaw_runtime::agent::cost::build_model_provider_pricing(&config);
+        zeroclaw_runtime::agent::cost::ToolLoopCostTrackingContext::new(
+            tracker.clone(),
+            Arc::new(pricing),
+        )
+        .with_agent_alias(agent_alias)
+    });
+    let turn_usage = state.cost_tracker.as_ref().map(|_| {
+        Arc::new(parking_lot::Mutex::new(
+            zeroclaw_runtime::agent::cost::TurnUsage::default(),
+        ))
+    });
+    zeroclaw_spawn::spawn!(async move {
+        let _permit = permit;
+        let query_result = zeroclaw_runtime::agent::cost::TOOL_LOOP_TURN_USAGE
+            .scope(
+                turn_usage,
+                zeroclaw_runtime::agent::cost::TOOL_LOOP_COST_TRACKING_CONTEXT
+                    .scope(cost_tracking_context, side_query.ask(&question, None)),
+            )
+            .await;
+        match query_result {
+            Ok(resp) => {
+                let leak_detection = state.config.read().security.leak_detection.clone();
+                let safe_question = redact_frame_text(&resp.question, &leak_detection);
+                let sanitized = zeroclaw_runtime::security::outbound::sanitize_outbound_response(
+                    &resp.answer,
+                    &resp.known_tool_names,
+                    &leak_detection,
+                    zeroclaw_runtime::security::outbound::OutboundContentFormat::Markdown,
+                );
+                let mut frame = serde_json::json!({
+                    "type": "btw_response",
+                    "question": safe_question,
+                    "content": sanitized,
+                    "full_response": sanitized,
+                    "model": resp.model,
+                    "provider": resp.provider_name,
+                    "revision": resp.revision,
+                });
+                if let Some(turn_id) = observed_turn_id.or(resp.active_turn_id) {
+                    frame["turn_id"] = serde_json::Value::String(turn_id);
+                }
+                stamp_request_id(&mut frame, request_id.as_deref());
+                conversation.publish(&frame);
+            }
+            Err(err) => {
+                let leak_detection = state.config.read().security.leak_detection.clone();
+                let safe_question = redact_frame_text(&question, &leak_detection);
+                let scrubbed = zeroclaw_providers::sanitize_api_error(&err.to_string());
+                let safe_message = redact_frame_text(&scrubbed, &leak_detection);
+                let mut frame = serde_json::json!({
+                    "type": "btw_error",
+                    "question": safe_question,
+                    "message": safe_message,
+                    "code": "BTW_FAILED",
+                });
+                if let Some(turn_id) = observed_turn_id {
+                    frame["turn_id"] = serde_json::Value::String(turn_id);
+                }
+                stamp_request_id(&mut frame, request_id.as_deref());
+                conversation.publish(&frame);
+            }
+        }
+    });
+}
+
 /// Record a client request as accepted: in the session store when it keeps
 /// receipts, otherwise in the hub's bounded reconnect memory. The flag says whether
 /// the record survives a restart.
@@ -1511,6 +1774,7 @@ async fn run_ws_turns(
     claim: TurnClaim,
 ) {
     let mut next = Some(claim);
+    let lifecycle = state.ws_conversations.session_lifecycle(&scope.session_key);
     // Each idle socket submission starts its own invocation with that
     // socket's scope. Joined late steering does not inherit its authorship.
     let mut initial_claim = true;
@@ -1520,6 +1784,7 @@ async fn run_ws_turns(
         request_id,
         intake,
         generation,
+        reset_revision,
         turn_id,
         cancel,
         mut steering,
@@ -1548,7 +1813,9 @@ async fn run_ws_turns(
                     .map(|(_, alias)| alias)
                     .unwrap_or("");
                 let permitted = device::permitted(&state, &scope, alias, "chat");
-                let admitted = if !permitted {
+                let admitted = if reset_revision != conversation.reset_revision() {
+                    Ok(false)
+                } else if !permitted {
                     let mut denied = device::refusal("BRIDGE_OPERATION_DENIED");
                     stamp_request_id(&mut denied, request_id.as_deref());
                     turn_control::publish(
@@ -1606,6 +1873,15 @@ async fn run_ws_turns(
                 (Vec::new(), "error")
             }
         };
+        // Execution releases its queue guard before taking this lock: DELETE
+        // takes the lifecycle guard first, then waits for execution to settle.
+        let _lifecycle = lifecycle.lock().await;
+        if reset_revision != conversation.reset_revision() {
+            if let Some(claim) = &intake {
+                intake::release(&state, claim);
+            }
+            break;
+        }
         if let Some(claim) = &intake {
             if intake_started {
                 intake::finish(&state, &conversation, claim, outcome);
@@ -3060,16 +3336,30 @@ mod tests {
             _model: &str,
             _temperature: Option<f64>,
         ) -> anyhow::Result<zeroclaw_providers::ChatResponse> {
-            self.gate.acquire().await?.forget();
-            self.corrections.lock().push(
-                zeroclaw_api::review::OWNER_CORRECTION_CONTEXT
-                    .try_with(|resolve| resolve())
-                    .ok()
-                    .flatten(),
-            );
-            if let Some(tool) = &self.correction_tool {
-                let result = tool.execute(serde_json::json!({"kind":"preference", "statement":"Turn correction", "semantic_key":"style"})).await?;
-                self.correction_results.lock().push(result.success);
+            let is_side_query = request.messages.last().is_some_and(|m| {
+                m.role == "user"
+                    && m.content.starts_with(
+                        zeroclaw_runtime::agent::side_query::BTW_SIDE_QUERY_INSTRUCTION,
+                    )
+            });
+            if !is_side_query {
+                self.gate.acquire().await?.forget();
+                self.corrections.lock().push(
+                    zeroclaw_api::review::OWNER_CORRECTION_CONTEXT
+                        .try_with(|resolve| resolve())
+                        .ok()
+                        .flatten(),
+                );
+                if let Some(tool) = &self.correction_tool {
+                    let result = tool
+                        .execute(serde_json::json!({
+                            "kind": "preference",
+                            "statement": "Turn correction",
+                            "semantic_key": "style"
+                        }))
+                        .await?;
+                    self.correction_results.lock().push(result.success);
+                }
             }
             self.systems.lock().extend(
                 request
@@ -3988,5 +4278,308 @@ mod tests {
         // Reconnecting without a name reports the stored one.
         let reported = stamp_session(backend.as_ref(), "gw_new1", "default", None);
         assert_eq!(reported.as_deref(), Some("Foo"));
+    }
+
+    #[test]
+    fn parse_btw_command_recognizes_slash_btw_and_ignores_other_prefixes() {
+        assert_eq!(
+            parse_btw_command("/btw what is running?"),
+            Some("what is running?")
+        );
+        assert_eq!(
+            parse_btw_command("   /btw   status check  "),
+            Some("status check")
+        );
+        assert_eq!(parse_btw_command("/btw\nmultiline"), Some("multiline"));
+        assert_eq!(parse_btw_command("/btw"), Some(""));
+        assert_eq!(parse_btw_command("/btw   "), Some(""));
+        assert_eq!(parse_btw_command("/btwx not a btw command"), None);
+        assert_eq!(parse_btw_command("regular message /btw inline"), None);
+    }
+
+    #[tokio::test]
+    async fn btw_side_query_answers_during_blocked_turn_without_steering_or_history_mutation() {
+        let mut chat = SharedChat::new();
+        chat.state.pairing = Arc::new(zeroclaw_runtime::security::pairing::PairingGuard::new(
+            false,
+            &["owner-btw-token".into()],
+        ));
+        chat.scope.auth_subject = Some(zeroclaw_config::tokens::hash_token("owner-btw-token"));
+        chat.state.session_backend = Some(Arc::new(
+            zeroclaw_infra::session_sqlite::SqliteSessionBackend::new(chat._tmp.path()).unwrap(),
+        ));
+        chat.state
+            .session_backend
+            .as_ref()
+            .unwrap()
+            .set_session_agent_alias(&chat.scope.session_key, "web")
+            .unwrap();
+        let mut a = chat.attach().await;
+
+        // Start a main turn with 0 gate permits so the turn holds `conversation.agent`
+        // and blocks inside `ScriptedProvider::chat`.
+        let main_ack = chat
+            .send(&a, message_with_id("main turn work", "main-1"))
+            .unwrap();
+        assert_eq!(main_ack["status"], "accepted");
+        assert_eq!(main_ack["turn"], "started");
+        assert!(a.conversation.is_running());
+
+        // Yield briefly so the spawned turn task acquires `conversation.agent`,
+        // updates the live side-query snapshot with the in-flight user message,
+        // and reaches `self.gate.acquire().await`.
+        for _ in 0..20 {
+            if a.conversation
+                .side_query
+                .as_ref()
+                .and_then(|sq| sq.active_turn_id())
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Send a `/btw` slash command over a regular `message` frame while the main turn is blocked.
+        let btw_ack = chat
+            .send(
+                &a,
+                message_with_id("/btw echo:side answer while busy", "btw-1"),
+            )
+            .unwrap();
+        assert_eq!(btw_ack["type"], "ack");
+        assert_eq!(btw_ack["id"], "btw-1");
+        assert_eq!(btw_ack["status"], "accepted");
+        assert_eq!(btw_ack["turn"], "btw");
+        assert_eq!(btw_ack["durable"], false);
+
+        let frame = tokio::time::timeout(Duration::from_secs(5), a.frames.recv())
+            .await
+            .expect("/btw must complete while the main turn is still blocked on the gate")
+            .expect("btw_response frame");
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["type"], "btw_response");
+        assert_eq!(frame["id"], "btw-1");
+        assert_eq!(frame["question"], "echo:side answer while busy");
+        assert_eq!(frame["content"], "side answer while busy");
+        assert_eq!(frame["full_response"], "side answer while busy");
+        assert!(
+            frame["turn_id"].as_str().is_some(),
+            "btw_response during an active turn must report the active turn_id"
+        );
+
+        // Also verify explicit `{"type":"btw","content":"..."}` frame works while blocked.
+        assert!(
+            chat.send(
+                &a,
+                serde_json::json!({
+                    "type": "btw",
+                    "content": "echo:second side answer"
+                }),
+            )
+            .is_none()
+        );
+        let frame2 = tokio::time::timeout(Duration::from_secs(5), a.frames.recv())
+            .await
+            .expect("explicit btw frame must complete while blocked")
+            .expect("second btw_response frame");
+        let frame2: serde_json::Value = serde_json::from_str(&frame2).unwrap();
+        assert_eq!(frame2["type"], "btw_response");
+        assert_eq!(frame2["content"], "second side answer");
+
+        // Also verify S2 `turn_control` negotiated socket accepts `/btw` while the main turn is blocked.
+        let mut turn_negotiated = false;
+        let mut steering_negotiated = false;
+        let (neg_reply, _) = turn_control::handle(
+            &chat.state,
+            &a.conversation,
+            &chat.scope,
+            &mut turn_negotiated,
+            &mut steering_negotiated,
+            &serde_json::json!({
+                "type": "turn_control",
+                "version": 1,
+                "op": "negotiate"
+            })
+            .to_string(),
+        );
+        let epoch = neg_reply.expect("turn_ready")["epoch"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let s2_req_id = uuid::Uuid::new_v4().to_string();
+        let s2_payload = serde_json::json!({
+            "type": "turn_control",
+            "version": 1,
+            "op": "message",
+            "epoch": epoch,
+            "request_id": s2_req_id,
+            "content": "/btw echo:s2 side answer"
+        })
+        .to_string();
+        let (s2_reply, s2_start) = turn_control::handle(
+            &chat.state,
+            &a.conversation,
+            &chat.scope,
+            &mut turn_negotiated,
+            &mut steering_negotiated,
+            &s2_payload,
+        );
+        assert!(
+            s2_start.is_none(),
+            "/btw on turn_control must not start a turn"
+        );
+        let s2_reply = s2_reply.expect("turn_control ack");
+        assert_eq!(s2_reply["type"], "turn_ack");
+        assert_eq!(s2_reply["request_id"], s2_req_id);
+        assert_eq!(s2_reply["status"], "btw");
+
+        let s2_frame = tokio::time::timeout(Duration::from_secs(5), a.frames.recv())
+            .await
+            .expect("s2 btw_response while blocked")
+            .expect("frame");
+        let s2_frame: serde_json::Value = serde_json::from_str(&s2_frame).unwrap();
+        assert_eq!(s2_frame["type"], "btw_response");
+        assert_eq!(s2_frame["id"], s2_req_id);
+        assert_eq!(s2_frame["content"], "s2 side answer");
+
+        // On a negotiated S2 socket, a legacy `message` frame carrying `source`
+        // or `attachments` with a `/btw` prefix must be rejected with
+        // `UNKNOWN_OPERATION` and never reach `intake::receive`.
+        let (spoofed_reply, spoofed_claim) = turn_control::handle(
+            &chat.state,
+            &a.conversation,
+            &chat.scope,
+            &mut turn_negotiated,
+            &mut steering_negotiated,
+            &serde_json::json!({
+                "type": "message",
+                "source": {"channel": "telegram", "sender_id": "u1"},
+                "content": "/btw spoofed intake"
+            })
+            .to_string(),
+        );
+        assert!(spoofed_claim.is_none());
+        let spoofed_reply = spoofed_reply.expect("spoofed source rejected");
+        assert_eq!(spoofed_reply["type"], "turn_error");
+        assert_eq!(spoofed_reply["code"], "UNKNOWN_OPERATION");
+
+        // Now release the main turn and wait for its terminal `done` frame.
+        chat.gate.add_permits(1);
+        let done = frames_until_end(&mut a).await.pop().unwrap();
+        assert_eq!(done["type"], "done");
+        assert_eq!(done["id"], "main-1");
+
+        // Verify the main turn's owner correction context was NOT invalidated by `/btw`
+        // (unlike steering messages).
+        {
+            let corrections = chat.corrections.lock();
+            assert_eq!(corrections.len(), 1);
+            assert!(
+                corrections[0].is_some(),
+                "/btw must never invalidate owner correction authority on the running turn"
+            );
+        }
+
+        // Verify neither `Agent::history` nor durable `session_backend` contains `/btw` messages.
+        {
+            let session = a.conversation.agent.lock().await;
+            for msg in session.agent.history() {
+                if let zeroclaw_providers::ConversationMessage::Chat(c) = msg {
+                    assert!(
+                        !c.content.contains("side answer") && !c.content.contains("/btw"),
+                        "Agent::history must not contain /btw question or answer: {}",
+                        c.content
+                    );
+                }
+            }
+        }
+        let persisted = chat
+            .state
+            .session_backend
+            .as_ref()
+            .unwrap()
+            .load(&chat.scope.session_key);
+        assert_eq!(
+            persisted.len(),
+            2,
+            "session store must only contain the main user+assistant turn"
+        );
+        assert!(
+            persisted
+                .iter()
+                .all(|m| !m.content.contains("side answer") && !m.content.contains("/btw"))
+        );
+    }
+
+    #[tokio::test]
+    async fn btw_side_query_sanitizes_outbound_leaks_and_rejects_invalid_inputs() {
+        let chat = SharedChat::new();
+        let mut a = chat.attach().await;
+
+        // Empty `/btw` is rejected without starting a turn.
+        let empty_err = chat
+            .send(&a, message_with_id("/btw   ", "btw-empty"))
+            .unwrap();
+        assert_eq!(empty_err["type"], "error");
+        assert_eq!(empty_err["code"], "EMPTY_CONTENT");
+        assert_eq!(empty_err["id"], "btw-empty");
+        assert!(!a.conversation.is_running());
+
+        // Attachments on `/btw` are rejected.
+        let attach_err = chat
+            .send(
+                &a,
+                serde_json::json!({
+                    "type": "btw",
+                    "id": "btw-att",
+                    "content": "what is this?",
+                    "attachments": [uuid::Uuid::new_v4().to_string()]
+                }),
+            )
+            .unwrap();
+        assert_eq!(attach_err["type"], "error");
+        assert_eq!(attach_err["code"], "INVALID_ATTACHMENTS");
+        assert_eq!(attach_err["id"], "btw-att");
+
+        // Outbound response sanitization strips `<think>`, `<tool_call>`, and leaked tokens.
+        let token = format!("zc_{}", "deadbeef".repeat(8));
+        assert!(
+            chat.send(
+                &a,
+                message(&format!(
+                    "/btw echo:<think>secret plan</think>Token is {token} <tool_call>{{\"name\":\"shell\",\"arguments\":{{}}}}</tool_call>clean tail"
+                )),
+            )
+            .is_none()
+        );
+        let frame = tokio::time::timeout(Duration::from_secs(5), a.frames.recv())
+            .await
+            .expect("btw_response")
+            .expect("frame");
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["type"], "btw_response");
+        let echoed_question = frame["question"].as_str().unwrap();
+        assert!(
+            !echoed_question.contains(&token),
+            "leaked token in echoed question must be redacted: {echoed_question}"
+        );
+        let content = frame["content"].as_str().unwrap();
+        assert!(
+            !content.contains(&token),
+            "leaked token must be redacted: {content}"
+        );
+        assert!(
+            !content.contains("<think>"),
+            "thinking tags must be stripped: {content}"
+        );
+        assert!(
+            !content.contains("<tool_call>"),
+            "tool_call markup must be stripped: {content}"
+        );
+        assert!(
+            content.contains("[REDACTED"),
+            "redaction marker expected: {content}"
+        );
     }
 }

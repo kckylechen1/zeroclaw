@@ -1601,6 +1601,17 @@ pub async fn handle_api_session_delete(
 
     let session_key = resolve_session_key(backend.as_ref(), &id);
 
+    // Keep new sockets/admissions from racing the deletion while the existing
+    // execution queue drains. This guard is local to the session, not an epoch
+    // change: other sessions and replay-prevention receipts stay intact.
+    let lifecycle = state.ws_conversations.session_lifecycle(&session_key);
+    let _lifecycle = lifecycle.lock().await;
+    let conversations = state.ws_conversations.session_conversations(&session_key);
+    for conversation in &conversations {
+        conversation.cancel_current();
+        conversation.drain_approvals();
+    }
+
     let token = state
         .cancel_tokens
         .lock()
@@ -1616,8 +1627,25 @@ pub async fn handle_api_session_delete(
         );
     }
 
+    // A turn holds this permit through persistence. Waiting after cancellation
+    // prevents a late append from recreating the session after DELETE succeeds.
+    let _session_guard = match state.session_queue.acquire(&session_key).await {
+        Ok(guard) => guard,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
     match backend.delete_session(&session_key) {
         Ok(true) => {
+            for conversation in conversations {
+                conversation.agent.lock().await.clear_history();
+                conversation.reset();
+            }
             // The backend call has released its lock before the transport
             // journal is redacted. Preserve only replay-prevention tombstones.
             state

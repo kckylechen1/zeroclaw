@@ -249,30 +249,37 @@ pub(crate) async fn interpret_chat_response(
                     "model": ctx.model,
                     "iteration": iteration + 1,
                     "issue": issue.as_str(),
-                    "response": scrub_credentials(&response_text),
                     "trace_id": ctx.turn_id,
                 })),
             "tool_call_parse_issue"
         );
     }
 
+    let mut response_attrs = ::serde_json::json!({
+        "model": ctx.model,
+        "iteration": iteration + 1,
+        "input_tokens": resp_input_tokens,
+        "output_tokens": resp_output_tokens,
+        "cost_usd": call_cost_usd,
+        "native_tool_calls": resp.tool_calls.len(),
+        "parsed_tool_calls": calls.len(),
+        "trace_id": ctx.turn_id,
+    });
+    // Text-protocol responses contain tool arguments too. Record those at
+    // call preparation after canonical resolution, under the per-tool policy,
+    // instead of duplicating them in a provider record that bypasses denylist
+    // and byte caps. Malformed protocol has no trustworthy tool identity.
+    if calls.is_empty() && parse_issue.is_none() {
+        response_attrs["raw_response"] =
+            serde_json::Value::String(scrub_credentials(&response_text));
+    }
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Receive)
             .with_category(::zeroclaw_log::EventCategory::Provider)
             .with_outcome(::zeroclaw_log::EventOutcome::Success)
             .with_duration(u64::try_from(llm_started_at.elapsed().as_millis()).unwrap_or(u64::MAX))
-            .with_attrs(::serde_json::json!({
-                "model": ctx.model,
-                "iteration": iteration + 1,
-                "input_tokens": resp_input_tokens,
-                "output_tokens": resp_output_tokens,
-                "cost_usd": call_cost_usd,
-                "raw_response": scrub_credentials(&response_text),
-                "native_tool_calls": resp.tool_calls.len(),
-                "parsed_tool_calls": calls.len(),
-                "trace_id": ctx.turn_id,
-            })),
+            .with_attrs(response_attrs),
         "llm_response"
     );
 

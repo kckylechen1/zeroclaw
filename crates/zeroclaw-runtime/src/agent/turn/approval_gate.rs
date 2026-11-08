@@ -3,8 +3,7 @@
 
 use super::context::TurnCtx;
 use super::events::StreamDelta;
-use super::redact::scrub_credentials;
-use super::redact::scrub_credentials_json;
+use super::tool_logging::tool_log_attributes;
 use crate::agent::tool_execution::ToolExecutionOutcome;
 use crate::approval::store::AuditDecision;
 use crate::approval::{ApprovalRequest, ApprovalRequirement, ApprovalResponse};
@@ -88,7 +87,13 @@ pub(crate) async fn gate_tool_approval(
                             )
                             .with_category(::zeroclaw_log::EventCategory::Tool)
                             .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                            .with_attrs(tool_log_attributes(
+                                tool_name,
+                                ::serde_json::json!({
+                                    "tool": tool_name,
+                                    "error": e.to_string(),
+                                })
+                            )),
                             "Channel approval request failed"
                         );
                         None
@@ -181,11 +186,11 @@ pub(crate) async fn gate_tool_approval(
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
                     .with_category(::zeroclaw_log::EventCategory::Tool)
                     .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
+                    .with_attrs(tool_log_attributes(tool_name, ::serde_json::json!({
                         "model": ctx.model,
                         "iteration": iteration + 1,
                         "tool": tool_name,
-                        "arguments": scrub_credentials_json(tool_args),
+                        "arguments": tool_args.to_string(),
                         "result": denied,
                         "trace_id": ctx.turn_id,
                         // Operator-facing only. The remedy lives here rather than
@@ -202,7 +207,7 @@ pub(crate) async fn gate_tool_approval(
                         } else {
                             None
                         },
-                    })),
+                    }))),
                 "tool_call_result"
             );
             if let Some(tx) = ctx.on_delta {
@@ -236,15 +241,18 @@ pub(crate) async fn gate_tool_approval(
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Approve)
                     .with_category(::zeroclaw_log::EventCategory::Tool)
                     .with_outcome(::zeroclaw_log::EventOutcome::Success)
-                    .with_attrs(::serde_json::json!({
-                        "model": ctx.model,
-                        "iteration": iteration + 1,
-                        "tool": tool_name,
-                        "arguments": scrub_credentials_json(tool_args),
-                        "replaced": true,
-                        "output": scrub_credentials(replacement),
-                        "trace_id": ctx.turn_id,
-                    })),
+                    .with_attrs(tool_log_attributes(
+                        tool_name,
+                        ::serde_json::json!({
+                            "model": ctx.model,
+                            "iteration": iteration + 1,
+                            "tool": tool_name,
+                            "arguments": tool_args.to_string(),
+                            "replaced": true,
+                            "output": replacement,
+                            "trace_id": ctx.turn_id,
+                        })
+                    )),
                 "tool_call_result"
             );
             return ApprovalGateOutcome::Replace(ToolExecutionOutcome {
