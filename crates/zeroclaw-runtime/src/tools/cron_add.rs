@@ -1199,10 +1199,20 @@ mod tests {
             .collect();
 
         assert_eq!(values.as_slice(), cron::CRON_DELIVERY_SCHEMA_CHANNELS);
-        assert!(values.contains(&"dingtalk"));
-        assert!(values.contains(&"wechat"));
-        assert!(values.contains(&"signal"));
+        assert!(values.contains(&"telegram"));
+        assert!(values.contains(&"webhook"));
         assert!(values.contains(&"email"));
+        // Retired transports must never be offered as delivery targets.
+        for retired in [
+            "slack",
+            "mattermost",
+            "matrix",
+            "dingtalk",
+            "wechat",
+            "signal",
+        ] {
+            assert!(!values.contains(&retired), "{retired} is retired");
+        }
     }
 
     #[tokio::test]
@@ -1221,8 +1231,8 @@ mod tests {
             "delivery.channel enum must include webhook"
         );
         assert!(
-            channel_enum.iter().any(|value| value == "whatsapp"),
-            "delivery.channel enum must include whatsapp"
+            !channel_enum.iter().any(|value| value == "whatsapp"),
+            "retired transports must not appear in the delivery enum"
         );
 
         let delivery_props = schema["properties"]["delivery"]["properties"]

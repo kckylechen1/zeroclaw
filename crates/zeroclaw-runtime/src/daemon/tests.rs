@@ -542,7 +542,12 @@ fn resolve_delivery_rejects_unsupported_channel() {
 }
 
 #[test]
-fn resolve_delivery_accepts_matrix_target() {
+fn resolve_delivery_rejects_retired_matrix_target() {
+    // matrix's in-process runner is retired (#579/#581): a configured
+    // [channels.matrix] section feeds nothing, and outbound delivery runs
+    // through gateway bridges only — so the target must be refused at
+    // validation with the retired diagnostic instead of being accepted and
+    // later dropped by the delivery layer.
     let mut config = Config::default();
     config.heartbeat.target = Some("matrix".into());
     config.heartbeat.to = Some("!room:example.org".into());
@@ -551,10 +556,10 @@ fn resolve_delivery_accepts_matrix_target() {
         .matrix
         .insert("default".to_string(), Default::default());
 
-    let target = resolve_heartbeat_delivery(&config).unwrap();
-    assert_eq!(
-        target,
-        Some(("matrix".to_string(), "!room:example.org".to_string()))
+    let err = resolve_heartbeat_delivery(&config).unwrap_err();
+    assert!(
+        err.to_string().contains("transport runner is retired"),
+        "expected retired rejection, got: {err}"
     );
 }
 

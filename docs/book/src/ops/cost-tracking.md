@@ -66,8 +66,9 @@ The pipeline from `[cost.rates.*]` to a recorded `cost_usd` value is:
    `[providers.models.<type>.<alias>].pricing` table is merged in too;
    `[cost.rates.*]` wins on conflict because it's the forward-looking
    surface.
-   (See `crates/zeroclaw-channels/src/orchestrator/mod.rs`,
-   the closure under `cost_tracking: CostTracker::get_or_init_global(...).map(|tracker| ...)`.)
+   (Historically this closure lived in the retired
+   `zeroclaw-channels` orchestrator; the tracker seam it fed is
+   `CostTracker::get_or_init_global(...).map(|tracker| ...)`.)
 
 2. **Recording inside the agent loop.** Every successful LLM response
    reaches `record_tool_loop_cost_usage(provider_name, model, usage)`

@@ -1,7 +1,7 @@
 tool-browser = 使用可插拔后端（agent-browser、rust-native、computer_use）进行网页/浏览器自动化。支持 DOM 操作以及通过 computer-use 边车进行的可选系统级操作（mouse_move、mouse_click、mouse_drag、key_type、key_press、screen_capture）。使用 'snapshot' 将交互元素映射到引用（@e1、@e2）。对 open 操作强制执行 browser.allowed_domains。
 tool-browser-open = 在系统浏览器中打开经批准的 HTTPS URL。安全约束：仅限允许列表中的域名，不允许本地/私有主机，不允许抓取。
 tool-content-search = 在工作区内按正则表达式模式搜索文件内容。支持 ripgrep (rg)，并以 grep 或内部搜索作为后备。输出模式：'content'（带上下文的匹配行）、'files_with_matches'（仅文件路径）、'count'（每个文件的匹配数量）。示例：pattern='fn main'，include='*.rs'，output_mode='content'。
-tool-cron-add = 创建一个定时 cron 任务（shell 或 agent），支持 cron/at/every 调度。使用 job_type='agent' 并提供提示词以按计划运行 AI agent。要将输出投递到频道（Discord、Telegram、Slack、Mattermost、Matrix），请设置 delivery={"{"}"mode":"announce","channel":"discord","to":"<channel_id_or_chat_id>"{"}"}。这是通过频道向用户发送定时/延迟消息的首选工具。
+tool-cron-add = 创建一个定时 cron 任务（shell 或 agent），支持 cron/at/every 调度。使用 job_type='agent' 并提供提示词以按计划运行 AI agent。要将输出投递到频道（Telegram 或已配置的网关 bridge），请设置 delivery={"{"}"mode":"announce","channel":"discord","to":"<channel_id_or_chat_id>"{"}"}。这是通过可用通道面向用户发送定时/延迟消息的首选工具。
 tool-cron-list = 列出所有定时 cron 任务
 tool-cron-remove = 按 id 移除一个 cron 任务
 tool-cron-run = 立即强制运行一个 cron 任务并记录运行历史
@@ -43,7 +43,7 @@ tool-discord-search = 搜索存储在 discord.db 中的 Discord 消息历史。�
 tool-memory-forget = 按 key 移除一条记忆。用于删除过时的事实或敏感数据。返回该记忆是否被找到并移除。
 tool-memory-recall = 在长期记忆中搜索相关的事实、偏好或上下文。返回按相关性排序的评分结果。省略查询或传入裸 * 以返回近期记忆。
 tool-memory-store = 在长期记忆中存储事实、偏好或备注。使用类别 'core' 表示永久性事实，'daily' 表示会话备注，'conversation' 表示聊天上下文，或自定义类别名称。
-tool-schedule = 管理仅限 shell 的定时任务。操作：create/add/once/list/get/cancel/remove/pause/resume。警告：此工具创建的 shell 任务输出仅被记录，不会投递到任何频道。要向 Discord/Telegram/Slack/Matrix 发送定时消息，请使用 cron_add 工具，并设置 job_type='agent' 和如 {"{"}"mode":"announce","channel":"discord","to":"<channel_id>"{"}"} 的 delivery 配置。
+tool-schedule = 管理仅限 shell 的定时任务。操作：create/add/once/list/get/cancel/remove/pause/resume。警告：此工具创建的 shell 任务输出仅被记录，不会投递到任何频道。要向 Telegram 或网关 bridge 发送定时消息，请使用 cron_add 工具，并设置 job_type='agent' 和如 {"{"}"mode":"announce","channel":"discord","to":"<channel_id>"{"}"} 的 delivery 配置。
 tool-screenshot = 捕获当前屏幕的截图。返回文件路径和 base64 编码的 PNG 数据。
 tool-shell = 在工作区目录中执行 shell 命令
 tool-tool-search = 获取延迟加载的 MCP 工具的完整 schema 定义，以便调用它们。使用 "select:name1,name2" 进行精确匹配，或使用关键词进行搜索。

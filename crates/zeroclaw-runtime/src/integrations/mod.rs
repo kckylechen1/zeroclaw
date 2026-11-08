@@ -94,17 +94,6 @@ pub fn show_integration_info(config: &Config, name: &str) -> Result<()> {
             println!("    3. Enable MESSAGE CONTENT intent");
             println!("    4. Run: zeroclaw config set channels.discord.default.bot-token <token>");
         }
-        "Slack" => {
-            println!("  Setup:");
-            println!("    1. Go to https://api.slack.com/apps");
-            println!("    2. Create app → Bot Token Scopes → Install");
-            println!("    3. Run: zeroclaw config set channels.slack.default.bot-token <token>");
-        }
-        "iMessage" => {
-            println!("  Setup (macOS only):");
-            println!("    Uses AppleScript bridge to send/receive iMessages.");
-            println!("    Requires Full Disk Access in System Settings → Privacy.");
-        }
         "OpenRouter" => {
             println!("  Setup:");
             println!("    1. Get API key at https://openrouter.ai/keys");
@@ -116,21 +105,6 @@ pub fn show_integration_info(config: &Config, name: &str) -> Result<()> {
             println!("    1. Install: brew install ollama");
             println!("    2. Pull a model: ollama pull llama3");
             println!("    3. Set model_provider to 'ollama' in config.toml");
-        }
-        "Git" => {
-            println!("  Setup:");
-            println!("    1. Create a GitHub App (Settings → Developer settings → GitHub Apps)");
-            println!(
-                "       Permissions: Issues R/W, Pull requests R/W, Metadata R. Webhook: off."
-            );
-            println!("    2. Generate a private key (.pem) and install the app on your repos");
-            println!("    3. Run: zeroclaw config set channels.git.default.provider github");
-            println!("       Run: zeroclaw config set channels.git.default.app-id <id>");
-            println!(
-                "       Run: zeroclaw config set channels.git.default.private-key-path <path>"
-            );
-            println!("       Run: zeroclaw config set channels.git.default.enabled true");
-            println!("    4. Start: zeroclaw channel start");
         }
         "Browser" => {
             println!("  Built-in:");

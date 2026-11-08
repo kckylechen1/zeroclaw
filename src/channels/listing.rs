@@ -179,17 +179,36 @@ fn compiled_channel_names() -> impl Iterator<Item = &'static str> {
         .filter_map(|spec| spec.schema_name)
 }
 
+/// Channels available in this binary: compiled feature specs minus retired
+/// transports. Retired kinds (empty `channel-*` feature stubs since the
+/// runner retirement, #579/#581) must never be listed as connectable — the
+/// feature flag alone no longer proves a runner exists.
 pub fn compiled_channels(cfg: &ChannelsConfig) -> Vec<ChannelInfo> {
     cfg.channels()
         .into_iter()
-        .filter(|info| compiled_channel_names().any(|name| name == info.name))
+        .filter(|info| !info.retired && compiled_channel_names().any(|name| name == info.name))
         .collect()
 }
 
+/// Live channel kinds that are configured but whose feature is not enabled
+/// in this build. Retired transports are excluded — they belong to
+/// [`configured_retired_channels`], not to a rebuild hint (rebuilding with
+/// their stub feature would not bring a runner back).
 pub fn configured_uncompiled_channels(cfg: &ChannelsConfig) -> Vec<ChannelInfo> {
     cfg.channels()
         .into_iter()
-        .filter(|info| info.configured && !is_channel_type_compiled(info.kind))
+        .filter(|info| info.configured && !info.retired && !is_channel_type_compiled(info.kind))
+        .collect()
+}
+
+/// Retired transports with a populated `[channels.<kind>]` section. The
+/// section still parses (schema retirement is evidence-gated in #584), but
+/// nothing consumes it — surfaces report these distinctly instead of
+/// presenting them as configured channels.
+pub fn configured_retired_channels(cfg: &ChannelsConfig) -> Vec<ChannelInfo> {
+    cfg.channels()
+        .into_iter()
+        .filter(|info| info.configured && info.retired)
         .collect()
 }
 
@@ -208,7 +227,10 @@ pub fn is_channel_type_compiled(channel_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{CHANNEL_COMPILE_SPECS, ChannelsConfig};
-    use super::{compiled_channels, configured_uncompiled_channels, is_channel_type_compiled};
+    use super::{
+        compiled_channels, configured_retired_channels, configured_uncompiled_channels,
+        is_channel_type_compiled,
+    };
     use std::collections::BTreeSet;
 
     #[cfg(all(
@@ -258,6 +280,7 @@ mod tests {
         let expected: BTreeSet<_> = CHANNEL_COMPILE_SPECS
             .iter()
             .filter(|spec| spec.compiled)
+            .filter(|spec| !zeroclaw_config::schema::is_retired_transport(spec.type_keys[0]))
             .filter_map(|spec| spec.schema_name)
             .collect();
 
@@ -266,10 +289,12 @@ mod tests {
 
     #[test]
     fn configured_uncompiled_channels_uses_schema_config_status() {
+        // Webhook is a live surface: with its feature off it is exactly
+        // "configured but not compiled" — a rebuild genuinely fixes it.
         let mut cfg = ChannelsConfig::default();
-        cfg.slack.insert(
+        cfg.webhook.insert(
             "default".to_string(),
-            zeroclaw_config::schema::SlackConfig::default(),
+            zeroclaw_config::schema::WebhookConfig::default(),
         );
 
         let names: BTreeSet<_> = configured_uncompiled_channels(&cfg)
@@ -277,7 +302,39 @@ mod tests {
             .map(|info| info.name)
             .collect();
 
-        assert_eq!(names.contains("Slack"), !cfg!(feature = "channel-slack"));
+        assert_eq!(
+            names.contains("Webhook"),
+            !cfg!(feature = "channel-webhook")
+        );
+    }
+
+    #[test]
+    fn retired_transports_are_never_compiled_or_uncompiled() {
+        let mut cfg = ChannelsConfig::default();
+        cfg.slack.insert(
+            "default".to_string(),
+            zeroclaw_config::schema::SlackConfig::default(),
+        );
+
+        let compiled: BTreeSet<_> = compiled_channels(&cfg)
+            .into_iter()
+            .map(|info| info.name)
+            .collect();
+        let uncompiled: BTreeSet<_> = configured_uncompiled_channels(&cfg)
+            .into_iter()
+            .map(|info| info.name)
+            .collect();
+        let retired: BTreeSet<_> = configured_retired_channels(&cfg)
+            .into_iter()
+            .map(|info| info.name)
+            .collect();
+
+        assert!(!compiled.contains("Slack"));
+        // A configured Slack section is retired, never "not compiled" —
+        // even when its stub feature happens to be enabled, rebuilding
+        // would not bring a runner back.
+        assert!(!uncompiled.contains("Slack"));
+        assert!(retired.contains("Slack"));
     }
 
     #[test]

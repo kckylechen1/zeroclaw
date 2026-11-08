@@ -32,6 +32,8 @@ The generated **ZeroClaw** sections below each reflect a specific source: the cu
 
 Generated from the manually curated [`ChannelsConfig::channels()` metadata list](../channels/overview.md). Compile-only or non-config channel surfaces may be outside this table. The canonical per-channel setup detail lives on each channel's own page.
 
+Rows suffixed **(retired)** are transports whose in-process runners were removed (#579/#581): ZeroClaw reports ❌ for them: their config sections still parse but nothing consumes them, and their removal is evidence-gated in [#584](https://github.com/kckylechen1/zeroclaw/issues/584). The retained Email/Discord rows describe tool configuration, not bot runners.
+
 {{#include ../_snippets/feature-matrix-channels.md}}
 
 ## Provider slot support

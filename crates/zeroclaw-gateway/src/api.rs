@@ -2432,9 +2432,15 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn api_channels_marks_configured_uncompiled_channel_unavailable() {
-        // Mochat is behind `channel-mochat`, which the gateway test build
-        // never enables; its configured alias must list as not compiled.
+        // The gateway listing marks every channel not compiled (no
+        // in-process listeners since the channels retirement); a live
+        // surface (webhook) still lists, while a configured retired
+        // transport (mochat) must not appear at all (#584).
         let mut config = zeroclaw_config::schema::Config::default();
+        config.channels.webhook.insert(
+            "default".to_string(),
+            zeroclaw_config::schema::WebhookConfig::default(),
+        );
         config.channels.mochat.insert(
             "default".to_string(),
             zeroclaw_config::schema::MochatConfig {
@@ -2450,16 +2456,21 @@ pub(crate) mod tests {
             .into_response();
         let json = response_json(response).await;
         let channels = json["channels"].as_array().expect("channels array");
-        let mochat = channels
+        let webhook = channels
             .iter()
             .find(|channel| channel["alias"] == "default")
-            .expect("configured channel is listed");
+            .expect("configured live channel is listed");
 
-        assert_eq!(mochat["type"].as_str(), Some("mochat"));
-        assert_eq!(mochat["enabled"], true);
-        assert_eq!(mochat["compiled"], false);
-        assert_eq!(mochat["status"], "not_compiled");
-        assert_eq!(mochat["health"], "unavailable");
+        assert_eq!(webhook["type"].as_str(), Some("webhook"));
+        assert_eq!(webhook["compiled"], false);
+        assert_eq!(webhook["status"], "not_compiled");
+        assert_eq!(webhook["health"], "unavailable");
+        assert!(
+            channels
+                .iter()
+                .all(|channel| channel["type"].as_str() != Some("mochat")),
+            "retired transports must not appear in the channel listing"
+        );
     }
 
     /// Bind `channel_ref` (e.g. `"wechat.admin"`) to an enabled agent so

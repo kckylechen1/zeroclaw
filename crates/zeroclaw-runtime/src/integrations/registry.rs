@@ -41,10 +41,16 @@ fn evaluate_model_provider_activation(
 }
 
 pub fn all_integrations(config: &Config) -> Vec<IntegrationEntry> {
+    // Retired transports (in-process runners removed with #579/#581) are not
+    // integrations: presenting them as Available would invite configuring a
+    // section nothing consumes. The retained rows are the live surfaces —
+    // Telegram bridge, webhook ingress, and the Email/Discord tool
+    // configuration (#584).
     let channels = config
         .channels
         .channels()
         .into_iter()
+        .filter(|info| !info.retired)
         .map(|info| IntegrationEntry {
             name: info.name.to_string(),
             description: info.desc.to_string(),
@@ -148,13 +154,18 @@ mod tests {
             .iter()
             .filter(|e| e.category == IntegrationCategory::Chat)
             .count();
-        let channel_infos = config.channels.channels();
+        let retained_infos: Vec<_> = config
+            .channels
+            .channels()
+            .into_iter()
+            .filter(|info| !info.retired)
+            .collect();
         assert_eq!(
             channel_count,
-            channel_infos.len(),
-            "every ChannelsConfig::channels() entry should produce exactly one Chat entry",
+            retained_infos.len(),
+            "every non-retired ChannelsConfig::channels() entry should produce exactly one Chat entry",
         );
-        for info in &channel_infos {
+        for info in &retained_infos {
             let entry = entries
                 .iter()
                 .find(|e| e.name == info.name)
@@ -175,6 +186,20 @@ mod tests {
                 info.name,
             );
         }
+    }
+
+    #[test]
+    fn retired_transports_produce_no_integration_entry_even_when_configured() {
+        let mut config = Config::default();
+        config
+            .channels
+            .slack
+            .insert("default".to_string(), Default::default());
+        let entries = all_integrations(&config);
+        assert!(
+            entries.iter().all(|e| e.name != "Slack"),
+            "retired transport Slack must not appear as an integration"
+        );
     }
 
     #[test]
@@ -215,7 +240,10 @@ mod tests {
     }
 
     #[test]
-    fn imessage_active_when_configured() {
+    fn imessage_and_matrix_are_retired_not_available() {
+        // The in-process runners are gone (#579/#581); their config sections
+        // feed nothing, so neither may surface as an Available/Active Chat
+        // integration — even when a section is populated.
         let mut config = Config::default();
         config.channels.imessage.insert(
             "default".to_string(),
@@ -226,52 +254,23 @@ mod tests {
                 reply_queue_depth_max: 0,
             },
         );
-        let entries = all_integrations(&config);
-        let display_name = <IMessageConfig as ChannelConfig>::name();
-        let im = entries.iter().find(|e| e.name == display_name).unwrap();
-        assert!(matches!(im.status, IntegrationStatus::Active));
-    }
-
-    #[test]
-    fn imessage_available_when_not_configured() {
-        let config = Config::default();
-        let entries = all_integrations(&config);
-        let display_name = <IMessageConfig as ChannelConfig>::name();
-        let im = entries.iter().find(|e| e.name == display_name).unwrap();
-        assert!(matches!(im.status, IntegrationStatus::Available));
-    }
-
-    #[test]
-    fn matrix_active_when_configured() {
-        let mut config = Config::default();
         config.channels.matrix.insert(
             "default".to_string(),
             MatrixConfig {
-                enabled: true,
                 homeserver: "https://m.org".into(),
-                access_token: Some("tok".into()),
-                user_id: None,
-                device_id: None,
-                allowed_rooms: vec!["!r:m".into()],
-                interrupt_on_new_message: false,
-                stream_mode: zeroclaw_config::schema::StreamMode::default(),
-                draft_update_interval_ms: 1500,
-                multi_message_delay_ms: 800,
-                recovery_key: None,
-                password: None,
-                mention_only: false,
-                approval_timeout_secs: 300,
-                reply_in_thread: true,
-                ack_reactions: Some(true),
-                excluded_tools: vec![],
-                reply_min_interval_secs: 0,
-                reply_queue_depth_max: 0,
+                ..Default::default()
             },
         );
         let entries = all_integrations(&config);
-        let display_name = <MatrixConfig as ChannelConfig>::name();
-        let mx = entries.iter().find(|e| e.name == display_name).unwrap();
-        assert!(matches!(mx.status, IntegrationStatus::Active));
+        for display_name in [
+            <IMessageConfig as ChannelConfig>::name(),
+            <MatrixConfig as ChannelConfig>::name(),
+        ] {
+            assert!(
+                entries.iter().all(|e| e.name != display_name),
+                "retired transport {display_name} must not appear in the registry"
+            );
+        }
     }
 
     /// Look up a toggle integration's status by its descriptor display

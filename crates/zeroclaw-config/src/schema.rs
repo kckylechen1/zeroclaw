@@ -4102,6 +4102,12 @@ impl Config {
     /// macro emits them) so adding a new channel type via the macro
     /// surfaces here without touching this code. Alias keys are HashMap
     /// keys; not kebab-converted.
+    ///
+    /// Retired transports (`RETIRED_TRANSPORT_KINDS`) are excluded: every
+    /// consumer of this walk is a presentation surface (dashboard channel
+    /// rows, agent channel pickers, tool channel-ref options), and a
+    /// populated retired section must not surface as a usable channel
+    /// alias (#584).
     #[must_use]
     pub fn channels_by_alias(&self) -> Vec<ChannelAliasInfo> {
         use std::collections::BTreeMap;
@@ -4118,6 +4124,7 @@ impl Config {
             }
         }
         seen.into_iter()
+            .filter(|((channel_type, _), _)| !is_retired_transport(channel_type))
             .map(|((channel_type, alias), enabled)| {
                 let composite = format!("{channel_type}.{alias}");
                 let owning_agent = self.agent_for_channel(&composite).map(str::to_string);
@@ -10581,6 +10588,59 @@ pub struct CustomTunnelConfig {
 
 // ── Channels ─────────────────────────────────────────────────────
 
+/// Channel kinds whose in-process transport runners were retired with the
+/// `zeroclaw-channels` crate (#579/#581). Their `[channels.<kind>]` sections
+/// still parse — schema retirement is a separate, evidence-gated slice
+/// (#584) — but no runtime, bridge, Node, or Tachi consumer reads them, so
+/// no surface may present them as available transports.
+///
+/// The retained channel surfaces are exactly the complement:
+/// `telegram` (gateway bridge), `webhook` (gateway ingress), `email`
+/// (email_search/email_read tool configuration), `discord` (Discord
+/// archive-query tool configuration), `voice_duplex` (Node path), and the
+/// always-on CLI. Do not add a kind here without a consumer-graph review,
+/// and do not remove one without the deletion evidence #584 requires.
+pub const RETIRED_TRANSPORT_KINDS: &[&str] = &[
+    "slack",
+    "mattermost",
+    "imessage",
+    "matrix",
+    "signal",
+    "whatsapp",
+    "irc",
+    "twitch",
+    "lark",
+    "line",
+    "dingtalk",
+    "wecom",
+    "wecom_ws",
+    "wechat",
+    "qq",
+    "twitter",
+    "mochat",
+    "nostr",
+    "clawdtalk",
+    "reddit",
+    "bluesky",
+    "git",
+    "voice_call",
+    "voice_wake",
+    "amqp",
+];
+
+/// Whether `kind` names a retired transport. Accepts the snake_case section
+/// key (`voice_wake`) and the kebab-case display kinds `channels()` emits
+/// (`voice-wake`, `whatsapp-web`).
+pub fn is_retired_transport(kind: &str) -> bool {
+    let normalized = kind.replace('-', "_");
+    // `channels()` renders the WhatsApp section key as `whatsapp-web`.
+    let canonical = match normalized.as_str() {
+        "whatsapp_web" => "whatsapp",
+        other => other,
+    };
+    RETIRED_TRANSPORT_KINDS.contains(&canonical)
+}
+
 /// Top-level channel configurations (`[channels]` section).
 ///
 /// each channel type is a keyed table of named instances (aliases).
@@ -10816,7 +10876,11 @@ impl ChannelsConfig {
     ///
     /// Always returns the full set of channel types regardless of compile-time
     /// feature flags — the `configured` flag reflects whether the operator has
-    /// populated that channel's config section.
+    /// populated that channel's config section, and `retired` marks kinds
+    /// whose transport runner no longer exists (`RETIRED_TRANSPORT_KINDS`).
+    /// Presentation surfaces must not offer `retired` kinds as connectable
+    /// channels; the retained Email/Discord rows are tool configuration, not
+    /// transports.
     pub fn channels(&self) -> Vec<super::traits::ChannelInfo> {
         use super::traits::ChannelInfo;
         vec![
@@ -10825,176 +10889,211 @@ impl ChannelsConfig {
                 name: "Telegram",
                 desc: "connect your bot",
                 configured: !self.telegram.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "discord",
                 name: "Discord",
-                desc: "connect your bot",
+                desc: "Discord archive search config",
                 configured: !self.discord.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "slack",
                 name: "Slack",
                 desc: "connect your bot",
                 configured: !self.slack.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "mattermost",
                 name: "Mattermost",
                 desc: "connect to your bot",
                 configured: !self.mattermost.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "imessage",
                 name: "iMessage",
                 desc: "macOS only",
                 configured: !self.imessage.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "matrix",
                 name: "Matrix",
                 desc: "self-hosted chat",
                 configured: !self.matrix.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "signal",
                 name: "Signal",
                 desc: "An open-source, encrypted messaging service",
                 configured: !self.signal.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "whatsapp-web",
                 name: "WhatsApp Web",
                 desc: "native WhatsApp Web (wa-rs)",
                 configured: self.whatsapp.values().any(|c| c.is_web_config()),
+                retired: false,
             },
             ChannelInfo {
                 kind: "email",
                 name: "Email",
-                desc: "Email over IMAP/SMTP",
+                desc: "email_search/email_read tool config",
                 configured: !self.email.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "twitch",
                 name: "Twitch",
                 desc: "Twitch chat (IRC)",
                 configured: !self.twitch.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "irc",
                 name: "IRC",
                 desc: "IRC over TLS",
                 configured: !self.irc.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "lark",
                 name: "Lark",
                 desc: "Lark Bot",
                 configured: !self.lark.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "dingtalk",
                 name: "DingTalk",
                 desc: "DingTalk Stream Mode",
                 configured: !self.dingtalk.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "wecom",
                 name: "WeCom",
                 desc: "WeCom Bot Webhook",
                 configured: !self.wecom.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "wecom-ws",
                 name: "WeCom WebSocket",
                 desc: "WeCom AI Bot long connection",
                 configured: !self.wecom_ws.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "wechat",
                 name: "WeChat",
                 desc: "WeChat iLink Bot",
                 configured: !self.wechat.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "qq",
                 name: "QQ Official",
                 desc: "Tencent QQ Bot",
                 configured: !self.qq.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "nostr",
                 name: "Nostr",
                 desc: "Nostr DMs",
                 configured: !self.nostr.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "clawdtalk",
                 name: "ClawdTalk",
                 desc: "ClawdTalk Channel",
                 configured: !self.clawdtalk.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "reddit",
                 name: "Reddit",
                 desc: "Reddit bot (OAuth2)",
                 configured: !self.reddit.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "bluesky",
                 name: "Bluesky",
                 desc: "AT Protocol",
                 configured: !self.bluesky.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "git",
                 name: "Git",
                 desc: "Git forge (GitHub, Gitea, Forgejo): issues, PRs & events",
                 configured: !self.git.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "twitter",
                 name: "X/Twitter",
                 desc: "X/Twitter Bot via API v2",
                 configured: !self.twitter.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "mochat",
                 name: "Mochat",
                 desc: "Mochat Customer Service",
                 configured: !self.mochat.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "line",
                 name: "LINE",
                 desc: "connect your LINE bot",
                 configured: !self.line.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "voice-call",
                 name: "Voice Call",
                 desc: "outbound voice call channel",
                 configured: !self.voice_call.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "voice-wake",
                 name: "VoiceWake",
                 desc: "voice wake word detection",
                 configured: !self.voice_wake.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "amqp",
                 name: "AMQP",
                 desc: "AMQP topic consumer",
                 configured: !self.amqp.is_empty(),
+                retired: false,
             },
             ChannelInfo {
                 kind: "webhook",
                 name: "Webhook",
                 desc: "HTTP endpoint",
                 configured: !self.webhook.is_empty(),
+                retired: false,
             },
         ]
+        .into_iter()
+        .map(|mut info: super::traits::ChannelInfo| {
+            info.retired = is_retired_transport(info.kind);
+            info
+        })
+        .collect()
     }
 
     /// Returns `true` when at least one channel entry across all channel types
@@ -11035,46 +11134,58 @@ impl ChannelsConfig {
             || self.git.values().any(|c| c.enabled)
     }
 
-    /// One `(canonical_name, configured, deliverable)` row per channel in the
-    /// registry. Single source for name-addressed channel lookups so no surface
-    /// has to hardcode a subset of the channel list. `deliverable` is `false`
-    /// for input-only transports whose `Channel::send` is a no-op (amqp is a
-    /// fan-in consumer; voice_wake and voice_duplex are input-only), so a name-addressed
-    /// outbound surface such as `heartbeat.target` can refuse them at validation
-    /// instead of accepting a target the delivery layer silently drops.
-    pub fn channel_presence(&self) -> [(&'static str, bool, bool); 30] {
+    /// One `(canonical_name, configured, deliverable, retired)` row per
+    /// channel in the registry. Single source for name-addressed channel
+    /// lookups so no surface has to hardcode a subset of the channel list.
+    /// `deliverable` is `false` for input-only transports whose
+    /// `Channel::send` is a no-op (voice_duplex is input-only) and for
+    /// retired transports (`retired`), so a name-addressed outbound surface
+    /// such as `heartbeat.target` refuses them at validation instead of
+    /// accepting a target the delivery layer silently drops.
+    pub fn channel_presence(&self) -> [(&'static str, bool, bool, bool); 30] {
         [
-            ("telegram", !self.telegram.is_empty(), true),
-            ("discord", !self.discord.is_empty(), true),
-            ("slack", !self.slack.is_empty(), true),
-            ("mattermost", !self.mattermost.is_empty(), true),
-            ("webhook", !self.webhook.is_empty(), true),
-            ("imessage", !self.imessage.is_empty(), true),
-            ("matrix", !self.matrix.is_empty(), true),
-            ("signal", !self.signal.is_empty(), true),
-            ("whatsapp", !self.whatsapp.is_empty(), true),
-            ("email", !self.email.is_empty(), true),
-            ("irc", !self.irc.is_empty(), true),
-            ("twitch", !self.twitch.is_empty(), true),
-            ("lark", !self.lark.is_empty(), true),
-            ("line", !self.line.is_empty(), true),
-            ("dingtalk", !self.dingtalk.is_empty(), true),
-            ("wecom", !self.wecom.is_empty(), true),
-            ("wecom_ws", !self.wecom_ws.is_empty(), true),
-            ("wechat", !self.wechat.is_empty(), true),
-            ("qq", !self.qq.is_empty(), true),
-            ("twitter", !self.twitter.is_empty(), true),
-            ("mochat", !self.mochat.is_empty(), true),
-            ("nostr", !self.nostr.is_empty(), true),
-            ("clawdtalk", !self.clawdtalk.is_empty(), true),
-            ("reddit", !self.reddit.is_empty(), true),
-            ("bluesky", !self.bluesky.is_empty(), true),
-            ("git", !self.git.is_empty(), true),
-            ("voice_call", !self.voice_call.is_empty(), true),
-            ("voice_wake", !self.voice_wake.is_empty(), false),
-            ("voice_duplex", !self.voice_duplex.is_empty(), false),
-            ("amqp", !self.amqp.is_empty(), false),
+            ("telegram", !self.telegram.is_empty(), true, false),
+            ("discord", !self.discord.is_empty(), true, false),
+            ("slack", !self.slack.is_empty(), false, true),
+            ("mattermost", !self.mattermost.is_empty(), false, true),
+            ("webhook", !self.webhook.is_empty(), true, false),
+            ("imessage", !self.imessage.is_empty(), false, true),
+            ("matrix", !self.matrix.is_empty(), false, true),
+            ("signal", !self.signal.is_empty(), false, true),
+            ("whatsapp", !self.whatsapp.is_empty(), false, true),
+            ("email", !self.email.is_empty(), true, false),
+            ("irc", !self.irc.is_empty(), false, true),
+            ("twitch", !self.twitch.is_empty(), false, true),
+            ("lark", !self.lark.is_empty(), false, true),
+            ("line", !self.line.is_empty(), false, true),
+            ("dingtalk", !self.dingtalk.is_empty(), false, true),
+            ("wecom", !self.wecom.is_empty(), false, true),
+            ("wecom_ws", !self.wecom_ws.is_empty(), false, true),
+            ("wechat", !self.wechat.is_empty(), false, true),
+            ("qq", !self.qq.is_empty(), false, true),
+            ("twitter", !self.twitter.is_empty(), false, true),
+            ("mochat", !self.mochat.is_empty(), false, true),
+            ("nostr", !self.nostr.is_empty(), false, true),
+            ("clawdtalk", !self.clawdtalk.is_empty(), false, true),
+            ("reddit", !self.reddit.is_empty(), false, true),
+            ("bluesky", !self.bluesky.is_empty(), false, true),
+            ("git", !self.git.is_empty(), false, true),
+            ("voice_call", !self.voice_call.is_empty(), false, true),
+            ("voice_wake", !self.voice_wake.is_empty(), false, true),
+            ("voice_duplex", !self.voice_duplex.is_empty(), false, false),
+            ("amqp", !self.amqp.is_empty(), false, true),
         ]
+    }
+
+    /// Whether `name` (case-insensitive) names a channel whose transport
+    /// runner is retired (`RETIRED_TRANSPORT_KINDS`). Used by name-addressed
+    /// surfaces to give an actionable error instead of a generic
+    /// not-deliverable one.
+    pub fn is_retired_channel(&self, name: &str) -> bool {
+        let needle = name.to_ascii_lowercase();
+        self.channel_presence()
+            .iter()
+            .any(|(canonical, _, _, retired)| *retired && *canonical == needle)
     }
 
     /// Whether a channel named `name` (case-insensitive) is a known channel
@@ -11084,7 +11195,7 @@ impl ChannelsConfig {
         let needle = name.to_ascii_lowercase();
         self.channel_presence()
             .iter()
-            .any(|(canonical, configured, _)| *configured && *canonical == needle)
+            .any(|(canonical, configured, _, _)| *configured && *canonical == needle)
     }
 
     /// Whether `name` (case-insensitive) names a channel in the registry,
@@ -11093,18 +11204,19 @@ impl ChannelsConfig {
         let needle = name.to_ascii_lowercase();
         self.channel_presence()
             .iter()
-            .any(|(canonical, _, _)| *canonical == needle)
+            .any(|(canonical, _, _, _)| *canonical == needle)
     }
 
     /// Whether `name` (case-insensitive) names a channel that can actually
-    /// deliver an outbound message. Input-only transports (amqp, voice_wake,
-    /// voice_duplex) are known and may be configured, but their `Channel::send`
-    /// is a no-op or absent, so they are not valid outbound targets.
+    /// deliver an outbound message. Input-only transports (voice_duplex) are
+    /// known and may be configured, but their `Channel::send` is a no-op or
+    /// absent, so they are not valid outbound targets; retired transports are
+    /// not deliverable either — no delivery path exists for them.
     pub fn is_channel_deliverable(&self, name: &str) -> bool {
         let needle = name.to_ascii_lowercase();
         self.channel_presence()
             .iter()
-            .any(|(canonical, _, deliverable)| *deliverable && *canonical == needle)
+            .any(|(canonical, _, deliverable, _)| *deliverable && *canonical == needle)
     }
 }
 
