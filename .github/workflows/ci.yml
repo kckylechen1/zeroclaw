@@ -44,16 +44,18 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-      - name: Test scope and required-result policy
+      - name: Test CI helpers and required-result policy
         run: python3 -m unittest discover -s scripts/ci -p 'test_ci_*.py' -v
       - name: Validate workflow semantics
         run: |
-          mkdir -p "$RUNNER_TEMP/actionlint"
-          curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
-            -o "$RUNNER_TEMP/actionlint/actionlint.tar.gz"
-          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint/actionlint.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/actionlint/actionlint.tar.gz" -C "$RUNNER_TEMP/actionlint" actionlint
-          "$RUNNER_TEMP/actionlint/actionlint" -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/ci-code-analysis.yml
+          download_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$download_dir"' EXIT
+          bash scripts/ci/download_tool.sh \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            "$download_dir/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $download_dir/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$download_dir/actionlint.tar.gz" -C "$download_dir" actionlint
+          "$download_dir/actionlint" -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/ci-code-analysis.yml
       - name: Classify the event's actual diff
         id: scope
         run: python3 scripts/ci/change_scope.py
@@ -503,7 +505,11 @@ jobs:
       - name: Install mold linker
         run: bash scripts/ci/apt_install.sh mold
       - name: Install cargo-nextest
-        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
+        run: |
+          download_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$download_dir"' EXIT
+          bash scripts/ci/download_tool.sh https://get.nexte.st/latest/linux "$download_dir/nextest.tar.gz"
+          tar zxf "$download_dir/nextest.tar.gz" -C ~/.cargo/bin
       - name: Partition guard (every workspace member in exactly one leg)
         shell: bash
         run: |
@@ -587,8 +593,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install cargo-deny
         run: |
-          curl -LsSf https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.9/cargo-deny-0.19.9-x86_64-unknown-linux-musl.tar.gz \
-            | tar zxf - -C ~/.cargo/bin --strip-components=1
+          download_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$download_dir"' EXIT
+          bash scripts/ci/download_tool.sh \
+            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.9/cargo-deny-0.19.9-x86_64-unknown-linux-musl.tar.gz \
+            "$download_dir/cargo-deny.tar.gz"
+          tar zxf "$download_dir/cargo-deny.tar.gz" -C ~/.cargo/bin --strip-components=1
       - name: Check licenses, sources, and advisories
         run: cargo deny check
       - name: Lockfile integrity
@@ -606,8 +616,12 @@ jobs:
           PY
       - name: Install cargo-audit
         run: |
-          curl -LsSf https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz \
-            | tar zxf - -C ~/.cargo/bin --strip-components=1
+          download_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$download_dir"' EXIT
+          bash scripts/ci/download_tool.sh \
+            https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz \
+            "$download_dir/cargo-audit.tgz"
+          tar zxf "$download_dir/cargo-audit.tgz" -C ~/.cargo/bin --strip-components=1
       - name: Run cargo audit (RustSec advisory database)
         run: cargo audit
 
@@ -708,8 +722,12 @@ jobs:
         env:
           MDBOOK_BIN_VERSION: v0.5.0
         run: |
-          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_BIN_VERSION}/mdbook-${MDBOOK_BIN_VERSION}-aarch64-unknown-linux-musl.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin
+          download_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$download_dir"' EXIT
+          bash scripts/ci/download_tool.sh \
+            "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_BIN_VERSION}/mdbook-${MDBOOK_BIN_VERSION}-aarch64-unknown-linux-musl.tar.gz" \
+            "$download_dir/mdbook.tar.gz"
+          sudo tar -xzf "$download_dir/mdbook.tar.gz" -C /usr/local/bin
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - name: Rust build cache
