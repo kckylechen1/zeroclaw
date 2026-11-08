@@ -734,7 +734,10 @@ mod tests {
             .model_provider(Box::new(ProjectionProvider {
                 prompts: prompts.clone(),
             }))
-            .tools(vec![])
+            // AgentBuilder admits the Tasks section only when the retained
+            // registry includes task_list. Keep the real tools and owner
+            // together so this exercises production prompt assembly.
+            .tools(built.tools)
             .task_owner(built.task_owner)
             .memory(Arc::new(zeroclaw_memory::NoneMemory::new("none")))
             .observer(Arc::new(crate::observability::NoopObserver))
@@ -753,15 +756,24 @@ mod tests {
                 [&owner],
             )
             .unwrap();
+        assert!(!writer.is_autocommit(), "the writer must remain open");
 
         agent
             .turn("read the committed task snapshot")
             .await
             .unwrap();
+        assert!(
+            !writer.is_autocommit(),
+            "projection must complete while the writer still owns its transaction"
+        );
         {
             let prompts = prompts.lock();
             assert_eq!(prompts.len(), 1);
-            assert!(prompts[0].contains("committed before writer"));
+            assert!(
+                prompts[0].contains("committed before writer"),
+                "expected the committed snapshot while the writer is open; synthetic prompt:\n{}",
+                prompts[0]
+            );
             assert!(prompts[0].contains("expected_revision=1"));
             assert!(!prompts[0].contains("committed on next request"));
             assert!(!prompts[0].contains("unavailable"));
@@ -773,7 +785,11 @@ mod tests {
             .unwrap();
         let prompts = prompts.lock();
         assert_eq!(prompts.len(), 2);
-        assert!(prompts[1].contains("committed on next request"));
+        assert!(
+            prompts[1].contains("committed on next request"),
+            "the next request must project the newly committed snapshot; synthetic prompt:\n{}",
+            prompts[1]
+        );
         assert!(prompts[1].contains("expected_revision=2"));
         assert!(!prompts[1].contains("committed before writer"));
     }
