@@ -663,4 +663,118 @@ mod tests {
         );
         assert_eq!(db.task_list(&owner).unwrap().revision, 2);
     }
+
+    #[tokio::test]
+    async fn production_agent_projects_tasks_without_waiting_for_the_session_writer() {
+        struct ProjectionProvider {
+            prompts: Arc<parking_lot::Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ModelProvider for ProjectionProvider {
+            async fn chat_with_system(
+                &self,
+                _: Option<&str>,
+                _: &str,
+                _: &str,
+                _: Option<f64>,
+            ) -> anyhow::Result<String> {
+                anyhow::bail!("fixture requires canonical chat dispatch")
+            }
+            async fn chat(
+                &self,
+                request: ChatRequest<'_>,
+                _: &str,
+                _: Option<f64>,
+            ) -> anyhow::Result<ChatResponse> {
+                self.prompts.lock().push(
+                    request
+                        .messages
+                        .iter()
+                        .find(|message| message.role == "system")
+                        .unwrap()
+                        .content
+                        .clone(),
+                );
+                Ok(ChatResponse {
+                    text: Some("done".into()),
+                    tool_calls: vec![],
+                    usage: None,
+                    reasoning_content: None,
+                })
+            }
+        }
+        impl zeroclaw_api::attribution::Attributable for ProjectionProvider {
+            fn role(&self) -> zeroclaw_api::attribution::Role {
+                zeroclaw_api::attribution::Role::System
+            }
+            fn alias(&self) -> &str {
+                "task-projection-fixture"
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = config(&tmp);
+        // Build the real registry before taking the writer lock: session
+        // startup, not per-request projection, owns schema initialization.
+        let built = registry(&config, None);
+        let owner = (built.task_owner.as_ref().unwrap())().unwrap().0;
+        let db = SqliteSessionBackend::new(&config.data_dir).unwrap();
+        db.apply_task_ops(
+            &owner,
+            0,
+            &[TaskOp::Add {
+                description: "committed before writer".into(),
+                status: "pending".into(),
+                reminder: None,
+            }],
+        )
+        .unwrap();
+        let prompts = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut agent = crate::agent::Agent::builder()
+            .model_provider(Box::new(ProjectionProvider {
+                prompts: prompts.clone(),
+            }))
+            .tools(vec![])
+            .task_owner(built.task_owner)
+            .memory(Arc::new(zeroclaw_memory::NoneMemory::new("none")))
+            .observer(Arc::new(crate::observability::NoopObserver))
+            .tool_dispatcher(Box::new(crate::agent::dispatcher::NativeToolDispatcher))
+            .workspace_dir(tmp.path().to_path_buf())
+            .agent_alias("alpha".into())
+            .build()
+            .unwrap();
+        let writer =
+            rusqlite::Connection::open(config.data_dir.join("sessions/sessions.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer.execute("UPDATE agent_tasks SET description = 'committed on next request' WHERE agent_identity = ?1", [&owner]).unwrap();
+        writer
+            .execute(
+                "UPDATE agent_task_revisions SET revision = 2 WHERE agent_identity = ?1",
+                [&owner],
+            )
+            .unwrap();
+
+        agent
+            .turn("read the committed task snapshot")
+            .await
+            .unwrap();
+        {
+            let prompts = prompts.lock();
+            assert_eq!(prompts.len(), 1);
+            assert!(prompts[0].contains("committed before writer"));
+            assert!(prompts[0].contains("expected_revision=1"));
+            assert!(!prompts[0].contains("committed on next request"));
+            assert!(!prompts[0].contains("unavailable"));
+        }
+        writer.execute_batch("COMMIT").unwrap();
+        agent
+            .turn("read the latest committed task snapshot")
+            .await
+            .unwrap();
+        let prompts = prompts.lock();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains("committed on next request"));
+        assert!(prompts[1].contains("expected_revision=2"));
+        assert!(!prompts[1].contains("committed before writer"));
+    }
 }
