@@ -32,7 +32,7 @@ cli-migrate-about = Migra datos desde otros entornos de ejecución de agentes
 cli-auth-about = Gestiona los perfiles de autenticación de suscripción del proveedor
 cli-memory-about = Gestiona las entradas de memoria del agente
 cli-config-about = Gestiona la configuración de ZeroClaw
-cli-update-about = Comprueba y aplica las actualizaciones de ZeroClaw
+cli-update-about = Actualizar este fork desde el código fuente
 cli-self-test-about = Ejecuta autopruebas de diagnóstico
 cli-completions-about = Genera scripts de autocompletado del shell
 cli-desktop-about = Inicia la aplicación de escritorio complementaria de ZeroClaw
@@ -241,19 +241,8 @@ cli-config-long-about =
 
     El autocompletado de la ruta de propiedades se incluye automáticamente en `zeroclaw completions <shell>`.
 cli-update-long-about =
-    Comprueba y aplica actualizaciones de ZeroClaw.
+    Este fork no tiene un canal verificado de actualización binaria. Actualice una copia de https://github.com/kckylechen1/zeroclaw y ejecute ./install.sh --source con sus opciones preset/features actuales. Las versiones del proyecto original no pueden actualizar este fork.
 
-    De forma predeterminada, descarga e instala la última versión con un pipeline de 6 fases: verificación previa, descarga, copia de seguridad, validación, intercambio y prueba de humo. Reversión automática en caso de fallo.
-
-    Usa --check para solo comprobar actualizaciones sin instalar.
-    Usa --force para omitir el aviso de confirmación.
-    Usa --version para apuntar a una versión específica en lugar de la última.
-
-    Ejemplos:
-    zeroclaw update                      # descargar e instalar la última
-    zeroclaw update --check              # solo comprobar, no instalar
-    zeroclaw update --force              # instalar sin confirmación
-    zeroclaw update --version 0.6.0      # instalar versión específica
 cli-self-test-long-about =
     Ejecuta autodiagnósticos para verificar la instalación de ZeroClaw.
 
@@ -673,12 +662,6 @@ cli-locales-installed = Se instalaron {$count} catálogo(s) para '{$locale}' en 
 cli-browse-header = {$path} ({$count} entradas)
 cli-browse-empty = (vacío)
 cli-browse-file-bytes = {$name} ({$bytes} bytes)
-cli-update-already-current = Ya está actualizado (v{$version}).
-cli-update-success = ¡Actualizado correctamente a v{$version}!
-cli-update-prebuilt-channel-note = Las actualizaciones precompiladas usan la distribución estándar ligera. Compila desde el código fuente con `./install.sh --source --preset full`, `--features channels-full` o una característica `channel-*` específica para Slack y otros canales no incluidos en esa distribución.
-cli-update-available = Actualización disponible: v{$current} -> v{$latest}
-cli-update-forcing-reinstall = Forzando la reinstalación: v{$current} -> v{$latest}
-cli-update-not-writable = el directorio de instalación {$dir} no admite escritura ({$error}); vuelve a ejecutar `zeroclaw update` con privilegios elevados (sudo en macOS/Linux, una consola de administrador en Windows)
 cli-selftest-all-passed = Las {$total} comprobaciones pasaron.
 cli-selftest-some-failed = {$failed}/{$total} comprobaciones fallaron.
 cli-selftest-channel-config-uncompiled = {$compiled} tipos de canal compilados, {$configured} compilados/configurados; configurados pero no compilados: {$names}. Compila desde el código fuente con `./install.sh --source --preset full`, `--features channels-full` o la característica `channel-*` específica.
@@ -885,3 +868,5 @@ acp-bridge-allow-once = Permitir una vez
 acp-bridge-reject-once = Rechazar una vez
 delegation-result-notice = La tarea delegada {$request} terminó con resultado {$outcome}. Pregunta al agente o consulta tachi_result para el despacho {$dispatch}.
 task-reminder-notice = Recordatorio: {$task}
+
+cli-update-source-only = Este fork no tiene un canal verificado de actualización binaria. Actualice una copia de https://github.com/kckylechen1/zeroclaw y ejecute ./install.sh --source con sus opciones preset/features actuales. Las versiones del proyecto original no pueden actualizar este fork.

@@ -875,35 +875,27 @@ Property path tab completion is included automatically in `zeroclaw completions 
         config_command: ConfigCommands,
     },
 
-    /// Check for and apply updates
+    /// Update this fork from source
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Check for and apply ZeroClaw updates.
+This fork has no verified binary update channel.
 
-By default, downloads and installs the latest release with a \
-6-phase pipeline: preflight, download, backup, validate, swap, \
-and smoke test. Automatic rollback on failure.
+Update a checkout of https://github.com/kckylechen1/zeroclaw and run \
+./install.sh --source with your existing preset/features.
 
-Use --check to only check for updates without installing.
-Use --force to skip the confirmation prompt.
-Use --version to target a specific release instead of latest.
-
-Examples:
-  zeroclaw update                      # download and install latest
-  zeroclaw update --check              # check only, don't install
-  zeroclaw update --force              # install without confirmation
-  zeroclaw update --version 0.6.0      # install specific version")]
+Legacy --check, --force, --version and --json options remain parseable, \
+but this command refuses every binary update without network access.")]
     Update {
-        /// Only check for updates, don't install
+        /// Legacy flag; binary update checks are disabled in this fork
         #[arg(long)]
         check: bool,
-        /// Install even if the target is not newer (reinstall or downgrade/pin to --version)
+        /// Legacy flag; cannot override the source-only update policy
         #[arg(long)]
         force: bool,
-        /// Target version (default: latest)
+        /// Legacy target version; binary updates are disabled
         #[arg(long)]
         version: Option<String>,
-        /// With --check, emit machine-readable JSON instead of human text
+        /// Legacy output flag; the disabled updater always returns an error
         #[arg(long)]
         json: bool,
     },
@@ -2821,55 +2813,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
             Ok(())
         }
 
-        Commands::Update {
-            check,
-            force,
-            version,
-            json,
-        } => {
-            if check {
-                let info = commands::update::check(version.as_deref()).await?;
-                if json {
-                    // Machine-readable shape consumed by the gateway's
-                    // `GET /api/version/check`. Keep field names stable.
-                    println!(
-                        "{}",
-                        serde_json::to_string(&serde_json::json!({
-                            "current_version": info.current_version,
-                            "latest_version": info.latest_version,
-                            "is_newer": info.is_newer,
-                            "release_url": info.release_url,
-                            "release_notes": info.release_notes,
-                            "published_at": info.published_at,
-                        }))?
-                    );
-                } else if info.is_newer {
-                    println!(
-                        "{}",
-                        ta(
-                            "cli-update-available",
-                            &[
-                                ("current", &info.current_version),
-                                ("latest", &info.latest_version)
-                            ],
-                            "Update available"
-                        )
-                    );
-                } else {
-                    println!(
-                        "{}",
-                        ta(
-                            "cli-update-already-current",
-                            &[("version", &info.current_version)],
-                            "Already up to date"
-                        )
-                    );
-                }
-                Ok(())
-            } else {
-                commands::update::run(version.as_deref(), force).await
-            }
-        }
+        Commands::Update { .. } => commands::update::unavailable(),
 
         Commands::SelfTest { quick } => {
             let results = if quick {

@@ -32,7 +32,7 @@ cli-migrate-about = Migrer les données depuis d'autres runtimes d'agents
 cli-auth-about = Gérer les profils d'authentification des abonnements fournisseur
 cli-memory-about = Gérer les entrées de mémoire de l'agent
 cli-config-about = Gérer la configuration de ZeroClaw
-cli-update-about = Vérifier et appliquer les mises à jour de ZeroClaw
+cli-update-about = Mettre à jour ce fork depuis les sources
 cli-self-test-about = Exécuter les tests d'autodiagnostic
 cli-completions-about = Générer des scripts d'achèvement de shell
 cli-desktop-about = Lancer l'application de bureau companion ZeroClaw
@@ -241,19 +241,8 @@ cli-config-long-about =
 
     La complétion par tabulation du chemin de propriété est incluse automatiquement dans `zeroclaw completions <shell>`.
 cli-update-long-about =
-    Vérifie et applique les mises à jour de ZeroClaw.
+    Ce fork ne dispose pas de canal de mise à jour binaire vérifié. Mettez à jour une copie de https://github.com/kckylechen1/zeroclaw et exécutez ./install.sh --source avec vos options preset/features actuelles. Les versions du projet amont ne peuvent pas mettre à jour ce fork.
 
-    Par défaut, télécharge et installe la dernière version avec un pipeline en 6 phases : pré-validation, téléchargement, sauvegarde, validation, remplacement et test de fumée. Rollback automatique en cas d'échec.
-
-    Utilisez --check pour uniquement vérifier les mises à jour sans installer.
-    Utilisez --force pour ignorer l'invite de confirmation.
-    Utilisez --version pour cibler une version spécifique au lieu de la dernière.
-
-    Exemples :
-    zeroclaw update                      # télécharger et installer la dernière version
-    zeroclaw update --check              # vérifier uniquement, ne pas installer
-    zeroclaw update --force              # installer sans confirmation
-    zeroclaw update --version 0.6.0      # installer une version spécifique
 cli-self-test-long-about =
     Exécute les tests d'auto-diagnostic pour vérifier l'installation de ZeroClaw.
 
@@ -673,12 +662,6 @@ cli-locales-installed = {$count} catalogue(s) installé(s) pour « {$locale} » 
 cli-browse-header = { $path } ({ $count } entrées)
 cli-browse-empty = (vide)
 cli-browse-file-bytes = { $name } ({ $bytes } octets)
-cli-update-already-current = Déjà à jour (v{ $version }).
-cli-update-success = Mise à jour réussie vers la v{ $version } !
-cli-update-prebuilt-channel-note = Les mises à jour précompilées utilisent la distribution standard légère. Compilez depuis les sources avec `./install.sh --source --preset full`, `--features channels-full` ou une fonctionnalité `channel-*` spécifique pour Slack et les autres canaux non inclus dans cette distribution.
-cli-update-available = Mise à jour disponible : v{ $current } -> v{ $latest }
-cli-update-forcing-reinstall = Réinstallation forcée : v{ $current } -> v{ $latest }
-cli-update-not-writable = le répertoire d'installation { $dir } n'est pas accessible en écriture ({ $error }) ; relancez `zeroclaw update` avec des privilèges élevés (sudo sur macOS/Linux, une console Administrateur sous Windows)
 cli-selftest-all-passed = Les { $total } vérifications ont toutes réussi.
 cli-selftest-some-failed = { $failed }/{ $total } vérifications ont échoué.
 cli-selftest-channel-config-uncompiled = { $compiled } types de canaux compilés, { $configured } compilés/configurés ; configurés mais non compilés : { $names }. Compilez depuis les sources avec `./install.sh --source --preset full`, `--features channels-full` ou la fonctionnalité `channel-*` spécifique.
@@ -885,3 +868,5 @@ acp-bridge-allow-once = Autoriser une fois
 acp-bridge-reject-once = Refuser une fois
 delegation-result-notice = La tâche déléguée {$request} est terminée avec le résultat {$outcome}. Demandez à l'agent ou interrogez tachi_result pour le dispatch {$dispatch}.
 task-reminder-notice = Rappel : {$task}
+
+cli-update-source-only = Ce fork ne dispose pas de canal de mise à jour binaire vérifié. Mettez à jour une copie de https://github.com/kckylechen1/zeroclaw et exécutez ./install.sh --source avec vos options preset/features actuelles. Les versions du projet amont ne peuvent pas mettre à jour ce fork.
