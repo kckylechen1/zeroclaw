@@ -1,8 +1,10 @@
 //! Per-turn evidence from completed dispatches. Only hashes survive a round.
 
 use crate::agent::tool_execution::{CompletedToolExecution, ToolExecutionOutcome};
+use regex::Regex;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::sync::LazyLock;
 use zeroclaw_tool_call_parser::ParsedToolCall;
 
 #[derive(Default)]
@@ -121,6 +123,56 @@ pub(super) fn call_signature(name: &str, arguments: &serde_json::Value) -> u64 {
     hasher.finish()
 }
 
+static FAILURE_TIMESTAMP_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}|\s+UTC)?\b",
+    )
+    .unwrap()
+});
+
+static FAILURE_PROCESS_ID_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(pid|ppid|tid)(\s*[:=]\s*|\s+#?)\d+\b").unwrap());
+
+static FAILURE_REQUEST_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)\b(request[_-]?id|req[_-]?id|trace[_-]?id|span[_-]?id|correlation[_-]?id|cf-ray)(["']?\s*[:=]\s*["']?)[A-Za-z0-9._-]+"#,
+    )
+    .unwrap()
+});
+
+static FAILURE_DURATION_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(elapsed(?:\s+time)?|duration|took|completed\s+in|failed\s+in)(\s*[:=]?\s*)\d+(?:\.\d+)?\s*(?:ns|µs|us|ms|s|sec|secs|seconds)\b",
+    )
+    .unwrap()
+});
+
+static FAILURE_BRACKETED_SUBSEC_DURATION_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"([(\[])\d+(?:\.\d+)?\s*(?:ns|µs|us|ms)([)\]])").unwrap());
+
+static FAILURE_ATTEMPT_COUNTER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(attempt|retry)(\s+#?\s*|\s*[:=]\s*)\d+(?:\s*(?:/|of)\s*\d+)?\b").unwrap()
+});
+
+/// Narrowly normalizes volatile observation telemetry inside failed tool outputs
+/// so repeated identical failures still converge when wrappers emit per-call
+/// timestamps, PIDs, request/trace IDs, elapsed durations, or attempt counters.
+///
+/// Never runs on successful outputs and never strips exit codes, HTTP status
+/// codes, line numbers, paths, configured timeout windows, or resource IDs.
+fn normalize_failure_observation_for_signature(scrubbed: &str) -> String {
+    let without_ts = FAILURE_TIMESTAMP_REGEX.replace_all(scrubbed, "<timestamp>");
+    let without_pid = FAILURE_PROCESS_ID_REGEX.replace_all(&without_ts, "${1}${2}<id>");
+    let without_req_id = FAILURE_REQUEST_ID_REGEX.replace_all(&without_pid, "${1}${2}<id>");
+    let without_duration_kv =
+        FAILURE_DURATION_KV_REGEX.replace_all(&without_req_id, "${1}${2}<duration>");
+    let without_subsec_brackets = FAILURE_BRACKETED_SUBSEC_DURATION_REGEX
+        .replace_all(&without_duration_kv, "${1}<duration>${2}");
+    FAILURE_ATTEMPT_COUNTER_REGEX
+        .replace_all(&without_subsec_brackets, "${1}${2}<n>")
+        .into_owned()
+}
+
 fn signature(
     name: &str,
     arguments: &serde_json::Value,
@@ -131,7 +183,12 @@ fn signature(
     // Hash the full scrubbed result, before display truncation. The fork keeps
     // raw outcomes for tool consumers; only hashes survive this boundary.
     // Do not strip arbitrary fields that might distinguish real progress.
-    crate::agent::turn::scrub_credentials(&outcome.output).hash(&mut hasher);
+    let scrubbed = crate::agent::turn::scrub_credentials(&outcome.output);
+    if outcome.success {
+        scrubbed.hash(&mut hasher);
+    } else {
+        normalize_failure_observation_for_signature(&scrubbed).hash(&mut hasher);
+    }
     Signature {
         call: call_signature(name, arguments),
         result: hasher.finish(),
@@ -231,5 +288,63 @@ mod tests {
         assert!(observe(&mut guard, false).message_key.is_none());
         assert!(!guard.is_exhausted());
         assert!(observe(&mut guard, true).close);
+    }
+
+    #[test]
+    fn failure_signature_normalizes_volatile_telemetry_without_collapsing_distinct_errors() {
+        let args = serde_json::json!({"command": "curl https://api.example.test/v1/items"});
+        let attempt_one = outcome(
+            "[2026-11-08T03:50:07.120Z] pid=41201 tid:99 request_id=req-88a1 (attempt 1/3) \
+             connect ECONNREFUSED 10.0.0.8:443 failed in 142ms [142.4ms]",
+        );
+        let attempt_two = outcome(
+            "[2026-11-08 03:50:09.904 UTC] pid=41289 tid:104 request_id=req-99b2 (attempt 2/3) \
+             connect ECONNREFUSED 10.0.0.8:443 failed in 1.24s [98.1ms]",
+        );
+        assert!(
+            signature("shell", &args, &attempt_one) == signature("shell", &args, &attempt_two),
+            "volatile wrapper telemetry on identical failures must converge to one signature"
+        );
+
+        let different_exit_code =
+            outcome("[2026-11-08T03:50:07Z] pid=41201 command failed with exit status 1");
+        let different_exit_code_two =
+            outcome("[2026-11-08T03:50:08Z] pid=41202 command failed with exit status 2");
+        assert!(
+            signature("shell", &args, &different_exit_code)
+                != signature("shell", &args, &different_exit_code_two),
+            "distinct exit codes must remain distinct failure evidence"
+        );
+
+        let different_timeout_window =
+            outcome("request timed out in 30s after 30s (elapsed: 30001ms)");
+        let different_timeout_window_two =
+            outcome("request timed out in 60s after 60s (elapsed: 60004ms)");
+        assert!(
+            signature("shell", &args, &different_timeout_window)
+                != signature("shell", &args, &different_timeout_window_two),
+            "configured timeout windows must not be stripped as elapsed telemetry"
+        );
+
+        let success_one = ToolExecutionOutcome {
+            output: "2026-11-08T03:50:07Z pid=41201 status=running elapsed=10ms".into(),
+            output_data: None,
+            success: true,
+            error_reason: None,
+            duration: std::time::Duration::ZERO,
+            receipt: None,
+        };
+        let success_two = ToolExecutionOutcome {
+            output: "2026-11-08T03:50:08Z pid=41202 status=running elapsed=20ms".into(),
+            output_data: None,
+            success: true,
+            error_reason: None,
+            duration: std::time::Duration::ZERO,
+            receipt: None,
+        };
+        assert!(
+            signature("shell", &args, &success_one) != signature("shell", &args, &success_two),
+            "successful outputs must never have timestamps, PIDs, or durations normalized"
+        );
     }
 }
