@@ -166,7 +166,7 @@ tool-web-fetch-error-resolution = Unable to resolve and validate the web_fetch d
 tool-web-fetch-response-truncated =
     { $body }
 
-    ... [Response truncated due to size limit] ...
+    { "..." } [Response truncated due to size limit] ...
 tool-web-fetch-firecrawl-error-status = Firecrawl API error: HTTP { $status } - { $body }
 tool-web-fetch-firecrawl-error-read = Failed to read bounded Firecrawl response: { $err }
 tool-web-fetch-firecrawl-error-size = Firecrawl response exceeds the JSON body limit of { $limit } bytes
