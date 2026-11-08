@@ -22,6 +22,7 @@ pub mod prompt;
 pub mod prompt_helpers;
 mod routed_approval;
 mod session_model_provider;
+pub mod side_query;
 pub mod soul_check;
 pub mod soul_reflection;
 pub mod system_prompt;
@@ -75,3 +76,4 @@ mod tests;
 #[allow(unused_imports)]
 pub use agent::{Agent, AgentBuilder, TurnEvent};
 pub use loop_::{process_message, run};
+pub use side_query::{SideQueryHandle, SideQueryResponse, SideQuerySnapshot};

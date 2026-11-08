@@ -64,8 +64,10 @@ mod construction;
 mod turn_entry;
 
 pub struct Agent {
-    model_provider: Box<dyn ModelProvider>,
+    model_provider: Arc<dyn ModelProvider>,
     tools: Vec<Box<dyn Tool>>,
+    known_tool_names_set: Arc<std::collections::HashSet<String>>,
+    side_query: crate::agent::side_query::SideQueryHandle,
     task_owner: Option<crate::tools::task_list::TaskOwnerResolver>,
     memory: Arc<dyn Memory>,
     observer: Arc<dyn Observer>,
@@ -630,8 +632,8 @@ impl AgentBuilder {
             }));
         }
 
-        Ok(Agent {
-            model_provider: self.model_provider.ok_or_else(|| {
+        let model_provider: Arc<dyn ModelProvider> =
+            Arc::from(self.model_provider.ok_or_else(|| {
                 ::zeroclaw_log::record!(
                     ERROR,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
@@ -640,8 +642,36 @@ impl AgentBuilder {
                     "AgentBuilder::build missing required field"
                 );
                 anyhow::Error::msg("model_provider is required")
-            })?,
+            })?);
+        let known_tool_names_set = Arc::new(crate::security::outbound::known_tool_names(
+            tools.iter().map(|t| t.name()),
+        ));
+        let model_name = self.model_name.unwrap_or_else(|| "<unconfigured>".into());
+        let model_provider_name = self
+            .model_provider_name
+            .unwrap_or_else(|| "<unconfigured>".into());
+        let side_query = crate::agent::side_query::SideQueryHandle::new(
+            crate::agent::side_query::SideQuerySnapshot {
+                model_provider: Arc::clone(&model_provider),
+                provider_name: model_provider_name.clone(),
+                model: model_name.clone(),
+                temperature: self.temperature,
+                pacing: zeroclaw_config::schema::PacingConfig {
+                    loop_detection_enabled: false,
+                    ..zeroclaw_config::schema::PacingConfig::default()
+                },
+                messages: Vec::new(),
+                known_tool_names: Arc::clone(&known_tool_names_set),
+                active_turn_id: None,
+                revision: 0,
+            },
+        );
+
+        let agent = Agent {
+            model_provider,
             tools,
+            known_tool_names_set,
+            side_query,
             task_owner,
             memory: memory.clone(),
             observer: self.observer.ok_or_else(|| {
@@ -674,10 +704,8 @@ impl AgentBuilder {
             config,
             structured_history_cap_resolver: self.structured_history_cap_resolver,
             multimodal_config: self.multimodal_config.unwrap_or_default(),
-            model_name: self.model_name.unwrap_or_else(|| "<unconfigured>".into()),
-            model_provider_name: self
-                .model_provider_name
-                .unwrap_or_else(|| "<unconfigured>".into()),
+            model_name,
+            model_provider_name,
             temperature: self.temperature,
             // Default for test callers that don't call workspace_dir().
             workspace_dir: self
@@ -724,7 +752,9 @@ impl AgentBuilder {
             channel_name: self.channel_name.unwrap_or_else(|| "agent".to_string()),
             #[cfg(test)]
             turn_datetime: self.turn_datetime,
-        })
+        };
+        agent.sync_side_query_snapshot(None);
+        Ok(agent)
     }
 }
 
@@ -829,6 +859,49 @@ impl Agent {
         self.history.clear();
         self.history_has_trim_breadcrumb = false;
         self.image_cache.clear();
+        self.sync_side_query_snapshot(None);
+    }
+
+    /// Return a cloneable, lock-free handle for executing read-only `/btw` side queries.
+    pub fn side_query_handle(&self) -> crate::agent::side_query::SideQueryHandle {
+        self.side_query.clone()
+    }
+
+    /// Execute a one-shot, read-only `/btw` side query against the agent's current
+    /// conversation and tool snapshot without mutating history or turn state.
+    pub async fn btw(&self, question: &str) -> Result<crate::agent::side_query::SideQueryResponse> {
+        self.side_query.ask(question, None).await
+    }
+
+    pub(crate) fn sync_side_query_snapshot(&self, active_turn_id: Option<&str>) {
+        let messages = if self.history.is_empty() {
+            self.build_system_prompt()
+                .ok()
+                .map(ChatMessage::system)
+                .into_iter()
+                .collect()
+        } else {
+            self.tool_dispatcher.to_provider_messages(&self.history)
+        };
+        self.side_query.replace(
+            Arc::clone(&self.model_provider),
+            self.model_provider_name.clone(),
+            self.model_name.clone(),
+            self.temperature,
+            self.turn_pacing(),
+            messages,
+            Arc::clone(&self.known_tool_names_set),
+            active_turn_id.map(str::to_owned),
+        );
+    }
+
+    pub(crate) fn sync_side_query_model_config(&self) {
+        self.side_query.update_model_config(
+            Arc::clone(&self.model_provider),
+            self.model_provider_name.clone(),
+            self.model_name.clone(),
+            self.temperature,
+        );
     }
 
     fn encode_response_cache_transcript(messages: &[ChatMessage]) -> String {
@@ -944,6 +1017,7 @@ impl Agent {
 
     pub fn set_temperature(&mut self, temperature: Option<f64>) {
         self.temperature = temperature;
+        self.sync_side_query_model_config();
     }
 
     pub fn refresh_memory_embedder(
@@ -964,24 +1038,29 @@ impl Agent {
 
     pub fn set_model_name(&mut self, model_name: String) {
         self.model_name = model_name;
+        self.sync_side_query_model_config();
     }
 
     pub fn set_model_provider(&mut self, model_provider: Box<dyn ModelProvider>) {
-        self.model_provider = model_provider;
+        self.model_provider = Arc::from(model_provider);
+        self.sync_side_query_model_config();
     }
 
     pub fn set_model_provider_name(&mut self, model_provider_name: String) {
         self.model_provider_name = model_provider_name;
+        self.sync_side_query_model_config();
     }
 
     pub fn set_tool_dispatcher(&mut self, tool_dispatcher: Box<dyn ToolDispatcher>) {
         self.tool_dispatcher = tool_dispatcher;
         self.refresh_system_prompt();
+        self.sync_side_query_snapshot(None);
     }
 
     /// Attach an adapter-owned section to the existing prompt pipeline.
     pub fn add_prompt_section(&mut self, section: Box<dyn crate::agent::prompt::PromptSection>) {
         self.prompt_builder = std::mem::take(&mut self.prompt_builder).add_section(section);
+        self.sync_side_query_snapshot(None);
     }
 
     fn refresh_system_prompt(&mut self) {
@@ -994,6 +1073,7 @@ impl Agent {
         if let Ok(sys) = self.build_system_prompt() {
             self.history[0] = ConversationMessage::Chat(ChatMessage::system(sys));
         }
+        self.sync_side_query_snapshot(None);
     }
 
     pub fn tool_names(&self) -> Vec<&str> {
@@ -1080,6 +1160,7 @@ impl Agent {
                 resolve()
             });
         if self.history.len() <= max {
+            self.sync_side_query_snapshot(None);
             return None;
         }
         let result = crate::agent::history_trim::trim_conversation_to_recent_turns(
@@ -1089,11 +1170,13 @@ impl Agent {
         );
         self.history = result.history;
         if !result.trimmed {
+            self.sync_side_query_snapshot(None);
             return None;
         }
 
         crate::agent::history_trim::insert_conversation_breadcrumb(&mut self.history);
         self.history_has_trim_breadcrumb = true;
+        self.sync_side_query_snapshot(None);
         let reason = crate::i18n::get_required_cli_string("history-trim-reason-message-cap");
         let channel = self.channel_name.clone();
         let agent_alias = self.observer_agent_alias();
@@ -1405,9 +1488,10 @@ impl Agent {
             Ok(new_prov) => {
                 // Commit state only after the provider was built
                 // successfully.
-                self.model_provider = new_prov;
+                self.model_provider = Arc::from(new_prov);
                 self.model_provider_name = new_model_provider;
                 self.model_name = new_model.clone();
+                self.sync_side_query_model_config();
                 Some(new_model)
             }
             Err(e) => {

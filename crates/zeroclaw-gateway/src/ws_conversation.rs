@@ -142,10 +142,20 @@ pub(crate) struct TurnClaim {
     pub(crate) steering: mpsc::Receiver<String>,
 }
 
+pub(crate) trait ConversationAgent {
+    fn side_query_handle(&self) -> Option<zeroclaw_runtime::agent::SideQueryHandle> {
+        None
+    }
+}
+
+impl ConversationAgent for () {}
+
 pub(crate) struct Conversation<A> {
     key: String,
     /// The agent state. A turn holds this lock for its whole duration.
     pub(crate) agent: tokio::sync::Mutex<A>,
+    /// Lock-free read-only snapshot handle for one-shot `/btw` side queries.
+    pub(crate) side_query: Option<zeroclaw_runtime::agent::SideQueryHandle>,
     frames: FrameSink,
     control_frames: broadcast::Sender<Frame>,
     pub(crate) pending_approvals: PendingApprovals,
@@ -156,16 +166,18 @@ pub(crate) struct Conversation<A> {
     controls_enabled: AtomicBool,
 }
 
-impl<A> Conversation<A> {
+impl<A: ConversationAgent> Conversation<A> {
     fn new(key: String, agent: A, seed: Seed) -> Self {
         let Seed {
             pending_approvals,
             questions,
             frames,
         } = seed;
+        let side_query = agent.side_query_handle();
         Self {
             key,
             agent: tokio::sync::Mutex::new(agent),
+            side_query,
             frames,
             control_frames: broadcast::channel(64).0,
             pending_approvals,
@@ -176,9 +188,15 @@ impl<A> Conversation<A> {
             controls_enabled: AtomicBool::new(false),
         }
     }
+}
 
+impl<A> Conversation<A> {
     pub(crate) fn key(&self) -> &str {
         &self.key
+    }
+
+    pub(crate) fn active_turn_id(&self) -> Option<String> {
+        self.turn.lock().as_ref().map(|t| t.id.clone())
     }
 
     #[cfg(test)]
@@ -453,6 +471,7 @@ impl<A> ConversationHub<A> {
         mut create: F,
     ) -> Result<(Subscription<A>, Option<X>), E>
     where
+        A: ConversationAgent,
         F: FnMut(Seed) -> Fut,
         Fut: std::future::Future<Output = Result<(A, X), E>>,
     {
