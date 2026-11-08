@@ -6,6 +6,8 @@ use rusqlite::{Connection, params};
 use std::fmt::Write as _;
 use uuid::Uuid;
 
+pub(super) use crate::point_scope::PointScope;
+
 const TAG: &str = "zc-key-v1:";
 
 fn key_prefix(key: &str) -> String {
@@ -72,6 +74,24 @@ impl KeyRow {
     }
 }
 
+impl crate::point_scope::PointRow for KeyRow {
+    fn is_conversation(&self) -> bool {
+        self.category == "conversation"
+    }
+
+    fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    fn agent(&self) -> &str {
+        &self.agent
+    }
+
+    fn namespace(&self) -> &str {
+        &self.namespace
+    }
+}
+
 pub(super) fn rows(
     conn: &Connection,
     key: &str,
@@ -103,47 +123,4 @@ pub(super) fn rows(
         }
     }
     Ok(result)
-}
-
-/// No task-local context is the historical administrative API. An installed
-/// context, even an empty one, is a host-scoped call and cannot see another
-/// session's Conversation rows. Secondary compatibility aliases are not scope.
-pub(super) struct PointScope(Option<Option<String>>);
-
-impl PointScope {
-    pub fn current() -> Self {
-        Self(
-            zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS
-                .try_with(|sessions| {
-                    sessions
-                        .first()
-                        .filter(|sid| !sid.trim().is_empty())
-                        .cloned()
-                })
-                .ok(),
-        )
-    }
-
-    pub fn select(&self, mut rows: Vec<KeyRow>, include_soul: bool) -> Vec<KeyRow> {
-        rows.retain(|row| include_soul || row.namespace != crate::SOUL_NAMESPACE);
-        if let Some(session) = &self.0 {
-            rows.retain(|row| {
-                row.category != "conversation"
-                    || session
-                        .as_deref()
-                        .is_some_and(|sid| row.session.as_deref() == Some(sid))
-            });
-            // A point key resolves to its Conversation row in this session,
-            // falling back to the existing global key separately for each agent.
-            let scoped_agents: std::collections::HashSet<String> = rows
-                .iter()
-                .filter(|row| row.category == "conversation")
-                .map(|row| row.agent.clone())
-                .collect();
-            rows.retain(|row| {
-                row.category == "conversation" || !scoped_agents.contains(&row.agent)
-            });
-        }
-        rows
-    }
 }

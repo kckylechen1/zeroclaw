@@ -1,17 +1,21 @@
 use async_trait::async_trait;
 use regex::RegexBuilder;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::VecDeque;
+use std::io::BufRead;
 use std::path::Path;
-use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
+use zeroclaw_infra::process::{OverflowBehavior, ProcessLimits, ProcessOutcome, run_bounded};
 use zeroclaw_policy::SecurityPolicy;
 
 const MAX_RESULTS: usize = 1000;
 const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
+const MAX_CONTEXT_BYTES: usize = MAX_OUTPUT_BYTES / 2;
 const TIMEOUT_SECS: u64 = 30;
+const MAX_DIRECTORY_ENTRIES: usize = 16_384;
 
 pub struct ContentSearchTool {
     security: Arc<SecurityPolicy>,
@@ -37,6 +41,12 @@ enum SearchBackend {
     Ripgrep,
     Grep,
     Internal,
+}
+
+#[derive(Default)]
+struct ContextLines {
+    before: usize,
+    after: usize,
 }
 
 fn detect_search_backend() -> SearchBackend {
@@ -262,7 +272,7 @@ impl Tool for ContentSearchTool {
 
         let formatted = match backend {
             SearchBackend::Ripgrep | SearchBackend::Grep => {
-                let raw_stdout = match self
+                let (raw_stdout, limited) = match self
                     .execute_external_search(
                         backend,
                         pattern,
@@ -270,9 +280,12 @@ impl Tool for ContentSearchTool {
                         output_mode,
                         include,
                         case_sensitive,
-                        context_before,
-                        context_after,
+                        ContextLines {
+                            before: context_before,
+                            after: context_after,
+                        },
                         multiline,
+                        max_results,
                     )
                     .await
                 {
@@ -280,7 +293,7 @@ impl Tool for ContentSearchTool {
                     Err(result) => return Ok(result),
                 };
 
-                match backend {
+                let mut formatted = match backend {
                     SearchBackend::Ripgrep => {
                         format_rg_output(&raw_stdout, &workspace_canon, output_mode, max_results)
                     }
@@ -291,7 +304,14 @@ impl Tool for ContentSearchTool {
                         format_grep_output(&raw_stdout, ws.as_ref(), output_mode, max_results)
                     }
                     SearchBackend::Internal => unreachable!(),
+                };
+                if limited {
+                    formatted.push_str("\n\n");
+                    formatted.push_str(&crate::i18n::get_required_tool_string(
+                        "tool-content-search-capture-limit",
+                    ));
                 }
+                formatted
             }
             SearchBackend::Internal => {
                 let pattern = pattern.to_string();
@@ -301,6 +321,10 @@ impl Tool for ContentSearchTool {
                 let include = include.map(str::to_string);
                 let security = (*self.security).clone();
                 let deadline = Instant::now() + Duration::from_secs(TIMEOUT_SECS);
+                let cancelled = Arc::new(AtomicBool::new(false));
+                // spawn_blocking cannot be aborted once running. Cancellation
+                // therefore travels into the bounded file/directory read loop.
+                let _cancel_on_drop = CancelInternalSearch(Arc::clone(&cancelled));
 
                 let task = tokio::task::spawn_blocking(move || {
                     run_internal_search_with_deadline(
@@ -315,6 +339,7 @@ impl Tool for ContentSearchTool {
                         max_results,
                         &security,
                         deadline,
+                        &cancelled,
                     )
                 });
 
@@ -371,10 +396,13 @@ impl ContentSearchTool {
         output_mode: &str,
         include: Option<&str>,
         case_sensitive: bool,
-        context_before: usize,
-        context_after: usize,
+        context: ContextLines,
         multiline: bool,
-    ) -> Result<String, ToolResult> {
+        max_results: usize,
+    ) -> Result<(String, bool), ToolResult> {
+        if max_results == 0 {
+            return Ok((String::new(), false));
+        }
         let mut cmd = match backend {
             SearchBackend::Ripgrep => build_rg_command(
                 pattern,
@@ -382,8 +410,8 @@ impl ContentSearchTool {
                 output_mode,
                 include,
                 case_sensitive,
-                context_before,
-                context_after,
+                context.before,
+                context.after,
                 multiline,
             ),
             SearchBackend::Grep => build_grep_command(
@@ -392,8 +420,8 @@ impl ContentSearchTool {
                 output_mode,
                 include,
                 case_sensitive,
-                context_before,
-                context_after,
+                context.before,
+                context.after,
             ),
             SearchBackend::Internal => unreachable!(),
         };
@@ -406,35 +434,61 @@ impl ContentSearchTool {
             }
         }
 
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        let output = match tokio::time::timeout(
-            std::time::Duration::from_secs(TIMEOUT_SECS),
-            tokio::process::Command::from(cmd).output(),
+        // Context and group separators count toward the capture line budget.
+        // grep --count also prints zero-count files, so its byte budget remains
+        // the collection bound; the formatter counts only positive results.
+        let lines_per_result = if output_mode == "content" {
+            1_usize
+                .saturating_add(context.before)
+                .saturating_add(context.after)
+                .saturating_add(usize::from(context.before > 0 || context.after > 0))
+        } else {
+            1
+        };
+        let stdout_lines = if backend == SearchBackend::Grep && output_mode == "count" {
+            None
+        } else {
+            Some(max_results.saturating_mul(lines_per_result))
+        };
+        let output = match run_bounded(
+            &mut tokio::process::Command::from(cmd),
+            ProcessLimits {
+                timeout: Duration::from_secs(TIMEOUT_SECS),
+                stdout_bytes: MAX_OUTPUT_BYTES,
+                stderr_bytes: 64 * 1024,
+                stdout_lines,
+                overflow: OverflowBehavior::Terminate,
+            },
         )
         .await
         {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => {
+            Ok(out) => out,
+            Err(e) => {
                 return Err(ToolResult {
                     success: false,
                     output: ToolOutput::default(),
                     error: Some(format!("Failed to execute search command: {e}")),
                 });
             }
-            Err(_) => {
+        };
+
+        let limited = output.stdout_truncated || output.stderr_truncated;
+        let status = match output.outcome {
+            ProcessOutcome::TimedOut => {
                 return Err(ToolResult {
                     success: false,
                     output: ToolOutput::default(),
                     error: Some(format!("Search timed out after {TIMEOUT_SECS} seconds.")),
                 });
             }
+            ProcessOutcome::OutputLimit => None,
+            ProcessOutcome::Exited(status) => Some(status),
         };
 
         // Exit code: 0 = matches found, 1 = no matches (grep/rg), 2 = error
-        let exit_code = output.status.code().unwrap_or(-1);
-        if exit_code >= 2 {
+        if output.stderr_truncated
+            || status.is_some_and(|status| status.code().is_none_or(|code| code >= 2))
+        {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ToolResult {
                 success: false,
@@ -443,7 +497,60 @@ impl ContentSearchTool {
             });
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok((
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            limited,
+        ))
+    }
+}
+
+struct CancelInternalSearch(Arc<AtomicBool>);
+
+impl Drop for CancelInternalSearch {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+struct SearchControl<'a> {
+    deadline: Instant,
+    cancelled: &'a AtomicBool,
+}
+
+impl SearchControl<'_> {
+    fn check(&self) -> anyhow::Result<()> {
+        if self.cancelled.load(Ordering::Acquire) {
+            anyhow::bail!(
+                "{}",
+                crate::i18n::get_required_tool_string("tool-content-search-cancelled")
+            );
+        }
+        if Instant::now() >= self.deadline {
+            anyhow::bail!("Search timed out after {TIMEOUT_SECS} seconds.");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct InternalSearchOutput {
+    lines: Vec<String>,
+    bytes: usize,
+    results: usize,
+    limited: bool,
+}
+
+impl InternalSearchOutput {
+    fn push(&mut self, line: String, is_result: bool) -> bool {
+        let bytes = line.len().saturating_add(1);
+        if bytes > MAX_OUTPUT_BYTES.saturating_sub(self.bytes) {
+            self.limited = true;
+            return false;
+        }
+        self.bytes += bytes;
+        self.results += usize::from(is_result);
+        self.lines.push(line);
+        true
     }
 }
 
@@ -460,15 +567,19 @@ fn run_internal_search_with_deadline(
     max_results: usize,
     security: &SecurityPolicy,
     deadline: Instant,
+    cancelled: &AtomicBool,
 ) -> anyhow::Result<String> {
-    check_internal_deadline(deadline)?;
+    let control = SearchControl {
+        deadline,
+        cancelled,
+    };
+    control.check()?;
     let regex = RegexBuilder::new(pattern)
         .case_insensitive(!case_sensitive)
         .build()?;
     let include_pattern = include.map(glob::Pattern::new).transpose()?;
 
-    let mut raw_lines = Vec::new();
-    let mut results_seen = 0usize;
+    let mut output = InternalSearchOutput::default();
     visit_internal_search_path(
         search_path,
         workspace_canon,
@@ -479,24 +590,28 @@ fn run_internal_search_with_deadline(
         context_before,
         context_after,
         max_results,
-        deadline,
-        &mut raw_lines,
-        &mut results_seen,
+        &control,
+        &mut output,
+        0,
     )?;
 
-    Ok(format_line_output(
-        &raw_lines.join("\n"),
+    let mut formatted = format_line_output(
+        &output.lines.join("\n"),
         workspace_canon,
         output_mode,
         max_results,
-    ))
-}
-
-fn check_internal_deadline(deadline: Instant) -> anyhow::Result<()> {
-    if Instant::now() >= deadline {
-        anyhow::bail!("Search timed out after {TIMEOUT_SECS} seconds.");
+    );
+    if output.limited {
+        if output.results == 0 {
+            formatted =
+                crate::i18n::get_required_tool_string("tool-content-search-no-scanned-matches");
+        }
+        formatted.push_str("\n\n");
+        formatted.push_str(&crate::i18n::get_required_tool_string(
+            "tool-content-search-resource-limit",
+        ));
     }
-    Ok(())
+    Ok(formatted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -510,14 +625,18 @@ fn visit_internal_search_path(
     context_before: usize,
     context_after: usize,
     max_results: usize,
-    deadline: Instant,
-    raw_lines: &mut Vec<String>,
-    results_seen: &mut usize,
+    control: &SearchControl<'_>,
+    output: &mut InternalSearchOutput,
+    depth: usize,
 ) -> anyhow::Result<()> {
-    if *results_seen >= max_results {
+    if output.results >= max_results || output.limited {
         return Ok(());
     }
-    check_internal_deadline(deadline)?;
+    control.check()?;
+    if depth > 128 {
+        output.limited = true;
+        return Ok(());
+    }
 
     let Ok(resolved) = std::fs::canonicalize(path) else {
         return Ok(());
@@ -535,31 +654,36 @@ fn visit_internal_search_path(
                 context_before,
                 context_after,
                 max_results,
-                deadline,
-                raw_lines,
-                results_seen,
+                control,
+                output,
             )?;
         }
         return Ok(());
     }
-
     if !resolved.is_dir() {
         return Ok(());
     }
-
     let Ok(entries) = std::fs::read_dir(&resolved) else {
         return Ok(());
     };
+    // Preserve deterministic traversal without materializing an arbitrarily
+    // large directory before the first cancellation/deadline check.
+    let mut sorted_entries = Vec::new();
+    for entry in entries.flatten() {
+        control.check()?;
+        if sorted_entries.len() == MAX_DIRECTORY_ENTRIES {
+            output.limited = true;
+            return Ok(());
+        }
+        sorted_entries.push(entry);
+    }
+    sorted_entries.sort_by_key(|entry| entry.path());
 
-    let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        if *results_seen >= max_results {
+    for entry in sorted_entries {
+        if output.results >= max_results || output.limited {
             break;
         }
-        check_internal_deadline(deadline)?;
-
+        control.check()?;
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -579,15 +703,11 @@ fn visit_internal_search_path(
                     context_before,
                     context_after,
                     max_results,
-                    deadline,
-                    raw_lines,
-                    results_seen,
+                    control,
+                    output,
                 )?;
             }
-            continue;
-        }
-
-        if file_type.is_dir() {
+        } else if file_type.is_dir() {
             visit_internal_search_path(
                 &path,
                 workspace_canon,
@@ -598,9 +718,9 @@ fn visit_internal_search_path(
                 context_before,
                 context_after,
                 max_results,
-                deadline,
-                raw_lines,
-                results_seen,
+                control,
+                output,
+                depth + 1,
             )?;
         } else if file_type.is_file()
             && let Ok(file) = std::fs::canonicalize(&path)
@@ -614,14 +734,61 @@ fn visit_internal_search_path(
                 context_before,
                 context_after,
                 max_results,
-                deadline,
-                raw_lines,
-                results_seen,
+                control,
+                output,
             )?;
         }
     }
-
     Ok(())
+}
+
+enum SearchLine {
+    Eof,
+    Text(String),
+    Binary,
+    Limit,
+}
+
+fn read_search_line(
+    reader: &mut impl BufRead,
+    control: &SearchControl<'_>,
+) -> anyhow::Result<SearchLine> {
+    let mut line = Vec::new();
+    loop {
+        control.check()?;
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            if line.is_empty() {
+                return Ok(SearchLine::Eof);
+            }
+            break;
+        }
+        // Examine the bounded read buffer, not only the part before the next
+        // newline, so binary data already read is never exposed as text.
+        if chunk.contains(&0) {
+            return Ok(SearchLine::Binary);
+        }
+        let end = chunk.iter().position(|byte| *byte == b'\n');
+        let take = end.map_or(chunk.len(), |index| index + 1);
+        if take > MAX_OUTPUT_BYTES.saturating_sub(line.len()) {
+            return Ok(SearchLine::Limit);
+        }
+        line.extend_from_slice(&chunk[..take]);
+        reader.consume(take);
+        if end.is_some() {
+            break;
+        }
+    }
+    if line.last() == Some(&b'\n') {
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+    }
+    Ok(match String::from_utf8(line) {
+        Ok(line) => SearchLine::Text(line),
+        Err(_) => SearchLine::Binary,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -632,46 +799,91 @@ fn search_internal_file(
     context_before: usize,
     context_after: usize,
     max_results: usize,
-    deadline: Instant,
-    raw_lines: &mut Vec<String>,
-    results_seen: &mut usize,
+    control: &SearchControl<'_>,
+    output: &mut InternalSearchOutput,
 ) -> anyhow::Result<()> {
-    check_internal_deadline(deadline)?;
-    let Ok(content) = std::fs::read_to_string(file) else {
+    control.check()?;
+    let Ok(handle) = std::fs::File::open(file) else {
         return Ok(());
     };
-    if content.as_bytes().contains(&0) {
-        return Ok(());
-    }
-
-    match output_mode {
-        "files_with_matches" => {
-            if content.lines().any(|line| regex.is_match(line)) {
-                raw_lines.push(file.to_string_lossy().to_string());
-                *results_seen += 1;
+    let mut reader = std::io::BufReader::with_capacity(8192, handle);
+    let checkpoint = (output.lines.len(), output.bytes, output.results);
+    let mut before = VecDeque::<(usize, String)>::new();
+    let mut before_bytes = 0_usize;
+    let mut clipped_before = 0_usize;
+    let mut after_remaining = 0_usize;
+    let mut last_emitted = 0_usize;
+    let mut line_number = 0_usize;
+    let mut count = 0_usize;
+    loop {
+        let line = match read_search_line(&mut reader, control)? {
+            SearchLine::Eof => break,
+            SearchLine::Text(line) => line,
+            SearchLine::Binary => {
+                output.lines.truncate(checkpoint.0);
+                output.bytes = checkpoint.1;
+                output.results = checkpoint.2;
+                return Ok(());
+            }
+            SearchLine::Limit => {
+                output.limited = true;
+                break;
+            }
+        };
+        line_number += 1;
+        let is_match = regex.is_match(&line);
+        match output_mode {
+            "files_with_matches" => {
+                if is_match {
+                    output.push(file.to_string_lossy().into_owned(), true);
+                    return Ok(());
+                }
+            }
+            "count" => count = count.saturating_add(usize::from(is_match)),
+            _ => {
+                if is_match && output.results < max_results {
+                    for (number, context) in &before {
+                        if *number > last_emitted
+                            && !output.push(format!("{}-{number}-{context}", file.display()), false)
+                        {
+                            return Ok(());
+                        }
+                    }
+                    if !output.push(format!("{}:{line_number}:{line}", file.display()), true) {
+                        return Ok(());
+                    }
+                    output.limited |=
+                        clipped_before >= line_number.saturating_sub(context_before).max(1);
+                    last_emitted = line_number;
+                    after_remaining = context_after;
+                } else if after_remaining > 0 {
+                    if !output.push(format!("{}-{line_number}-{line}", file.display()), false) {
+                        return Ok(());
+                    }
+                    last_emitted = line_number;
+                    after_remaining -= 1;
+                }
+                if output.limited || (output.results >= max_results && after_remaining == 0) {
+                    break;
+                }
+                before_bytes += line.len() + std::mem::size_of::<(usize, String)>();
+                before.push_back((line_number, line));
+                while before.len() > context_before || before_bytes > MAX_CONTEXT_BYTES {
+                    let clipped =
+                        before_bytes > MAX_CONTEXT_BYTES && before.len() <= context_before;
+                    if let Some((number, removed)) = before.pop_front() {
+                        before_bytes -= removed.len() + std::mem::size_of::<(usize, String)>();
+                        if clipped {
+                            clipped_before = number;
+                        }
+                    }
+                }
             }
         }
-        "count" => {
-            let count = content.lines().filter(|line| regex.is_match(line)).count();
-            if count > 0 {
-                raw_lines.push(format!("{}:{count}", file.to_string_lossy()));
-                *results_seen += 1;
-            }
-        }
-        _ => {
-            append_internal_content_matches(
-                file,
-                &content,
-                regex,
-                context_before,
-                context_after,
-                max_results,
-                raw_lines,
-                results_seen,
-            );
-        }
     }
-
+    if output_mode == "count" && count > 0 {
+        output.push(format!("{}:{count}", file.display()), true);
+    }
     Ok(())
 }
 
@@ -692,56 +904,6 @@ fn internal_include_matches(
         .unwrap_or_default();
 
     include.matches(&relative) || include.matches(&file_name)
-}
-
-fn append_internal_content_matches(
-    file: &Path,
-    content: &str,
-    regex: &regex::Regex,
-    context_before: usize,
-    context_after: usize,
-    max_results: usize,
-    raw_lines: &mut Vec<String>,
-    results_seen: &mut usize,
-) {
-    let lines: Vec<&str> = content.lines().collect();
-    let mut match_indexes = BTreeSet::new();
-    let mut output_indexes = BTreeSet::new();
-
-    for (idx, line) in lines.iter().enumerate() {
-        if *results_seen + match_indexes.len() >= max_results {
-            break;
-        }
-        if !regex.is_match(line) {
-            continue;
-        }
-        match_indexes.insert(idx);
-
-        let start = idx.saturating_sub(context_before);
-        let end = (idx + context_after).min(lines.len().saturating_sub(1));
-        for context_idx in start..=end {
-            output_indexes.insert(context_idx);
-        }
-    }
-
-    for context_idx in output_indexes {
-        let separator = if match_indexes.contains(&context_idx) {
-            ':'
-        } else {
-            '-'
-        };
-        raw_lines.push(format!(
-            "{}{}{}{}{}",
-            file.to_string_lossy(),
-            separator,
-            context_idx + 1,
-            separator,
-            lines[context_idx]
-        ));
-        if separator == ':' {
-            *results_seen += 1;
-        }
-    }
 }
 
 fn build_rg_command(
@@ -1602,6 +1764,137 @@ mod tests {
     }
 
     #[test]
+    fn internal_line_reader_stops_before_materializing_an_oversized_line() {
+        let bytes = vec![b'x'; MAX_OUTPUT_BYTES * 2];
+        let cursor = std::io::Cursor::new(bytes);
+        let mut reader = std::io::BufReader::with_capacity(8192, cursor);
+        let cancelled = AtomicBool::new(false);
+        let control = SearchControl {
+            deadline: Instant::now() + Duration::from_secs(5),
+            cancelled: &cancelled,
+        };
+        assert!(matches!(
+            read_search_line(&mut reader, &control).unwrap(),
+            SearchLine::Limit
+        ));
+        assert!(reader.get_ref().position() <= (MAX_OUTPUT_BYTES + 8192) as u64);
+    }
+
+    #[tokio::test]
+    async fn internal_search_stops_after_the_first_match_without_reading_the_file_tail() {
+        let dir = TempDir::new().unwrap();
+        let mut content = b"match first\n".to_vec();
+        content.extend(vec![b'x'; MAX_OUTPUT_BYTES * 2]);
+        std::fs::write(dir.path().join("large.txt"), content).unwrap();
+        let tool = ContentSearchTool::new_with_backend(
+            test_security(dir.path().to_path_buf()),
+            SearchBackend::Internal,
+        );
+        let result = tool
+            .execute(json!({"pattern": "match", "max_results": 1}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("large.txt:1:match first"));
+        assert!(
+            !result.output.contains("resource limit"),
+            "the oversized tail was unnecessarily read"
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_context_is_bounded_and_marks_incomplete_results() {
+        let dir = TempDir::new().unwrap();
+        let mut content = format!("{}\n", "x".repeat(32_768)).repeat(32);
+        content.push_str("match\n");
+        std::fs::write(dir.path().join("context.txt"), content).unwrap();
+        let tool = ContentSearchTool::new_with_backend(
+            test_security(dir.path().to_path_buf()),
+            SearchBackend::Internal,
+        );
+        let result = tool
+            .execute(json!({"pattern": "match", "context_before": 10_000}))
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("context.txt:33:match"));
+        assert!(result.output.contains("results may be incomplete"));
+        assert!(result.output.len() <= MAX_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn internal_search_observes_cancellation_between_reads() {
+        struct CancellingReader {
+            owner: Option<CancelInternalSearch>,
+            reads: usize,
+        }
+        impl std::io::Read for CancellingReader {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                bytes.fill(b'x');
+                // Simulate the tool future being dropped after its first
+                // bounded OS read, while this line has not ended yet.
+                self.owner.take();
+                Ok(bytes.len())
+            }
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut reader = std::io::BufReader::with_capacity(
+            8192,
+            CancellingReader {
+                owner: Some(CancelInternalSearch(Arc::clone(&cancelled))),
+                reads: 0,
+            },
+        );
+        let control = SearchControl {
+            deadline: Instant::now() + Duration::from_secs(5),
+            cancelled: &cancelled,
+        };
+        let error = match read_search_line(&mut reader, &control) {
+            Err(error) => error,
+            Ok(_) => panic!("cancellation must interrupt a line between read buffers"),
+        };
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(reader.get_ref().reads, 1);
+    }
+
+    #[tokio::test]
+    async fn external_collection_respects_a_small_result_budget() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("many.txt"), "match\n".repeat(20_000)).unwrap();
+        let tool = ContentSearchTool::new(test_security(dir.path().to_path_buf()));
+        for (backend, binary) in [
+            (SearchBackend::Ripgrep, "rg"),
+            (SearchBackend::Grep, "grep"),
+        ] {
+            if which::which(binary).is_err() {
+                continue;
+            }
+            let (raw, limited) = tool
+                .execute_external_search(
+                    backend,
+                    "match",
+                    dir.path(),
+                    "content",
+                    None,
+                    true,
+                    ContextLines::default(),
+                    false,
+                    1,
+                )
+                .await
+                .unwrap();
+            assert!(limited);
+            assert_eq!(
+                raw.lines().count(),
+                1,
+                "{binary} collected past max_results"
+            );
+            assert!(raw.contains("match"));
+        }
+    }
+
+    #[test]
     fn content_search_internal_backend_reports_expired_deadline() {
         let dir = TempDir::new().unwrap();
         create_test_files(&dir);
@@ -1620,6 +1913,7 @@ mod tests {
             MAX_RESULTS,
             &security,
             std::time::Instant::now() - std::time::Duration::from_secs(1),
+            &AtomicBool::new(false),
         );
 
         assert!(result.is_err());
