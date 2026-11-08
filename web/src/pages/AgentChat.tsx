@@ -113,6 +113,9 @@ export function AgentChatInner({
   const {
     messages,
     sendMessage,
+    steerMessage,
+    canSteer,
+    steeringPending,
     connected,
     error,
     typing,
@@ -312,7 +315,9 @@ export function AgentChatInner({
     // local commands like /help still work during transient disconnects.
     // Network-dependent commands (/clear, /model) self-recover via their own
     // reconnect paths inside the context. #7137
-    if (isSlashCommand(trimmed)) {
+    if (typing) {
+      if (!steerMessage(trimmed, attachments.length > 0 ? attachments.map((a) => a.id) : undefined)) return;
+    } else if (isSlashCommand(trimmed)) {
       runCommand(trimmed);
     } else {
       if (!connected) return;
@@ -733,16 +738,16 @@ export function AgentChatInner({
             placeholder={!connected
               ? t('agent.connecting')
               : typing
-                ? t('agent.running')
+                ? canSteer ? t('agent.steer_placeholder') : t('agent.running')
                 : t('agent.type_message')}
-            disabled={!connected || typing}
+            disabled={!connected || (typing && (!canSteer || steeringPending))}
             className="flex-1 px-4 text-sm resize-none rounded-[var(--radius-md)] border border-pc-border bg-pc-input text-pc-text placeholder:text-pc-text-muted transition-colors focus:outline-none focus:border-pc-accent focus:ring-2 focus:ring-pc-accent/30 disabled:opacity-40"
             style={{ minHeight: '40px', maxHeight: '200px', paddingTop: '9px', paddingBottom: '9px' }}
           />
           <Button
             variant="ghost"
             size="md"
-            disabled={!connected || typing || uploadingAttachment}
+            disabled={!connected || (typing && (!canSteer || steeringPending)) || uploadingAttachment}
             onClick={() => fileInputRef.current?.click()}
             aria-label={t('agent.attach')}
             title={t('agent.attach')}
@@ -750,6 +755,18 @@ export function AgentChatInner({
           >
             <Paperclip className={`h-4 w-4 ${uploadingAttachment ? 'animate-pulse' : ''}`} />
           </Button>
+          {typing && canSteer && (
+            <Button
+              variant="primary"
+              size="md"
+              onClick={handleSend}
+              disabled={!input.trim() || steeringPending || uploadingAttachment}
+              aria-label={t('agent.steer')}
+              title={t('agent.steer')}
+            >
+              {steeringPending ? t('agent.steer_pending') : t('agent.steer')}
+            </Button>
+          )}
           {typing ? (
             <Button
               variant="danger"

@@ -56,7 +56,7 @@ assert.equal(wire.readyState, 0);
 wire.readyState = 1;
 wire.onopen?.();
 assert.equal(sent.length, 1, 'negotiation is the first frame on open');
-assert.deepEqual(sent[0], { type: 'turn_control', version: 1, op: 'negotiate' });
+assert.deepEqual(sent[0], { type: 'turn_control', version: 1, op: 'negotiate', capabilities: ['steer'] });
 // sendTurnMessage before turn_ready must queue, not send.
 const queuedId = s2.sendTurnMessage('queued hello');
 assert.equal(s2.epoch, null);

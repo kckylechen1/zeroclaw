@@ -36,6 +36,21 @@ impl std::fmt::Display for ToolLoopCancelled {
 
 impl std::error::Error for ToolLoopCancelled {}
 
+/// The caller owns steering admission and enrichment. This is a continuation,
+/// not a failed turn; all tool results have already entered both transcripts.
+#[derive(Debug)]
+pub(crate) struct SteeringPending {
+    pub(crate) display_text: String,
+}
+
+impl std::fmt::Display for SteeringPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("steering pending at tool boundary")
+    }
+}
+
+impl std::error::Error for SteeringPending {}
+
 pub fn is_tool_loop_cancelled(err: &anyhow::Error) -> bool {
     err.chain().any(|source| source.is::<ToolLoopCancelled>())
 }

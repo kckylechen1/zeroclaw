@@ -24,6 +24,12 @@ pub(super) async fn provider_response(request: &Value) -> Option<axum::response:
     if text.contains("s2-held-provider") {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+    if text.contains("s2-held-provider-error") {
+        return Some((
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error":{"message":"synthetic provider rejected input","type":"invalid_request_error"}})),
+        ).into_response());
+    }
     if !text.contains("s2-large-stream") || request["stream"] != true {
         return None;
     }
@@ -64,6 +70,253 @@ async fn negotiate(client: &mut DeviceWire) -> String {
 
 fn request(epoch: &str, id: &str, content: &str) -> Value {
     json!({"type":"turn_control","version":1,"op":"message","epoch":epoch,"request_id":id,"content":content})
+}
+
+fn steer(epoch: &str, request: &str, parent: &str, turn: &str, content: &str) -> Value {
+    json!({"type":"turn_control","version":1,"op":"steer","epoch":epoch,
+        "request_id":request,"parent_request_id":parent,"turn_id":turn,"content":content})
+}
+
+async fn negotiate_steering(client: &mut DeviceWire) -> String {
+    client
+        .send(json!({"type":"turn_control","version":1,"op":"negotiate","capabilities":["steer"]}))
+        .await;
+    let ready = client.until("turn_ready").await;
+    assert_eq!(ready["capabilities"], json!(["steer"]));
+    assert_eq!(ready["busy"], "reject");
+    ready["epoch"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn s2_explicit_steering_requires_opt_in_scopes_and_deduplicates_receipts() {
+    let fixture = DeviceFixture::new(&["chat", "cancel"]).await;
+    let mut client = fixture.socket(DEVICE_TOKEN).await;
+    let epoch = negotiate(&mut client).await;
+    let parent = uuid::Uuid::new_v4().to_string();
+    client
+        .send(request(&epoch, &parent, "s2-held-provider"))
+        .await;
+    let admitted = client.until("turn_ack").await;
+    let turn = admitted["turn_id"].as_str().unwrap();
+    wait_provider(&fixture, 1).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    let correction = steer(&epoch, &id, &parent, turn, "use the corrected destination");
+    client.send(correction.clone()).await;
+    assert_eq!(
+        client.until("turn_error").await["code"],
+        "STEERING_NOT_NEGOTIATED"
+    );
+    assert_eq!(negotiate_steering(&mut client).await, epoch);
+
+    let mut wrong = correction.clone();
+    wrong["epoch"] = json!(uuid::Uuid::new_v4().to_string());
+    client.send(wrong).await;
+    assert_eq!(client.until("turn_error").await["code"], "EPOCH_MISMATCH");
+    let mut wrong = correction.clone();
+    wrong["turn_id"] = json!(uuid::Uuid::new_v4().to_string());
+    client.send(wrong).await;
+    assert_eq!(client.until("turn_steer_ack").await["status"], "stale");
+    let mut wrong = correction.clone();
+    wrong["parent_request_id"] = json!(uuid::Uuid::new_v4().to_string());
+    client.send(wrong).await;
+    assert_eq!(client.until("turn_steer_ack").await["status"], "unknown");
+    let mut forged = correction.clone();
+    forged["source"] = json!("owner");
+    client.send(forged).await;
+    assert_eq!(
+        client.until("turn_error").await["code"],
+        "UNSUPPORTED_FIELD"
+    );
+
+    // Another authenticated subject in the same conversation cannot steer an
+    // admission that belongs to the device, even when it knows all public IDs.
+    let mut other = fixture.socket(OWNER_TOKEN).await;
+    negotiate_steering(&mut other).await;
+    other.send(correction.clone()).await;
+    assert_eq!(other.until("turn_steer_ack").await["status"], "unknown");
+
+    client.send(correction.clone()).await;
+    let accepted = client.until("turn_steer_ack").await;
+    assert_eq!(accepted["status"], "accepted");
+    assert_eq!(accepted["parent_request_id"], parent);
+    client.send(correction.clone()).await;
+    assert_eq!(client.until("turn_steer_ack").await["status"], "duplicate");
+    let mut conflict = correction.clone();
+    conflict["content"] = json!("different correction");
+    client.send(conflict).await;
+    assert_eq!(client.until("turn_steer_ack").await["status"], "conflict");
+    client
+        .send(request(
+            &epoch,
+            &uuid::Uuid::new_v4().to_string(),
+            "ordinary busy message",
+        ))
+        .await;
+    assert_eq!(client.until("turn_ack").await["status"], "busy");
+
+    terminal(&mut client, &parent, turn).await;
+    assert_eq!(
+        fixture.seen.lock().len(),
+        2,
+        "one accepted correction creates one continuation"
+    );
+    client.send(correction).await;
+    assert_eq!(client.until("turn_steer_ack").await["status"], "duplicate");
+    client
+        .send(steer(
+            &epoch,
+            &uuid::Uuid::new_v4().to_string(),
+            &parent,
+            turn,
+            "too late",
+        ))
+        .await;
+    assert_eq!(client.until("turn_steer_ack").await["status"], "terminal");
+}
+
+#[tokio::test]
+async fn s2_explicit_steering_preserves_bridge_attachment_gate() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let mut client = fixture.socket(DEVICE_TOKEN).await;
+    let epoch = negotiate_steering(&mut client).await;
+    let mut correction = steer(
+        &epoch,
+        &uuid::Uuid::new_v4().to_string(),
+        &uuid::Uuid::new_v4().to_string(),
+        &uuid::Uuid::new_v4().to_string(),
+        "caption",
+    );
+    correction["attachments"] = json!([uuid::Uuid::new_v4().to_string()]);
+    client.send(correction).await;
+    assert_eq!(
+        client.until("error").await["code"],
+        "BRIDGE_OPERATION_DENIED"
+    );
+    assert!(fixture.seen.lock().is_empty());
+}
+
+fn assert_failed_parent_fallback(attempts: &[Value]) {
+    // call_provider retries a failed, output-free stream as ordinary chat.
+    // Both attempts belong to the SAME parent input; neither is a new turn.
+    assert_eq!(
+        attempts.len(),
+        2,
+        "one stream attempt and its non-streaming fallback: {attempts:?}"
+    );
+    assert_eq!(attempts[0]["stream"], true);
+    assert_ne!(attempts[1]["stream"], true);
+    assert_eq!(
+        attempts[0]["messages"], attempts[1]["messages"],
+        "fallback must retain the exact parent transcript"
+    );
+    let messages = attempts[1]["messages"].as_array().unwrap();
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert!(
+        last["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("s2-held-provider-error"),
+        "both attempts must still address the failed parent: {last}"
+    );
+}
+
+#[tokio::test]
+async fn s2_explicit_steering_is_not_promoted_after_provider_error() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let mut client = fixture.socket(DEVICE_TOKEN).await;
+    let epoch = negotiate_steering(&mut client).await;
+    let parent = uuid::Uuid::new_v4().to_string();
+    client
+        .send(request(&epoch, &parent, "s2-held-provider-error"))
+        .await;
+    let admitted = client.until("turn_ack").await;
+    let turn = admitted["turn_id"].as_str().unwrap();
+    wait_provider(&fixture, 1).await;
+    client
+        .send(steer(
+            &epoch,
+            &uuid::Uuid::new_v4().to_string(),
+            &parent,
+            turn,
+            "must stay on the failed turn",
+        ))
+        .await;
+    assert_eq!(client.until("turn_steer_ack").await["status"], "accepted");
+    let events = terminal(&mut client, &parent, turn).await;
+    assert_eq!(events.last().unwrap()["event"]["outcome"], "error");
+    let failed_attempts = fixture.seen.lock().clone();
+    assert_failed_parent_fallback(&failed_attempts);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            wait_provider(&fixture, failed_attempts.len() + 1)
+        )
+        .await
+        .is_err(),
+        "unread explicit steering must not start a successor or inject into another turn"
+    );
+    assert_eq!(
+        *fixture.seen.lock(),
+        failed_attempts,
+        "no request may follow the failed parent's fallback"
+    );
+
+    // A separate explicit admission remains possible; the scoped fence only
+    // discards unread steering from the failed target.
+    let next = uuid::Uuid::new_v4().to_string();
+    client
+        .send(request(&epoch, &next, "new explicit task"))
+        .await;
+    let admitted = client.until("turn_ack").await;
+    assert_eq!(admitted["status"], "accepted");
+    terminal(&mut client, &next, admitted["turn_id"].as_str().unwrap()).await;
+    let seen = fixture.seen.lock();
+    assert_eq!(seen.len(), failed_attempts.len() + 1);
+    let next_messages = seen.last().unwrap()["messages"].as_array().unwrap();
+    assert!(
+        next_messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("new explicit task")
+    );
+    assert!(
+        !next_messages.iter().any(|message| message["content"]
+            .to_string()
+            .contains("must stay on the failed turn")),
+        "discarded steering must not leak into the next explicit turn"
+    );
+}
+
+#[tokio::test]
+async fn legacy_late_steering_still_follows_up_after_provider_error() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let mut client = fixture.socket(DEVICE_TOKEN).await;
+    client.send(json!({"type":"message","id":"legacy-failed-parent","content":"s2-held-provider-error"})).await;
+    assert_eq!(client.until("ack").await["turn"], "started");
+    wait_provider(&fixture, 1).await;
+    client
+        .send(json!({"type":"message","id":"legacy-follow-up","content":"legacy correction"}))
+        .await;
+    assert_eq!(client.until("ack").await["turn"], "steered");
+    client.until("error").await;
+    client.until("done").await;
+    let seen = fixture.seen.lock();
+    assert_eq!(
+        seen.len(),
+        3,
+        "two parent transport attempts and one legacy follow-up"
+    );
+    assert_failed_parent_fallback(&seen[..2]);
+    let follow_up = seen[2]["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(follow_up["role"], "user");
+    assert!(
+        follow_up["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("legacy correction"),
+        "the third request must be the legacy follow-up, not another attempt of the parent: {follow_up}"
+    );
 }
 
 async fn terminal(client: &mut DeviceWire, id: &str, turn: &str) -> Vec<Value> {

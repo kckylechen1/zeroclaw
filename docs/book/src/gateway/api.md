@@ -238,6 +238,62 @@ Stop extension clients before reverting the gateway extension. Retain the sessio
 ledger; do not rebuild it to recover transport state. This is a prerequisite for
 an adapter, not an adapter implementation or a change to Telegram intake.
 
+#### Explicit steering capability
+
+Steering is a separate opt-in operation. Request it on each authenticated socket
+with `{"type":"turn_control","version":1,"op":"negotiate","capabilities":["steer"]}`.
+Only enable the operation when `turn_ready.capabilities` contains `"steer"`.
+Omitting the capability keeps it disabled; `message` continues to reject busy
+input even on a steering-enabled connection. Reconnect requires negotiation again.
+
+Send `op: "steer"` with a new UUID `request_id`, the original message's
+`parent_request_id`, its observed `turn_id`, the negotiated `epoch`, and `content`.
+Optional `attachments` use the existing scoped handles, materialization and
+authorization checks. Restricted bridges retain the existing attachment refusal.
+The parent admission must belong to the same authenticated subject, session and
+agent. Client-supplied source or identity fields are rejected. Steering invalidates
+the initial ingress evidence; it does not acquire owner/Soul write authority.
+
+`turn_steer_ack` echoes all four IDs. Its status has these meanings:
+
+| Status | Meaning |
+| --- | --- |
+| `accepted` | Buffered for the named live turn; application is not confirmed. |
+| `duplicate` | This exact body and target were already accepted; nothing was enqueued again. |
+| `conflict` | The steering request ID was used for different input, operation or target. |
+| `unknown` | No visible parent/receipt exists in this scope, or the receipt was redacted. |
+| `stale` / `terminal` / `no_active` | The target cannot accept new input; it is never redirected to a newer turn. |
+| `cancelling` / `closed` / `full` | The existing turn queue refuses this input. |
+
+The existing S2 `Store` owns steering receipts under the same 256-request global
+process-epoch bound. Accepted identities are not evicted. This adds no durable
+input ledger or background queue. `resume` and `cancel` keep addressing the original
+message request, and output keeps that request's event sequence. They do not use
+the steering receipt ID. Retries can recover `duplicate` only with the same body,
+target and epoch; an uncertain result never authorizes a fresh execution or an
+automatic resend after restart. The Web client reports an unknown receipt after
+five seconds or disconnect and never resends steering automatically.
+
+The Conversation compares the live turn and cancellation state under its existing
+turn lock before reserving a slot in its 32-message steering queue. The runtime
+lets a complete tool batch finish, then yields to the existing streamed entry
+point before the next model call. That entry point retains raw-input autosave,
+timestamps, user-role messages and the canonical per-round transcript. It does not
+interrupt a running tool or restart the turn. Cancellation, exhausted budgets or
+terminal settlement can win before consumption; `accepted` is deliberately not an
+`applied` guarantee. Unread steering on an S2 admission is discarded at settlement,
+including after provider failure or exhausted budgets; it cannot become a new
+turn or enter a successor. Legacy admissions retain their existing late-follow-up
+behavior. A late acknowledgement must not update another turn's UI.
+
+This bounded adaptation was checked against upstream
+[`zeroclaw-labs/zeroclaw@641b766`](https://github.com/zeroclaw-labs/zeroclaw/blob/641b766030805edfa999bb5aa6ff19a9ffd4339b/crates/zeroclaw-runtime/src/agent/agent.rs)
+and its
+[`turn` engine](https://github.com/zeroclaw-labs/zeroclaw/blob/641b766030805edfa999bb5aa6ff19a9ffd4339b/crates/zeroclaw-runtime/src/agent/turn/mod.rs).
+It reuses their `yield_to_steering` / `SteeringPending` boundary mechanism while
+retaining this fork's shared Conversation and S2 ownership. The upstream socket
+lifecycle and typed principal-posture platform are not imported.
+
 ### Streaming chunk completeness
 
 The `chunk` stream is a progressive hint. The outbound redactor releases only

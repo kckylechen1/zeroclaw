@@ -37,11 +37,11 @@ pub use execution::{
 pub(crate) use history_window::preflight_history_maintenance;
 pub use knobs::{LoopKnobs, MaxIterationBehavior};
 pub(crate) use max_iter::finish_after_max_iterations;
-pub(crate) use outcome::StreamCancelledAfterOutput;
 pub use outcome::{
     ModelSwitchCallback, ModelSwitchRequested, ToolLoopCancelled, is_model_switch_requested,
     is_tool_loop_cancelled,
 };
+pub(crate) use outcome::{SteeringPending, StreamCancelledAfterOutput};
 pub(crate) use outcome::{current_model_switch_state, scope_model_switch_state};
 #[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use parse_response::build_native_assistant_history;
@@ -270,14 +270,17 @@ impl<'a> TurnState<'a> {
 }
 
 pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
-    run_tool_call_loop_with_guard(p, None).await
+    run_tool_call_loop_with_guard(p, None, false).await
 }
 
 /// Agent owns this guard for the full API turn, including steering and model
 /// switch rounds. Low-level/channel callers keep their legacy detector.
+/// Steering yield is internal to streamed Agent enrichment; keep the public
+/// LoopKnobs shape and low-level drain behavior compatible for embedders.
 pub(crate) async fn run_tool_call_loop_with_guard(
     p: ToolLoop<'_>,
     repetition_guard: Option<&std::sync::Mutex<repetition::RepetitionGuard>>,
+    yield_to_steering: bool,
 ) -> Result<String> {
     // One loop invocation is one agent turn: advisor consultations made by
     // its tools count against a fresh per-turn budget (#405).
@@ -305,6 +308,7 @@ pub(crate) async fn run_tool_call_loop_with_guard(
                 crate::subagent_v1::scope_advisor_turn(run_tool_call_loop_turn(
                     p,
                     repetition_guard,
+                    yield_to_steering,
                 )),
             ),
         )
@@ -314,6 +318,7 @@ pub(crate) async fn run_tool_call_loop_with_guard(
 async fn run_tool_call_loop_turn(
     mut p: ToolLoop<'_>,
     repetition_guard: Option<&std::sync::Mutex<repetition::RepetitionGuard>>,
+    yield_to_steering: bool,
 ) -> Result<String> {
     let model_switch_state = p
         .exec
@@ -499,7 +504,37 @@ async fn run_tool_call_loop_turn(
     };
 
     for iteration in 0..max_iterations {
-        for steering_message in drain_steering_messages(&mut steering) {
+        if cancellation_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(ToolLoopCancelled.into());
+        }
+        // Adapted from upstream 641b766: the streamed Agent owns enrichment.
+        // A model switch from the previous batch must be applied first.
+        let switch_pending = model_switch_callback.as_ref().is_some_and(|callback| {
+            callback.lock().is_ok_and(|pending| {
+                pending
+                    .as_ref()
+                    .is_some_and(|(p, m)| p != provider_name || m != model)
+            })
+        });
+        if yield_to_steering
+            && iteration > 0
+            && !switch_pending
+            && steering.as_deref().is_some_and(|rx| !rx.is_empty())
+        {
+            return Err(outcome::SteeringPending {
+                display_text: accumulated_display_text,
+            }
+            .into());
+        }
+        let pending = if yield_to_steering {
+            Vec::new()
+        } else {
+            drain_steering_messages(&mut steering)
+        };
+        for steering_message in pending {
             match ingress_policy(&steering_message, &ingress, &ingress_policy_cfg) {
                 // DEFAULT — append the injection to history exactly as today.
                 IngressDecision::Loop => {}

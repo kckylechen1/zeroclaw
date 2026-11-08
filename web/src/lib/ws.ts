@@ -58,6 +58,7 @@ export class WebSocketClient {
   /** S2 (#549): negotiated epoch, or null before `turn_ready` / during a
    * reconnect window (onopen clears it until the new socket negotiates). */
   private turnEpoch: string | null = null;
+  private steeringNegotiated = false;
   /** Once selected, S2 stays required across failed negotiation, credential
    * loss and reconnect. Legacy is only chosen for an anonymous attachment. */
   private turnControlRequired = false;
@@ -115,9 +116,10 @@ export class WebSocketClient {
       // only before this attachment has ever selected S2. Losing a token
       // during reconnect must never downgrade the contract.
       this.turnEpoch = null;
+      this.steeringNegotiated = false;
       this.protocol = this.turnControlRequired ? 'negotiating' : 'legacy';
       if (this.protocol === 'negotiating') {
-        this.sendRaw({ type: 'turn_control', version: 1, op: 'negotiate' });
+        this.sendRaw({ type: 'turn_control', version: 1, op: 'negotiate', capabilities: ['steer'] });
       }
       this.onOpen?.();
     };
@@ -137,6 +139,7 @@ export class WebSocketClient {
         // queued while the socket was pre-negotiation.
         if (this.protocol === 'negotiating' && msg.type === 'turn_ready' && typeof msg.epoch === 'string') {
           this.turnEpoch = msg.epoch;
+          this.steeringNegotiated = msg.capabilities?.includes('steer') === true;
           this.protocol = 's2';
           // Reconciliation needs to distinguish an unsent queued request from
           // an admission whose outcome belongs to the previous process epoch.
@@ -202,6 +205,23 @@ export class WebSocketClient {
 
   isMessageQueued(requestId: string): boolean {
     return this.queuedSends.some((queued) => queued.requestId === requestId);
+  }
+
+  /** Explicit correction for an observed turn. Never queued across handshake,
+   * reconnect or epoch change; a successful send is not an applied receipt. */
+  steerTurn(parentRequestId: string, turnId: string, epoch: string, content: string, attachments?: string[]): string | null {
+    if (!this.canSteer || this.turnEpoch !== epoch) return null;
+    const requestId = generateUUID();
+    this.sendRaw({
+      type: 'turn_control', version: 1, op: 'steer', epoch,
+      request_id: requestId, parent_request_id: parentRequestId, turn_id: turnId,
+      content, ...(attachments?.length ? { attachments } : {}),
+    });
+    return requestId;
+  }
+
+  get canSteer(): boolean {
+    return this.protocol === 's2' && this.steeringNegotiated && this.turnEpoch !== null && this.connected;
   }
 
   /** Cancel the observed turn (S2 scoped cancellation). The control MUST
