@@ -378,7 +378,7 @@ Upstream `zeroclaw-labs/zeroclaw` was inspected at
 detach-versus-abort but has no equivalent shared-Conversation bridge stop target.
 This leaf extends the fork's existing Conversation owner; it does not import
 upstream Agent orchestration. Real-bot/provider acceptance and the remainder of
-#377 stay separate.
+\#377 stay separate.
 
 ### Who can attach to a session
 
