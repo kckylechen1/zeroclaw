@@ -2,6 +2,8 @@ use super::*;
 use tempfile::TempDir;
 use zeroclaw_config::schema::MattermostListenMode;
 
+mod cron_shutdown;
+
 fn test_config(tmp: &TempDir) -> Config {
     let config = Config {
         data_dir: tmp.path().join("data"),
