@@ -416,6 +416,33 @@ pub async fn handle(config: &Config, format: Option<String>) -> Result<()> {
             )
         );
     }
+    let retired = crate::channels::listing::configured_retired_channels(&config.channels);
+    if !retired.is_empty() {
+        println!(
+            "{}",
+            t(
+                "cli-channels-retired-header",
+                "  Configured sections of retired transports (no runner exists):"
+            )
+        );
+        for entry in &retired {
+            println!(
+                "  {:9} {}",
+                entry.name,
+                t(
+                    "cli-status-channel-retired",
+                    "⚠️ section parses, nothing runs; remove it"
+                )
+            );
+        }
+        println!(
+            "{}",
+            t(
+                "cli-channels-retired-hint",
+                "  Live surfaces: Telegram bridge, webhook ingress, Email tools, Discord archive search."
+            )
+        );
+    }
 
     Ok(())
 }

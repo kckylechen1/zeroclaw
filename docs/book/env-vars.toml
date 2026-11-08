@@ -33,16 +33,15 @@ value = "sk-or-..."
 group = "example"
 
 [[var]]
-path = "channels.matrix.home.enabled"
+path = "channels.telegram.home.enabled"
 comment = "Toggle and configure a channel"
 value = "true"
 group = "example"
 
 [[var]]
-path = "channels.matrix.home.homeserver"
-value = "https://matrix.example.org"
+path = "channels.telegram.home.mention_only"
+value = "true"
 group = "example"
-table = true
 
 [[var]]
 path = "gateway.request_timeout_secs"

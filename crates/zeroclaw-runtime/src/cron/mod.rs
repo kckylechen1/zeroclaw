@@ -26,24 +26,14 @@ pub use types::{
     deserialize_maybe_stringified,
 };
 
-/// Channel names exposed by the cron tool schemas. Actual runtime delivery is
-/// provided by the registered channel delivery handler, not this static enum.
-pub(crate) const CRON_DELIVERY_SCHEMA_CHANNELS: &[&str] = &[
-    "telegram",
-    "discord",
-    "slack",
-    "mattermost",
-    "matrix",
-    "qq",
-    "whatsapp",
-    "webhook",
-    "lark",
-    "feishu",
-    "dingtalk",
-    "wechat",
-    "signal",
-    "email",
-];
+/// Channel names exposed by the cron tool schemas: the retained surfaces
+/// only. Retired transports (in-process runners removed with #579/#581)
+/// are deliberately absent — a cron delivery targeting one can never
+/// deliver, so the tool schema must not offer it (#584). Runtime delivery
+/// is provided by the registered channel delivery handler (gateway
+/// bridges), not this static enum.
+pub(crate) const CRON_DELIVERY_SCHEMA_CHANNELS: &[&str] =
+    &["telegram", "discord", "webhook", "email"];
 
 /// Delivery channel names for the cron tool schemas: the in-core channels
 /// plus every configured `[gateway.bridges.<name>]`, whose deliveries go to

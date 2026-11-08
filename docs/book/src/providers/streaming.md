@@ -91,4 +91,4 @@ When `supports_streaming()` is false, callers use the provider's non-streaming c
 - `crates/zeroclaw-providers/src/compatible.rs`: OpenAI-compat SSE parser
 - `crates/zeroclaw-providers/src/anthropic.rs`: Anthropic streaming
 - `crates/zeroclaw-providers/src/ollama.rs`: Ollama streaming
-- `crates/zeroclaw-channels/src/orchestrator/mod.rs`: channel-side stream consumption
+- `bridges/telegram/src/render.rs`: bridge-side stream consumption (draft edits)

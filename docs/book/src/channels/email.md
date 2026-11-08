@@ -1,63 +1,58 @@
 # Email
 
-The email channel polls IMAP for inbound messages and sends replies over SMTP.
+The email **channel runner** is retired: the in-process poller/reply loop was
+removed with the `zeroclaw-channels` crate (#579, #581); ZeroClaw no longer
+polls IMAP for inbound turns or sends SMTP replies. What is retained is the
+**tool configuration**: `[channels.email]` still feeds live consumers; the
+`email_search` and `email_read` tools, and email authentication (mailbox
+aliases, OAuth2, secrets, allowlists); so the section is not dead config
+(#584 keeps it behind an explicit owner migration if that ever changes).
 
-## Who can talk to the agent
+## What the retained config drives
 
-{{#peer-group email}}
+- `email_search`; IMAP SEARCH over the configured mailbox (filter by
+  sender, subject keyword, date, unread; folder selectable, default INBOX).
+- `email_read`; fetch one message's full content by UID, read-only
+  (`BODY.PEEK`; never marks mail as seen).
+- Email authentication resolves configured mailbox aliases and secret
+  references.
 
-## IMAP + SMTP (`email_channel`)
+Both tools are gated by the `channel-email` feature (included in the default
+build via `email-tools`).
 
-The general-purpose email channel. Polls IMAP for new messages, sends via SMTP. Works with Gmail, Outlook, Fastmail, self-hosted Postfix, and anything else that speaks IMAP/SMTP.
+{{#config-where channels email}}
+
+`password` (and `smtp_password` if configured for the relay) are secrets:
+
+{{#secret-config channels.email.<alias>.password}}
+
+## Configuration
+
+The full field list, derived from the live schema:
 
 {{#config-fields channels.email}}
 
-`password` (and `smtp_password` if you use a separate relay) are secrets:
+### Gmail notes
 
-{{#secret-config channels.email.<alias>.password}}
+- **App passwords required** if 2FA is on; regular account passwords are
+  rejected by the IMAP tooling.
 
-### Gmail gotchas
+## Who the tools answer for
 
-- **App passwords required** if 2FA is on. Regular account password is rejected.
-- **"Less secure app access" is gone**: app password is the only path.
+{{#peer-group email}}
 
-### Outlook / Office 365
-
-`password` (and `smtp_password`) are secrets:
-
-{{#secret-config channels.email.<alias>.password}}
+Peer-group gating still applies to the identity surfaces that consume the
+mailbox aliases.
 
 ## Gmail Push (removed)
 
-The `gmail_push` channel depended on the gateway's `/webhook/gmail` Pub/Sub endpoint, which was removed (#375), and the channel type has since been deleted. A leftover `[channels.gmail_push]` section is ignored and reported with the `inbound_webhook_channel_removed` config warning. Use the IMAP/SMTP channel above instead.
+The `gmail_push` channel depended on the gateway's `/webhook/gmail` Pub/Sub
+endpoint, which was removed (#375), and the channel type has since been
+deleted. A leftover `[channels.gmail_push]` section is ignored and reported
+with the `inbound_webhook_channel_removed` config warning. Use the retained
+email configuration above.
 
----
+## See also
 
-## Reply threading
-
-The email channel threads replies using `In-Reply-To` and `References` headers so conversations stay grouped in whatever client the sender uses.
-
-## Outbound body format
-
-Agent replies are sent as `multipart/alternative` with both a plain-text and an HTML part by default. The HTML part is the Markdown-rendered body; the plain-text part is the raw body text. Mail clients that prefer plain text will select the plain-text alternative automatically.
-
-To send plain text only (no HTML part, for clients or setups that prefer it), set the channel's `html_body` field to `false`.
-
-When attachments are present the body alternatives are wrapped in an outer `multipart/mixed`.
-
-## Attachment handling
-
-Inbound attachments are stored under `<workspace>/attachments/<conversation>/`. The agent gets file paths in its context and can read them via the `file_read` tool.
-
-Outbound attachments are resolved from the workspace path provided by the agent and sent as MIME parts. Filenames are taken from the `Content-Disposition` header first, falling back to the `Content-Type` `name` parameter.
-
-## Rate and volume limits
-
-Email isn't optimised for conversational latency. Expect:
-
-- IMAP poll latency: `poll_interval_secs` (default 60 s). Lower at the cost of server load; some providers rate-limit aggressive polling.
-- SMTP send: subject to your provider's daily-send quota (Gmail: 500/day for free accounts, 2000/day for Workspace).
-
-## Safety
-
-Email has no auth at the protocol level beyond SMTP's envelope; anyone can claim to be anyone. Gate inbound senders with a peer group (above) before exposing the agent to an inbox that receives public mail.
+- [Discord](./discord.md); the other retained tool configuration
+- [Channels overview](./overview.md)

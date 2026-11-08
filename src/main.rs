@@ -633,7 +633,7 @@ Examples:
 Start the long-running autonomous daemon.
 
 Launches the full ZeroClaw runtime: gateway server, all configured \
-channels (Telegram, Discord, Slack, etc.), heartbeat monitor, and \
+channel surfaces (Telegram bridge, webhook ingress, Email/Discord tools), heartbeat monitor, and \
 the cron scheduler. This is the recommended way to run ZeroClaw in \
 production or as an always-on assistant.
 
@@ -748,14 +748,14 @@ Examples:
         providers_command: Option<ProvidersCommands>,
     },
 
-    /// Manage channels (telegram, discord, slack)
+    /// Manage channels (telegram, discord, email, webhook)
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
 Manage communication channels.
 
 Add, remove, list, send, and health-check channels that connect ZeroClaw \
-to messaging platforms. Supported channel types: telegram, discord, \
-slack, whatsapp, matrix, imessage, email.
+to messaging surfaces. Live channel types: telegram, discord, email, \
+webhook (other legacy sections are retired; see the channels book page).
 
 Examples:
   zeroclaw channel list

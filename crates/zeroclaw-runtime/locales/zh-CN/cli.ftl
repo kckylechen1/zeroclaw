@@ -172,7 +172,7 @@ cli-acp-long-about =
 cli-daemon-long-about =
     启动长期运行的自主守护进程。
 
-    启动完整的 ZeroClaw 运行时：网关服务器、所有已配置的通道（Telegram、Discord、Slack 等）、心跳监视器以及 cron 调度器。这是在生产环境中或作为始终在线助手运行 ZeroClaw 的推荐方式。
+    启动完整的 ZeroClaw 运行时：网关服务器、所有已配置的通道面（Telegram bridge、webhook 接入、Email/Discord 工具）、心跳监视器以及 cron 调度器。这是在生产环境中或作为始终在线助手运行 ZeroClaw 的推荐方式。
 
     使用 'zeroclaw service install' 将守护进程注册为操作系统服务（systemd/launchd），以便开机自动启动。
 
@@ -200,7 +200,7 @@ cli-cron-long-about =
 cli-channel-long-about =
     管理通信通道。
 
-    添加、删除、列出、发送以及对将 ZeroClaw 连接到消息平台的通道进行健康检查。支持的通道类型：telegram、discord、slack、whatsapp、matrix、imessage、email。
+    添加、删除、列出、发送以及对将 ZeroClaw 连接到消息平台的通道进行健康检查。可用通道类型：telegram、discord、email、webhook（其余旧分节均已退役）。
 
     示例：
     zeroclaw channel list
@@ -615,6 +615,7 @@ cli-status-word-none = （无）
 cli-status-word-configured = 已配置
 cli-status-word-not-configured = 未配置
 cli-status-channel-not-compiled = 🚫 已配置，未编译
+cli-status-channel-retired = ⚠️ 分节可解析，但无任何组件运行；请移除
 cli-desktop-not-installed = 未安装 ZeroClaw 配套应用。
 cli-desktop-blurb1 = 该配套应用是一个轻量级菜单栏应用，
 cli-desktop-blurb2 = 它连接到与 CLI 相同的网关。
@@ -667,6 +668,7 @@ cli-browse-file-bytes = {$name}（{$bytes} 字节）
 cli-selftest-all-passed = 全部 {$total} 项检查通过。
 cli-selftest-some-failed = {$failed}/{$total} 项检查失败。
 cli-selftest-channel-config-uncompiled = {$compiled} 个通道类型已编译，{$configured} 个已编译且已配置；已配置但未编译：{$names}。请从源码构建：`./install.sh --source --preset full`、`--features channels-full`，或指定对应的 `channel-*` 功能。
+cli-selftest-channel-config-retired = {$compiled} 个通道类型，{$configured} 个已配置；已配置的退役传输分节（无组件运行）：{$names}。请移除这些 [channels.*] 分节；可用面为 Telegram bridge、webhook 接入、Email 工具与 Discord 归档搜索。
 cli-channels-header = 渠道：
 cli-channels-cli-always = {"  "}✅ CLI（始终可用）
 cli-channels-notion = {"  "}{$status} Notion
@@ -676,6 +678,9 @@ cli-channels-build-hint = {"  "}请从源码构建：`./install.sh --source --pr
 cli-channels-start-hint = 启动渠道：zeroclaw channel start
 cli-channels-doctor-hint = 检查健康状况：    zeroclaw channel doctor
 cli-channels-configure-hint = 配置方法：      zeroclaw config set channels.<name>.<field>=<value>
+cli-channels-retired-header = {"  "}已配置的退役传输分节（不存在运行器）：
+cli-channels-retired-entry = {"  "}⚠️ {$name}（分节可解析，但无任何组件运行；请移除）
+cli-channels-retired-hint = {"  "}可用面：Telegram bridge、webhook 接入、Email 工具、Discord 归档搜索。
 cli-models-set-ok = 默认模型已设置为 "{ $model }" (provider: { $provider })。
 cli-models-status-current = 默认模型: { $model } (provider: { $provider })
 cli-models-status-none = 未配置默认模型。

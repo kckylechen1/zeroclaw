@@ -190,6 +190,13 @@ pub struct ChannelInfo {
     pub name: &'static str,
     pub desc: &'static str,
     pub configured: bool,
+    /// `true` when the in-process transport runner for this kind is retired
+    /// (`zeroclaw-channels` and its tool callers, #579/#581): the
+    /// `[channels.<kind>]` section may still parse, but no runtime, bridge,
+    /// Node, or Tachi consumer reads it. Retired kinds must not be presented
+    /// as available transports. The retained non-bridge surfaces (`email`,
+    /// `discord`) are tool configuration and are never `retired`.
+    pub retired: bool,
 }
 
 /// The trait for describing a channel

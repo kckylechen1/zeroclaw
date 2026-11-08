@@ -220,6 +220,18 @@ fn check_channel_config(config: &crate::config::Config) -> CheckResult {
     let channels = crate::channels::listing::compiled_channels(&config.channels);
     let configured = channels.iter().filter(|e| e.configured).count();
     let uncompiled = crate::channels::listing::configured_uncompiled_channels(&config.channels);
+    let retired = crate::channels::listing::configured_retired_channels(&config.channels);
+    if !retired.is_empty() {
+        let names = retired
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return CheckResult::fail(
+            "channels",
+            channel_config_retired_detail(channels.len(), configured, &names),
+        );
+    }
     if !uncompiled.is_empty() {
         let names = uncompiled
             .iter()
@@ -250,6 +262,23 @@ fn channel_config_uncompiled_detail(
     let configured = compiled_configured.to_string();
     get_required_cli_string_with_args(
         "cli-selftest-channel-config-uncompiled",
+        &[
+            ("compiled", compiled.as_str()),
+            ("configured", configured.as_str()),
+            ("names", names),
+        ],
+    )
+}
+
+fn channel_config_retired_detail(
+    compiled: usize,
+    compiled_configured: usize,
+    names: &str,
+) -> String {
+    let compiled = compiled.to_string();
+    let configured = compiled_configured.to_string();
+    get_required_cli_string_with_args(
+        "cli-selftest-channel-config-retired",
         &[
             ("compiled", compiled.as_str()),
             ("configured", configured.as_str()),
