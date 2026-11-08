@@ -8212,7 +8212,6 @@ export interface components {
          * @description A normalized filesystem change kind reported by the watcher.
          * @enum {string}
          */
-        FilesystemEventKind: "created" | "modified" | "deleted" | "renamed";
         /**
          * @description Firecrawl fallback configuration for JS-heavy and bot-blocked sites.
          *
@@ -18508,16 +18507,6 @@ export interface components {
          *     `StepToolCall.output_data`) so downstream bindings can be authored
          *     and previewed without re-executing the tool.
          */
-        PlannedToolCall: {
-            /**
-             * @description Argument template; string leaves may contain bindings.
-             * @default null
-             */
-            args: unknown;
-            /** @description Pinned sample output for authoring/preview. */
-            pinned?: unknown;
-            tool: string;
-        };
         /**
          * @description Per-plugin config section keyed by plugin alias; values are secret so they
          *     encrypt at rest under the same adjacent `.secret_key` as every other secret.
@@ -21068,92 +21057,12 @@ export interface components {
          * Sop
          * @description A complete Standard Operating Procedure definition.
          */
-        Sop: {
-            /**
-             * @description How to handle a trigger that cannot be admitted immediately because this
-             *     SOP's execution slots are full (A2). Default `parallel`.
-             * @default parallel
-             */
-            admission_policy: components["schemas"]["SopAdmissionPolicy"];
-            /**
-             * @description Parent agent alias that owns this procedure. Every `execute` step runs
-             *     as this agent unless the step names its own `agent` override. Required
-             *     for headless triggers (mqtt, webhook, cron, amqp), which have no
-             *     ambient agent loop to borrow.
-             */
-            agent?: string | null;
-            /**
-             * Format: uint64
-             * @description Minimum seconds between successive runs of this procedure. `0`
-             *     (default) disables the cooldown and back-to-back runs are allowed.
-             * @default 0
-             */
-            cooldown_secs: number;
-            /**
-             * @description Free-text summary of what the procedure does and when it fires. Shown
-             *     in the SOP list and header; purely descriptive, never executed.
-             */
-            description: string;
-            /**
-             * @description When true, sets execution_mode to Deterministic.
-             *     Steps execute sequentially without LLM round-trips.
-             * @default false
-             */
-            deterministic: boolean;
-            /**
-             * @description How steps are driven: `auto`, `supervised` (default), `step_by_step`,
-             *     `priority_based`, or `deterministic`. `deterministic = true` forces
-             *     the last regardless of this field.
-             */
-            execution_mode: components["schemas"]["SopExecutionMode"];
-            /**
-             * Format: uint32
-             * @description Maximum simultaneous runs of this one procedure. Excess trigger
-             *     firings queue or drop per the engine's concurrency policy. Default 1.
-             * @default 1
-             */
-            max_concurrent: number;
-            /**
-             * Format: uint32
-             * @description Upper bound on runs of this SOP parked at a HITL approval at once
-             *     (`0` = unlimited). Once reached, further triggers are deferred (surfaced for
-             *     backpressure/redelivery) rather than silently dropped. Default `0`.
-             * @default 0
-             */
-            max_pending_approvals: number;
-            /**
-             * @description Unique procedure name. Doubles as the on-disk directory key, so a
-             *     rename in the editor moves the SOP's folder. Must be non-empty.
-             */
-            name: string;
-            /**
-             * @description Scheduling priority when concurrency limits force a choice between
-             *     runnable procedures: `critical`, `high`, `normal` (default), `low`.
-             */
-            priority: components["schemas"]["SopPriority"];
-            /**
-             * @description Ordered step definitions. This is the body of the procedure; the
-             *     daemon renumbers and remaps routing refs on save.
-             */
-            steps: components["schemas"]["SopStep"][];
-            /**
-             * @description Signals that start a run. A procedure may bind several triggers; any
-             *     one firing (subject to its own condition) launches the SOP.
-             */
-            triggers: components["schemas"]["SopTrigger"][];
-            /**
-             * @description Semantic version string for the procedure definition (e.g. `1.0.0`).
-             *     Bump it when you change step behavior so runs are traceable.
-             */
-            version: string;
-        };
         /**
          * @description How concurrent triggers are handled when a SOP's execution slots are full. A
          *     run parked at a HITL approval releases its slot (A1), so this governs the
          *     remaining case: too many runs actively *executing* at once. No variant ever
          *     silently drops a trigger except `Drop`, which is explicit opt-in.
          */
-        SopAdmissionPolicy: "parallel" | "hold" | "coalesce" | "drop";
         /**
          * @description `[sop.approval]` - approval broker policy config. A permanent identity source
          *     for channel-provided approvers (not a stopgap): the approval broker consumes it
@@ -21350,40 +21259,15 @@ export interface components {
             untrusted_payload_max_bytes: number;
         };
         /** @description How much autonomy the agent has when executing an SOP. */
-        SopExecutionMode: "auto" | "supervised" | "step_by_step" | "priority_based" | "deterministic";
         /**
          * SopGraph
          * @description The full projected graph: nodes, wires, validation diagnostics, and a
          *     precomputed layout. Serialized as-is over RPC (`sops/graph`) and HTTP.
          */
-        SopGraph: {
-            /** @default [] */
-            diagnostics: components["schemas"]["GraphDiagnostic"][];
-            /**
-             * @default {
-             *       "columns": 0,
-             *       "geometry": {
-             *         "col_gap": 130,
-             *         "node_h": 84,
-             *         "node_w": 210,
-             *         "origin": 24,
-             *         "row_gap": 46
-             *       },
-             *       "positions": [],
-             *       "rows": 0
-             *     }
-             */
-            layout: components["schemas"]["GraphLayout"];
-            /** @default [] */
-            nodes: components["schemas"]["GraphNode"][];
-            /** @default [] */
-            wires: components["schemas"]["GraphWire"][];
-        };
         /**
          * @description SOP priority level, used for execution mode resolution and scheduling.
          * @enum {string}
          */
-        SopPriority: "low" | "normal" | "high" | "critical";
         /**
          * @description Durable SOP run-state backend selector. A closed, compile-time-known set, so it
          *     is a serde enum rather than free text (mirrors `SandboxBackend` /
@@ -21391,198 +21275,8 @@ export interface components {
          */
         SopRunStoreBackend: "sqlite" | "memory";
         /** @description A single step in an SOP procedure, parsed from SOP.md. */
-        SopStep: {
-            /**
-             * @description Agent alias that runs this step. Overrides the SOP's parent agent when
-             *     set; unset inherits the parent. Authored, persisted, and resolved into
-             *     the executing action via `effective_agent` (step override then parent).
-             *     Spawning a distinct per-step agent's own session at execution time is
-             *     staged follow-on work; today the resolved alias is stamped on the action
-             *     and the active agent loop executes the step body.
-             */
-            agent?: string | null;
-            /**
-             * @description The step's instruction body in Markdown. This is the prompt the
-             *     running agent executes for the step; bindings like `{{steps.N}}`
-             *     resolve against prior step outputs at run time.
-             * @default
-             */
-            body: string;
-            /**
-             * @description Ordered tool calls planned for this step. Args may carry
-             *     `{{steps.N}}` / `{{calls.K}}` bindings validated at save time.
-             */
-            calls?: components["schemas"]["PlannedToolCall"][];
-            /** @description Capability identifier used when `kind = "capability"`. */
-            capability?: string | null;
-            /**
-             * @description Editable-field opt-in for a checkpoint step (`- edit: body` bullet): the
-             *     named field of the piped value an approver may amend before the run
-             *     resumes (the gate prompt gains an "Edit" choice). Absent = no editing.
-             */
-            edit?: string | null;
-            /**
-             * @description Authored gate-notice template for a HITL step (`- prompt:` bullet).
-             *     `{{path.to.field}}` placeholders resolve against the step's piped input
-             *     (the trigger payload at step 1, the previous step's output later) — pure
-             *     lookups, no logic. Rendered into the out-of-band approval notice so the
-             *     approver sees WHAT they are approving; absent = an automatic summary.
-             */
-            gate_prompt?: string | null;
-            /**
-             * @description Step kind: `execute` (default) or `checkpoint`.
-             * @default execute
-             */
-            kind: components["schemas"]["SopStepKind"];
-            /** @description Optional per-step execution mode override. */
-            mode?: components["schemas"]["SopExecutionMode"] | null;
-            /**
-             * Format: uint32
-             * @description Ordinal position of this step within the procedure. Steps run in
-             *     number order unless routing overrides the sequence; the daemon
-             *     renumbers on save so gaps and reorders normalize to 1..N.
-             * @default 0
-             */
-            number: number;
-            /** @description Failure handling metadata. Default preserves fail-the-run behavior. */
-            on_failure?: components["schemas"]["StepFailure"];
-            /**
-             * @description Approval policy name (a key in `[sop.approval].policies`) the approval broker
-             *     enforces for this step's gate: required approver group + quorum. `None` keeps
-             *     today's behavior (`approval_mode` alone governs, no membership/quorum).
-             */
-            policy?: string | null;
-            /**
-             * @description Persisted canvas coordinate, set by dragging the node in the Blueprint
-             *     editor. Absent until the node is moved; not surfaced in the step form.
-             */
-            pos?: components["schemas"]["StepPos"] | null;
-            /**
-             * @description Pause for human confirmation before this step runs. Independent of
-             *     `checkpoint` kind and the SOP-level approval gate; both still apply.
-             * @default false
-             */
-            requires_confirmation: boolean;
-            /** @description Conditional routing metadata. Default preserves linear execution. */
-            routing?: components["schemas"]["StepRouting"];
-            /** @description Typed input/output schemas for deterministic data flow validation. */
-            schema?: components["schemas"]["StepSchema"] | null;
-            /** @description Tool scope for this step. `suggested_tools` remains the legacy alias. */
-            scope?: components["schemas"]["StepToolScope"] | null;
-            /**
-             * @description Advisory tool names surfaced to the agent for this step. Legacy alias
-             *     for `scope.allow`; when `step_scope_enforce` is off these are hints,
-             *     not a hard restriction.
-             * @default []
-             */
-            suggested_tools: string[];
-            /**
-             * @description Short human label for the step, shown on the canvas node and in the
-             *     step list. Leave blank and the surface falls back to "untitled".
-             * @default
-             */
-            title: string;
-            /** @description Capability arguments, serialized as `with` in TOML/JSON definitions. */
-            with?: unknown;
-        };
         /** @description The kind of a workflow step. */
-        SopStepKind: "execute" | "checkpoint" | "capability";
         /** @description What event can activate an SOP. */
-        SopTrigger: {
-            /**
-             * @description Optional expression evaluated against the message payload; the run
-             *     starts only when it holds.
-             * @default null
-             */
-            condition: string | null;
-            /** @description Topic filter. `+` matches one level, `#` matches the remaining levels. */
-            topic: string;
-            /** @constant */
-            type: "mqtt";
-        } | {
-            /** @description Request path matched exactly against the event path. */
-            path: string;
-            /** @constant */
-            type: "webhook";
-        } | {
-            /** @description Cron expression evaluated over the run window. */
-            expression: string;
-            /** @constant */
-            type: "cron";
-        } | {
-            /** @description Board identifier the signal originates from. */
-            board: string;
-            /**
-             * @description Optional expression evaluated against the signal payload.
-             * @default null
-             */
-            condition: string | null;
-            /** @description Signal name on the board; matched as `board/signal`. */
-            signal: string;
-            /** @constant */
-            type: "peripheral";
-        } | {
-            /**
-             * @description Optional expression evaluated against the change payload.
-             * @default null
-             */
-            condition: string | null;
-            /**
-             * @description Change kinds to match; empty matches every kind.
-             * @default []
-             */
-            events: components["schemas"]["FilesystemEventKind"][];
-            /** @description Path glob (`*`, `**`, `?`); a bare directory matches anything under it. */
-            path: string;
-            /** @constant */
-            type: "filesystem";
-        } | {
-            /**
-             * @description Calendar IDs to scope to; empty matches all of the source's calendars.
-             * @default []
-             */
-            calendar_ids: string[];
-            /** @description Calendar source identifier the event originates from. */
-            calendar_source: string;
-            /**
-             * @description Optional expression evaluated against the calendar event payload.
-             * @default null
-             */
-            condition: string | null;
-            /** @constant */
-            type: "calendar";
-        } | {
-            /**
-             * @description Optional configured-instance alias; unset matches every instance.
-             * @default null
-             */
-            alias: string | null;
-            /** @description `ChannelKind` snake_case value naming the channel type. */
-            channel: string;
-            /**
-             * @description Optional expression evaluated against the message payload.
-             * @default null
-             */
-            condition: string | null;
-            /** @constant */
-            type: "channel";
-        } | {
-            /** @constant */
-            type: "manual";
-        } | {
-            /**
-             * @description Optional expression evaluated against the delivery body.
-             * @default null
-             */
-            condition: string | null;
-            /**
-             * @description Routing-key filter (topic-exchange semantics): `.`-delimited words,
-             *     `*` matches one word, `#` matches zero or more words.
-             */
-            routing_key: string;
-            /** @constant */
-            type: "amqp";
-        };
         /** @description SQLite storage backend (`[storage.sqlite.<alias>]`). */
         SqliteStorageConfig: {
             /**
@@ -21600,68 +21294,17 @@ export interface components {
             path: string | null;
         };
         /** @description Failure handling policy for a single SOP step. */
-        StepFailure: "fail" | {
-            retry: {
-                /** Format: uint32 */
-                max: number;
-            };
-        } | {
-            goto: {
-                /** Format: uint32 */
-                step: number;
-            };
-        };
         /**
          * @description Persisted canvas coordinate for a step node. Written by the Blueprint
          *     editor when a node is dragged; never edited in the step-definition form.
          */
-        StepPos: {
-            /** Format: double */
-            x: number;
-            /** Format: double */
-            y: number;
-        };
         /** @description Conditional routing metadata for a single SOP step. */
-        StepRouting: {
-            /** @description Step numbers that must have completed before this step can run. */
-            depends_on?: number[];
-            /**
-             * Format: uint32
-             * @description Explicit successor step number.
-             */
-            next?: number | null;
-            /**
-             * @description Ordered switch ports. Non-empty makes this a multi-branch switch node:
-             *     each port is a named conditional out-edge, matched top to bottom.
-             */
-            switch?: components["schemas"]["SwitchRule"][];
-            /**
-             * @description When true, this step ends its branch: no implicit fallthrough to the
-             *     following step is derived. Lets an authoring surface delete the default
-             *     sequence edge and leave a node free-floating between saves.
-             */
-            terminal?: boolean;
-            /** @description Guard evaluated against accumulated run data. */
-            when?: string | null;
-        };
         /**
          * @description JSON Schema fragment for validating step input/output data.
          *     Stored as a raw `serde_json::Value` so callers can validate without
          *     pulling in a full JSON Schema library.
          */
-        StepSchema: {
-            /** @description JSON Schema object describing expected input shape. */
-            input?: unknown;
-            /** @description JSON Schema object describing expected output shape. */
-            output?: unknown;
-        };
         /** @description Per-step allow/deny tool scope. Enforcement is opt-in through SOP config. */
-        StepToolScope: {
-            /** @description Only these names or groups are allowed when present. */
-            allow?: string[] | null;
-            /** @description These names or groups are always subtracted. */
-            deny?: string[];
-        };
         StepfunEndpoint: "cn" | "intl";
         /** @description Named model_provider profile definition. */
         StepfunModelProviderConfig: {

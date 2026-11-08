@@ -2708,10 +2708,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "uri": "Endpoint URI for HTTP-based backends. Overrides the family default\nwhen pointing at a compatible third-party API (Groq, Azure, self-hosted\nproxies). Set to the **full** URL — there is no separate path-suffix\nfield. Renamed from `api_url` for parity with `ModelProviderConfig.uri`.",
     "voice": "Voice override for this instance. When empty, falls back to\n`[tts].default_voice`."
   },
-  "PlannedToolCall": {
-    "args": "Argument template; string leaves may contain bindings.",
-    "pinned": "Pinned sample output for authoring/preview."
-  },
   "PluginLimitsConfig": {
     "call_fuel": "Fuel budget per plugin call (wasmtime instruction units).",
     "max_instances": "Maximum component instances a plugin store may create.",
@@ -3106,21 +3102,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "thread_replies": "When true (default), replies stay in the originating Slack thread.\nWhen false, replies go to the channel root instead.",
     "use_markdown_blocks": "Use the newer Slack `markdown` block type (12 000 char limit, richer formatting).\nDefaults to false (uses universally supported `section` blocks with `mrkdwn`).\nEnable this only if your Slack workspace supports the `markdown` block type."
   },
-  "Sop": {
-    "admission_policy": "How to handle a trigger that cannot be admitted immediately because this\nSOP's execution slots are full (A2). Default `parallel`.",
-    "agent": "Parent agent alias that owns this procedure. Every `execute` step runs\nas this agent unless the step names its own `agent` override. Required\nfor headless triggers (mqtt, webhook, cron, amqp), which have no\nambient agent loop to borrow.",
-    "cooldown_secs": "Minimum seconds between successive runs of this procedure. `0`\n(default) disables the cooldown and back-to-back runs are allowed.",
-    "description": "Free-text summary of what the procedure does and when it fires. Shown\nin the SOP list and header; purely descriptive, never executed.",
-    "deterministic": "When true, sets execution_mode to Deterministic.\nSteps execute sequentially without LLM round-trips.",
-    "execution_mode": "How steps are driven: `auto`, `supervised` (default), `step_by_step`,\n`priority_based`, or `deterministic`. `deterministic = true` forces\nthe last regardless of this field.",
-    "max_concurrent": "Maximum simultaneous runs of this one procedure. Excess trigger\nfirings queue or drop per the engine's concurrency policy. Default 1.",
-    "max_pending_approvals": "Upper bound on runs of this SOP parked at a HITL approval at once\n(`0` = unlimited). Once reached, further triggers are deferred (surfaced for\nbackpressure/redelivery) rather than silently dropped. Default `0`.",
-    "name": "Unique procedure name. Doubles as the on-disk directory key, so a\nrename in the editor moves the SOP's folder. Must be non-empty.",
-    "priority": "Scheduling priority when concurrency limits force a choice between\nrunnable procedures: `critical`, `high`, `normal` (default), `low`.",
-    "steps": "Ordered step definitions. This is the body of the procedure; the\ndaemon renumbers and remaps routing refs on save.",
-    "triggers": "Signals that start a run. A procedure may bind several triggers; any\none firing (subject to its own condition) launches the SOP.",
-    "version": "Semantic version string for the procedure definition (e.g. `1.0.0`).\nBump it when you change step behavior so runs are traceable."
-  },
   "SopApprovalConfig": {
     "groups": "Named approver groups: `group name -> members`. A member is matched against\nthe transport-derived (channel-authenticated) `ApprovalPrincipal` identity.\nA member may be source-qualified (`<source>:<identity>`, e.g. `http:ZeroClawOperator`,\n`ws:<subject>`, `agent:<alias>`) to grant rights on one transport only, or a\nbare identity (`alice`) to grant from any non-channel source. Channel members\nmust include the channel namespace (`channel:<channel-key>:<sender>`) so sender\nids from different channel aliases cannot collide. A future auth system adds a\nsecond resolver alongside this one; it does not replace channel identities.",
     "policies": "Named approval policies a SOP step may reference by name."
@@ -3150,59 +3131,9 @@ export const fieldDescriptions: FieldDescriptions = {
     "untrusted_outbound_redact": "Redact outbound SOP content before persistence/audit consumers write it.\nIntended to converge with the shared B/F redaction switch once those consumers land.",
     "untrusted_payload_max_bytes": "Maximum bytes accepted from untrusted SOP trigger payload/topic content\nbefore char-boundary truncation. 0 disables the cap."
   },
-  "SopStep": {
-    "agent": "Agent alias that runs this step. Overrides the SOP's parent agent when\nset; unset inherits the parent. Authored, persisted, and resolved into\nthe executing action via `effective_agent` (step override then parent).\nSpawning a distinct per-step agent's own session at execution time is\nstaged follow-on work; today the resolved alias is stamped on the action\nand the active agent loop executes the step body.",
-    "body": "The step's instruction body in Markdown. This is the prompt the\nrunning agent executes for the step; bindings like `{{steps.N}}`\nresolve against prior step outputs at run time.",
-    "calls": "Ordered tool calls planned for this step. Args may carry\n`{{steps.N}}` / `{{calls.K}}` bindings validated at save time.",
-    "capability": "Capability identifier used when `kind = \"capability\"`.",
-    "edit": "Editable-field opt-in for a checkpoint step (`- edit: body` bullet): the\nnamed field of the piped value an approver may amend before the run\nresumes (the gate prompt gains an \"Edit\" choice). Absent = no editing.",
-    "gate_prompt": "Authored gate-notice template for a HITL step (`- prompt:` bullet).\n`{{path.to.field}}` placeholders resolve against the step's piped input\n(the trigger payload at step 1, the previous step's output later) — pure\nlookups, no logic. Rendered into the out-of-band approval notice so the\napprover sees WHAT they are approving; absent = an automatic summary.",
-    "kind": "Step kind: `execute` (default) or `checkpoint`.",
-    "mode": "Optional per-step execution mode override.",
-    "number": "Ordinal position of this step within the procedure. Steps run in\nnumber order unless routing overrides the sequence; the daemon\nrenumbers on save so gaps and reorders normalize to 1..N.",
-    "on_failure": "Failure handling metadata. Default preserves fail-the-run behavior.",
-    "policy": "Approval policy name (a key in `[sop.approval].policies`) the approval broker\nenforces for this step's gate: required approver group + quorum. `None` keeps\ntoday's behavior (`approval_mode` alone governs, no membership/quorum).",
-    "pos": "Persisted canvas coordinate, set by dragging the node in the Blueprint\neditor. Absent until the node is moved; not surfaced in the step form.",
-    "requires_confirmation": "Pause for human confirmation before this step runs. Independent of\n`checkpoint` kind and the SOP-level approval gate; both still apply.",
-    "routing": "Conditional routing metadata. Default preserves linear execution.",
-    "schema": "Typed input/output schemas for deterministic data flow validation.",
-    "scope": "Tool scope for this step. `suggested_tools` remains the legacy alias.",
-    "suggested_tools": "Advisory tool names surfaced to the agent for this step. Legacy alias\nfor `scope.allow`; when `step_scope_enforce` is off these are hints,\nnot a hard restriction.",
-    "title": "Short human label for the step, shown on the canvas node and in the\nstep list. Leave blank and the surface falls back to \"untitled\".",
-    "with": "Capability arguments, serialized as `with` in TOML/JSON definitions."
-  },
-  "SopTrigger": {
-    "alias": "Optional configured-instance alias; unset matches every instance.",
-    "board": "Board identifier the signal originates from.",
-    "calendar_ids": "Calendar IDs to scope to; empty matches all of the source's calendars.",
-    "calendar_source": "Calendar source identifier the event originates from.",
-    "channel": "`ChannelKind` snake_case value naming the channel type.",
-    "condition": "Optional expression evaluated against the message payload; the run\nstarts only when it holds.",
-    "events": "Change kinds to match; empty matches every kind.",
-    "expression": "Cron expression evaluated over the run window.",
-    "path": "Request path matched exactly against the event path.",
-    "routing_key": "Routing-key filter (topic-exchange semantics): `.`-delimited words,\n`*` matches one word, `#` matches zero or more words.",
-    "signal": "Signal name on the board; matched as `board/signal`.",
-    "topic": "Topic filter. `+` matches one level, `#` matches the remaining levels."
-  },
   "SqliteStorageConfig": {
     "open_timeout_secs": "Maximum seconds to wait when opening the DB if it's locked.\n`None` waits indefinitely. Recommended max: 300.",
     "path": "Optional override for the SQLite database path.\nWhen unset, defaults to `<workspace_dir>/brain.db`."
-  },
-  "StepRouting": {
-    "depends_on": "Step numbers that must have completed before this step can run.",
-    "next": "Explicit successor step number.",
-    "switch": "Ordered switch ports. Non-empty makes this a multi-branch switch node:\neach port is a named conditional out-edge, matched top to bottom.",
-    "terminal": "When true, this step ends its branch: no implicit fallthrough to the\nfollowing step is derived. Lets an authoring surface delete the default\nsequence edge and leave a node free-floating between saves.",
-    "when": "Guard evaluated against accumulated run data."
-  },
-  "StepSchema": {
-    "input": "JSON Schema object describing expected input shape.",
-    "output": "JSON Schema object describing expected output shape."
-  },
-  "StepToolScope": {
-    "allow": "Only these names or groups are allowed when present.",
-    "deny": "These names or groups are always subtracted."
   },
   "StepfunModelProviderConfig": {
     "api_key": "Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly.",
