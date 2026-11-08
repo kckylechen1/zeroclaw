@@ -12,13 +12,16 @@ use crate::tools::task_context::TaskIdentity;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream};
+use std::future::Future;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use zeroclaw_config::schema::Config;
 use zeroclaw_config::schema::{CronJobDecl, CronScheduleDecl};
+use zeroclaw_infra::process::{OverflowBehavior, ProcessLimits, ProcessOutcome, run_bounded};
 use zeroclaw_log::Instrument;
 
 const MIN_POLL_SECONDS: u64 = 5;
@@ -63,6 +66,44 @@ const CRON_AGENT_DEFAULT_EXCLUDED_TOOLS: &[&str] = &[
 #[cfg(test)]
 tokio::task_local! {
     static TEST_AGENT_JOB_TIMEOUT: Duration;
+    static TEST_SHELL_JOB_TIMEOUT: Duration;
+}
+
+tokio::task_local! {
+    // The daemon retains another handle across forced component aborts. This
+    // is only in-memory task ownership; cron's existing SQLite store continues
+    // to own claims and run history.
+    static CRON_CHILDREN: TaskTracker;
+}
+
+fn spawn_owned_cron_task<F>(future: F) -> AbortOnDropHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let children = CRON_CHILDREN.try_with(Clone::clone).unwrap_or_default();
+    // Tokio task-local values do not propagate across spawn. An explicitly
+    // authorized nested cron_run must stay in this daemon generation's join
+    // barrier even when its direct parent is cancelled first.
+    let tracked = children.track_future(CRON_CHILDREN.scope(children.clone(), future));
+    AbortOnDropHandle::new(zeroclaw_spawn::spawn!(tracked))
+}
+
+/// A deadline aborts and joins the child before cleanup or lock release can
+/// proceed. Dropping this waiter (cancellation or forced parent abort) still
+/// aborts the child; the daemon's tracker then owns the remaining join barrier.
+async fn wait_owned_cron_task<T>(
+    timeout: Duration,
+    mut task: AbortOnDropHandle<T>,
+) -> Result<Result<T, tokio::task::JoinError>, time::error::Elapsed> {
+    match time::timeout(timeout, &mut task).await {
+        Ok(result) => Ok(result),
+        Err(elapsed) => {
+            task.abort();
+            let _ = task.await;
+            Err(elapsed)
+        }
+    }
 }
 
 fn agent_job_timeout() -> Duration {
@@ -71,6 +112,14 @@ fn agent_job_timeout() -> Duration {
         return d;
     }
     Duration::from_secs(CRON_AGENT_JOB_TIMEOUT_SECS)
+}
+
+fn shell_job_timeout() -> Duration {
+    #[cfg(test)]
+    if let Ok(timeout) = TEST_SHELL_JOB_TIMEOUT.try_with(|timeout| *timeout) {
+        return timeout;
+    }
+    Duration::from_secs(SHELL_JOB_TIMEOUT_SECS)
 }
 
 /// Type alias for the optional broadcast sender used to push cron results
@@ -189,22 +238,18 @@ pub async fn deliver_and_classify_run_result(
         let d_config = config.clone();
         let d_job = job.clone();
         let d_output = output.clone();
-        let handle = zeroclaw_spawn::spawn!(async move {
+        let handle = spawn_owned_cron_task(async move {
             deliver_if_configured(&d_config, &d_job, &d_output, &started_at.to_rfc3339()).await
         });
-        let abort = handle.abort_handle();
-        match time::timeout(CRON_DELIVERY_TIMEOUT, handle).await {
+        match wait_owned_cron_task(CRON_DELIVERY_TIMEOUT, handle).await {
             Ok(Ok(res)) => res,
             Ok(Err(join_err)) => Err(anyhow::Error::msg(format!(
                 "delivery task failed while the job lock was held: {join_err}"
             ))),
-            Err(_elapsed) => {
-                abort.abort();
-                Err(anyhow::Error::msg(format!(
-                    "delivery exceeded {:?} deadline while the job lock was held; abandoned",
-                    CRON_DELIVERY_TIMEOUT
-                )))
-            }
+            Err(_elapsed) => Err(anyhow::Error::msg(format!(
+                "delivery exceeded {:?} deadline while the job lock was held; abandoned",
+                CRON_DELIVERY_TIMEOUT
+            ))),
         }
     };
 
@@ -378,6 +423,58 @@ pub async fn run(
     cancel: CancellationToken,
     task_identities: TaskIdentity,
 ) -> Result<()> {
+    run_tracked(
+        config,
+        event_tx,
+        cancel,
+        task_identities,
+        TaskTracker::new(),
+    )
+    .await
+}
+
+pub(crate) async fn run_tracked(
+    config: Config,
+    event_tx: EventBroadcast,
+    cancel: CancellationToken,
+    task_identities: TaskIdentity,
+    children: TaskTracker,
+) -> Result<()> {
+    // A retried component must not clear claims while any child of the prior
+    // attempt still exists, even if that child's abort has been requested.
+    anyhow::ensure!(
+        children.is_empty(),
+        "previous cron tasks are still stopping"
+    );
+    let result = CRON_CHILDREN
+        .scope(children.clone(), async {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Ok(()),
+                result = run_scheduler(config, event_tx, task_identities) => result,
+            }
+        })
+        .await;
+    // The select dropped catch-up/poll batches and their abort-on-drop
+    // handles. Wait for actual child destruction before allowing a reload.
+    children.close();
+    children.wait().await;
+    if cancel.is_cancelled() {
+        crate::health::mark_component_ok(SCHEDULER_COMPONENT);
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+            "Cron scheduler shutting down via cancellation token"
+        );
+    }
+    result
+}
+
+async fn run_scheduler(
+    config: Config,
+    event_tx: EventBroadcast,
+    task_identities: TaskIdentity,
+) -> Result<()> {
     let poll_secs = config.reliability.scheduler_poll_secs.max(MIN_POLL_SECONDS);
     let mut interval = time::interval(Duration::from_secs(poll_secs));
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -464,66 +561,61 @@ pub async fn run(
     }
 
     loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                // Keep scheduler liveness fresh even when there are no due jobs.
-                crate::health::mark_component_ok(SCHEDULER_COMPONENT);
+        interval.tick().await;
+        // Keep scheduler liveness fresh even when there are no due jobs.
+        crate::health::mark_component_ok(SCHEDULER_COMPONENT);
 
-                // TTL reclaim: unlock jobs whose in-flight lock exceeded the
-                // stale TTL so hung/crashed runs do not block max_concurrent
-                // until the next process restart.
-                match reclaim_stale_locks(
-                    &config,
-                    Utc::now(),
-                    Duration::from_secs(STALE_LOCK_TTL_SECS),
-                ) {
-                    Ok(0) => {}
-                    Ok(cleared) => ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_attrs(::serde_json::json!({
-                                "cleared": cleared,
-                                "ttl_secs": STALE_LOCK_TTL_SECS
-                            })),
-                        "Reclaimed TTL-expired cron in-flight locks"
-                    ),
-                    Err(e) => ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "Failed to reclaim TTL-expired cron in-flight locks"
-                    ),
-                }
-
-                let jobs = match due_jobs(&config, Utc::now()) {
-                    Ok(jobs) => jobs,
-                    Err(e) => {
-                        crate::health::mark_component_error(SCHEDULER_COMPONENT, e.to_string());
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                            "Scheduler query failed"
-                        );
-                        continue;
-                    }
-                };
-
-                let jobs = claim_due_jobs(&config, jobs);
-                process_due_jobs(&config, jobs, SCHEDULER_COMPONENT, &event_tx, &task_identities).await;
-            }
-            _ = cancel.cancelled() => {
-                crate::health::mark_component_ok(SCHEDULER_COMPONENT);
-                ::zeroclaw_log::record!(
-                    INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                    "Cron scheduler shutting down via cancellation token"
-                );
-                return Ok(());
-            }
+        // TTL reclaim: unlock jobs whose in-flight lock exceeded the
+        // stale TTL so hung/crashed runs do not block max_concurrent
+        // until the next process restart.
+        match reclaim_stale_locks(
+            &config,
+            Utc::now(),
+            Duration::from_secs(STALE_LOCK_TTL_SECS),
+        ) {
+            Ok(0) => {}
+            Ok(cleared) => ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({
+                        "cleared": cleared,
+                        "ttl_secs": STALE_LOCK_TTL_SECS
+                    })),
+                "Reclaimed TTL-expired cron in-flight locks"
+            ),
+            Err(e) => ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                "Failed to reclaim TTL-expired cron in-flight locks"
+            ),
         }
+
+        let jobs = match due_jobs(&config, Utc::now()) {
+            Ok(jobs) => jobs,
+            Err(e) => {
+                crate::health::mark_component_error(SCHEDULER_COMPONENT, e.to_string());
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                    "Scheduler query failed"
+                );
+                continue;
+            }
+        };
+
+        let jobs = claim_due_jobs(&config, jobs);
+        process_due_jobs(
+            &config,
+            jobs,
+            SCHEDULER_COMPONENT,
+            &event_tx,
+            &task_identities,
+        )
+        .await;
     }
 }
 
@@ -719,7 +811,12 @@ async fn execute_job_with_retry(
 
     for attempt in 0..=retries {
         let (success, output) = match job.job_type {
-            JobType::Shell => run_job_command(config, security, job).await,
+            JobType::Shell => match run_job_command(config, security, job).await {
+                ShellJobOutcome::Finished { success, output } => (success, output),
+                // A timeout may follow external side effects. Its typed
+                // interruption result must never trigger an automatic retry.
+                ShellJobOutcome::Interrupted(output) => return (false, output),
+            },
             JobType::Agent => {
                 Box::pin(run_agent_job(
                     config,
@@ -957,7 +1054,7 @@ async fn purge_isolated_session(
     // Spawn so a purge that blocks before its first await cannot starve the
     // parent's timeout arm. Abort explicitly on deadline — dropping a
     // JoinHandle only detaches the task.
-    let handle = zeroclaw_spawn::spawn!(async move {
+    let handle = spawn_owned_cron_task(async move {
         if let Ok(mem) = zeroclaw_memory::create_memory_for_agent(
             &owned_config,
             &owned_alias,
@@ -968,12 +1065,10 @@ async fn purge_isolated_session(
             let _ = mem.purge_session(&mem_session_key).await;
         }
     });
-    let abort = handle.abort_handle();
-    if time::timeout(ISOLATED_SESSION_PURGE_TIMEOUT, handle)
+    if wait_owned_cron_task(ISOLATED_SESSION_PURGE_TIMEOUT, handle)
         .await
         .is_err()
     {
-        abort.abort();
         ::zeroclaw_log::record!(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -1094,7 +1189,7 @@ async fn run_agent_job_with_timeout(
                 .and_then(|e| e.temperature);
             let run_session_path = session_path.clone();
             let run_allowed_tools = job.allowed_tools.clone();
-            let handle = zeroclaw_spawn::spawn!(
+            let handle = spawn_owned_cron_task(
                 async move {
                     Box::pin(crate::agent::run(
                         cron_config,
@@ -1111,17 +1206,14 @@ async fn run_agent_job_with_timeout(
                     ))
                     .await
                 }
-                .instrument(subagent_span)
+                .instrument(subagent_span),
             );
-            let abort = handle.abort_handle();
-
-            match time::timeout(timeout, handle).await {
+            match wait_owned_cron_task(timeout, handle).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(join_err)) => Err(anyhow::Error::msg(format!(
                     "agent cron job task failed: {join_err}"
                 ))),
                 Err(_elapsed) => {
-                    abort.abort();
                     ::zeroclaw_log::record!(
                         WARN,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -1132,8 +1224,7 @@ async fn run_agent_job_with_timeout(
                             })),
                         "Cron job: agent run timed out"
                     );
-                    // Child aborted at next await. Purge is independently
-                    // bounded below.
+                    // The child has been joined before purge or lock release.
                     purge_isolated_session(config, job, agent_alias, &session_path).await;
                     return (
                         false,
@@ -1488,18 +1579,34 @@ pub fn enqueue_for_bridge(
     Ok(())
 }
 
+enum ShellJobOutcome {
+    Finished { success: bool, output: String },
+    Interrupted(String),
+}
+
+impl ShellJobOutcome {
+    #[cfg(test)]
+    fn into_result(self) -> (bool, String) {
+        match self {
+            Self::Finished { success, output } => (success, output),
+            Self::Interrupted(output) => (false, output),
+        }
+    }
+
+    fn failed(output: impl Into<String>) -> Self {
+        Self::Finished {
+            success: false,
+            output: output.into(),
+        }
+    }
+}
+
 async fn run_job_command(
     config: &Config,
     security: &SecurityPolicy,
     job: &CronJob,
-) -> (bool, String) {
-    run_job_command_with_timeout(
-        config,
-        security,
-        job,
-        Duration::from_secs(SHELL_JOB_TIMEOUT_SECS),
-    )
-    .await
+) -> ShellJobOutcome {
+    run_job_command_with_timeout(config, security, job, shell_job_timeout()).await
 }
 
 async fn run_job_command_with_timeout(
@@ -1507,19 +1614,13 @@ async fn run_job_command_with_timeout(
     security: &SecurityPolicy,
     job: &CronJob,
     timeout: Duration,
-) -> (bool, String) {
+) -> ShellJobOutcome {
     if !security.can_act() {
-        return (
-            false,
-            "blocked by security policy: autonomy is read-only".to_string(),
-        );
+        return ShellJobOutcome::failed("blocked by security policy: autonomy is read-only");
     }
 
     if security.is_rate_limited() {
-        return (
-            false,
-            "blocked by security policy: rate limit exceeded".to_string(),
-        );
+        return ShellJobOutcome::failed("blocked by security policy: rate limit exceeded");
     }
 
     // Unified command validation: allowlist + risk + path checks in one call.
@@ -1530,49 +1631,68 @@ async fn run_job_command_with_timeout(
     if let Err(error) =
         crate::cron::validate_shell_command_with_security(security, &job.command, approved)
     {
-        return (false, error.to_string());
+        return ShellJobOutcome::failed(error.to_string());
     }
 
     if let Some(path) = security.forbidden_path_argument(&job.command) {
-        return (
-            false,
-            format!("blocked by security policy: forbidden path argument: {path}"),
-        );
+        return ShellJobOutcome::failed(format!(
+            "blocked by security policy: forbidden path argument: {path}"
+        ));
     }
 
     if !security.record_action() {
-        return (
-            false,
-            "blocked by security policy: action budget exhausted".to_string(),
-        );
+        return ShellJobOutcome::failed("blocked by security policy: action budget exhausted");
     }
 
-    let child = match build_cron_shell_command(&job.command, &config.data_dir) {
-        Ok(mut cmd) => match cmd.spawn() {
-            Ok(child) => child,
-            Err(e) => return (false, format!("spawn error: {e}")),
-        },
-        Err(e) => return (false, format!("shell setup error: {e}")),
+    let mut command = match build_cron_shell_command(&job.command, &config.data_dir) {
+        Ok(command) => command,
+        Err(error) => return ShellJobOutcome::failed(format!("shell setup error: {error}")),
     };
-
-    match time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let combined = format!(
-                "status={}\nstdout:\n{}\nstderr:\n{}",
-                output.status,
-                stdout.trim(),
-                stderr.trim()
-            );
-            (output.status.success(), combined)
-        }
-        Ok(Err(e)) => (false, format!("spawn error: {e}")),
-        Err(_) => (
-            false,
-            format!("job timed out after {}s", timeout.as_secs_f64()),
+    let output = match run_bounded(
+        &mut command,
+        ProcessLimits {
+            timeout,
+            stdout_bytes: crate::cron::store::MAX_CRON_OUTPUT_BYTES,
+            stderr_bytes: crate::cron::store::MAX_CRON_OUTPUT_BYTES,
+            stdout_lines: None,
+            // Authorized side-effecting commands must finish even when their
+            // diagnostics are noisy. Keep draining, but bound retained bytes.
+            overflow: OverflowBehavior::Drain,
+        },
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(error) => return ShellJobOutcome::failed(format!("spawn error: {error}")),
+    };
+    let stdout = format_shell_capture(&output.stdout, output.stdout_truncated);
+    let stderr = format_shell_capture(&output.stderr, output.stderr_truncated);
+    match output.outcome {
+        ProcessOutcome::Exited(status) => ShellJobOutcome::Finished {
+            success: status.success(),
+            output: format!("status={status}\nstdout:\n{stdout}\nstderr:\n{stderr}"),
+        },
+        ProcessOutcome::TimedOut => ShellJobOutcome::Interrupted(format!(
+            "job timed out after {}s\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            timeout.as_secs_f64()
+        )),
+        // Drain mode does not currently return OutputLimit. Keep any future
+        // interruption non-retryable instead of replaying a partial command.
+        ProcessOutcome::OutputLimit => ShellJobOutcome::Interrupted(
+            crate::i18n::get_required_cli_string("cron-shell-output-limit"),
         ),
     }
+}
+
+fn format_shell_capture(bytes: &[u8], truncated: bool) -> String {
+    let mut text = String::from_utf8_lossy(bytes).trim().to_string();
+    if truncated {
+        text.push('\n');
+        text.push_str(&crate::i18n::get_required_cli_string(
+            "cron-shell-output-truncated",
+        ));
+    }
+    text
 }
 
 fn build_cron_shell_command(
