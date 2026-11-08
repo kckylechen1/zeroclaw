@@ -1157,7 +1157,10 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
         .collect();
 
     if live_configured {
-        items.push(DiagItem::ok(cat, "at least one live channel surface configured"));
+        items.push(DiagItem::ok(
+            cat,
+            "at least one live channel surface configured",
+        ));
     } else if !retired_configured.is_empty() {
         items.push(DiagItem::warn(
             cat,

@@ -229,7 +229,11 @@ mod tests {
             let is_retired = retired.contains(&r.label.trim_end_matches(" (retired)"));
             assert_eq!(
                 r.zeroclaw,
-                if is_retired { Status::None } else { Status::Supported },
+                if is_retired {
+                    Status::None
+                } else {
+                    Status::Supported
+                },
                 "row {} status must follow the retired flag",
                 r.label
             );

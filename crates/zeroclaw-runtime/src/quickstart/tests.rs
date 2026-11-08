@@ -39,7 +39,9 @@ fn channel_type_options_cover_every_retained_schema_channel() {
     }
     // Retired transports must never reach the first-run picker.
     assert!(
-        picker.iter().all(|p| p.kind != "slack" && p.kind != "matrix"),
+        picker
+            .iter()
+            .all(|p| p.kind != "slack" && p.kind != "matrix"),
         "retired transports leaked into the quickstart picker"
     );
 }

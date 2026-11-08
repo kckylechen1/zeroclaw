@@ -197,9 +197,7 @@ pub fn compiled_channels(cfg: &ChannelsConfig) -> Vec<ChannelInfo> {
 pub fn configured_uncompiled_channels(cfg: &ChannelsConfig) -> Vec<ChannelInfo> {
     cfg.channels()
         .into_iter()
-        .filter(|info| {
-            info.configured && !info.retired && !is_channel_type_compiled(info.kind)
-        })
+        .filter(|info| info.configured && !info.retired && !is_channel_type_compiled(info.kind))
         .collect()
 }
 
@@ -229,7 +227,10 @@ pub fn is_channel_type_compiled(channel_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{CHANNEL_COMPILE_SPECS, ChannelsConfig};
-    use super::{compiled_channels, configured_uncompiled_channels, is_channel_type_compiled};
+    use super::{
+        compiled_channels, configured_retired_channels, configured_uncompiled_channels,
+        is_channel_type_compiled,
+    };
     use std::collections::BTreeSet;
 
     #[cfg(all(
@@ -279,9 +280,7 @@ mod tests {
         let expected: BTreeSet<_> = CHANNEL_COMPILE_SPECS
             .iter()
             .filter(|spec| spec.compiled)
-            .filter(|spec| !zeroclaw_config::schema::is_retired_transport(
-                spec.type_keys[0]
-            ))
+            .filter(|spec| !zeroclaw_config::schema::is_retired_transport(spec.type_keys[0]))
             .filter_map(|spec| spec.schema_name)
             .collect();
 
