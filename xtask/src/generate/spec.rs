@@ -36,10 +36,6 @@ pub enum Value {
 /// platform-specific command; the abstract op is the single definition.
 #[derive(Clone)]
 pub enum Action {
-    /// Download the prebuilt asset to a temp dir.
-    DownloadPrebuilt,
-    /// Install the main binary into BinDir.
-    InstallBinary,
     /// Bootstrap the Rust toolchain via rustup.
     InstallToolchain,
     /// `cargo install --path . --locked --force <CargoFlags>`.
@@ -73,22 +69,14 @@ impl Step {
     }
 }
 
-/// The install flow as it actually is: a divergence (prebuilt vs source) that
-/// reconverges at a shared tail. The tree makes branch + convergence a property
-/// of the type, not something a reader reconstructs from per-step `when` flags.
+/// The source-only bootstrap plan. Release artifact generation is separate
+/// from installation and continues to use the shared feature resolver below.
 pub struct Plan {
-    /// Mutually exclusive install branches, selected at runtime.
-    pub diverge: Branches,
-    /// Steps both branches run after converging (PATH, quickstart).
-    pub converge: Vec<Step>,
+    pub source: Vec<Step>,
+    /// Steps after the source build (PATH, quickstart).
+    pub finish: Vec<Step>,
     /// Resolved canonical data the steps interpolate.
     pub resolved: Resolved,
-}
-
-/// The two mutually exclusive install branches.
-pub struct Branches {
-    pub prebuilt: Vec<Step>,
-    pub source: Vec<Step>,
 }
 
 impl Plan {
@@ -106,25 +94,17 @@ impl Plan {
                 .collect()
         };
         let plan = Plan {
-            diverge: Branches {
-                prebuilt: keep(prebuilt_branch()),
-                source: keep(source_branch()),
-            },
-            converge: keep(converge_tail()),
+            source: keep(source_branch()),
+            finish: keep(finish_steps()),
             resolved,
         };
         plan.validate()?;
         Ok(plan)
     }
 
-    /// Every step the plan can run, in no particular order - for invariants and
-    /// coverage checks that don't care about branch structure.
+    /// Every step in installation order, for invariants and coverage checks.
     pub fn all_steps(&self) -> impl Iterator<Item = &Step> {
-        self.diverge
-            .prebuilt
-            .iter()
-            .chain(self.diverge.source.iter())
-            .chain(self.converge.iter())
+        self.source.iter().chain(self.finish.iter())
     }
 
     /// Invariant that makes dry-run trustworthy: every step has a non-empty
@@ -148,18 +128,16 @@ pub fn dry_run_line(narration_text: &str) -> String {
     format!("[dry-run] Would {narration_text}")
 }
 
-/// Conditions for an *intra-branch* step. Branch selection (prebuilt vs source)
-/// is structural - it lives in `Plan`, not here - so this only covers the
-/// genuinely conditional steps within a branch, mirroring install.sh's guards.
+/// Conditions for source-install steps, mirroring install.sh's guards.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum When {
-    /// Unconditional within its branch.
+    /// Unconditional.
     Always,
-    /// Source branch: toolchain missing, bootstrap rustup.
+    /// Source install: toolchain missing, bootstrap rustup.
     ToolchainMissing,
-    /// Source branch: gateway feature resolved in.
+    /// Source install: gateway feature resolved in.
     GatewayResolved,
-    /// Source branch: gateway resolved AND npm present (else skip-warn).
+    /// Source install: gateway resolved AND npm present (else skip-warn).
     GatewayResolvedAndNpm,
 }
 
@@ -303,42 +281,7 @@ pub fn exclude_features(
     Ok(features)
 }
 
-/// Prebuilt install branch, reproducing install.sh@HEAD's prebuilt path.
-pub fn prebuilt_branch() -> Vec<Step> {
-    use Action::*;
-    use Platform::{Unix, Windows};
-    use When::Always;
-    vec![
-        Step {
-            id: "download-prebuilt",
-            narration: Value::Lit("download the prebuilt asset".into()),
-            action: DownloadPrebuilt,
-            when: Always,
-            platforms: &[Unix, Windows],
-        },
-        Step {
-            id: "install-binary",
-            narration: Value::Concat(vec![Value::Lit("install to ".into()), Value::BinDir]),
-            action: InstallBinary,
-            when: Always,
-            platforms: &[Unix, Windows],
-        },
-        Step {
-            id: "install-web-dist-bundled",
-            narration: Value::Concat(vec![
-                Value::Lit("install web dashboard to ".into()),
-                Value::WebDataDir,
-            ]),
-            action: InstallWebDist,
-            when: Always,
-            platforms: &[Unix, Windows],
-        },
-    ]
-}
-
-/// Source build branch, reproducing install.sh@HEAD's source path. Intra-branch
-/// conditionals stay as `When`; branch selection is structural (this fn IS the
-/// source branch).
+/// Source build steps. Conditional actions retain their existing guards.
 pub fn source_branch() -> Vec<Step> {
     use Action::*;
     use Platform::{Unix, Windows};
@@ -381,8 +324,8 @@ pub fn source_branch() -> Vec<Step> {
     ]
 }
 
-/// Shared tail both branches reconverge to.
-pub fn converge_tail() -> Vec<Step> {
+/// Final source-install steps.
+pub fn finish_steps() -> Vec<Step> {
     use Action::*;
     use Platform::{Unix, Windows};
     use When::Always;
@@ -1077,22 +1020,13 @@ mod tests {
     }
 
     #[test]
-    fn plan_diverges_and_converges() {
+    fn source_plan_builds_before_finishing_path_setup() {
         let p = Plan::build(&root(), Platform::Unix, &Selection::Full).unwrap();
-        // Both branches exist and differ (divergence is structural, not a flag).
-        assert!(!p.diverge.prebuilt.is_empty());
-        assert!(!p.diverge.source.is_empty());
-        let pb_ids: Vec<_> = p.diverge.prebuilt.iter().map(|s| s.id).collect();
-        let src_ids: Vec<_> = p.diverge.source.iter().map(|s| s.id).collect();
-        assert!(pb_ids.contains(&"download-prebuilt"));
-        assert!(src_ids.contains(&"cargo-install-self"));
-        assert!(
-            !pb_ids.contains(&"cargo-install-self"),
-            "branches must not bleed"
-        );
-        // Convergence: shared tail runs after either branch.
-        let tail: Vec<_> = p.converge.iter().map(|s| s.id).collect();
-        assert!(tail.contains(&"add-to-path"), "branches reconverge at PATH");
+        let source: Vec<_> = p.source.iter().map(|s| s.id).collect();
+        assert!(source.contains(&"cargo-install-self"));
+        let tail: Vec<_> = p.finish.iter().map(|s| s.id).collect();
+        assert_eq!(tail, vec!["add-to-path"]);
+        assert!(!p.all_steps().any(|s| s.id == "download-prebuilt"));
     }
 
     #[test]

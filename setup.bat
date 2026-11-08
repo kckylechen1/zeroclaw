@@ -4,13 +4,12 @@ setlocal enabledelayedexpansion
 :: ============================================================================
 :: ZeroClaw Windows Setup Script
 :: Simplifies building and installing ZeroClaw on Windows.
-:: Usage: setup.bat [--prebuilt | --minimal | --dist | --default | --all | --dry-run | --help]
+:: Usage: setup.bat [--source | --minimal | --dist | --default | --all | --dry-run | --help]
 :: ============================================================================
 
 set "VERSION=0.8.3"
-set "RUST_MIN_VERSION=1.87"
 set "TARGET=x86_64-pc-windows-msvc"
-set "REPO=https://github.com/zeroclaw-labs/zeroclaw"
+set "REPO=https://github.com/kckylechen1/zeroclaw"
 
 :: Colors via ANSI (Windows 10+ Terminal)
 set "GREEN=[32m"
@@ -20,21 +19,50 @@ set "BLUE=[34m"
 set "BOLD=[1m"
 set "RESET=[0m"
 
-:: Parse arguments
-set "MODE=interactive"
+:: Parse arguments. Reject retired prebuilt mode before prerequisites or writes.
+set "MODE="
 set "DRY_RUN=false"
 :parse_args
-if "%~1"==""           goto :start
-if "%~1"=="--help"     goto :show_help
-if "%~1"=="-h"         goto :show_help
-if "%~1"=="--dry-run"  set "DRY_RUN=true" & shift & goto :parse_args
-if "%~1"=="--prebuilt" set "MODE=prebuilt" & shift & goto :parse_args
-if "%~1"=="--minimal"  set "MODE=minimal"  & shift & goto :parse_args
-if "%~1"=="--dist"     set "MODE=dist"     & shift & goto :parse_args
-if "%~1"=="--default"  set "MODE=default"  & shift & goto :parse_args
-if "%~1"=="--all"      set "MODE=all"      & shift & goto :parse_args
-echo Unknown option: %~1
-goto :show_help
+if "%~1"=="" goto :start
+if "%~1"=="--help" goto :show_help
+if "%~1"=="-h" goto :show_help
+if "%~1"=="--prebuilt" goto :prebuilt_unavailable
+if "%~1"=="--source" (
+    shift
+    goto :parse_args
+)
+if "%~1"=="--dry-run" (
+    set "DRY_RUN=true"
+    shift
+    goto :parse_args
+)
+if "%~1"=="--minimal" (
+    set "MODE=minimal"
+    shift
+    goto :parse_args
+)
+if "%~1"=="--dist" (
+    set "MODE=dist"
+    shift
+    goto :parse_args
+)
+if "%~1"=="--default" (
+    set "MODE=default"
+    shift
+    goto :parse_args
+)
+if "%~1"=="--all" (
+    set "MODE=all"
+    shift
+    goto :parse_args
+)
+echo Unknown option. Run setup.bat --help for supported options.
+goto :error_exit
+
+:prebuilt_unavailable
+echo This fork has no verified prebuilt binary channel.
+echo Clone %REPO%.git into a new directory and run setup.bat --source there.
+goto :error_exit
 
 :start
 echo.
@@ -42,6 +70,29 @@ echo %BOLD%%BLUE%=========================================%RESET%
 echo %BOLD%%BLUE%  ZeroClaw Windows Setup  v%VERSION%%RESET%
 echo %BOLD%%BLUE%=========================================%RESET%
 echo.
+
+:: Verify source identity before toolchain bootstrap; do not echo a remote URL
+:: because a configured URL may contain credentials.
+if not exist "Cargo.toml" (
+    echo   %RED%ERROR: Run this script from the fork repository root.%RESET%
+    echo   git clone %REPO%.git
+    echo   cd zeroclaw
+    echo   setup.bat --source
+    goto :error_exit
+)
+where git >nul 2>&1
+if errorlevel 1 (
+    echo   %RED%ERROR: Git is required to verify the fork source checkout.%RESET%
+    echo   Install Git from https://git-scm.com/download/win
+    goto :error_exit
+)
+git remote get-url origin 2>nul | findstr /I /X /L /C:"%REPO%" /C:"%REPO%.git" /C:"git@github.com:kckylechen1/zeroclaw" /C:"git@github.com:kckylechen1/zeroclaw.git" /C:"ssh://git@github.com/kckylechen1/zeroclaw" /C:"ssh://git@github.com/kckylechen1/zeroclaw.git" >nul
+if errorlevel 1 (
+    echo   %RED%ERROR: Source origin is not this fork or could not be verified.%RESET%
+    echo   Clone %REPO%.git into a new directory and run setup.bat --source there.
+    echo   Existing checkout was not changed.
+    goto :error_exit
+)
 
 :: ---- Step 1: Check prerequisites ----
 echo %BOLD%[1/5] Checking prerequisites...%RESET%
@@ -53,7 +104,6 @@ for /f "tokens=2 delims==" %%a in ('wmic os get FreePhysicalMemory /value 2^>nul
 if defined FREE_RAM_MB (
     if !FREE_RAM_MB! LSS 2048 (
         echo   %YELLOW%WARNING: Only !FREE_RAM_MB! MB free RAM detected. 2048 MB recommended for source builds.%RESET%
-        echo   %YELLOW%Consider using --prebuilt instead.%RESET%
     ) else (
         echo   %GREEN%OK%RESET% Free RAM: !FREE_RAM_MB! MB
     )
@@ -85,16 +135,6 @@ if %ERRORLEVEL% NEQ 0 (
 ) else (
     for /f "tokens=1" %%v in ('node --version 2^>nul') do set "NODE_VER=%%v"
     echo   %GREEN%OK%RESET% Node.js !NODE_VER! found
-)
-
-:: Check Git
-where git >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo   %RED%ERROR: Git is required but not found.%RESET%
-    echo   Install Git from https://git-scm.com/download/win
-    goto :error_exit
-) else (
-    echo   %GREEN%OK%RESET% Git found
 )
 
 goto :choose_mode
@@ -129,81 +169,14 @@ goto :choose_mode
 :: ---- Choose build mode ----
 :: >>> generated:menu by `cargo generate installers` - do not edit <<<
 :choose_mode
-if "%MODE%"=="prebuilt" goto :install_prebuilt
+if "%MODE%"=="" goto :build_dist
 if "%MODE%"=="minimal" goto :build_minimal
 if "%MODE%"=="dist" goto :build_dist
 if "%MODE%"=="default" goto :build_default
 if "%MODE%"=="all" goto :build_all
-
-echo %BOLD%[2/5] Choose installation method:%RESET%
-echo.
-echo   1) Prebuilt binary - Download pre-compiled release (fastest)
-echo   2) minimal build - core only, no default features
-echo   3) dist build - lean standard distribution (recommended)
-echo   4) default build - default feature set
-echo   5) all build - every optional feature (kitchen sink)
-echo.
-set /p "CHOICE=  Select [1-5] (default: 1): "
-if "%CHOICE%"=="" set "CHOICE=1"
-if "%CHOICE%"=="1" goto :install_prebuilt
-if "%CHOICE%"=="2" goto :build_minimal
-if "%CHOICE%"=="3" goto :build_dist
-if "%CHOICE%"=="4" goto :build_default
-if "%CHOICE%"=="5" goto :build_all
-echo   %RED%Invalid choice. Please enter 1-5.%RESET%
-goto :choose_mode
+echo   %RED%Unknown source build mode.%RESET%
+goto :error_exit
 :: >>> end generated:menu <<<
-
-:: ---- Prebuilt binary ----
-:install_prebuilt
-echo.
-echo %BOLD%[3/5] Downloading prebuilt binary...%RESET%
-
-if "%DRY_RUN%"=="true" (
-    echo   [dry-run] Would download the prebuilt Windows release archive
-    echo   [dry-run] Would install to %USERPROFILE%\.zeroclaw\bin
-    echo   [dry-run] Would add %USERPROFILE%\.zeroclaw\bin to PATH
-    goto :dry_run_done
-)
-
-:: Try to get latest release URL via gh or curl
-where gh >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    for /f "tokens=*" %%u in ('gh release view --repo %REPO% --json assets --jq ".assets[] | select(.name | test(\"windows-msvc\")) | .url" 2^>nul') do (
-        set "DOWNLOAD_URL=%%u"
-    )
-)
-
-if not defined DOWNLOAD_URL (
-    :: Fallback: construct URL from known release pattern
-    set "DOWNLOAD_URL=https://github.com/zeroclaw-labs/zeroclaw/releases/latest/download/zeroclaw-%TARGET%.zip"
-)
-
-echo   Downloading from release...
-curl -sSfL -o "%TEMP%\zeroclaw-windows.zip" "!DOWNLOAD_URL!"
-if %ERRORLEVEL% NEQ 0 (
-    echo   %YELLOW%Prebuilt binary not available. Falling back to source build - dist%RESET%
-    goto :build_dist
-)
-
-:: Extract
-echo   Extracting...
-mkdir "%USERPROFILE%\.zeroclaw\bin" 2>nul
-tar -xf "%TEMP%\zeroclaw-windows.zip" -C "%USERPROFILE%\.zeroclaw\bin"
-if %ERRORLEVEL% NEQ 0 (
-    powershell -Command "Expand-Archive -Force '%TEMP%\zeroclaw-windows.zip' '%USERPROFILE%\.zeroclaw\bin'"
-)
-
-:: Add to PATH if not already there
-echo %PATH% | findstr /I /C:".zeroclaw\bin" >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    setx PATH "%PATH%;%USERPROFILE%\.zeroclaw\bin" >nul 2>&1
-    set "PATH=%PATH%;%USERPROFILE%\.zeroclaw\bin"
-    echo   %GREEN%OK%RESET% Added to PATH
-)
-
-echo   %GREEN%OK%RESET% Binary installed to %USERPROFILE%\.zeroclaw\bin\zeroclaw.exe
-goto verify
 
 :: ---- Source build presets ----
 :: >>> generated:presets by `cargo generate installers` - do not edit <<<
@@ -240,16 +213,6 @@ if "%DRY_RUN%"=="true" (
     echo   [dry-run] Would build web dashboard ^(cargo web build^) and install to %LOCALAPPDATA%\zeroclaw\web\dist
     echo   [dry-run] Would add %USERPROFILE%\.zeroclaw\bin to PATH
     goto :dry_run_done
-)
-
-:: Ensure we're in the repo root (check for Cargo.toml)
-if not exist "Cargo.toml" (
-    echo   %RED%ERROR: Cargo.toml not found. Run this script from the zeroclaw repository root.%RESET%
-    echo   Example:
-    echo     git clone %REPO%
-    echo     cd zeroclaw
-    echo     setup.bat
-    goto :error_exit
 )
 
 :: Add target if missing
@@ -359,11 +322,7 @@ echo     3. Configure your API key in %%USERPROFILE%%\.zeroclaw\config.toml
 echo     4. Start chatting: zeroclaw agent
 )
 echo.
-echo   Alternative install via Scoop:
-echo     scoop bucket add zeroclaw https://github.com/zeroclaw-labs/scoop-zeroclaw
-echo     scoop install zeroclaw
-echo.
-echo   Documentation: https://github.com/zeroclaw-labs/zeroclaw
+echo   Documentation: %REPO%
 echo.
 goto :end
 
@@ -375,7 +334,8 @@ echo.
 echo Usage: setup.bat [OPTIONS]
 echo.
 echo Options:
-echo   --prebuilt    Download pre-compiled binary (fastest)
+echo   --source      Build this fork from source ^(default^)
+echo   --prebuilt    Unsupported: this fork has no verified binary channel
 echo   --minimal     Build core only ^(--no-default-features^)
 echo   --dist        Build lean standard distribution (recommended)
 echo   --default     Build the default feature set
@@ -383,11 +343,11 @@ echo   --all         Build every feature
 echo   --dry-run     Show what would happen without building or installing
 echo   --help, -h    Show this help message
 echo.
-echo Without arguments, runs in interactive mode.
+echo Without arguments, builds the recommended dist preset from this fork checkout.
 echo.
 echo Prerequisites:
 echo   - Git (required)
-echo   - Rust 1.87+ (auto-installed if missing)
+echo   - Rust via rustup ^(uses the repository toolchain; bootstrapped if missing^)
 echo   - Visual Studio Build Tools with C++ workload (for source builds)
 echo   - Node.js (optional, for web dashboard)
 echo.
