@@ -800,6 +800,222 @@ async fn s2_wire_concurrent_duplicate_has_one_admission_and_one_turn() {
 }
 
 #[tokio::test]
+async fn s2_wire_session_delete_resets_shared_history_and_preserves_other_sessions() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let mut first = fixture.socket(DEVICE_TOKEN).await;
+    let mut second = fixture.socket(DEVICE_TOKEN).await;
+    let epoch = negotiate(&mut first).await;
+    assert_eq!(negotiate(&mut second).await, epoch);
+    let old_id = uuid::Uuid::new_v4().to_string();
+    first
+        .send(request(&epoch, &old_id, "s2-delete-marker"))
+        .await;
+    let ack = first.until("turn_ack").await;
+    let turn = ack["turn_id"].as_str().unwrap();
+    terminal(&mut first, &old_id, turn).await;
+    terminal(&mut second, &old_id, turn).await;
+
+    let (status, mut other) = DeviceWire::upgrade(
+        fixture.address,
+        "agent=device-agent&session_id=unaffected-session",
+        OWNER_TOKEN,
+    )
+    .await;
+    assert_eq!(status, 101);
+    other.connected(json!({"type":"connect"})).await;
+    assert_eq!(negotiate(&mut other).await, epoch);
+    let other_id = uuid::Uuid::new_v4().to_string();
+    other
+        .send(request(&epoch, &other_id, "unaffected-context-marker"))
+        .await;
+    let ack = other.until("turn_ack").await;
+    terminal(&mut other, &other_id, ack["turn_id"].as_str().unwrap()).await;
+
+    let (status, _) = device_http(
+        fixture.address,
+        "DELETE",
+        "/api/sessions/device-session",
+        "synthetic-unpaired-token",
+        "",
+    )
+    .await;
+    assert_eq!(status, 401, "deletion retains owner authentication");
+    let (status, _) = device_http(
+        fixture.address,
+        "DELETE",
+        "/api/sessions/device-session",
+        OWNER_TOKEN,
+        "",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        !fixture
+            .state
+            .session_backend
+            .as_ref()
+            .unwrap()
+            .session_exists("gw_device-session")
+    );
+
+    // Keep B attached throughout A's clear/reconnect. Its subscription used to
+    // retain the old Agent, so an empty database alone did not reset context.
+    drop(first);
+    let mut reopened = fixture.socket(DEVICE_TOKEN).await;
+    assert_eq!(negotiate(&mut reopened).await, epoch);
+    second.send(json!({"type":"turn_control","version":1,"op":"resume","epoch":epoch,"request_id":old_id,"after_seq":0})).await;
+    assert_eq!(second.until("turn_ack").await["status"], "unknown");
+    reopened
+        .send(request(&epoch, &old_id, "s2-delete-marker"))
+        .await;
+    assert_eq!(reopened.until("turn_ack").await["status"], "unknown");
+    assert_eq!(
+        fixture.seen.lock().len(),
+        2,
+        "deleted request cannot replay effects"
+    );
+
+    let fresh_id = uuid::Uuid::new_v4().to_string();
+    reopened
+        .send(request(&epoch, &fresh_id, "fresh-after-delete"))
+        .await;
+    let ack = reopened.until("turn_ack").await;
+    terminal(&mut reopened, &fresh_id, ack["turn_id"].as_str().unwrap()).await;
+    {
+        let seen = fixture.seen.lock();
+        assert_eq!(seen.len(), 3);
+        let input = seen[2]["messages"].to_string();
+        assert!(input.contains("fresh-after-delete"));
+        assert!(!input.contains("s2-delete-marker"));
+        assert!(!input.contains("s2-deleted-output-marker"));
+    }
+
+    let second_id = uuid::Uuid::new_v4().to_string();
+    second
+        .send(request(&epoch, &second_id, "still-connected-after-delete"))
+        .await;
+    let ack = second.until("turn_ack").await;
+    terminal(&mut second, &second_id, ack["turn_id"].as_str().unwrap()).await;
+    {
+        let seen = fixture.seen.lock();
+        assert_eq!(seen.len(), 4);
+        let input = seen[3]["messages"].to_string();
+        assert!(
+            input.contains("fresh-after-delete"),
+            "both sockets still share one Agent"
+        );
+        assert!(!input.contains("s2-delete-marker"));
+        assert!(!input.contains("s2-deleted-output-marker"));
+    }
+
+    let followup = uuid::Uuid::new_v4().to_string();
+    other
+        .send(request(&epoch, &followup, "unaffected-followup"))
+        .await;
+    let ack = other.until("turn_ack").await;
+    assert_eq!(ack["status"], "accepted", "another session keeps its epoch");
+    terminal(&mut other, &followup, ack["turn_id"].as_str().unwrap()).await;
+    let seen = fixture.seen.lock();
+    assert_eq!(seen.len(), 5);
+    assert!(
+        seen[4]["messages"]
+            .to_string()
+            .contains("unaffected-context-marker")
+    );
+}
+
+#[tokio::test]
+async fn s2_wire_session_delete_during_connect_cannot_restore_old_snapshot() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let mut first = fixture.socket(DEVICE_TOKEN).await;
+    let epoch = negotiate(&mut first).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    first.send(request(&epoch, &id, "s2-delete-marker")).await;
+    let ack = first.until("turn_ack").await;
+    terminal(&mut first, &id, ack["turn_id"].as_str().unwrap()).await;
+
+    let (status, mut connecting) = DeviceWire::upgrade(
+        fixture.address,
+        &format!("agent=device-agent&session_id={SESSION}"),
+        DEVICE_TOKEN,
+    )
+    .await;
+    assert_eq!(status, 101);
+    assert_eq!(connecting.until("session_start").await["resumed"], true);
+    drop(first);
+    tokio::time::timeout(LIMIT, async {
+        while fixture.state.ws_conversations.len() != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // This socket has read session_start but has not sent its connect frame.
+    // It must neither block DELETE nor later seed an Agent with that snapshot.
+    let (status, _) = device_http(
+        fixture.address,
+        "DELETE",
+        "/api/sessions/device-session",
+        OWNER_TOKEN,
+        "",
+    )
+    .await;
+    assert_eq!(status, 200);
+    connecting.connected(json!({"type":"connect"})).await;
+    assert_eq!(negotiate(&mut connecting).await, epoch);
+    let fresh_id = uuid::Uuid::new_v4().to_string();
+    connecting
+        .send(request(&epoch, &fresh_id, "fresh-delayed-connect"))
+        .await;
+    let ack = connecting.until("turn_ack").await;
+    terminal(&mut connecting, &fresh_id, ack["turn_id"].as_str().unwrap()).await;
+    let seen = fixture.seen.lock();
+    assert_eq!(seen.len(), 2);
+    let input = seen[1]["messages"].to_string();
+    assert!(!input.contains("s2-delete-marker"));
+    assert!(!input.contains("s2-deleted-output-marker"));
+}
+
+#[tokio::test]
+async fn s2_wire_session_delete_without_persistence_keeps_404_and_live_history() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let mut client = fixture.socket(DEVICE_TOKEN).await;
+    let epoch = negotiate(&mut client).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    client.send(request(&epoch, &id, "s2-delete-marker")).await;
+    let ack = client.until("turn_ack").await;
+    terminal(&mut client, &id, ack["turn_id"].as_str().unwrap()).await;
+
+    // Exercise the same handler with persistence disabled. DELETE never
+    // silently becomes a different in-memory reset operation in that mode.
+    let mut state = fixture.state.clone();
+    state.session_backend = None;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {OWNER_TOKEN}").parse().unwrap(),
+    );
+    let response = crate::api::handle_api_session_delete(
+        State(state),
+        headers,
+        axum::extract::Path(SESSION.into()),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    let followup = uuid::Uuid::new_v4().to_string();
+    client
+        .send(request(&epoch, &followup, "history-still-present"))
+        .await;
+    let ack = client.until("turn_ack").await;
+    terminal(&mut client, &followup, ack["turn_id"].as_str().unwrap()).await;
+    let seen = fixture.seen.lock();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1]["messages"].to_string().contains("s2-delete-marker"));
+}
+
+#[tokio::test]
 async fn s2_wire_http_session_delete_erases_replay_without_reexecution() {
     let fixture = DeviceFixture::new(&["chat"]).await;
     let mut device = fixture.socket(DEVICE_TOKEN).await;
@@ -904,10 +1120,17 @@ async fn s2_wire_negotiated_device_cannot_approve_owner_can_complete_same_prompt
 async fn s2_wire_delete_active_turn_suppresses_late_events_and_allows_fresh_request() {
     let fixture = DeviceFixture::new(&["chat"]).await;
     let mut active = fixture.socket(DEVICE_TOKEN).await;
+    let mut second = fixture.socket(DEVICE_TOKEN).await;
+    let mut legacy = fixture.socket(OWNER_TOKEN).await;
     let epoch = negotiate(&mut active).await;
+    assert_eq!(negotiate(&mut second).await, epoch);
     let erased = uuid::Uuid::new_v4().to_string();
     active
-        .send(request(&epoch, &erased, "s2-held-provider"))
+        .send(request(
+            &epoch,
+            &erased,
+            "s2-held-provider s2-active-private-marker",
+        ))
         .await;
     let ack = active.until("turn_ack").await;
     assert_eq!(ack["status"], "accepted");
@@ -921,6 +1144,23 @@ async fn s2_wire_delete_active_turn_suppresses_late_events_and_allows_fresh_requ
     )
     .await;
     assert_eq!(status, 200);
+    // The unnegotiated subscriber has no S2 journal visibility filter. Its
+    // queued cancellation/output frames must be invalidated by reset too.
+    legacy.send(json!({"type":"reset-visibility-probe"})).await;
+    tokio::time::timeout(LIMIT, async {
+        loop {
+            let frame = legacy.next().await.unwrap();
+            assert!(
+                !matches!(frame["type"].as_str(), Some("chunk" | "done" | "aborted")),
+                "legacy subscriber received a deleted turn frame: {frame}"
+            );
+            if frame["type"] == "error" && frame["code"] == "UNKNOWN_MESSAGE_TYPE" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
     // The provider was held before emitting any content. After a successful
     // deletion neither cancellation output nor late completion may leak through
     // this already-attached negotiated subscriber.
@@ -947,17 +1187,28 @@ async fn s2_wire_delete_active_turn_suppresses_late_events_and_allows_fresh_requ
         assert!(reply["turn_id"].is_null());
     }
     drop(active);
-    tokio::time::timeout(LIMIT, async {
-        while fixture.state.ws_conversations.len() != 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
+    assert_eq!(
+        fixture.state.ws_conversations.len(),
+        1,
+        "second subscriber stays attached"
+    );
+    assert!(
+        !fixture
+            .state
+            .session_backend
+            .as_ref()
+            .unwrap()
+            .session_exists("gw_device-session"),
+        "a deleted active turn cannot recreate durable history"
+    );
     let mut fresh = fixture.socket(DEVICE_TOKEN).await;
     assert_eq!(negotiate(&mut fresh).await, epoch);
     fresh
-        .send(request(&epoch, &erased, "s2-held-provider"))
+        .send(request(
+            &epoch,
+            &erased,
+            "s2-held-provider s2-active-private-marker",
+        ))
         .await;
     assert_eq!(fresh.until("turn_ack").await["status"], "unknown");
     let fresh_id = uuid::Uuid::new_v4().to_string();
@@ -981,6 +1232,12 @@ async fn s2_wire_delete_active_turn_suppresses_late_events_and_allows_fresh_requ
         fixture.seen.lock().len(),
         2,
         "only the new explicit ID may run after deletion"
+    );
+    assert!(
+        !fixture.seen.lock()[1]["messages"]
+            .to_string()
+            .contains("s2-active-private-marker"),
+        "cancellation settlement must not retain the deleted turn in the shared Agent"
     );
 }
 

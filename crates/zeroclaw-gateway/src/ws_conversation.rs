@@ -18,15 +18,40 @@
 
 use crate::ws_approval::{PendingApprovals, new_pending_approvals};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use tokio::sync::{OnceCell, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use zeroclaw_api::channel::ChannelApprovalResponse;
 use zeroclaw_infra::session_backend::RequestReceipt;
 
-/// A serialized JSON frame, shared by every subscriber.
-pub(crate) type Frame = Arc<str>;
+/// A serialized JSON frame and its in-process history revision. The revision
+/// never enters the wire format; it invalidates unread frames after deletion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Frame {
+    text: Arc<str>,
+    reset_revision: u64,
+}
+
+impl Frame {
+    pub(crate) fn is_current(&self, revision: u64) -> bool {
+        self.reset_revision == revision
+    }
+}
+
+impl std::ops::Deref for Frame {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for Frame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.text)
+    }
+}
 
 /// Frames buffered per conversation for slow subscribers. A subscriber that
 /// falls further behind skips frames (logged); the `done` frame still carries
@@ -83,11 +108,15 @@ impl RecentRequests {
 pub(crate) struct FrameSink {
     frames: broadcast::Sender<Frame>,
     subscribers: Arc<AtomicUsize>,
+    reset_revision: Arc<AtomicU64>,
 }
 
 impl FrameSink {
     pub(crate) fn publish(&self, frame: &serde_json::Value) {
-        let _ = self.frames.send(Arc::from(frame.to_string()));
+        let _ = self.frames.send(Frame {
+            text: Arc::from(frame.to_string()),
+            reset_revision: self.reset_revision.load(Ordering::Acquire),
+        });
     }
 
     /// Whether any socket is currently subscribed.
@@ -137,6 +166,8 @@ pub(crate) struct TurnClaim {
     pub(crate) intake: Option<crate::ws::intake::Claim>,
     pub(crate) surface: Option<zeroclaw_api::chat_surface::ChatSurface>,
     pub(crate) generation: u64,
+    /// Session deletion invalidates admissions that have not run yet.
+    pub(crate) reset_revision: u64,
     pub(crate) turn_id: String,
     pub(crate) cancel: CancellationToken,
     pub(crate) steering: mpsc::Receiver<String>,
@@ -181,6 +212,27 @@ impl<A> Conversation<A> {
         &self.key
     }
 
+    pub(crate) fn reset_revision(&self) -> u64 {
+        self.frames.reset_revision.load(Ordering::Acquire)
+    }
+
+    /// Called with the session lifecycle and execution guards held, after
+    /// clearing the Agent. Old ACK writers/queued claims cannot revive a turn.
+    pub(crate) fn reset(&self) {
+        let mut turn = self.turn.lock();
+        if let Some(active) = turn.as_ref() {
+            active.cancel.cancel();
+        }
+        *turn = None;
+        // Publishers hold their pending-map guard through publication. Revoke
+        // both maps before advancing the revision so an already-running relay
+        // cannot stamp a revoked prompt with the new history revision.
+        self.drain_approvals();
+        self.questions.drain();
+        self.frames.reset_revision.fetch_add(1, Ordering::AcqRel);
+        self.publish_turn_state(&turn);
+    }
+
     #[cfg(test)]
     pub(crate) fn frame_sink(&self) -> FrameSink {
         self.frames.clone()
@@ -194,7 +246,10 @@ impl<A> Conversation<A> {
     /// Extension traffic has a separate bounded ring, so opting in cannot
     /// reduce the legacy subscriber's existing frame retention.
     pub(crate) fn publish_control(&self, frame: &serde_json::Value) {
-        let _ = self.control_frames.send(Arc::from(frame.to_string()));
+        let _ = self.control_frames.send(Frame {
+            text: Arc::from(frame.to_string()),
+            reset_revision: self.reset_revision(),
+        });
     }
 
     /// Start a turn if none is running, otherwise steer the running one.
@@ -278,6 +333,7 @@ impl<A> Conversation<A> {
             intake: None,
             surface: None,
             generation,
+            reset_revision: self.reset_revision(),
             turn_id,
             cancel,
             steering: steering_rx,
@@ -394,6 +450,9 @@ pub struct ConversationHub<A> {
     /// Scheduling ownership in this process, not a copy of durable input state.
     pub(crate) intake: crate::ws::intake::Scheduling,
     slots: parking_lot::Mutex<HashMap<String, Slot<A>>>,
+    // Short-lived synchronization only: the session backend still owns durable
+    // history and receipts, and Conversation still owns the live Agent/turn.
+    lifecycles: parking_lot::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     // Canonical fallback receipts outlive idle conversations. No second copy
     // in Conversation and no agent/history retention for reconnect dedup.
     requests: parking_lot::Mutex<HashMap<String, RecentRequests>>,
@@ -403,6 +462,7 @@ impl<A> Default for ConversationHub<A> {
     fn default() -> Self {
         Self {
             slots: parking_lot::Mutex::new(HashMap::new()),
+            lifecycles: parking_lot::Mutex::default(),
             attachments: crate::api_attachments::Store::default(),
             turn_control: crate::ws::turn_control::Store::default(),
             intake: crate::ws::intake::Scheduling::default(),
@@ -412,6 +472,34 @@ impl<A> Default for ConversationHub<A> {
 }
 
 impl<A> ConversationHub<A> {
+    /// Serialize same-session hydration/admission with deletion, independently
+    /// of the long-running execution queue. Never hold this guard while waiting
+    /// for socket input/output. Weak entries retain no disconnected sessions.
+    pub(crate) fn session_lifecycle(&self, session: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut lifecycles = self.lifecycles.lock();
+        if let Some(lifecycle) = lifecycles.get(session).and_then(Weak::upgrade) {
+            return lifecycle;
+        }
+        lifecycles.retain(|_, lifecycle| lifecycle.strong_count() > 0);
+        let lifecycle = Arc::new(tokio::sync::Mutex::new(()));
+        lifecycles.insert(session.to_string(), Arc::downgrade(&lifecycle));
+        lifecycle
+    }
+
+    /// Snapshot while holding the session lifecycle guard: concurrent factories
+    /// cannot add a conversation seeded with pre-deletion history.
+    pub(crate) fn session_conversations(&self, session: &str) -> Vec<Arc<Conversation<A>>> {
+        self.slots
+            .lock()
+            .iter()
+            .filter(|(key, _)| {
+                key.rsplit_once('\u{1f}')
+                    .is_some_and(|(key, _)| key == session)
+            })
+            .filter_map(|(_, slot)| slot.get().cloned())
+            .collect()
+    }
+
     pub(crate) fn record_request(
         &self,
         key: &str,
@@ -472,6 +560,7 @@ impl<A> ConversationHub<A> {
                     let frames = FrameSink {
                         frames,
                         subscribers: Arc::new(AtomicUsize::new(0)),
+                        reset_revision: Arc::new(AtomicU64::new(0)),
                     };
                     let (agent, extra) = create(Seed {
                         pending_approvals: pending_approvals.clone(),
@@ -617,6 +706,85 @@ mod tests {
             let frame = sub.frames.recv().await.unwrap();
             assert_eq!(&*frame, r#"{"content":"hi","type":"chunk"}"#);
         }
+    }
+
+    #[tokio::test]
+    async fn reset_invalidates_buffered_frames_but_keeps_new_output_and_other_sessions() {
+        let hub = Arc::new(ConversationHub::<()>::default());
+        let (mut sub, _) = attach(&hub, "gw_deleted").await;
+        let (mut other, _) = attach(&hub, "gw_other").await;
+        sub.conversation
+            .publish(&serde_json::json!({"type":"chunk", "content":"old"}));
+        other
+            .conversation
+            .publish(&serde_json::json!({"type":"chunk", "content":"retained"}));
+        sub.conversation.reset();
+        sub.conversation
+            .publish(&serde_json::json!({"type":"chunk", "content":"new"}));
+        assert!(
+            !sub.frames
+                .recv()
+                .await
+                .unwrap()
+                .is_current(sub.conversation.reset_revision())
+        );
+        let fresh = sub.frames.recv().await.unwrap();
+        assert!(fresh.is_current(sub.conversation.reset_revision()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fresh).unwrap()["content"],
+            "new"
+        );
+        assert!(
+            other
+                .frames
+                .recv()
+                .await
+                .unwrap()
+                .is_current(other.conversation.reset_revision())
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_waits_for_an_approval_publisher_before_advancing_frame_revision() {
+        let hub = Arc::new(ConversationHub::<()>::default());
+        let (mut sub, _) = attach(&hub, "gw_deleted").await;
+        let conversation = Arc::clone(&sub.conversation);
+        let Submitted::Start(claim) = conversation.submit("old turn".into()) else {
+            panic!("idle conversation must start a turn")
+        };
+        let revision = conversation.reset_revision();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // Model the relay after it found the request but before it published.
+        let mut pending = conversation.pending_approvals.lock();
+        pending.insert("old-approval".into(), tx);
+        let resetting = Arc::clone(&conversation);
+        let reset = std::thread::spawn(move || resetting.reset());
+        // Cancellation proves reset has entered its turn-locked section; the
+        // held map guard prevents it from completing revocation.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !claim.cancel.is_cancelled() {
+            assert!(std::time::Instant::now() < deadline, "reset did not enter");
+            std::thread::yield_now();
+        }
+        let observed_revision = conversation.reset_revision();
+        conversation.publish(&serde_json::json!({
+            "type": "approval_request", "request_id": "old-approval",
+            "arguments_summary": "deleted private prompt"
+        }));
+        drop(pending);
+        reset.join().unwrap();
+        assert_eq!(observed_revision, revision);
+        assert_eq!(conversation.reset_revision(), revision + 1);
+        assert!(rx.await.is_err(), "reset must revoke the old approval");
+        assert!(conversation.pending_approvals.lock().is_empty());
+        assert!(
+            !sub.frames
+                .recv()
+                .await
+                .unwrap()
+                .is_current(conversation.reset_revision()),
+            "a publisher already holding the old map guard cannot survive reset"
+        );
     }
 
     #[tokio::test]
