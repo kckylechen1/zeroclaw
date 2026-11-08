@@ -270,7 +270,7 @@ impl<'a> TurnState<'a> {
 }
 
 pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
-    run_tool_call_loop_with_guard(p, None, false).await
+    run_tool_call_loop_with_guard(p, None, false, None).await
 }
 
 /// Agent owns this guard for the full API turn, including steering and model
@@ -281,6 +281,7 @@ pub(crate) async fn run_tool_call_loop_with_guard(
     p: ToolLoop<'_>,
     repetition_guard: Option<&std::sync::Mutex<repetition::RepetitionGuard>>,
     yield_to_steering: bool,
+    side_query: Option<&crate::agent::side_query::SideQueryHandle>,
 ) -> Result<String> {
     // One loop invocation is one agent turn: advisor consultations made by
     // its tools count against a fresh per-turn budget (#405).
@@ -309,6 +310,7 @@ pub(crate) async fn run_tool_call_loop_with_guard(
                     p,
                     repetition_guard,
                     yield_to_steering,
+                    side_query,
                 )),
             ),
         )
@@ -319,6 +321,7 @@ async fn run_tool_call_loop_turn(
     mut p: ToolLoop<'_>,
     repetition_guard: Option<&std::sync::Mutex<repetition::RepetitionGuard>>,
     yield_to_steering: bool,
+    side_query: Option<&crate::agent::side_query::SideQueryHandle>,
 ) -> Result<String> {
     let model_switch_state = p
         .exec
@@ -729,6 +732,14 @@ async fn run_tool_call_loop_turn(
         // Explicit execution context prevents a nested peer turn inheriting
         // the parent's task owner. Every production entry point uses this seam.
         refresh_task_context(turn_state.history, task_owner);
+        if let Some(sq) = side_query {
+            sq.update_live_messages(
+                active_model_provider_name,
+                active_model,
+                turn_state.history,
+                Some(turn_id),
+            );
+        }
 
         let prepared_messages = prepare_messages_for_iteration(
             turn_state.history,
@@ -1286,6 +1297,14 @@ async fn run_tool_call_loop_turn(
             &tool_results,
             use_native_tools,
         );
+        if let Some(sq) = side_query {
+            sq.update_live_messages(
+                active_model_provider_name,
+                active_model,
+                turn_state.history,
+                Some(turn_id),
+            );
+        }
 
         if cancelled_mid_batch {
             return Err(ToolLoopCancelled.into());
@@ -1367,7 +1386,7 @@ fn refresh_task_context(
     }
 }
 
-fn refresh_prompt_anchor(history: &mut [ChatMessage], use_native_tools: bool) {
+pub(crate) fn refresh_prompt_anchor(history: &mut [ChatMessage], use_native_tools: bool) {
     if let Some(first) = history.first_mut()
         && (first.content.contains(NATIVE_TOOLS_TASK_FRAMING)
             || first.content.contains(NO_TOOLS_TASK_FRAMING))
