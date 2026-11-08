@@ -1569,3 +1569,287 @@ fn parse_image_markers_image_only_message_becomes_empty() {
     );
     assert_eq!(refs.len(), 1);
 }
+
+#[tokio::test]
+async fn latest_tool_result_images_survive_trailing_system_advisory() {
+    let temp = tempfile::tempdir().unwrap();
+    let image_path = temp.path().join("latest-capture.png");
+    std::fs::write(
+        &image_path,
+        [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'],
+    )
+    .unwrap();
+
+    let native_messages = vec![
+        ChatMessage::user("Capture screenshot"),
+        ChatMessage::assistant("Running screenshot tool"),
+        ChatMessage::tool(
+            serde_json::json!({
+                "tool_call_id": "call_1",
+                "content": format!("Captured screenshot [IMAGE:{}]", image_path.display()),
+            })
+            .to_string(),
+        ),
+        ChatMessage::system("[Loop guard] You have repeated the same failing call 2 times."),
+    ];
+    let config = MultimodalConfig {
+        max_images: 4,
+        max_image_size_mb: 5,
+        allow_remote_fetch: false,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        count_image_markers(&native_messages),
+        1,
+        "trailing system advisory must not hide the latest tool-result image from vision routing"
+    );
+
+    let mut cache = LocalImageCache::new();
+    let result = prepare_messages_for_provider_cached(&native_messages, &config, &mut cache)
+        .await
+        .expect("latest tool result image should normalize through trailing system advisory");
+
+    assert!(result.contains_images);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result.messages[2].content).expect("tool JSON remains valid");
+    let inner = parsed
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("tool content string");
+    assert!(
+        inner.contains("data:image/png;base64,"),
+        "latest tool result image must normalize instead of being stripped as stale: {inner}"
+    );
+
+    let prompt_messages = vec![
+        ChatMessage::user("Capture screenshot"),
+        ChatMessage::assistant("Running screenshot tool"),
+        ChatMessage::user(format!(
+            "[Tool results]\n<tool_result name=\"screenshot\">\nCaptured [IMAGE:{}]\n</tool_result>",
+            image_path.display()
+        )),
+        ChatMessage::system("[Loop guard] Advisory notice"),
+    ];
+    assert_eq!(count_image_markers(&prompt_messages), 1);
+    let prompt_result = prepare_messages_for_provider_cached(&prompt_messages, &config, &mut cache)
+        .await
+        .expect("prompt-mode tool result image should normalize through trailing system advisory");
+    assert!(prompt_result.contains_images);
+    assert!(
+        prompt_result.messages[2]
+            .content
+            .contains("data:image/png;base64,")
+    );
+}
+
+#[tokio::test]
+async fn trim_images_by_age_ignores_prompt_mode_tool_result_messages() {
+    let temp = tempfile::tempdir().unwrap();
+    let image_path = temp.path().join("user-attached.png");
+    std::fs::write(
+        &image_path,
+        [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'],
+    )
+    .unwrap();
+
+    // Single real user turn followed by two prompt-mode `[Tool results]` rounds.
+    // With `max_image_turns = 1`, the user's attached image is in the current
+    // (and only) real user turn and must NOT be evicted just because tool
+    // results were injected as `role = "user"` messages.
+    let messages = vec![
+        ChatMessage::user(format!("Inspect this UI [IMAGE:{}]", image_path.display())),
+        ChatMessage::assistant("Checking element tree"),
+        ChatMessage::user("[Tool results]\n<tool_result name=\"dom\">ok</tool_result>"),
+        ChatMessage::assistant("Checking console logs"),
+        ChatMessage::user("[Tool results]\n<tool_result name=\"logs\">clean</tool_result>"),
+    ];
+    let config = MultimodalConfig {
+        max_images: 4,
+        max_image_size_mb: 5,
+        allow_remote_fetch: false,
+        max_image_turns: 1,
+        ..Default::default()
+    };
+
+    let result = prepare_messages_for_provider(&messages, &config)
+        .await
+        .expect("prompt-mode tool rounds must not age-out current user turn image");
+    assert!(
+        result.contains_images,
+        "current user turn image should survive prompt-mode tool rounds"
+    );
+    assert!(
+        result.messages[0]
+            .content
+            .contains("data:image/png;base64,"),
+        "user turn image must remain normalized: {}",
+        result.messages[0].content
+    );
+}
+
+#[tokio::test]
+async fn cached_prepare_preserves_stale_tool_result_text_within_warm_ttl_then_compacts_after_expiry()
+ {
+    let config = MultimodalConfig::default();
+    let mut cache = LocalImageCache::new();
+
+    let head_marker = "HEAD_CONTEXT_LINE_0001\n";
+    let middle_bulk = "M".repeat(STALE_TOOL_RESULT_MAX_CHARS * 3);
+    let tail_receipt = "\n[zeroclaw_tool_receipt:hmac=deadbeefcafebabe]";
+    let big_tool_output = format!("{head_marker}{middle_bulk}{tail_receipt}");
+    let tool_json = serde_json::json!({
+        "tool_call_id": "call_1",
+        "content": big_tool_output,
+    })
+    .to_string();
+
+    // Turn 1, round 1: tool result is the latest tool round.
+    let mut history = vec![
+        ChatMessage::system("system prompt"),
+        ChatMessage::user("Turn 1 question"),
+        ChatMessage::assistant("Calling tool 1"),
+        ChatMessage::tool(&tool_json),
+    ];
+    let prepared_t1_r1 = prepare_messages_for_provider_cached(&history, &config, &mut cache)
+        .await
+        .unwrap();
+    assert_eq!(cache.compacted_prefix_len(), 1);
+    assert_eq!(prepared_t1_r1.messages[3].content, tool_json);
+
+    // Turn 1, round 2: another tool runs in the same turn. Tool 1 is no longer
+    // the latest tool result, but is still after `compacted_prefix_len` (1), so
+    // its text stays byte-for-byte identical to preserve the prompt cache prefix.
+    history.push(ChatMessage::assistant("Calling tool 2"));
+    history.push(ChatMessage::tool(
+        serde_json::json!({
+            "tool_call_id": "call_2",
+            "content": "short second result",
+        })
+        .to_string(),
+    ));
+    let prepared_t1_r2 = prepare_messages_for_provider_cached(&history, &config, &mut cache)
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared_t1_r2.messages[3].content, tool_json,
+        "stale tool text inside an active turn must not mutate the cached prefix"
+    );
+
+    // Turn 2 arrives while the 5-minute prompt cache is still warm:
+    // `compacted_prefix_len` stays frozen at 1 so Turn 1's messages stay
+    // byte-for-byte identical for provider prompt cache hits.
+    history.push(ChatMessage::assistant("Turn 1 complete"));
+    history.push(ChatMessage::user("Turn 2 follow-up while cache is warm"));
+    let prepared_t2_warm = prepare_messages_for_provider_cached(&history, &config, &mut cache)
+        .await
+        .unwrap();
+    assert_eq!(cache.compacted_prefix_len(), 1);
+    assert_eq!(
+        prepared_t2_warm.messages[3].content, tool_json,
+        "warm prompt-cache window must preserve Turn 1 tool output byte-for-byte"
+    );
+
+    // Once the prompt-cache TTL window expires, the next preparation advances
+    // `compacted_prefix_len` to Turn 2's user message (index 7) and compacts
+    // Turn 1's oversized tool result deterministically while keeping head + tail.
+    cache.expire_prompt_cache_window();
+    let prepared_t2_cold = prepare_messages_for_provider_cached(&history, &config, &mut cache)
+        .await
+        .unwrap();
+    assert_eq!(cache.compacted_prefix_len(), 7);
+    let compacted_json: serde_json::Value =
+        serde_json::from_str(&prepared_t2_cold.messages[3].content)
+            .expect("compacted native tool result must remain valid JSON");
+    assert_eq!(
+        compacted_json.get("tool_call_id").and_then(|v| v.as_str()),
+        Some("call_1")
+    );
+    let compacted_inner = compacted_json
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("compacted content string");
+    assert!(
+        compacted_inner.len() <= STALE_TOOL_RESULT_MAX_CHARS,
+        "compacted content length {} must fit STALE_TOOL_RESULT_MAX_CHARS ({})",
+        compacted_inner.len(),
+        STALE_TOOL_RESULT_MAX_CHARS
+    );
+    assert!(compacted_inner.starts_with(head_marker));
+    assert!(compacted_inner.ends_with(tail_receipt));
+    assert!(compacted_inner.contains("characters truncated"));
+
+    // Subsequent warm iterations in Turn 2 produce the exact same compacted
+    // payload so the newly established cache prefix stays stable.
+    let prepared_t2_next = prepare_messages_for_provider_cached(&history, &config, &mut cache)
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared_t2_next.messages[3].content,
+        prepared_t2_cold.messages[3].content
+    );
+}
+
+#[tokio::test]
+async fn cached_prepare_reanchors_compaction_boundary_when_history_trim_shifts_prefix() {
+    let config = MultimodalConfig::default();
+    let mut cache = LocalImageCache::new();
+    let big_content = format!(
+        "START_MARKER\n{}\nEND_MARKER",
+        "X".repeat(STALE_TOOL_RESULT_MAX_CHARS * 2)
+    );
+
+    // Initial 3-turn history where Turn 1 and Turn 2 both have completed tool results.
+    let history_before_trim = vec![
+        ChatMessage::system("system"),
+        ChatMessage::user("Turn 1"),
+        ChatMessage::assistant("Ack 1"),
+        ChatMessage::user("Turn 2"),
+        ChatMessage::assistant("Tool call 2"),
+        ChatMessage::tool(
+            serde_json::json!({
+                "tool_call_id": "call_t2",
+                "content": big_content,
+            })
+            .to_string(),
+        ),
+        ChatMessage::assistant("Done 2"),
+    ];
+    let _ = prepare_messages_for_provider_cached(&history_before_trim, &config, &mut cache)
+        .await
+        .unwrap();
+    assert_eq!(cache.compacted_prefix_len(), 3);
+
+    // Simulate whole-turn history trim dropping Turn 1 while the cache is still warm,
+    // and appending Turn 3. Because the prefix shifted, the provider prompt cache is
+    // already invalidated, so `compacted_prefix_len` must re-anchor to Turn 3 and
+    // compact Turn 2's oversized tool result immediately.
+    let history_after_trim = vec![
+        ChatMessage::system("system"),
+        ChatMessage::user("[Earlier conversation turns were trimmed to fit the context window.]"),
+        ChatMessage::user("Turn 2"),
+        ChatMessage::assistant("Tool call 2"),
+        ChatMessage::tool(
+            serde_json::json!({
+                "tool_call_id": "call_t2",
+                "content": big_content,
+            })
+            .to_string(),
+        ),
+        ChatMessage::assistant("Done 2"),
+        ChatMessage::user("Turn 3"),
+    ];
+    let prepared = prepare_messages_for_provider_cached(&history_after_trim, &config, &mut cache)
+        .await
+        .unwrap();
+    assert_eq!(cache.compacted_prefix_len(), 6);
+    let compacted_json: serde_json::Value =
+        serde_json::from_str(&prepared.messages[4].content).unwrap();
+    let inner = compacted_json
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap();
+    assert!(inner.len() <= STALE_TOOL_RESULT_MAX_CHARS);
+    assert!(inner.starts_with("START_MARKER"));
+    assert!(inner.ends_with("END_MARKER"));
+}
