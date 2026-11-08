@@ -11,3 +11,4 @@ mod provider_resolution;
 mod provider_schema;
 mod security;
 mod skills_bundle_cli;
+mod source_update_cli;
