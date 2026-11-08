@@ -1379,6 +1379,69 @@ struct NativeMessage {
 // Streaming support (SSE parser)
 // ---------------------------------------------------------------
 
+// Bound parser-owned memory independently of the provider's token budget.
+// A body chunk may contain many valid lines, so the line cap is enforced
+// before copying each fragment rather than against the HTTP chunk size.
+const MAX_SSE_LINE_BYTES: usize = 1_048_576;
+const MAX_STREAM_TOOL_CALLS: usize = 128;
+const MAX_STREAM_TOOL_BYTES: usize = 4 * 1_048_576;
+
+#[derive(Default)]
+struct SseLineBuffer {
+    pending: Vec<u8>,
+    /// Only the unfinished UTF-8 suffix (at most three bytes) needs to be
+    /// checked again when the next fragment arrives.
+    validated: usize,
+}
+
+impl SseLineBuffer {
+    fn next_line(&mut self, bytes: &mut &[u8]) -> StreamResult<Option<String>> {
+        let newline = bytes.iter().position(|byte| *byte == b'\n');
+        let take = newline.unwrap_or(bytes.len());
+        if take > MAX_SSE_LINE_BYTES.saturating_sub(self.pending.len()) {
+            return Err(StreamError::ModelProvider(format!(
+                "SSE line exceeds {MAX_SSE_LINE_BYTES} bytes"
+            )));
+        }
+        self.pending.extend_from_slice(&bytes[..take]);
+        *bytes = &bytes[take + usize::from(newline.is_some())..];
+
+        match std::str::from_utf8(&self.pending[self.validated..]) {
+            Ok(_) => self.validated = self.pending.len(),
+            Err(error) if error.error_len().is_none() && newline.is_none() => {
+                self.validated += error.valid_up_to();
+            }
+            Err(_) => {
+                return Err(StreamError::ModelProvider(
+                    "SSE response contains invalid UTF-8".to_string(),
+                ));
+            }
+        }
+
+        if newline.is_none() {
+            return Ok(None);
+        }
+        self.validated = 0;
+        String::from_utf8(std::mem::take(&mut self.pending))
+            .map(Some)
+            .map_err(|_| StreamError::ModelProvider("SSE response contains invalid UTF-8".into()))
+    }
+
+    fn finish(&self) -> StreamResult<()> {
+        if self.validated != self.pending.len() {
+            return Err(StreamError::ModelProvider(
+                "SSE response ends with incomplete UTF-8".to_string(),
+            ));
+        }
+        if !self.pending.is_empty() {
+            return Err(StreamError::ModelProvider(
+                "SSE response ends with an incomplete line".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Server-Sent Event stream chunk for OpenAI-compatible streaming.
 #[derive(Debug, Deserialize)]
 struct StreamChunkResponse {
@@ -1698,7 +1761,7 @@ fn sse_bytes_to_chunks(
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
 
     let handle = ::zeroclaw_spawn::spawn!(async move {
-        let mut buffer = String::new();
+        let mut lines = SseLineBuffer::default();
 
         match response.error_for_status_ref() {
             Ok(_) => {}
@@ -1711,41 +1774,19 @@ fn sse_bytes_to_chunks(
         }
 
         let mut bytes_stream = response.bytes_stream();
-        // Accumulate partial UTF-8 sequences that may be split across
-        // HTTP/1.1 chunked transfer boundaries (e.g. 3-byte CJK chars).
-        let mut utf8_buf: Vec<u8> = Vec::new();
-
         'stream: while let Some(item) = bytes_stream.next().await {
             match item {
                 Ok(bytes) => {
-                    utf8_buf.extend_from_slice(&bytes);
-                    let text = match std::str::from_utf8(&utf8_buf) {
-                        Ok(s) => {
-                            let owned = s.to_string();
-                            utf8_buf.clear();
-                            owned
-                        }
-                        Err(e) => {
-                            let valid_up_to = e.valid_up_to();
-                            if valid_up_to == 0 && utf8_buf.len() < 4 {
-                                // Could still be an incomplete multi-byte char; wait for more data
-                                continue;
+                    let mut remaining = bytes.as_ref();
+                    while !remaining.is_empty() {
+                        let line = match lines.next_line(&mut remaining) {
+                            Ok(Some(line)) => line,
+                            Ok(None) => break,
+                            Err(error) => {
+                                let _ = tx.send(Err(error)).await;
+                                return;
                             }
-                            let valid =
-                                String::from_utf8_lossy(&utf8_buf[..valid_up_to]).into_owned();
-                            utf8_buf.drain(..valid_up_to);
-                            valid
-                        }
-                    };
-                    if text.is_empty() {
-                        continue;
-                    }
-
-                    buffer.push_str(&text);
-
-                    while let Some(pos) = buffer.find('\n') {
-                        let line = buffer[..pos].to_string();
-                        buffer.drain(..=pos);
+                        };
 
                         if line.trim().strip_prefix("data:").map(str::trim) == Some("[DONE]") {
                             break 'stream;
@@ -1779,6 +1820,10 @@ fn sse_bytes_to_chunks(
             }
         }
 
+        if let Err(error) = lines.finish() {
+            let _ = tx.send(Err(error)).await;
+            return;
+        }
         let _ = tx.send(Ok(StreamChunk::final_chunk())).await;
     });
 
@@ -1805,8 +1850,9 @@ fn sse_bytes_to_events_for_contract(
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
 
     let handle = ::zeroclaw_spawn::spawn!(async move {
-        let mut buffer = String::new();
+        let mut lines = SseLineBuffer::default();
         let mut tool_calls: Vec<StreamToolCallAccumulator> = Vec::new();
+        let mut tool_call_bytes = 0_usize;
         let mut used_tool_call_ids = std::collections::HashSet::new();
         let mut emitted_tool_calls = false;
         let mut saw_completion = false;
@@ -1822,38 +1868,19 @@ fn sse_bytes_to_events_for_contract(
         }
 
         let mut bytes_stream = response.bytes_stream();
-        // Accumulate partial UTF-8 sequences split across chunk boundaries.
-        let mut utf8_buf: Vec<u8> = Vec::new();
         'stream: while let Some(item) = bytes_stream.next().await {
             match item {
                 Ok(bytes) => {
-                    utf8_buf.extend_from_slice(&bytes);
-                    let text = match std::str::from_utf8(&utf8_buf) {
-                        Ok(s) => {
-                            let owned = s.to_string();
-                            utf8_buf.clear();
-                            owned
-                        }
-                        Err(e) => {
-                            let valid_up_to = e.valid_up_to();
-                            if valid_up_to == 0 && utf8_buf.len() < 4 {
-                                continue;
+                    let mut remaining = bytes.as_ref();
+                    while !remaining.is_empty() {
+                        let line = match lines.next_line(&mut remaining) {
+                            Ok(Some(line)) => line,
+                            Ok(None) => break,
+                            Err(error) => {
+                                let _ = tx.send(Err(error)).await;
+                                return;
                             }
-                            let valid =
-                                String::from_utf8_lossy(&utf8_buf[..valid_up_to]).into_owned();
-                            utf8_buf.drain(..valid_up_to);
-                            valid
-                        }
-                    };
-                    if text.is_empty() {
-                        continue;
-                    }
-
-                    buffer.push_str(&text);
-
-                    while let Some(pos) = buffer.find('\n') {
-                        let line = buffer[..pos].to_string();
-                        buffer.drain(..=pos);
+                        };
 
                         // Custom proxy events for pre-executed tool calls
                         // (e.g. claude-max-api-proxy streaming x_tool_start/x_tool_result)
@@ -1880,6 +1907,27 @@ fn sse_bytes_to_events_for_contract(
                                 return;
                             }
                         };
+
+                        // Charge the complete wire line once before retaining any
+                        // deltas. This bounds arguments fragmented over arbitrarily
+                        // many individually valid frames, plus IDs and opaque extras.
+                        if chunk.choices.iter().any(|choice| {
+                            choice
+                                .delta
+                                .tool_calls
+                                .as_ref()
+                                .is_some_and(|deltas| !deltas.is_empty())
+                        }) {
+                            if line.len() > MAX_STREAM_TOOL_BYTES.saturating_sub(tool_call_bytes) {
+                                let _ = tx
+                                    .send(Err(StreamError::ModelProvider(format!(
+                                        "SSE tool-call deltas exceed {MAX_STREAM_TOOL_BYTES} bytes"
+                                    ))))
+                                    .await;
+                                return;
+                            }
+                            tool_call_bytes += line.len();
+                        }
 
                         let mut should_emit_tool_calls = false;
                         for choice in &chunk.choices {
@@ -1913,8 +1961,19 @@ fn sse_bytes_to_events_for_contract(
                             if let Some(deltas) = choice.delta.tool_calls.as_ref() {
                                 for delta in deltas {
                                     let index = delta.index.unwrap_or(tool_calls.len());
+                                    let Some(required) = index
+                                        .checked_add(1)
+                                        .filter(|length| *length <= MAX_STREAM_TOOL_CALLS)
+                                    else {
+                                        let _ = tx
+                                            .send(Err(StreamError::ModelProvider(format!(
+                                                "SSE tool-call index exceeds the {MAX_STREAM_TOOL_CALLS}-call limit"
+                                            ))))
+                                            .await;
+                                        return;
+                                    };
                                     if index >= tool_calls.len() {
-                                        tool_calls.resize_with(index + 1, Default::default);
+                                        tool_calls.resize_with(required, Default::default);
                                     }
                                     if let Some(acc) = tool_calls.get_mut(index) {
                                         acc.apply_delta(delta);
@@ -1958,6 +2017,10 @@ fn sse_bytes_to_events_for_contract(
             }
         }
 
+        if let Err(error) = lines.finish() {
+            let _ = tx.send(Err(error)).await;
+            return;
+        }
         if !emitted_tool_calls {
             for tool_call in tool_calls.drain(..).filter_map(|tool_call| {
                 tool_call.into_provider_tool_call(
@@ -3602,3 +3665,6 @@ impl ::zeroclaw_api::attribution::Attributable for OpenAiCompatibleModelProvider
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stream_bounds_tests;

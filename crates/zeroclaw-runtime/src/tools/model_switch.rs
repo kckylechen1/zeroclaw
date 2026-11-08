@@ -577,7 +577,12 @@ mod tests {
     #[tokio::test]
     async fn list_models_accepts_dotted_provider_profile_ref() {
         let result = tool()
-            .handle_list_models(&json!({
+            .with_catalog_resolver(|family| async move {
+                assert_eq!(family, "openai", "resolve the configured profile's family");
+                Ok(vec!["openai-profile-fixture".to_string()])
+            })
+            .execute(json!({
+                "action": "list_models",
                 "model_provider": "openai.default"
             }))
             .await
@@ -587,17 +592,9 @@ mod tests {
         let output: serde_json::Value =
             serde_json::from_str(&result.output).expect("output should be json");
         assert_eq!(output["model_provider"], "openai.default");
-        // Whether the live models.dev catalog is reachable or we fell back to
-        // the offline list, a configured OpenAI profile must yield a non-empty
-        // model list.
-        assert!(
-            !output["models"]
-                .as_array()
-                .expect("models should be an array")
-                .is_empty(),
-            "expected a non-empty model list, got: {}",
-            result.output
-        );
+        // This contract is profile resolution through canonical execution; it
+        // must not depend on the availability of either public catalog.
+        assert_eq!(output["models"], json!(["openai-profile-fixture"]));
     }
 
     #[test]

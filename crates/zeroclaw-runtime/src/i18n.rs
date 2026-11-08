@@ -148,7 +148,7 @@ fn load_cli_strings(locale: &str) -> HashMap<String, String> {
 }
 
 fn load_cli_ftl_sources(locale: &str) -> CliFtlSources {
-    CliFtlSources {
+    let sources = CliFtlSources {
         locale: locale.to_string(),
         disk: (locale != "en")
             .then(|| load_ftl_from_disk(locale, "cli.ftl"))
@@ -156,14 +156,24 @@ fn load_cli_ftl_sources(locale: &str) -> CliFtlSources {
         builtin: (locale != "en")
             .then(|| builtin_cli_ftl_source(locale))
             .flatten(),
+    };
+    if locale != "en" && sources.disk.is_none() && sources.builtin.is_none() {
+        // Covers configurations that still select a retired locale (es, fr,
+        // ja) as well as unknown codes: every CLI string resolves in English
+        // instead of failing, and the condition is observable once at init.
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({"locale": locale, "fallback": "en"})),
+            "locale has no embedded or on-disk catalogs; CLI strings fall back to English"
+        );
     }
+    sources
 }
 
 fn builtin_cli_ftl_source(locale: &str) -> Option<&'static str> {
     match locale {
-        "es" => Some(include_str!("../locales/es/cli.ftl")),
-        "fr" => Some(include_str!("../locales/fr/cli.ftl")),
-        "ja" => Some(include_str!("../locales/ja/cli.ftl")),
         "zh-CN" => Some(include_str!("../locales/zh-CN/cli.ftl")),
         _ => None,
     }
@@ -516,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_ctxwin_write_failed_formats_in_english_and_japanese() {
+    fn doctor_ctxwin_write_failed_formats_in_english_and_zh_cn() {
         let cases = [(
             "cli-doctor-ctxwin-write-failed",
             &[
@@ -526,7 +536,7 @@ mod tests {
         )];
         for pair in [
             (include_str!("../locales/en/cli.ftl"), "en"),
-            (include_str!("../locales/ja/cli.ftl"), "ja"),
+            (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
         ] {
             let (locale_source, locale) = (pair.0, pair.1);
             for (key, args) in cases {
@@ -541,6 +551,44 @@ mod tests {
                     "{key} in {locale} should inline error; got: {value:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn registry_lists_only_english_and_zh_cn() {
+        let codes: Vec<&str> = available_locales()
+            .iter()
+            .map(|o| o.code.as_str())
+            .collect();
+        assert_eq!(codes, vec!["en", "zh-CN"]);
+        assert!(
+            available_locales().iter().all(|o| !o.label.is_empty()),
+            "every registry entry carries a display label"
+        );
+    }
+
+    #[test]
+    fn retired_locales_have_no_builtin_and_fall_back_to_english() {
+        for retired in ["es", "fr", "ja"] {
+            assert!(
+                builtin_cli_ftl_source(retired).is_none(),
+                "{retired} must not embed a CLI catalog after retirement"
+            );
+            // The final English fallback keeps every key resolvable, so a
+            // config still selecting a retired locale keeps working (disk
+            // overlays, if previously fetched, still win per the loader).
+            let sources = CliFtlSources {
+                locale: retired.to_string(),
+                disk: None,
+                builtin: builtin_cli_ftl_source(retired),
+            };
+            let value = format_cli_string_with_args(
+                &sources,
+                "cli-doctor-ctxwin-write-failed",
+                &[("provider_ref", "groq.alias2"), ("error", "boom")],
+            )
+            .expect("English fallback must resolve the key");
+            assert!(value.contains("groq.alias2") && value.contains("boom"));
         }
     }
 
@@ -566,9 +614,6 @@ mod tests {
 
         for (source, locale) in [
             (include_str!("../locales/en/cli.ftl"), "en"),
-            (include_str!("../locales/es/cli.ftl"), "es"),
-            (include_str!("../locales/fr/cli.ftl"), "fr"),
-            (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
         ] {
             for (key, args, expected_parts) in cases {
@@ -790,9 +835,6 @@ mod tests {
 
         for (source, locale) in [
             (include_str!("../locales/en/cli.ftl"), "en"),
-            (include_str!("../locales/es/cli.ftl"), "es"),
-            (include_str!("../locales/fr/cli.ftl"), "fr"),
-            (include_str!("../locales/ja/cli.ftl"), "ja"),
             (include_str!("../locales/zh-CN/cli.ftl"), "zh-CN"),
         ] {
             for (key, args, expected_parts) in cases {

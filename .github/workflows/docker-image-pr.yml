@@ -7,6 +7,10 @@ on:
       - Dockerfile
       - Dockerfile.debian
       - Dockerfile.ci
+      - '**/Cargo.toml'
+      - Cargo.lock
+      - 'src/bin/**'
+      - scripts/ci/docker_prefetch_test.py
       - .dockerignore
       - dev/config.template.toml
       - .github/workflows/docker-image-pr.yml
@@ -21,6 +25,15 @@ permissions:
   contents: read
 
 jobs:
+  prefetch-targets:
+    name: Docker prefetch target contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Validate manifest targets in both prefetch layers
+        run: python3 scripts/ci/docker_prefetch_test.py
+
   images:
     name: Docker Images Build (no push)
     runs-on: ubuntu-latest
@@ -74,6 +87,7 @@ jobs:
   # this never publishes. Split per matrix entry so the slow arm64 cross-build
   # does not serialize behind the others.
   source-images:
+    needs: prefetch-targets
     name: Dockerfile Source Build (no push)
     runs-on: ubuntu-latest
     timeout-minutes: 90
