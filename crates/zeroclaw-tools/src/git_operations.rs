@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::autonomy::AutonomyLevel;
+use zeroclaw_infra::process::{OverflowBehavior, ProcessLimits, ProcessOutcome, run_bounded};
 use zeroclaw_policy::SecurityPolicy;
+
+const MAX_GIT_OUTPUT_BYTES: usize = 1_048_576;
 
 /// Git operations tool for structured repository management.
 /// Provides safe, parsed git operations with JSON output.
@@ -209,20 +212,68 @@ impl GitOperationsTool {
         args: &[&str],
         working_dir: &std::path::Path,
     ) -> anyhow::Result<String> {
-        let output = tokio::process::Command::new("git")
+        let mut command = tokio::process::Command::new("git");
+        command
             .args(args)
             .current_dir(working_dir)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await?;
+            .env("GIT_TERMINAL_PROMPT", "0");
+        let output = run_bounded(
+            &mut command,
+            ProcessLimits {
+                timeout: std::time::Duration::from_secs(self.security.shell_timeout_secs),
+                stdout_bytes: MAX_GIT_OUTPUT_BYTES,
+                stderr_bytes: MAX_GIT_OUTPUT_BYTES,
+                stdout_lines: None,
+                // A verbose hook must not cancel an otherwise valid mutation.
+                overflow: OverflowBehavior::Drain,
+            },
+        )
+        .await?;
+        let status = match output.outcome {
+            ProcessOutcome::Exited(status) => status,
+            ProcessOutcome::TimedOut => anyhow::bail!(
+                "{}",
+                crate::i18n::get_required_tool_string_with_args(
+                    "tool-git-operations-error-timeout",
+                    &[("seconds", &self.security.shell_timeout_secs.to_string())],
+                )
+            ),
+            ProcessOutcome::OutputLimit => anyhow::bail!(
+                "{}",
+                crate::i18n::get_required_tool_string("tool-git-operations-error-output-stopped",)
+            ),
+        };
 
-        if !output.status.success() {
+        if !status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Git command failed: {stderr}");
+            let suffix = if output.stderr_truncated {
+                crate::i18n::get_required_tool_string("tool-process-stderr-truncated")
+            } else {
+                String::new()
+            };
+            anyhow::bail!("Git command failed: {stderr} {suffix}");
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if output.stdout_truncated {
+            if !args
+                .first()
+                .is_some_and(|operation| self.requires_write_access(operation))
+            {
+                anyhow::bail!(
+                    "{}",
+                    crate::i18n::get_required_tool_string_with_args(
+                        "tool-git-operations-error-incomplete-output",
+                        &[("bytes", &MAX_GIT_OUTPUT_BYTES.to_string())],
+                    )
+                );
+            }
+            stdout.push('\n');
+            stdout.push_str(&crate::i18n::get_required_tool_string(
+                "tool-git-operations-completed-truncated",
+            ));
+        }
+        Ok(stdout)
     }
 
     async fn git_status(
@@ -1266,6 +1317,115 @@ mod tests {
         // Branch listing is read-only; it must not require write access
         assert!(!tool.requires_write_access("branch"));
         assert!(tool.is_read_only("branch"));
+    }
+
+    #[tokio::test]
+    async fn oversized_diff_is_not_reported_as_a_complete_repository_result() {
+        let tmp = TempDir::new().unwrap();
+        bootstrap_repo(tmp.path(), &["large.txt"]).await;
+        std::fs::write(
+            tmp.path().join("large.txt"),
+            "x".repeat(MAX_GIT_OUTPUT_BYTES + 100),
+        )
+        .unwrap();
+        let error = test_tool(tmp.path())
+            .execute(json!({"operation": "diff", "files": "large.txt"}))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not a complete repository result")
+        );
+    }
+
+    #[cfg(unix)]
+    fn install_waiting_commit_hook(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::write(&hook,
+            "#!/bin/sh\n(while ! test -e .git/fixture-release; do sleep 0.01; done; printf escaped > .git/fixture-escaped) &\nprintf ready > .git/fixture-started\nwait\n"
+        ).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["config", "core.hooksPath", ".git/hooks"])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_commit_future_stops_the_hook_and_its_child() {
+        let tmp = TempDir::new().unwrap();
+        bootstrap_repo(tmp.path(), &[]).await;
+        install_waiting_commit_hook(tmp.path());
+        let tool = test_tool(tmp.path());
+        std::fs::write(tmp.path().join("README.md"), "changed").unwrap();
+        tool.run_git_command(&["add", "README.md"], tmp.path())
+            .await
+            .unwrap();
+        let before = tool
+            .run_git_command(&["rev-parse", "HEAD"], tmp.path())
+            .await
+            .unwrap();
+        let task = zeroclaw_spawn::spawn!(async move {
+            tool.execute(json!({"operation": "commit", "message": "fixture"}))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !tmp.path().join(".git/fixture-started").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("commit must reach the real hook");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        std::fs::write(tmp.path().join(".git/fixture-release"), "continue").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!tmp.path().join(".git/fixture-escaped").exists());
+        let after = test_tool(tmp.path())
+            .run_git_command(&["rev-parse", "HEAD"], tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(before, after, "cancelled hook must not finish the commit");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn commit_timeout_reports_unknown_mutation_and_stops_descendants() {
+        let tmp = TempDir::new().unwrap();
+        bootstrap_repo(tmp.path(), &[]).await;
+        install_waiting_commit_hook(tmp.path());
+        let security = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            workspace_dir: tmp.path().to_path_buf(),
+            shell_timeout_secs: 1,
+            ..SecurityPolicy::default()
+        });
+        let tool = GitOperationsTool::new(security, tmp.path().to_path_buf());
+        std::fs::write(tmp.path().join("README.md"), "changed").unwrap();
+        tool.run_git_command(&["add", "README.md"], tmp.path())
+            .await
+            .unwrap();
+        let result = tool
+            .execute(json!({"operation": "commit", "message": "fixture"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("Inspect it before retrying")
+        );
+        assert!(tmp.path().join(".git/fixture-started").exists());
+        std::fs::write(tmp.path().join(".git/fixture-release"), "continue").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!tmp.path().join(".git/fixture-escaped").exists());
     }
 
     #[tokio::test]
