@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use serde_json::json;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
@@ -105,21 +104,8 @@ impl FileUploadTool {
     }
 
     async fn read_response_body_capped(response: reqwest::Response) -> Vec<u8> {
-        let hard_cap = RESPONSE_BODY_LIMIT_BYTES.saturating_add(1);
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            // A mid-stream read error simply ends the body; the HTTP status was
-            // already captured from the response head before reading.
-            let Ok(chunk) = chunk else { break };
-            let remaining = hard_cap - bytes.len();
-            if chunk.len() >= remaining {
-                bytes.extend_from_slice(&chunk[..remaining]);
-                break;
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        bytes
+        crate::helpers::http_body::read_response_body_prefix(response, RESPONSE_BODY_LIMIT_BYTES)
+            .await
     }
 
     fn truncate_response_body(body: &str) -> String {
