@@ -69,7 +69,7 @@ async fn point_reads_deletes_and_new_writes_do_not_grow_full_entry_pages() {
 }
 
 #[tokio::test]
-async fn typed_key_candidates_exclude_unrelated_bodies_and_archived_rows() {
+async fn metadata_projection_preserves_unicode_keys_and_archived_visibility() {
     let tmp = TempDir::new().unwrap();
     let memory = TachiMemory::new("tachi", tmp.path()).unwrap();
     let key = "quote%'_\"雪/..";
@@ -107,21 +107,23 @@ async fn typed_key_candidates_exclude_unrelated_bodies_and_archived_rows() {
         .unwrap()
         .unwrap();
     {
-        let mut store = memory.store_handle().lock();
-        let pattern = TachiMemory::key_path_pattern(key, Some("alpha"));
+        let store = memory.store_handle().lock();
+        let pattern = format!("{}%", TachiMemory::agent_path_prefix(Some("alpha")));
         let candidates = store.list_memories_by_path_prefix(&pattern).unwrap();
         assert_eq!(
             candidates.len(),
-            2,
-            "SQL projection returns only this encoded key's candidates"
+            14,
+            "one complete projection includes unrelated metadata without bodies"
         );
+        let matching = TachiMemory::rows_matching_key(&store, key, Some("alpha")).unwrap();
+        assert_eq!(matching.len(), 2);
         assert!(
-            candidates
+            matching
                 .iter()
-                .all(|row| row.metadata.contains(METADATA_ZC_KEY))
+                .all(|row| row.text == "A" || row.text == "B")
         );
         store.archive_memory(&a.id).unwrap();
-        let live = TachiMemory::rows_matching_key(&store, key, Some("alpha"), &pattern).unwrap();
+        let live = TachiMemory::rows_matching_key(&store, key, Some("alpha")).unwrap();
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].text, "B");
     }
@@ -144,7 +146,7 @@ async fn typed_key_candidates_exclude_unrelated_bodies_and_archived_rows() {
 }
 
 #[tokio::test]
-async fn legacy_metadata_fallback_keeps_session_precedence_and_complete_delete() {
+async fn legacy_metadata_keeps_session_precedence_and_complete_delete() {
     let tmp = TempDir::new().unwrap();
     let memory = TachiMemory::new("tachi", tmp.path()).unwrap();
     memory
@@ -244,6 +246,246 @@ async fn legacy_metadata_fallback_keeps_session_precedence_and_complete_delete()
     let rows = memory.export_agent("alpha").await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].content, "global");
+}
+
+#[tokio::test]
+async fn conversation_duplicates_keep_legacy_winner_and_session_delete_scope() {
+    let tmp = TempDir::new().unwrap();
+    let memory = TachiMemory::new("tachi", tmp.path()).unwrap();
+    memory
+        .store_with_agent(
+            "shared",
+            "global",
+            MemoryCategory::Core,
+            None,
+            None,
+            None,
+            Some("alpha"),
+        )
+        .await
+        .unwrap();
+    for session in ["A", "B"] {
+        memory
+            .store_with_agent(
+                "shared",
+                session,
+                MemoryCategory::Conversation,
+                Some(session),
+                None,
+                None,
+                Some("alpha"),
+            )
+            .await
+            .unwrap();
+    }
+    let canonical = TOOL_LOOP_MEMORY_SESSIONS
+        .scope(vec!["A".into()], memory.get_for_agent("shared", "alpha"))
+        .await
+        .unwrap()
+        .unwrap();
+    let (newer_id, winner_id) = {
+        let mut store = memory.store_handle().lock();
+        let mut duplicate = store.get(&canonical.id).unwrap().unwrap();
+        duplicate.path = format!(
+            "{}zz-historical/duplicate",
+            TachiMemory::agent_path_prefix(Some("alpha"))
+        );
+        assert!(duplicate.path > store.get(&canonical.id).unwrap().unwrap().path);
+        duplicate.id = Uuid::new_v4().to_string();
+        duplicate.timestamp = "2025-01-02T00:00:00+00:00".into();
+        duplicate.text = "newer legacy A".into();
+        store.upsert(&duplicate).unwrap();
+        let newer_id = duplicate.id.clone();
+        duplicate.id = Uuid::new_v4().to_string();
+        duplicate.timestamp = "2025-01-01T00:00:00+00:00".into();
+        duplicate.text = "legacy A winner".into();
+        store.upsert(&duplicate).unwrap();
+        (newer_id, duplicate.id)
+    };
+
+    // Historical point reads sort path ASC, timestamp DESC, then select the
+    // host scope and pop the last row. Canonical paths do not have priority.
+    let winner = TOOL_LOOP_MEMORY_SESSIONS
+        .scope(vec!["A".into()], memory.get_for_agent("shared", "alpha"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(winner.id, winner_id);
+    assert_eq!(winner.content, "legacy A winner");
+    assert_eq!(
+        TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], memory.get("shared"))
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        winner_id
+    );
+    assert_eq!(
+        TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["B".into()], memory.get_for_agent("shared", "alpha"))
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "B"
+    );
+    assert!(
+        TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], memory.forget_for_agent("shared", "alpha"))
+            .await
+            .unwrap()
+    );
+    {
+        let store = memory.store_handle().lock();
+        for id in [&canonical.id, &newer_id, &winner_id] {
+            assert!(store.get(id).unwrap().is_none());
+        }
+    }
+    assert_eq!(
+        TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["B".into()], memory.get_for_agent("shared", "alpha"))
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "B"
+    );
+    assert_eq!(
+        TOOL_LOOP_MEMORY_SESSIONS
+            .scope(vec!["A".into()], memory.get_for_agent("shared", "alpha"))
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "global"
+    );
+}
+
+#[tokio::test]
+async fn unscoped_global_duplicates_keep_legacy_winner_and_complete_agent_delete() {
+    let tmp = TempDir::new().unwrap();
+    let memory = TachiMemory::new("tachi", tmp.path()).unwrap();
+    for agent in ["alpha", "beta"] {
+        memory
+            .store_with_agent(
+                "shared",
+                agent,
+                MemoryCategory::Core,
+                None,
+                None,
+                None,
+                Some(agent),
+            )
+            .await
+            .unwrap();
+    }
+    let canonical = memory
+        .get_for_agent("shared", "alpha")
+        .await
+        .unwrap()
+        .unwrap();
+    let winner_id = {
+        let mut store = memory.store_handle().lock();
+        let mut duplicate = store.get(&canonical.id).unwrap().unwrap();
+        duplicate.id = Uuid::new_v4().to_string();
+        duplicate.path = format!(
+            "{}zz-historical/global",
+            TachiMemory::agent_path_prefix(Some("alpha"))
+        );
+        duplicate.text = "legacy global winner".into();
+        store.upsert(&duplicate).unwrap();
+        duplicate.id
+    };
+    // No task-local host scope: keep the historical administrative winner.
+    let winner = memory
+        .get_for_agent("shared", "alpha")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(winner.id, winner_id);
+    assert_eq!(winner.content, "legacy global winner");
+    assert!(memory.forget_for_agent("shared", "alpha").await.unwrap());
+    {
+        let store = memory.store_handle().lock();
+        for id in [&canonical.id, &winner_id] {
+            assert!(store.get(id).unwrap().is_none());
+        }
+    }
+    assert!(
+        memory
+            .get_for_agent("shared", "alpha")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        memory
+            .get_for_agent("shared", "beta")
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "beta"
+    );
+}
+
+#[tokio::test]
+async fn writes_keep_exact_path_priority_and_legacy_fallback_identity_order() {
+    let tmp = TempDir::new().unwrap();
+    let memory = TachiMemory::new("tachi", tmp.path()).unwrap();
+    memory
+        .store("shared", "canonical", MemoryCategory::Core, None)
+        .await
+        .unwrap();
+    let canonical = memory.get("shared").await.unwrap().unwrap();
+    let legacy_id = {
+        let mut store = memory.store_handle().lock();
+        let mut duplicate = store.get(&canonical.id).unwrap().unwrap();
+        duplicate.id = Uuid::new_v4().to_string();
+        duplicate.path = format!(
+            "{}aaa-historical/first",
+            TachiMemory::agent_path_prefix(Some("default"))
+        );
+        assert!(duplicate.path < store.get(&canonical.id).unwrap().unwrap().path);
+        duplicate.text = "legacy first".into();
+        store.upsert(&duplicate).unwrap();
+        duplicate.id
+    };
+    memory
+        .store("shared", "exact updated", MemoryCategory::Core, None)
+        .await
+        .unwrap();
+    {
+        let store = memory.store_handle().lock();
+        assert_eq!(
+            store.get(&canonical.id).unwrap().unwrap().text,
+            "exact updated"
+        );
+        assert_eq!(store.get(&legacy_id).unwrap().unwrap().text, "legacy first");
+    }
+    // Moving namespace/category misses the exact path. Preserve the first
+    // complete path-ordered identity, even with a canonical duplicate present.
+    memory
+        .store_with_metadata(
+            "shared",
+            "moved legacy",
+            MemoryCategory::Daily,
+            None,
+            Some("updated-namespace"),
+            None,
+        )
+        .await
+        .unwrap();
+    let store = memory.store_handle().lock();
+    assert_eq!(
+        store.get(&canonical.id).unwrap().unwrap().text,
+        "exact updated"
+    );
+    let updated = store.get(&legacy_id).unwrap().unwrap();
+    assert_eq!(updated.text, "moved legacy");
+    assert_eq!(updated.metadata[METADATA_ZC_NAMESPACE], "updated-namespace");
+    assert_eq!(updated.metadata[METADATA_ZC_CATEGORY], "daily");
 }
 
 #[tokio::test]

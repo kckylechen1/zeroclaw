@@ -14,11 +14,6 @@ pub(crate) trait PointRow {
 pub(crate) struct PointScope(Option<Option<String>>);
 
 impl PointScope {
-    #[cfg(feature = "tachi")]
-    pub(crate) fn has_canonical_session(&self) -> bool {
-        matches!(&self.0, Some(Some(_)))
-    }
-
     pub(crate) fn current() -> Self {
         Self(
             zeroclaw_api::TOOL_LOOP_MEMORY_SESSIONS

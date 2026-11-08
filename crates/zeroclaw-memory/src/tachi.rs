@@ -62,13 +62,6 @@ const DEFAULT_NAMESPACE: &str = "default";
 const DEFAULT_LIST_PAGE_SIZE: usize = 512;
 const MAX_LIST_GROW: usize = 1_048_576;
 
-enum KeyLookup {
-    /// Prefer canonical paths; a scope miss still checks legacy metadata.
-    Select,
-    /// Deletes must include legacy duplicates even when a canonical row exists.
-    Complete,
-}
-
 /// Global rows use agent/key identity; session-bound Conversation rows use
 /// agent/session/key identity. Metadata remains authoritative for legacy rows.
 /// Point get/forget follows the same host session rules as SQLite.
@@ -512,31 +505,22 @@ impl TachiMemory {
         }
     }
 
-    fn key_path_pattern(key: &str, agent: Option<&str>) -> String {
-        // Both historical adapter paths and session-aware paths end in this
-        // encoded key. `%` never comes from the caller: encoding allows only
-        // ASCII alphanumerics, '-', '_' and '.'. LIKE's '_' and case folding can
-        // broaden candidates, so path and metadata are rechecked below.
-        format!(
-            "{}%/{}",
-            Self::agent_path_prefix(agent),
-            Self::encode_path_segment(key)
-        )
-    }
-
     /// Use the admitted live kernel handle and its typed, projected query. No
     /// independent SQLite connection, raw SQL, schema change or lookup cache.
-    /// Only matching ids load text/vector bodies. The broad legacy fallback
-    /// still scans metadata; it does not promise an indexed/O(1) key lookup.
+    /// Only matching ids load text/vector bodies. Every lookup scans metadata
+    /// once so canonical paths cannot hide legacy duplicates or change which
+    /// row wins. This does not promise an indexed/O(1) key lookup.
     fn rows_matching_key(
         store: &MemoryStore,
         key: &str,
         agent: Option<&str>,
-        pattern: &str,
     ) -> anyhow::Result<Vec<portable_kernel::MemoryEntry>> {
         let prefix = Self::agent_path_prefix(agent);
+        // LIKE's '_' and case folding can broaden candidates, so the literal
+        // path prefix and exact metadata remain authoritative below.
+        let pattern = format!("{prefix}%");
         let candidates = store
-            .list_memories_by_path_prefix(pattern)
+            .list_memories_by_path_prefix(&pattern)
             .map_err(|error| {
                 ::zeroclaw_log::record!(
                     ERROR,
@@ -576,7 +560,8 @@ impl TachiMemory {
                 result.push(entry);
             }
         }
-        // Match list_by_path's stable ordering for administrative point reads.
+        // Preserve list_by_path's ordering before PointScope and point reads'
+        // pop(), or writes' first matching identity, including legacy rows.
         result.sort_by(|a, b| {
             a.path
                 .cmp(&b.path)
@@ -689,27 +674,12 @@ impl TachiMemory {
             let existing = match exact_hit {
                 Some(entry) => Some(entry),
                 None => {
-                    let agent = Some(agent_owned.as_str());
-                    let canonical = Self::rows_matching_key(
-                        &store,
-                        &key_owned,
-                        agent,
-                        &Self::key_path_pattern(&key_owned, agent),
-                    )?
-                    .into_iter()
-                    .find(&same_identity);
-                    match canonical {
-                        Some(entry) => Some(entry),
-                        None => {
-                            // A new key, or an old row with a non-canonical
-                            // path, needs one projected metadata scan. Keep it
-                            // fallible so an error cannot fork row identity.
-                            let pattern = format!("{}%", Self::agent_path_prefix(agent));
-                            Self::rows_matching_key(&store, &key_owned, agent, &pattern)?
-                                .into_iter()
-                                .find(same_identity)
-                        }
-                    }
+                    // Preserve the complete legacy ordering on an exact-path
+                    // miss. A canonical candidate cannot establish which
+                    // same-identity row list_prefix_complete would pick.
+                    Self::rows_matching_key(&store, &key_owned, Some(&agent_owned))?
+                        .into_iter()
+                        .find(same_identity)
                 }
             };
 
@@ -806,51 +776,19 @@ impl TachiMemory {
         key: &str,
         agent_id: Option<&str>,
         scope: PointScope,
-        lookup: KeyLookup,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         let store = self.store.clone();
         let key = key.to_string();
         let agent = agent_id.map(str::to_owned);
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
             let store = store.lock();
-            let include_soul = agent.is_some();
-            let select = |rows: Vec<portable_kernel::MemoryEntry>| {
-                scope.select(
-                    rows.into_iter()
-                        .map(|row| Self::memcore_to_zeroclaw(row, None))
-                        .collect(),
-                    include_soul,
-                )
-            };
-            if matches!(lookup, KeyLookup::Select) && agent.is_some() {
-                let rows = select(Self::rows_matching_key(
-                    &store,
-                    &key,
-                    agent.as_deref(),
-                    &Self::key_path_pattern(&key, agent.as_deref()),
-                )?);
-                // A global candidate cannot hide a legacy Conversation row
-                // for the caller's session. Unscoped administrative queries
-                // use the complete projection across all agents below.
-                if !rows.is_empty()
-                    && (!scope.has_canonical_session()
-                        || rows
-                            .iter()
-                            .all(|row| row.category == MemoryCategory::Conversation))
-                {
-                    return Ok(rows);
-                }
-            }
-            // A scope miss (including a canonical row in another session) must
-            // still find the caller's legacy row. Deletes always scan this
-            // projection once to include non-canonical same-key duplicates.
-            let pattern = format!("{}%", Self::agent_path_prefix(agent.as_deref()));
-            Ok(select(Self::rows_matching_key(
-                &store,
-                &key,
-                agent.as_deref(),
-                &pattern,
-            )?))
+            let rows = Self::rows_matching_key(&store, &key, agent.as_deref())?;
+            Ok(scope.select(
+                rows.into_iter()
+                    .map(|row| Self::memcore_to_zeroclaw(row, None))
+                    .collect(),
+                agent.is_some(),
+            ))
         })
         .await?
     }
@@ -1074,10 +1012,7 @@ impl Memory for TachiMemory {
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
         let scope = PointScope::current();
         // Ambient get never returns a row from the reserved Soul namespace.
-        Ok(self
-            .find_rows_by_key(key, None, scope, KeyLookup::Select)
-            .await?
-            .pop())
+        Ok(self.find_rows_by_key(key, None, scope).await?.pop())
     }
 
     async fn get_for_agent(
@@ -1087,7 +1022,7 @@ impl Memory for TachiMemory {
     ) -> anyhow::Result<Option<MemoryEntry>> {
         let scope = PointScope::current();
         Ok(self
-            .find_rows_by_key(key, Some(agent_id), scope, KeyLookup::Select)
+            .find_rows_by_key(key, Some(agent_id), scope)
             .await?
             .pop())
     }
@@ -1111,9 +1046,7 @@ impl Memory for TachiMemory {
 
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
         let scope = PointScope::current();
-        let rows = self
-            .find_rows_by_key(key, None, scope, KeyLookup::Complete)
-            .await?;
+        let rows = self.find_rows_by_key(key, None, scope).await?;
         // The unscoped delete never reaches the reserved Soul namespace;
         // Soul rows are forgotten only through `forget_for_agent` with the
         // admitted identity.
@@ -1123,9 +1056,7 @@ impl Memory for TachiMemory {
 
     async fn forget_for_agent(&self, key: &str, agent_id: &str) -> anyhow::Result<bool> {
         let scope = PointScope::current();
-        let rows = self
-            .find_rows_by_key(key, Some(agent_id), scope, KeyLookup::Complete)
-            .await?;
+        let rows = self.find_rows_by_key(key, Some(agent_id), scope).await?;
         let ids: Vec<String> = rows.into_iter().map(|e| e.id).collect();
         Ok(self.delete_ids(ids).await? > 0)
     }
