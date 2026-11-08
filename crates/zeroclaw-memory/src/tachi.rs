@@ -589,7 +589,16 @@ impl TachiMemory {
             // and retain their UUID; another session must never adopt them.
             let exact_hit = store
                 .list_by_path(&path_c, 8, false)
-                .map_err(|e| anyhow::anyhow!("tachi identity lookup failed: {e}"))?
+                .map_err(|error| {
+                    ::zeroclaw_log::record!(
+                        ERROR,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({"phase": "identity_lookup"})),
+                        "tachi memory identity lookup failed"
+                    );
+                    anyhow::Error::msg(format!("tachi identity lookup failed: {error}"))
+                })?
                 .into_iter()
                 .find(|entry| entry.path == path_c && same_identity(entry));
             let existing = match exact_hit {
