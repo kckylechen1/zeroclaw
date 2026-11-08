@@ -9,7 +9,7 @@ use rusqlite::{Connection, OpenFlags, params};
 use uuid::Uuid;
 use zeroclaw_config::schema::Config;
 
-const MAX_CRON_OUTPUT_BYTES: usize = 16 * 1024;
+pub(super) const MAX_CRON_OUTPUT_BYTES: usize = 16 * 1024;
 const TRUNCATED_OUTPUT_MARKER: &str = "\n...[truncated]";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
