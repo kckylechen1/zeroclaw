@@ -400,7 +400,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       }
       return;
     }
-    if (isSideQueryRequestId(sideRequestId)) {
+    // Only receipts/errors use this request-id namespace. Ordinary display
+    // frames can carry an unrelated tool-call `id` with the same prefix.
+    if (isSideQueryRequestId(sideRequestId)
+      && ['turn_ack', 'ack', 'turn_error', 'error'].includes(msg.type)) {
       if (msg.type === 'error' || msg.type === 'turn_error'
         || (msg.type === 'turn_ack' && msg.status !== 'btw')
         || (msg.type === 'ack' && msg.status !== 'accepted')) {

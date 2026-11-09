@@ -192,6 +192,19 @@ test('side queries correlate out of order, bound concurrency and ignore duplicat
   assert.equal(ctx.value.typing, false);
 }));
 
+test('side-query request ids cannot hide ordinary tool events with the same id prefix', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive(ready()));
+  await update(() => ctx.value.sendMessage('main task with a tool'));
+  const parent = sentMessages()[0].request_id;
+  await update(() => ctx.wire.receive({ type: 'turn_ack', request_id: parent, turn_id: turnId, status: 'accepted' }));
+  await update(() => ctx.value.sendSideQuery('concurrent side question'));
+  await update(() => ctx.wire.receive(event(parent, 1, { type: 'tool_call', id: 'btw-synthetic-tool-call', name: 'lookup', args: {} })));
+  await update(() => ctx.wire.receive(event(parent, 2, { type: 'tool_result', id: 'btw-synthetic-tool-call', name: 'lookup', output: 'ordinary tool result' })));
+  assert.equal(ctx.value.messages.find(message => message.toolCall)?.toolCall.output, 'ordinary tool result');
+  assert.equal(ctx.value.typing, true);
+  assert.equal(ctx.value.error, null);
+}));
+
 test('side-query validation rejects attachments and invalid UTF-8 byte lengths without losing main state', async () => withAgent(true, async ctx => {
   await update(() => ctx.wire.receive(ready()));
   await update(() => assert.equal(ctx.value.sendSideQuery('with a file', ['synthetic-handle']), false));
