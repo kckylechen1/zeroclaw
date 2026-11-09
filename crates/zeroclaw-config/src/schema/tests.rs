@@ -3044,10 +3044,10 @@ async fn config_save_encrypts_nested_credentials() {
         "Bearer http-request-credential".to_string(),
     )]);
     config.channels.telegram.insert(
-        "feishu".to_string(),
+        "primary".to_string(),
         TelegramConfig {
             enabled: true,
-            bot_token: "feishu-secret".into(),
+            bot_token: "telegram-bot-fixture".into(),
             ..TelegramConfig::default()
         },
     );
@@ -3218,9 +3218,12 @@ async fn config_save_encrypts_nested_credentials() {
         "Bearer http-request-credential"
     );
 
-    let tg = stored.channels.telegram.get("feishu").unwrap();
+    let tg = stored.channels.telegram.get("primary").unwrap();
     assert!(crate::secrets::SecretStore::is_encrypted(&tg.bot_token));
-    assert_eq!(store.decrypt(&tg.bot_token).unwrap(), "feishu-secret");
+    assert_eq!(
+        store.decrypt(&tg.bot_token).unwrap(),
+        "telegram-bot-fixture"
+    );
 
     // Webhook auth_header — newly tagged `#[secret]`.
     let webhook = stored.channels.webhook.get("primary").unwrap();
@@ -4618,6 +4621,75 @@ async fn load_or_init_invalid_composition_hard_errors() {
 }
 
 #[test]
+async fn load_or_init_warns_about_retired_feishu_and_lark_settings() {
+    let _env_guard = env_override_lock().await;
+    let dir = TempDir::new().unwrap();
+    let _config_guard = EnvValueGuard::set("ZEROCLAW_CONFIG_DIR", dir.path());
+    let config_path = dir.path().join("config.toml");
+
+    for (version, channels, retired, setting, remedy) in [
+        (
+            "",
+            "channels_config",
+            "feishu",
+            "[channels_config.feishu]\nenabled = true\n",
+            "Remove the section.",
+        ),
+        (
+            "",
+            "channels_config",
+            "lark",
+            "[channels_config.lark]\nuse_feishu = true\n",
+            "Remove the section.",
+        ),
+        (
+            "",
+            "channels_config",
+            "feishu",
+            "[channels_config]\nfeishu = false\n",
+            "Remove the key.",
+        ),
+        (
+            "schema_version = 2\n",
+            "channels",
+            "feishu",
+            "[channels.feishu]\nenabled = true\n",
+            "Remove the section.",
+        ),
+        (
+            "schema_version = 2\n",
+            "channels",
+            "lark",
+            "[channels.lark]\nreceive_mode = 'webhook'\n",
+            "Remove the section.",
+        ),
+        (
+            "schema_version = 2\n",
+            "channels",
+            "feishu",
+            "[channels]\nfeishu = false\n",
+            "Remove the key.",
+        ),
+    ] {
+        let retired_path = format!("{channels}.{retired}");
+        let contents = format!("{version}{setting}\n[{channels}.webhook]\nport = 8080\n");
+        fs::write(&config_path, contents).await.unwrap();
+
+        let config = Box::pin(Config::load_or_init()).await.unwrap();
+        assert_eq!(config.channels.webhook["default"].port, 8080);
+
+        let warnings = config.collect_warnings();
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.path == retired_path)
+            .unwrap_or_else(|| panic!("missing warning for [{retired_path}]: {warnings:?}"));
+        assert_eq!(warning.code, "retired_channel_transport_removed");
+        assert!(warning.message.contains(&retired_path));
+        assert!(warning.message.contains(remedy));
+    }
+}
+
+#[test]
 async fn load_or_init_retired_pairing_dashboard_section_parses_with_tombstone_warning() {
     // Section-parse finding: `[gateway.pairing_dashboard]` in a config
     // file is an unknown (silently ignored) nested section after schema
@@ -4845,7 +4917,7 @@ default_model = "legacy-model"
 }
 
 #[test]
-async fn load_or_init_decrypts_feishu_channel_secrets() {
+async fn load_or_init_decrypts_telegram_channel_secrets() {
     let _env_guard = env_override_lock().await;
     let temp_home =
         std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
@@ -4867,18 +4939,18 @@ async fn load_or_init_decrypts_feishu_channel_secrets() {
     };
     config.secrets.encrypt = true;
     config.channels.telegram.insert(
-        "feishu".to_string(),
+        "primary".to_string(),
         TelegramConfig {
             enabled: true,
-            bot_token: "feishu-secret".into(),
+            bot_token: "telegram-bot-fixture".into(),
             ..TelegramConfig::default()
         },
     );
     config.save().await.unwrap();
 
     let loaded = Box::pin(Config::load_or_init()).await.unwrap();
-    let tg = loaded.channels.telegram.get("feishu").unwrap();
-    assert_eq!(tg.bot_token, "feishu-secret");
+    let tg = loaded.channels.telegram.get("primary").unwrap();
+    assert_eq!(tg.bot_token, "telegram-bot-fixture");
 
     if let Some(home) = original_home {
         // SAFETY: test-only, single-threaded test runner.
@@ -12734,6 +12806,7 @@ const SCHEMA_DELETED: &[&str] = &[
     "irc",
     "twitch",
     "lark",
+    "feishu",
 ];
 
 #[test]

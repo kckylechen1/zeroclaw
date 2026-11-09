@@ -225,7 +225,8 @@ mod tests {
             .filter(|info| info.retired)
             .map(|info| info.name)
             .collect();
-        for r in channels_rows(&parity).unwrap() {
+        let rows = channels_rows(&parity).unwrap();
+        for r in &rows {
             let is_retired = retired.contains(&r.label.trim_end_matches(" (retired)"));
             assert_eq!(
                 r.zeroclaw,
@@ -244,8 +245,16 @@ mod tests {
                 r.label
             );
         }
-        // Spot-check one retired and one retained row.
+        // Spot-check one retired and one retained row, and channels whose schema was removed.
         assert!(retired.contains(&"WeChat"));
         assert!(!retired.contains(&"Telegram"));
+        for removed in ["Slack", "Feishu", "Lark"] {
+            assert!(
+                !rows
+                    .iter()
+                    .any(|r| r.label.trim_end_matches(" (retired)") == removed),
+                "removed channel {removed} must not have a matrix row"
+            );
+        }
     }
 }

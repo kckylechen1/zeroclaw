@@ -286,9 +286,6 @@ channel-acp-server = []
 nodes = ["zeroclaw-gateway?/nodes"]
 channel-voice-call = []
 channel-line = []
-# Feishu uses the same channel implementation as Lark; `use_feishu = true`
-# selects Feishu endpoints at runtime.
-channel-feishu = []
 whatsapp-web = []
 voice-wake = []
 memory-tachi = ["zeroclaw-memory/tachi"]

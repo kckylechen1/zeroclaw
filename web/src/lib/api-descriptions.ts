@@ -504,7 +504,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "gmail_push": "Gmail Pub/Sub push notification channel instances (`[channels.gmail_push.<alias>]`).",
     "imessage": "iMessage channel instances (`[channels.imessage.<alias>]`, macOS only).",
     "irc": "IRC channel instances (`[channels.irc.<alias>]`).",
-    "lark": "Lark channel instances (`[channels.lark.<alias>]`).",
     "line": "LINE Messaging API channel instances (`[channels.line.<alias>]`).",
     "linq": "Linq Partner API channel instances (`[channels.linq.<alias>]`).",
     "matrix": "Matrix channel instances (`[channels.matrix.<alias>]`).",

@@ -689,7 +689,7 @@ impl FeatureCtx<'_> {
     }
 
     /// A pure alias: a non-meta feature whose only member is another local
-    /// feature (e.g. `channel-feishu = ["channel-lark"]`) - not separately
+    /// feature (e.g. `alias = ["feature"]`) - not separately
     /// selectable in `All`.
     fn is_alias(&self, feature: &str) -> bool {
         match self.graph.get(feature) {
@@ -819,7 +819,8 @@ mod tests {
             container_excluded: &container_excluded,
         };
 
-        let mut expected = resolve_feature_list(&root(), &Selection::Dist).unwrap();
+        let dist = resolve_feature_list(&root(), &Selection::Dist).unwrap();
+        let mut expected = dist.clone();
         expected.extend(ctx.expand("channels-full"));
         expected.sort();
         expected.dedup();
@@ -827,6 +828,9 @@ mod tests {
         let broad = resolve_feature_list(&root(), &Selection::DistBroad).unwrap();
         assert_eq!(broad, expected);
         assert!(broad.contains(&"channel-git".to_string()));
+        assert!(broad.contains(&"channel-line".to_string()));
+        assert!(!dist.contains(&"channel-line".to_string()));
+        assert!(!broad.contains(&"channel-slack".to_string()));
         assert!(!broad.contains(&"sandbox-bubblewrap".to_string()));
     }
 
@@ -881,10 +885,10 @@ mod tests {
     #[test]
     fn required_registry_list_rejects_malformed_metadata() {
         assert!(parse_required_registry_list(None, "dist_extra_features").is_err());
-        let wrong_type = serde_json::json!({ "dist_extra_features": "channel-lark" });
+        let wrong_type = serde_json::json!({ "dist_extra_features": "channel-webhook" });
         assert!(parse_required_registry_list(Some(&wrong_type), "dist_extra_features").is_err());
         let duplicate = serde_json::json!({
-            "dist_extra_features": ["channel-lark", "channel-lark"]
+            "dist_extra_features": ["channel-webhook", "channel-webhook"]
         });
         assert!(parse_required_registry_list(Some(&duplicate), "dist_extra_features").is_err());
     }

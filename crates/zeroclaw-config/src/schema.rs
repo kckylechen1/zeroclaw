@@ -10610,6 +10610,7 @@ pub const RETIRED_TRANSPORT_KINDS: &[&str] = &[
     "irc",
     "twitch",
     "lark",
+    "feishu",
     "line",
     "dingtalk",
     "wecom",
@@ -12019,19 +12020,6 @@ fn default_amqp_sender_label() -> String {
 
 fn default_amqp_durable_ack() -> bool {
     true
-}
-
-/// How ZeroClaw receives events from Feishu / Lark.
-///
-/// - `websocket` (default) — persistent WSS long-connection; no public URL required.
-/// - `webhook` — HTTP callback server; requires a public HTTPS endpoint.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, zeroclaw_macros::ConfigEnum)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum LarkReceiveMode {
-    #[default]
-    Websocket,
-    Webhook,
 }
 
 /// DM (1:1 chat) access policy for the LINE channel.

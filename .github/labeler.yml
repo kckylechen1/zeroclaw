@@ -108,12 +108,6 @@
           - "src/channels/irc.rs"
           - "crates/zeroclaw-channels/src/irc.rs"
 
-"channel:lark":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/channels/lark.rs"
-          - "crates/zeroclaw-channels/src/lark.rs"
-
 "channel:line":
   - changed-files:
       - any-glob-to-any-file:

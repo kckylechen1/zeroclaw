@@ -270,9 +270,6 @@ mod tests {
 
     #[test]
     fn retired_transports_are_never_compiled_or_uncompiled() {
-        // WeChat still has a schema (batches after Slice 3 batch A retire
-        // it); a populated retired section must appear only in the retired
-        // view — never as compiled or as a rebuild hint.
         let mut cfg = ChannelsConfig::default();
         cfg.wechat.insert(
             "default".to_string(),
@@ -293,10 +290,10 @@ mod tests {
             .collect();
 
         assert!(!compiled.contains("WeChat"));
+        // Rebuilding with the stub feature cannot restore the retired runner.
         assert!(!uncompiled.contains("WeChat"));
         assert!(retired.contains("WeChat"));
-        // Batch-A schemas are gone entirely: no view may name them.
-        for gone in [
+        for removed in [
             "Slack",
             "Mattermost",
             "iMessage",
@@ -305,10 +302,11 @@ mod tests {
             "IRC",
             "Twitch",
             "Lark",
+            "Feishu",
         ] {
-            assert!(!compiled.contains(gone));
-            assert!(!uncompiled.contains(gone));
-            assert!(!retired.contains(gone));
+            assert!(!compiled.contains(removed));
+            assert!(!uncompiled.contains(removed));
+            assert!(!retired.contains(removed));
         }
     }
 

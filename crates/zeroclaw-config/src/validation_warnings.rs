@@ -35,11 +35,11 @@ use serde::{Deserialize, Serialize};
 ///   compatibility shims will be removed in a later announced window.
 /// - `inbound_webhook_channel_removed`: a `[channels.linq]`, `[channels.wati]`,
 ///   `[channels.nextcloud_talk]` or `[channels.gmail_push]` section is still
-/// - `retired_channel_transport_removed`: a `[channels.<type>]` section for a
-///   transport whose schema was deleted by #584 Slice 3 (no runner, no tools).
 ///   present. These channels received messages only through gateway webhook
 ///   routes that were removed, so the channel types were deleted; the section
 ///   is ignored (see `RETIRED_CONFIG_SURFACES`).
+/// - `retired_channel_transport_removed`: a channel section for a transport
+///   whose schema was deleted by #584 Slice 3, including its V1 spelling.
 /// - `whatsapp_cloud_backend_removed`: a `[channels.whatsapp.<alias>]` table
 ///   still sets a field only the WhatsApp Cloud API backend read
 ///   (`access_token`, `phone_number_id`, `verify_token`, `app_secret`,
@@ -159,6 +159,34 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("channels.irc", "retired_channel_transport_removed"),
     ("channels.twitch", "retired_channel_transport_removed"),
     ("channels.lark", "retired_channel_transport_removed"),
+    ("channels.feishu", "retired_channel_transport_removed"),
+    ("channels_config.slack", "retired_channel_transport_removed"),
+    (
+        "channels_config.mattermost",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.imessage",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.matrix",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.signal",
+        "retired_channel_transport_removed",
+    ),
+    ("channels_config.irc", "retired_channel_transport_removed"),
+    (
+        "channels_config.twitch",
+        "retired_channel_transport_removed",
+    ),
+    ("channels_config.lark", "retired_channel_transport_removed"),
+    (
+        "channels_config.feishu",
+        "retired_channel_transport_removed",
+    ),
     ("channels.wati", "inbound_webhook_channel_removed"),
     ("channels.nextcloud_talk", "inbound_webhook_channel_removed"),
     ("channels.gmail_push", "inbound_webhook_channel_removed"),
@@ -192,11 +220,13 @@ pub const RETIRED_MEMORY_BACKENDS: &[&str] = &["postgres", "qdrant"];
 /// and `peer_groups.<g>.channel` references to a retired channel type: the
 /// section tombstone already reports the retirement, and the reference has
 /// nothing left to resolve against, so it must not fail config load.
+/// Legacy Feishu sections migrated into the `lark` type in V3.
 #[must_use]
 pub fn is_retired_channel_type(channel_type: &str) -> bool {
-    RETIRED_CONFIG_SURFACES
-        .iter()
-        .any(|(path, _)| path.strip_prefix("channels.") == Some(channel_type))
+    channel_type != "feishu"
+        && RETIRED_CONFIG_SURFACES
+            .iter()
+            .any(|(path, _)| path.strip_prefix("channels.") == Some(channel_type))
 }
 
 /// Retired config FIELDS: dotted path (one `*` wildcard segment allowed for
@@ -519,17 +549,24 @@ pub fn retired_section_tombstones(contents: &str) -> Vec<ValidationWarning> {
     };
     RETIRED_CONFIG_SURFACES
         .iter()
-        .filter(|(path, _)| table_path_exists(root.as_table(), path))
-        .map(|(path, code)| {
-            let warning = ValidationWarning::new(
-                *code,
+        .filter_map(|(path, code)| {
+            let message = if table_path_exists(root.as_table(), path) {
                 format!(
                     "[{path}] in config.toml is ignored: the section was removed from the \
                      schema and has no runtime consumer. This compatibility shim will be \
                      removed in a later announced window. Remove the section."
-                ),
-                (*path).to_string(),
-            );
+                )
+            } else if matches!(*path, "channels.feishu" | "channels_config.feishu")
+                && root.as_table().is_some_and(|table| {
+                    value_at_exists(table, &path.split('.').collect::<Vec<_>>())
+                })
+            {
+                // The old Feishu migration also reported malformed values.
+                format!("{path} in config.toml is ignored: Feishu was removed from the schema. Remove the key.")
+            } else {
+                return None;
+            };
+            let warning = ValidationWarning::new(*code, message, *path);
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -537,7 +574,7 @@ pub fn retired_section_tombstones(contents: &str) -> Vec<ValidationWarning> {
                     .with_attrs(::serde_json::json!({"path": path, "code": code})),
                 &warning.message
             );
-            warning
+            Some(warning)
         })
         .collect()
 }

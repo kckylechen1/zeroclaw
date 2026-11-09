@@ -359,26 +359,6 @@ username = "zeroclaw"
 channels = ["#zeroclaw"]
 allowed_users = ["operator"]
 
-[channels_config.lark]
-enabled = true
-app_id = "cli_lark_v1"
-app_secret = "lark-v1-app-secret"
-encrypt_key = "lark-encrypt-key"
-verification_token = "lark-verify-token"
-allowed_users = ["ou_admin"]
-mention_only = false
-use_feishu = false
-receive_mode = "websocket"
-
-[channels_config.feishu]
-enabled = true
-app_id = "cli_feishu_v1"
-app_secret = "feishu-v1-app-secret"
-encrypt_key = "feishu-encrypt-key"
-verification_token = "feishu-verify-token"
-allowed_users = ["ou_feishu_admin"]
-receive_mode = "websocket"
-
 [channels_config.dingtalk]
 enabled = false
 client_id = "ding-client-id"

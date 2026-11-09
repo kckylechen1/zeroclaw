@@ -102,10 +102,6 @@ export const enumValues: EnumValues = {
   "KiloEndpoint": [
     "gateway"
   ],
-  "LarkReceiveMode": [
-    "websocket",
-    "webhook"
-  ],
   "LineDmPolicy": [
     "open",
     "pairing",

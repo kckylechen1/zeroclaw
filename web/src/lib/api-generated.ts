@@ -3770,9 +3770,6 @@ export interface components {
             /** @description IRC channel instances (`[channels.irc.<alias>]`). */
             irc?: {
             };
-            /** @description Lark channel instances (`[channels.lark.<alias>]`). */
-            lark?: {
-            };
             /** @description LINE Messaging API channel instances (`[channels.line.<alias>]`). */
             line?: {
                 [key: string]: components["schemas"]["LineConfig"];
@@ -11727,14 +11724,6 @@ export interface components {
             /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
             wire_api?: components["schemas"]["WireApi"] | null;
         };
-        /**
-         * @description How ZeroClaw receives events from Feishu / Lark.
-         *
-         *     - `websocket` (default) — persistent WSS long-connection; no public URL required.
-         *     - `webhook` — HTTP callback server; requires a public HTTPS endpoint.
-         * @enum {string}
-         */
-        LarkReceiveMode: "websocket" | "webhook";
         /**
          * @description Canvas geometry carried on every serialized graph so the web canvas reads
          *     placement pitch from the wire instead of a local literal. The values are
