@@ -471,7 +471,7 @@ pub(super) fn handle(
             return (Some(error_op("BTW_BUSY")), None);
         };
         let active_turn = conversation.active_turn_id();
-        super::spawn_ws_btw_query(
+        let _task = super::spawn_ws_btw_query(
             state,
             conversation,
             side_query,
