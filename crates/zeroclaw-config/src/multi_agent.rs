@@ -132,12 +132,6 @@ fn normalize_telegram_identity(value: &str) -> String {
     value.trim().trim_start_matches('@').to_string()
 }
 
-/// Trim-only identity normalizer for channels whose native id has no
-/// `@`-style prefix to strip (WeChat openid, LINE user id).
-fn normalize_trim_identity(value: &str) -> String {
-    value.trim().to_string()
-}
-
 /// Per-channel-type identity normalizer. The operator-bind op is otherwise
 /// identical across the pairing-capable channels; the only variance is how a
 /// raw identity is canonicalized before it is stored in the allowlist.
@@ -150,7 +144,6 @@ pub type ChannelIdentityNormalizer = fn(&str) -> String;
 pub fn channel_identity_normalizer(channel_type: &str) -> Option<ChannelIdentityNormalizer> {
     match channel_type {
         "telegram" => Some(normalize_telegram_identity),
-        "wechat" | "line" => Some(normalize_trim_identity),
         _ => None,
     }
 }
@@ -166,8 +159,6 @@ pub fn channel_alias_configured(
 ) -> bool {
     match channel_type {
         "telegram" => config.channels.telegram.contains_key(alias),
-        "wechat" => config.channels.wechat.contains_key(alias),
-        "line" => config.channels.line.contains_key(alias),
         _ => false,
     }
 }
@@ -190,7 +181,7 @@ pub fn bind_channel_identity_into(
     let Some(normalize) = channel_identity_normalizer(channel_type) else {
         anyhow::bail!(
             "Channel type `{channel_type}` does not support identity binding \
-             (supported: telegram, wechat, line)."
+             (supported: telegram)."
         );
     };
 
@@ -525,7 +516,7 @@ output_modality = "voice"
             "discord must not be in the bind closed-set"
         );
         assert!(channel_identity_normalizer("telegram").is_some());
-        assert!(channel_identity_normalizer("wechat").is_some());
-        assert!(channel_identity_normalizer("line").is_some());
+        assert!(channel_identity_normalizer("wechat").is_none());
+        assert!(channel_identity_normalizer("line").is_none());
     }
 }

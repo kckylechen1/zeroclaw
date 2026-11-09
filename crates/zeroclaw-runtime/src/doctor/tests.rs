@@ -677,9 +677,9 @@ fn doctor_flags_retired_transports_alongside_live_channels() {
             ..Default::default()
         },
     );
-    config.channels.wechat.insert(
+    config.channels.whatsapp.insert(
         "default".to_string(),
-        zeroclaw_config::schema::WeChatConfig::default(),
+        zeroclaw_config::schema::WhatsAppConfig::default(),
     );
 
     let mut items = Vec::new();
@@ -693,16 +693,16 @@ fn doctor_flags_retired_transports_alongside_live_channels() {
         .iter()
         .find(|i| i.message.contains("retired transports configured"))
         .expect("retired section should be named");
-    assert!(retired.message.contains("wechat"));
+    assert!(retired.message.contains("whatsapp-web"));
     assert_eq!(retired.severity, Severity::Warn);
 }
 
 #[test]
 fn doctor_warns_when_only_retired_transports_are_configured() {
     let mut config = Config::default();
-    config.channels.wechat.insert(
+    config.channels.whatsapp.insert(
         "default".to_string(),
-        zeroclaw_config::schema::WeChatConfig::default(),
+        zeroclaw_config::schema::WhatsAppConfig::default(),
     );
 
     let mut items = Vec::new();
@@ -713,11 +713,10 @@ fn doctor_warns_when_only_retired_transports_are_configured() {
             .any(|i| i.message.contains("no live channel configured")),
         "retired-only config must not pass the live-channel check"
     );
-    assert!(
-        items
-            .iter()
-            .any(|i| i.message.contains("retired transports configured (wechat)"))
-    );
+    assert!(items.iter().any(|i| {
+        i.message
+            .contains("retired transports configured (whatsapp-web)")
+    }));
 }
 
 #[test]

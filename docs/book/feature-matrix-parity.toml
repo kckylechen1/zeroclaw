@@ -50,26 +50,6 @@ hermes = "supported"
 openclaw = "none"
 hermes = "supported"
 
-[channels.dingtalk]
-openclaw = "none"
-hermes = "supported"
-
-[channels.wecom]
-openclaw = "none"
-hermes = "supported"
-
-[channels.wecom-ws]
-openclaw = "none"
-hermes = "supported"
-
-[channels.wechat]
-openclaw = "none"
-hermes = "supported"
-
-[channels.qq]
-openclaw = "supported"
-hermes = "supported"
-
 [channels.nostr]
 openclaw = "supported"
 hermes = "none"
@@ -85,18 +65,6 @@ hermes = "none"
 [channels.bluesky]
 openclaw = "none"
 hermes = "none"
-
-[channels.twitter]
-openclaw = "none"
-hermes = "none"
-
-[channels.mochat]
-openclaw = "none"
-hermes = "none"
-
-[channels.line]
-openclaw = "supported"
-hermes = "supported"
 
 [channels.voice-call]
 openclaw = "supported"

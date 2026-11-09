@@ -59,21 +59,6 @@ cli-channel-doctor-about = Run health checks for configured channels
 cli-channel-add-about = Add a new channel configuration
 cli-channel-remove-about = Remove a channel configuration
 cli-channel-send-about = Send a one-off message to a configured channel
-cli-wechat-pairing-required = 🔐 WeChat pairing required. One-time bind code: {$code}
-cli-wechat-send-bind-command = Send `{$command} <code>` from your WeChat.
-cli-wechat-qr-login = 📱 WeChat QR Login ({$attempt}/{$max})
-cli-wechat-scan-to-connect = Scan with WeChat to connect.
-cli-wechat-qr-url = QR URL: {$url}
-cli-wechat-qr-expired-giving-up = WeChat QR code expired {$max} times, giving up.
-cli-wechat-qr-fetch-failed = Failed to fetch WeChat QR code.
-cli-wechat-qr-fetch-status-failed = WeChat QR code fetch failed ({$status}): {$body}
-cli-wechat-missing-response-field = Missing {$field} in WeChat response.
-cli-wechat-scanned-confirm = 👀 Scanned! Confirm on your phone...
-cli-wechat-qr-expired-refreshing = ⏳ QR code expired, refreshing...
-cli-wechat-login-confirmed-missing-field = Login confirmed but {$field} missing.
-cli-wechat-connected = ✅ WeChat connected!
-cli-wechat-bound-success = ✅ WeChat account bound successfully. You can talk to ZeroClaw now.
-cli-wechat-invalid-bind-code = ❌ Invalid bind code. Please try again.
 
 cli-skills-list-about = List all installed skills
 cli-skills-audit-about = Audit a skill source directory or installed skill name
@@ -345,40 +330,6 @@ channel-whatsapp-web-feature-missing-build =     Build/run with: cargo build --f
 channel-whatsapp-web-feature-missing-install =     If installed to PATH, reinstall with: cargo install --path . --force --locked --features whatsapp-web
 channel-whatsapp-web-feature-missing-error = WhatsApp Web channel requires the 'whatsapp-web' feature. Enable with: cargo build --features whatsapp-web (or, if installed to PATH: cargo install --path . --force --locked --features whatsapp-web)
 
-channel-wecom-ws-stream-bootstrap = Working on it, please wait.
-channel-wecom-ws-stop-ack = Stopped the current message.
-channel-wecom-ws-voice-unavailable = I can't process voice messages right now {$emoji}
-channel-wecom-ws-unsupported-message = This message type is not supported yet.
-channel-wecom-ws-welcome = Hi, welcome to chat with me {$emoji}
-channel-wecom-ws-supplemental-message =
-    {"["}Supplemental message]
-    {$extra}
-channel-wecom-ws-group-allowlist-missing =
-    The WeCom allowlist is not configured, so this bot is not accepting group messages.
-
-    Group chatid: {$chatid}
-    Sender userid: {$userid}
-
-    Add an allowed entry to {$allowed_groups_path} or {$allowed_users_path}. You can also temporarily set it to ["*"] for testing.
-channel-wecom-ws-group-access-denied =
-    This group is not allowed to use this bot.
-
-    Group chatid: {$chatid}
-    Sender userid: {$userid}
-
-    Ask an administrator to add this group to {$allowed_groups_path}, or add your userid to {$allowed_users_path}.
-channel-wecom-ws-dm-allowlist-missing =
-    The WeCom allowlist is not configured, so this bot is not accepting messages.
-
-    Your userid: {$userid}
-
-    Add an allowed entry to {$allowed_users_path}. You can also temporarily set it to ["*"] for testing.
-channel-wecom-ws-dm-access-denied =
-    You do not have permission to use this bot.
-
-    Your userid: {$userid}
-
-    Ask an administrator to add your userid to {$allowed_users_path}.
 channel-discord-interaction-unauthorized = You're not authorized to use this command here.
 channel-discord-interaction-malformed = Unknown or malformed command.
 channel-discord-interaction-unavailable = That command is no longer available, or its input was empty.

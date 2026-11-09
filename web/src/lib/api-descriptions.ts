@@ -941,13 +941,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "thread_id": "Optional thread/conversation identifier carried into the outbound send.\nRequired by channels that route on a separate `thread_id` field (e.g.\nwebhook callbacks bridging into agent-chat platforms).",
     "to": "Target/recipient identifier."
   },
-  "DingTalkConfig": {
-    "client_id": "Client ID (AppKey) from DingTalk developer console",
-    "client_secret": "Client Secret (AppSecret) from DingTalk developer console",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "proxy_url": "Per-channel proxy URL (http, https, socks5, socks5h).\nOverrides the global `[proxy]` setting for this channel only."
-  },
   "DiscordConfig": {
     "approval_timeout_secs": "Seconds to wait for operator approval on `always_ask` tools before auto-denying.",
     "archive": "When true, the channel opens a sidecar `discord.db` SQLite memory\nbackend, archives every non-bot message it sees, and registers the\n`discord_search` tool against it. Default: false. Folded in from\nthe legacy `[channels.discord-history]` block.",
@@ -1715,17 +1708,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "vision": "Override the provider's vision (image input) capability.\n`None` (default) uses the provider family's built-in default. Several\nfamilies (llama.cpp, the generic OpenAI-compatible endpoint, etc.)\nassume vision-capable because they can serve multimodal models. Set\n`vision = false` for a text-only model served by such a family (e.g. a\ntext LLM behind llama.cpp) so image messages are routed to a configured\n`[multimodal] vision_model_provider` instead of being sent to a model\nthat rejects them. `Some(true)` forces vision on.",
     "wire_api": "Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination."
   },
-  "LineConfig": {
-    "channel_access_token": "Long-lived channel access token (from LINE Developers Console).\nUsed for both the Reply API and the Push API fallback.\nFalls back to the `LINE_CHANNEL_ACCESS_TOKEN` environment variable if empty.",
-    "channel_secret": "Channel secret (from LINE Developers Console).\nUsed to verify the `X-Line-Signature` header on incoming webhooks.\nFalls back to the `LINE_CHANNEL_SECRET` environment variable if empty.",
-    "dm_policy": "DM (1:1 chat) access policy. Default: `pairing`.\n\n- `open`: respond to everyone\n- `pairing`: require one-time `/bind <code>` handshake on first contact\n- `allowlist`: respond only to user IDs listed in `allowed_users`",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "group_policy": "Group / multi-person chat policy. Default: `mention`.\n\n- `open`: respond to every message\n- `mention`: respond only when @mentioned\n- `disabled`: ignore all group messages",
-    "proxy_url": "Per-channel proxy URL (http, https, socks5, socks5h).\nOverrides the global `[proxy]` setting for this channel only.",
-    "sender_name": "Display name shown as the sender in LINE chat bubbles.\nDefaults to `\"AI\"` when unset or empty.",
-    "webhook_port": "TCP port the embedded webhook server listens on. Default: `8443`."
-  },
   "LinkEnricherConfig": {
     "enabled": "Enable the link enricher pipeline stage (default: false)",
     "max_links": "Maximum number of links to fetch per message (default: 3)",
@@ -2061,13 +2043,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "uri": "Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field.",
     "vision": "Override the provider's vision (image input) capability.\n`None` (default) uses the provider family's built-in default. Several\nfamilies (llama.cpp, the generic OpenAI-compatible endpoint, etc.)\nassume vision-capable because they can serve multimodal models. Set\n`vision = false` for a text-only model served by such a family (e.g. a\ntext LLM behind llama.cpp) so image messages are routed to a configured\n`[multimodal] vision_model_provider` instead of being sent to a model\nthat rejects them. `Some(true)` forces vision on.",
     "wire_api": "Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination."
-  },
-  "MochatConfig": {
-    "api_token": "Mochat API token",
-    "api_url": "Mochat API base URL",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "poll_interval_secs": "Poll interval in seconds for new messages. Default: 5"
   },
   "ModelCostRates": {
     "cached_input_per_mtok": "Cached input tokens (USD per 1M). Optional — leave unset on\nproviders that don't charge separately for prompt cache hits.",
@@ -2688,13 +2663,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "scope": "Proxy application scope.",
     "services": "Service selectors used when scope = \"services\"."
   },
-  "QQConfig": {
-    "app_id": "App ID from QQ Bot developer console",
-    "app_secret": "App Secret from QQ Bot developer console",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "proxy_url": "Per-channel proxy URL (http, https, socks5, socks5h).\nOverrides the global `[proxy]` setting for this channel only."
-  },
   "QdrantStorageConfig": {
     "api_key": "API key for Qdrant Cloud or secured instances.\nUse `ZEROCLAW_storage__qdrant__<alias>__api_key=...` for env injection.",
     "collection": "Collection name for storing memories.\nUse `ZEROCLAW_storage__qdrant__<alias>__collection=...` for env injection.",
@@ -3232,11 +3200,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "tailscale": "Tailscale Funnel/Serve configuration (used when `tunnel_provider = \"tailscale\"`).",
     "tunnel_provider": "How the gateway gets exposed to the public internet so webhooks (Telegram, Slack, etc.) can reach it. `none` = keep it local, no tunnel; `cloudflare` = Cloudflare Tunnel via cloudflared (needs a Zero Trust account and token); `tailscale` = Tailscale Funnel/Serve (tailnet-only or public, no account beyond tailscale); `ngrok` = ngrok agent with auth token; `openvpn` = bring-your-own OpenVPN egress; `pinggy` = Pinggy SSH tunnels (quick one-shot URLs); `custom` = run an arbitrary command you define under `[tunnel.custom]`."
   },
-  "TwitterConfig": {
-    "bearer_token": "Twitter API v2 Bearer Token (OAuth 2.0)",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel."
-  },
   "UpgradeRequest": {
     "auto_restart": "After a successful swap, exit so a supervisor relaunches the new binary.\nOnly honoured under a detected supervisor (systemd/launchd).",
     "version": "Target release tag; defaults to latest."
@@ -3381,31 +3344,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
     "proxy_url": "Per-channel proxy URL (http, https, socks5, socks5h).\nOverrides the global `[proxy]` setting for this channel only.",
     "tenant_id": "Tenant ID for multi-channel setups (optional)."
-  },
-  "WeChatConfig": {
-    "api_base_url": "Override the iLink API base URL. Default: `https://ilinkai.weixin.qq.com`.",
-    "cdn_base_url": "Override the CDN base URL. Default: `https://novac2c.cdn.weixin.qq.com/c2c`.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "state_dir": "Directory to persist bot token and sync cursor.\nDefault: `~/.zeroclaw/wechat/`."
-  },
-  "WeComConfig": {
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "webhook_key": "Webhook key from WeCom Bot configuration"
-  },
-  "WeComWsConfig": {
-    "allowed_groups": "Allowed WeCom group chat IDs. Empty = deny all groups, \"*\" = allow all groups.",
-    "allowed_users": "Allowed WeCom user IDs. Empty = deny all, \"*\" = allow all users.",
-    "bot_id": "Bot ID for WeCom WebSocket subscription.",
-    "bot_name": "Display name or mention alias of the WeCom AI bot, for example `danya`.\n\nWeCom group text often arrives as plain text such as `@danya say hi`;\npassing this name through lets the generic reply-intent precheck\nrecognize that a group message was addressed to the bot.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "file_retention_days": "File retention days for downloaded WeCom attachments under the workspace cache.",
-    "max_file_size_mb": "Maximum accepted file size in MiB for WeCom attachment download attempts.",
-    "proxy_url": "Optional per-channel proxy override. Falls back to the global proxy config when empty.",
-    "secret": "Secret for WeCom WebSocket subscription authentication.",
-    "stream_mode": "Streaming mode for progressive draft delivery over the WeCom long connection."
   },
   "WebAuthnConfig": {
     "enabled": "Enable WebAuthn authentication. Default: false.",

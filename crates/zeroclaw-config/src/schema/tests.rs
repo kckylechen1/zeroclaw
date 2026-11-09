@@ -1861,7 +1861,6 @@ async fn channels_default() {
     assert!(c.cli);
     assert!(c.telegram.is_empty());
     assert!(c.discord.is_empty());
-    assert!(c.wecom_ws.is_empty());
     assert!(!c.show_tool_calls);
     assert_eq!(
         c.max_concurrent_per_channel,
@@ -1899,63 +1898,6 @@ async fn validate_rejects_zero_channel_max_concurrent_per_channel() {
             .contains("channels.max_concurrent_per_channel must be greater than 0"),
         "got: {err}"
     );
-}
-
-#[test]
-async fn wecom_ws_config_serde_defaults_and_secret_metadata() {
-    let toml = r#"
-        enabled = true
-        bot_id = "bot-123"
-        secret = "sk-test"
-        allowed_users = ["zeroclaw_user"]
-        allowed_groups = ["zeroclaw_group"]
-        bot_name = "danya"
-        proxy_url = "http://127.0.0.1:7890"
-    "#;
-    let parsed: WeComWsConfig = toml::from_str(toml).unwrap();
-
-    assert!(parsed.enabled);
-    assert_eq!(parsed.bot_id, "bot-123");
-    assert_eq!(parsed.secret, "sk-test");
-    assert_eq!(parsed.allowed_users, vec!["zeroclaw_user"]);
-    assert_eq!(parsed.allowed_groups, vec!["zeroclaw_group"]);
-    assert_eq!(parsed.bot_name.as_deref(), Some("danya"));
-    assert_eq!(parsed.file_retention_days, 7);
-    assert_eq!(parsed.max_file_size_mb, 20);
-    assert_eq!(parsed.stream_mode, StreamMode::Partial);
-    assert_eq!(parsed.proxy_url.as_deref(), Some("http://127.0.0.1:7890"));
-    assert!(parsed.excluded_tools.is_empty());
-    assert_eq!(WeComWsConfig::default().file_retention_days, 7);
-    assert_eq!(WeComWsConfig::default().max_file_size_mb, 20);
-    assert_eq!(WeComWsConfig::default().stream_mode, StreamMode::Partial);
-    assert!(WeComWsConfig::default().bot_name.is_none());
-    assert!(WeComWsConfig::default().proxy_url.is_none());
-    assert!(WeComWsConfig::prop_is_secret("channels.wecom_ws.secret"));
-}
-
-#[test]
-async fn config_parses_wecom_ws_separate_from_wecom_webhook() {
-    let toml = r#"
-        [channels.wecom.default]
-        enabled = true
-        webhook_key = "webhook-key"
-
-        [channels.wecom_ws.default]
-        enabled = true
-        bot_id = "bot-123"
-        secret = "sk-test"
-        allowed_users = ["zeroclaw_user"]
-    "#;
-    let parsed: Config = toml::from_str(toml).unwrap();
-
-    assert_eq!(
-        parsed.channels.wecom.get("default").unwrap().webhook_key,
-        "webhook-key"
-    );
-    let ws = parsed.channels.wecom_ws.get("default").unwrap();
-    assert_eq!(ws.bot_id, "bot-123");
-    assert_eq!(ws.allowed_users, vec!["zeroclaw_user"]);
-    assert_eq!(ws.stream_mode, StreamMode::Partial);
 }
 
 // ── Serde round-trip ─────────────────────────────────────
@@ -2067,14 +2009,6 @@ async fn config_toml_roundtrip() {
             webhook: HashMap::new(),
             whatsapp: HashMap::new(),
             email: HashMap::new(),
-            line: HashMap::new(),
-            dingtalk: HashMap::new(),
-            wecom: HashMap::new(),
-            wecom_ws: HashMap::new(),
-            wechat: HashMap::new(),
-            qq: HashMap::new(),
-            twitter: HashMap::new(),
-            mochat: HashMap::new(),
             nostr: HashMap::new(),
             clawdtalk: HashMap::new(),
             reddit: HashMap::new(),
@@ -3610,14 +3544,6 @@ async fn channels_with_whatsapp() {
             },
         )]),
         email: HashMap::new(),
-        line: HashMap::new(),
-        dingtalk: HashMap::new(),
-        wecom: HashMap::new(),
-        wecom_ws: HashMap::new(),
-        wechat: HashMap::new(),
-        qq: HashMap::new(),
-        twitter: HashMap::new(),
-        mochat: HashMap::new(),
         nostr: HashMap::new(),
         clawdtalk: HashMap::new(),
         reddit: HashMap::new(),
@@ -5516,117 +5442,6 @@ async fn gateway_config_default_values() {
 // ── Peripherals config ───────────────────────────────────────
 
 // ── LINE ──────────────────────────────────────────────────
-
-#[test]
-async fn line_config_toml_roundtrip() {
-    // Full [channels.line] TOML block — covers every user-facing field.
-    //
-    // channel_access_token and channel_secret can be omitted here and
-    // supplied via LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET env vars
-    // instead; both fields default to "" when absent.
-    let toml = r#"
-[channels_config.line.default]
-enabled = true
-channel_access_token = "ChannelAccessToken=="
-channel_secret = "abc123secret"
-dm_policy = "pairing"
-group_policy = "mention"
-allowed_users = []
-webhook_port = 8443
-sender_name = "Popcorn"
-"#;
-    let config: Config = toml::from_str(toml).unwrap();
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(ln.channel_access_token, "ChannelAccessToken==");
-    assert_eq!(ln.channel_secret, "abc123secret");
-    assert_eq!(ln.dm_policy, LineDmPolicy::Pairing);
-    assert_eq!(ln.group_policy, LineGroupPolicy::Mention);
-    assert_eq!(ln.webhook_port, 8443);
-    assert!(ln.proxy_url.is_none());
-    assert_eq!(ln.sender_name.as_deref(), Some("Popcorn"));
-}
-
-#[test]
-async fn line_config_defaults() {
-    // Minimal config — only the required secret fields are provided.
-    // All optional fields should resolve to documented defaults.
-    let toml = r#"
-[channels_config.line.default]
-channel_access_token = "tok"
-channel_secret = "sec"
-"#;
-    let config: Config = toml::from_str(toml).unwrap();
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(
-        ln.dm_policy,
-        LineDmPolicy::Pairing,
-        "dm_policy default is pairing"
-    );
-    assert_eq!(
-        ln.group_policy,
-        LineGroupPolicy::Mention,
-        "group_policy default is mention"
-    );
-    assert_eq!(ln.webhook_port, 8443, "webhook_port default is 8443");
-    assert!(ln.proxy_url.is_none());
-    assert!(ln.sender_name.is_none(), "sender_name default is None");
-}
-
-#[test]
-async fn line_config_allowlist_policy() {
-    // dm_policy = allowlist; the user ID list itself now lives on the
-    // V3 `peer_groups.line_default` group (synthesized from V2's
-    // `allowed_users`), not on the LineConfig struct.
-    let toml = r#"
-schema_version = 2
-
-[channels.line]
-enabled = true
-channel_access_token = "tok"
-channel_secret = "sec"
-dm_policy = "allowlist"
-allowed_users = ["Uabc123", "Udef456"]
-"#;
-    let config = crate::migration::migrate_to_current(toml).expect("migration succeeds");
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(ln.dm_policy, LineDmPolicy::Allowlist);
-    let group = config
-        .peer_groups
-        .get("line_default")
-        .expect("V2 line.allowed_users must fold into peer_groups.line_default");
-    let usernames: Vec<&str> = group.external_peers.iter().map(|p| p.as_str()).collect();
-    assert_eq!(usernames, vec!["Uabc123", "Udef456"]);
-}
-
-#[test]
-async fn line_config_open_policies() {
-    // dm_policy = open + group_policy = open — most permissive combination.
-    let toml = r#"
-[channels_config.line.default]
-channel_access_token = "tok"
-channel_secret = "sec"
-dm_policy = "open"
-group_policy = "open"
-"#;
-    let config: Config = toml::from_str(toml).unwrap();
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(ln.dm_policy, LineDmPolicy::Open);
-    assert_eq!(ln.group_policy, LineGroupPolicy::Open);
-}
-
-#[test]
-async fn line_config_group_disabled() {
-    // group_policy = disabled — bot ignores all group/room messages.
-    let toml = r#"
-[channels_config.line.default]
-channel_access_token = "tok"
-channel_secret = "sec"
-group_policy = "disabled"
-"#;
-    let config: Config = toml::from_str(toml).unwrap();
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(ln.group_policy, LineGroupPolicy::Disabled);
-}
 
 // ── Config file permission hardening (Unix only) ───────────────
 
@@ -12806,6 +12621,14 @@ const SCHEMA_DELETED: &[&str] = &[
     "irc",
     "twitch",
     "lark",
+    "line",
+    "dingtalk",
+    "wecom",
+    "wecom_ws",
+    "wechat",
+    "qq",
+    "twitter",
+    "mochat",
     "feishu",
 ];
 

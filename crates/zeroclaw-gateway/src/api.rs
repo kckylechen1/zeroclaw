@@ -2441,14 +2441,9 @@ pub(crate) mod tests {
             "default".to_string(),
             zeroclaw_config::schema::WebhookConfig::default(),
         );
-        config.channels.mochat.insert(
+        config.channels.nostr.insert(
             "default".to_string(),
-            zeroclaw_config::schema::MochatConfig {
-                enabled: true,
-                api_url: "https://mochat.example.com".to_string(),
-                api_token: "test-token".to_string(),
-                ..Default::default()
-            },
+            zeroclaw_config::schema::NostrConfig::default(),
         );
 
         let response = handle_api_channels(State(test_state(config)), HeaderMap::new())
@@ -2468,7 +2463,7 @@ pub(crate) mod tests {
         assert!(
             channels
                 .iter()
-                .all(|channel| channel["type"].as_str() != Some("mochat")),
+                .all(|channel| channel["type"].as_str() != Some("nostr")),
             "retired transports must not appear in the channel listing"
         );
     }

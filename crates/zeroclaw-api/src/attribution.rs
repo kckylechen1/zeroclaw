@@ -64,29 +64,21 @@ pub enum ChannelKind {
     ClawdTalk,
     Cli,
     #[strum(serialize = "dingtalk")]
-    DingTalk,
     Discord,
     Email,
     Filesystem,
     Git,
     #[strum(serialize = "imessage")]
-    Line,
     #[strum(serialize = "mochat")]
-    MoChat,
     Nostr,
     Notion,
-    Qq,
     Reddit,
     Telegram,
-    Twitter,
     VoiceCall,
     VoiceWake,
     #[strum(serialize = "wecom")]
-    WeCom,
     #[strum(serialize = "wecom_ws")]
-    WeComWs,
     Webhook,
-    Wechat,
     WhatsappWeb,
     Plugin,
 }

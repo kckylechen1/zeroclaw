@@ -92,7 +92,6 @@
   - [ACP (Agent Client Protocol)](./channels/acp.md)
   - [Voice & telephony](./channels/voice.md)
   - [Retired transports](./channels/retired.md)
-    - [LINE](./channels/line.md)
     - [WhatsApp](./channels/whatsapp.md)
     - [Other chat platforms](./channels/chat-others.md)
     - [Social (Bluesky, Nostr, Twitter, Reddit)](./channels/social.md)

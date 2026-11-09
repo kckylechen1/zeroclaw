@@ -72,14 +72,6 @@ pub const V3_CHANNEL_TYPES: &[&str] = &[
     "webhook",
     "whatsapp",
     "email",
-    "line",
-    "dingtalk",
-    "wecom",
-    "wecom_ws",
-    "wechat",
-    "qq",
-    "twitter",
-    "mochat",
     "nostr",
     "clawdtalk",
     "reddit",
@@ -1189,8 +1181,7 @@ fn fold_channel_peer_auth_into_peer_groups(
     peer_groups: &mut toml::Table,
 ) {
     let Some(field_name) = (match channel_type {
-        "telegram" | "discord" | "line" | "dingtalk" | "wecom" | "wechat" | "qq" | "twitter"
-        | "mochat" => Some("allowed_users"),
+        "telegram" | "discord" => Some("allowed_users"),
         "whatsapp" => Some("allowed_numbers"),
         "email" => Some("allowed_senders"),
         "nostr" => Some("allowed_pubkeys"),

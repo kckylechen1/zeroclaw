@@ -2229,7 +2229,7 @@ fn generate_v3_channel_breadth_lower_bound() {
     // Raise the bound only when adding more channels to the fixture. The
     // fixture's Linq, WATI, Nextcloud Talk and Gmail Push blocks are dropped
     // by design (retired channel types), so they do not count.
-    const MIN_CHANNEL_ALIASES: usize = 14;
+    const MIN_CHANNEL_ALIASES: usize = 8;
 
     let cfg = migrate_to_current(
         &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
@@ -2242,13 +2242,6 @@ fn generate_v3_channel_breadth_lower_bound() {
         + cfg.channels.webhook.len()
         + cfg.channels.whatsapp.len()
         + cfg.channels.mqtt.len()
-        + cfg.channels.line.len()
-        + cfg.channels.dingtalk.len()
-        + cfg.channels.wecom.len()
-        + cfg.channels.wechat.len()
-        + cfg.channels.qq.len()
-        + cfg.channels.twitter.len()
-        + cfg.channels.mochat.len()
         + cfg.channels.reddit.len()
         + cfg.channels.bluesky.len()
         + cfg.channels.email.len()
