@@ -1510,7 +1510,7 @@ pub(super) fn parse_btw_command(content: &str) -> Option<&str> {
 fn handle_btw_frame(
     state: &AppState,
     conversation: &Arc<Conversation<WsSession>>,
-    _scope: &WsTurnScope,
+    scope: &WsTurnScope,
     parsed: &serde_json::Value,
 ) -> (Option<serde_json::Value>, Option<TurnClaim>) {
     let request_id = match parsed.get("id") {
@@ -1540,6 +1540,14 @@ fn handle_btw_frame(
         stamp_request_id(&mut frame, request_id);
         (Some(frame), None)
     };
+
+    // Authenticated attachments retain live credential checks on this side
+    // route; anonymous legacy chat keeps its existing pairing-off policy.
+    if scope.auth_subject.is_some() && !question_answer_authorized(state, scope) {
+        let mut frame = device::refusal("BRIDGE_OPERATION_DENIED");
+        stamp_request_id(&mut frame, request_id);
+        return (Some(frame), None);
+    }
 
     if parsed.get("source").is_some() {
         return reject(

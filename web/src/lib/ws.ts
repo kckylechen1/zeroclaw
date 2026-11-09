@@ -203,19 +203,13 @@ export class WebSocketClient {
   }
 
   /** A read-only side query has no turn admission, replay or reconnect queue.
-   * S2 uses the gateway's /btw message route; legacy uses its explicit frame
-   * with `id` (the field echoed on both transports' side-query results). */
+   * The gateway explicitly accepts `btw` on negotiated S2 attachments too.
+   * Its dedicated `id` is echoed on admission errors as well as results;
+   * S2 `op: message` requires a UUID and does not correlate its refusals. */
   sendSideQuery(question: string): string | null {
     if (!this.connected || (this.protocol !== 'legacy' && (this.protocol !== 's2' || !this.turnEpoch))) return null;
     const requestId = `${SIDE_QUERY_ID_PREFIX}${generateUUID()}`;
-    if (this.protocol === 'legacy') {
-      this.sendRaw({ type: 'btw', id: requestId, content: `/btw ${question}` });
-    } else {
-      this.sendRaw({
-        type: 'turn_control', version: 1, op: 'message', epoch: this.turnEpoch,
-        request_id: requestId, content: `/btw ${question}`,
-      });
-    }
+    this.sendRaw({ type: 'btw', id: requestId, content: `/btw ${question}` });
     return requestId;
   }
 

@@ -388,8 +388,8 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   // through this same handler rather than a parallel display path.
   const handleWsMessage = useCallback(function handleWsMessage(msg: WsMessage) {
     // /btw is not a main turn: neither its ACK nor any result/error may bind,
-    // finalize, resume or clear the main stream/Stop state. Results use `id`
-    // even on S2; admission receipts use `request_id`.
+    // finalize, resume or clear the main stream/Stop state. Dedicated side
+    // frames echo `id`, including on an attachment negotiated for S2 turns.
     const sideRequestId = msg.request_id ?? msg.id;
     if (msg.type === 'btw_response' || msg.type === 'btw_error') {
       if (sideRequestId) {
