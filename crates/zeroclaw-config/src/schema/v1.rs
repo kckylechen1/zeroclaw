@@ -181,10 +181,8 @@ impl V1Config {
             Some(toml::Value::Table(providers))
         };
 
-        // Rename channels_config → channels and apply the singular→plural
-        // folds V2 needs (matrix.room_id, slack.channel_id).
-        if let Some(mut channels_value) = channels_config {
-            if let Some(channels_table) = channels_value.as_table_mut() {}
+        // Rename channels_config → channels.
+        if let Some(channels_value) = channels_config {
             passthrough.insert("channels".to_string(), channels_value);
             ::zeroclaw_log::record!(
                 INFO,
