@@ -1,6 +1,5 @@
 use super::*;
 use tempfile::TempDir;
-use zeroclaw_config::schema::MattermostListenMode;
 
 mod cron_shutdown;
 

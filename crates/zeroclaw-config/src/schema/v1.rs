@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::migration::fold_string_into_array;
 use crate::schema::v2::V2Config;
 
 /// V1 partial typed lens. Names only fields that change in the V1→V2

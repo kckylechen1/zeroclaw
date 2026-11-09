@@ -11542,35 +11542,6 @@ impl ChannelConfig for DiscordConfig {
     }
 }
 
-fn default_slack_draft_update_interval_ms() -> u64 {
-    1200
-}
-
-/// Shared token resolution for [`SlackConfig`]: a non-empty configured value
-/// wins; otherwise the `ZEROCLAW_SLACK_<KIND>_TOKEN` env var takes precedence
-/// over the conventional `SLACK_<KIND>_TOKEN`. Blank values (config or env) are
-/// treated as absent. `kind` is `"BOT"` or `"APP"`.
-fn resolve_slack_token(configured: Option<&str>, kind: &str) -> Option<String> {
-    if let Some(value) = configured {
-        let value = value.trim();
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-    for var in [
-        format!("ZEROCLAW_SLACK_{kind}_TOKEN"),
-        format!("SLACK_{kind}_TOKEN"),
-    ] {
-        if let Ok(value) = std::env::var(&var) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// How the Mattermost channel receives inbound messages.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, zeroclaw_macros::ConfigEnum,
