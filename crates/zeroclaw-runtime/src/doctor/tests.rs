@@ -679,7 +679,10 @@ fn doctor_flags_retired_transports_alongside_live_channels() {
     );
     config.channels.whatsapp.insert(
         "default".to_string(),
-        zeroclaw_config::schema::WhatsAppConfig::default(),
+        zeroclaw_config::schema::WhatsAppConfig {
+            session_path: Some("wa.db".into()),
+            ..Default::default()
+        },
     );
 
     let mut items = Vec::new();
@@ -702,7 +705,10 @@ fn doctor_warns_when_only_retired_transports_are_configured() {
     let mut config = Config::default();
     config.channels.whatsapp.insert(
         "default".to_string(),
-        zeroclaw_config::schema::WhatsAppConfig::default(),
+        zeroclaw_config::schema::WhatsAppConfig {
+            session_path: Some("wa.db".into()),
+            ..Default::default()
+        },
     );
 
     let mut items = Vec::new();
