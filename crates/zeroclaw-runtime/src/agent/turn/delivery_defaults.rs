@@ -7,8 +7,6 @@ const AUTO_DELIVERY_DEFAULT_CHANNELS: &[&str] = &[
     "mattermost",
     "matrix",
     "dingtalk",
-    "lark",
-    "feishu",
 ];
 
 /// Tools that take an optional `channel` arg and otherwise pick

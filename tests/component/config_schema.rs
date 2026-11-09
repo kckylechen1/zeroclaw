@@ -337,7 +337,7 @@ bot_token = "test_token"
     let parsed: Config = toml::from_str(toml_str).expect("multi-channel config should parse");
     assert!(!parsed.channels.telegram.is_empty());
     assert!(!parsed.channels.discord.is_empty());
-    assert!(parsed.channels.slack.is_empty());
+    assert!(parsed.channels.wecom.is_empty());
 }
 
 #[test]
@@ -359,19 +359,17 @@ fn config_channels_without_cli_field() {
     let toml_str = r#"
 default_temperature = 0.7
 
-[channels.matrix.default]
-homeserver = "https://matrix.example.com"
-access_token = "syt_test_token"
-allowed_rooms = ["!abc123:example.com"]
+[channels.telegram.default]
+bot_token = "telegram-test-token"
 allowed_users = ["@user:example.com"]
 "#;
     let parsed: Config = toml::from_str(toml_str)
-        .expect("channels with only a Matrix section (no explicit cli field) should parse");
+        .expect("channels with only a Telegram section (no explicit cli field) should parse");
     assert!(
         parsed.channels.cli,
         "cli should default to true when omitted"
     );
-    assert!(!parsed.channels.matrix.is_empty());
+    assert!(!parsed.channels.telegram.is_empty());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

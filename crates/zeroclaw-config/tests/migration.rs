@@ -177,60 +177,6 @@ fn v1_model_routes_preserved_at_providers_level() {
 // T1, T2 — V1→V2 channel singular→plural folds
 // ─────────────────────────────────────────────────────────────
 
-#[test]
-fn t1_matrix_room_id_folds_into_allowed_rooms() {
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[channels_config.matrix]
-enabled = true
-homeserver = "https://matrix.org"
-access_token = "tok"
-room_id = "!fold-test:matrix.org"
-allowed_users = ["@u:matrix.org"]
-"#;
-    let cfg = migrate_to_current(raw).expect("V1 matrix migrates");
-    let matrix = cfg
-        .channels
-        .matrix
-        .get("default")
-        .expect("channels.matrix.default exists");
-    assert!(
-        matrix
-            .allowed_rooms
-            .iter()
-            .any(|r| r == "!fold-test:matrix.org"),
-        "V1 matrix.room_id was not folded into V3 allowed_rooms[]; got {:?}",
-        matrix.allowed_rooms
-    );
-}
-
-#[test]
-fn t2_slack_channel_id_folds_into_channel_ids() {
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[channels_config.slack]
-enabled = true
-bot_token = "xoxb-tok"
-channel_id = "C0FOLDTEST"
-allowed_users = ["U1"]
-"#;
-    let cfg = migrate_to_current(raw).expect("V1 slack migrates");
-    let slack = cfg
-        .channels
-        .slack
-        .get("default")
-        .expect("channels.slack.default exists");
-    assert!(
-        slack.channel_ids.iter().any(|c| c == "C0FOLDTEST"),
-        "V1 slack.channel_id was not folded into V3 channel_ids[]; got {:?}",
-        slack.channel_ids
-    );
-}
-
 // ─────────────────────────────────────────────────────────────
 // T3-T6 — V2→V3 channel singular→plural folds
 // ─────────────────────────────────────────────────────────────
@@ -261,38 +207,6 @@ guild_id = "FOLDGUILD"
         guild_ids.iter().any(|v| v.as_str() == Some("FOLDGUILD")),
         "V2 discord.guild_id was not folded into V3 guild_ids[]; got {:?}",
         guild_ids
-    );
-}
-
-#[test]
-fn t4_mattermost_channel_id_folds_into_channel_ids() {
-    let v3 = migrate_v2(
-        r#"
-schema_version = 2
-
-[channels.mattermost]
-enabled = true
-url = "https://mm.example.com"
-bot_token = "mm-tok"
-channel_id = "mm-fold-test"
-"#,
-    );
-    let channel_ids = v3
-        .get("channels")
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("mattermost"))
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("default"))
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("channel_ids"))
-        .and_then(toml::Value::as_array)
-        .expect("channels.mattermost.default.channel_ids array");
-    assert!(
-        channel_ids
-            .iter()
-            .any(|v| v.as_str() == Some("mm-fold-test")),
-        "V2 mattermost.channel_id was not folded into V3 channel_ids[]; got {:?}",
-        channel_ids
     );
 }
 
@@ -329,35 +243,6 @@ subreddit = "fold-test"
 }
 
 #[test]
-fn t6_signal_group_id_folds_into_group_ids() {
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[channels_config.signal]
-enabled = true
-http_url = "http://127.0.0.1:8686"
-account = "+15555550100"
-group_id = "fold-test-group"
-"#;
-    let cfg = migrate_to_current(raw).expect("V1 signal migrates");
-    let signal = cfg
-        .channels
-        .signal
-        .get("default")
-        .expect("channels.signal.default exists");
-    assert!(
-        signal.group_ids.iter().any(|g| g == "fold-test-group"),
-        "V2 signal.group_id was not folded into V3 group_ids[]; got {:?}",
-        signal.group_ids
-    );
-    assert!(
-        !signal.dm_only,
-        "non-\"dm\" group_id must not set dm_only=true"
-    );
-}
-
-#[test]
 fn t7_enabled_false_channel_preserved() {
     let v3 = migrate_v2(
         r#"
@@ -387,31 +272,40 @@ port = 8080
 
 #[test]
 fn t7_enabled_unset_defaults_to_false() {
-    let cfg = v3_config();
-    let imessage =
-        cfg.channels.imessage.get("default").expect(
-            "V2 imessage block (peer-auth fields folded into peer_groups) survives into V3",
-        );
+    let cfg = migrate_to_current(
+        r#"
+schema_version = 2
+
+[channels.webhook]
+port = 8080
+"#,
+    )
+    .expect("V2 webhook block without enabled migrates");
+    let webhook = cfg
+        .channels
+        .webhook
+        .get("default")
+        .expect("webhook.default survives into V3");
     assert!(
-        !imessage.enabled,
+        !webhook.enabled,
         "V2 missing `enabled` deserializes to V3 enabled = false (matches V2 default)"
     );
 }
 
 #[test]
 fn t7_enabled_field_preserved_on_surviving_instance() {
-    // V3 keeps the `enabled` field on every channel config. Matrix in
+    // V3 keeps the `enabled` field on every channel config. Telegram in
     // the V1 fixture has enabled = true; migration ports the value
     // through verbatim and the typed config exposes it.
     let cfg = v3_config();
-    let matrix_default = cfg
+    let telegram = cfg
         .channels
-        .matrix
+        .telegram
         .get("default")
-        .expect("channels.matrix.default in migrated config");
+        .expect("channels.telegram.default in migrated config");
     assert!(
-        matrix_default.enabled,
-        "V2 enabled = true must port through to V3 channels.matrix.default.enabled"
+        telegram.enabled,
+        "V2 enabled = true must port through to V3 channels.telegram.default.enabled"
     );
 }
 
@@ -1211,111 +1105,6 @@ channel_ids = ["aaaa"]
 }
 
 #[test]
-fn feishu_only_block_folds_into_lark_feishu_alias() {
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[channels_config.feishu]
-enabled = true
-app_id = "feishu_app_id_123"
-app_secret = "feishu_secret"
-mention_only = true
-"#;
-    let cfg = migrate_to_current(raw).expect("Feishu-only fold migration succeeds");
-    assert!(
-        cfg.channels.lark.contains_key("feishu"),
-        "[channels.feishu] must surface as [channels.lark.feishu] after fold"
-    );
-    assert!(
-        !cfg.channels.lark.contains_key("default"),
-        "no spurious lark.default alias when only [channels.feishu] was set"
-    );
-    let lark = &cfg.channels.lark["feishu"];
-    assert!(
-        lark.use_feishu,
-        "use_feishu must be set true on the folded entry so the runtime routes to open.feishu.cn"
-    );
-    assert_eq!(lark.app_id, "feishu_app_id_123");
-    assert!(lark.mention_only);
-}
-
-#[test]
-fn feishu_and_lark_blocks_become_two_aliases() {
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[channels_config.lark]
-enabled = true
-app_id = "lark_intl_app"
-app_secret = "lark_secret"
-
-[channels_config.feishu]
-enabled = true
-app_id = "feishu_cn_app"
-app_secret = "feishu_secret"
-encrypt_key = "feishu_encrypt"
-"#;
-    let cfg = migrate_to_current(raw).expect("two-bot migration succeeds without drops");
-
-    let lark_default = cfg
-        .channels
-        .lark
-        .get("default")
-        .expect("lark.default carries the V2 [channels.lark] block");
-    assert_eq!(lark_default.app_id, "lark_intl_app");
-    assert!(
-        !lark_default.use_feishu,
-        "lark.default keeps Lark international routing"
-    );
-
-    let lark_feishu = cfg
-        .channels
-        .lark
-        .get("feishu")
-        .expect("lark.feishu carries the V2 [channels.feishu] block");
-    assert_eq!(lark_feishu.app_id, "feishu_cn_app");
-    assert!(
-        lark_feishu.use_feishu,
-        "lark.feishu routes to Feishu (open.feishu.cn) via use_feishu = true"
-    );
-    assert_eq!(lark_feishu.encrypt_key.as_deref(), Some("feishu_encrypt"));
-}
-
-#[test]
-fn feishu_block_with_same_app_id_as_lark_still_lands_under_feishu_alias() {
-    // Even when both blocks share an app_id (uncommon — operator double-
-    // configured the same bot), the migration preserves both rows. The
-    // operator can dedupe post-migration with full visibility; the
-    // migration never silently merges or drops.
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[channels_config.lark]
-enabled = true
-app_id = "shared_app_id"
-app_secret = "lark_secret"
-
-[channels_config.feishu]
-enabled = true
-app_id = "shared_app_id"
-app_secret = "feishu_secret"
-encrypt_key = "feishu_encrypt"
-"#;
-    let cfg = migrate_to_current(raw).expect("same-app_id migration preserves both aliases");
-    assert_eq!(cfg.channels.lark["default"].app_id, "shared_app_id");
-    assert!(!cfg.channels.lark["default"].use_feishu);
-    assert_eq!(cfg.channels.lark["feishu"].app_id, "shared_app_id");
-    assert!(cfg.channels.lark["feishu"].use_feishu);
-    assert_eq!(
-        cfg.channels.lark["feishu"].encrypt_key.as_deref(),
-        Some("feishu_encrypt")
-    );
-}
-
-#[test]
 fn anthropic_custom_colon_url_default_provider_folds_under_anthropic() {
     // Phase 8 migration sweep: V2 `anthropic-custom:URL` form folds under
     // model_providers.anthropic.custom with the URL split out onto the
@@ -1410,34 +1199,6 @@ api_key = "sk-zai-agent"
     assert_eq!(
         synthesized.get("api_key").and_then(toml::Value::as_str),
         Some("sk-zai-agent")
-    );
-}
-
-#[test]
-fn t6_signal_dm_sentinel_sets_dm_only() {
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[channels_config.signal]
-enabled = true
-http_url = "http://127.0.0.1:8686"
-account = "+15555550100"
-group_id = "dm"
-"#;
-    let cfg = migrate_to_current(raw).expect("dm-sentinel V1 migrates");
-    let signal = cfg
-        .channels
-        .signal
-        .get("default")
-        .expect("channels.signal.default present");
-    assert!(
-        signal.dm_only,
-        "V2 signal.group_id=\"dm\" must set V3 signal.dm_only=true"
-    );
-    assert!(
-        signal.group_ids.is_empty(),
-        "the \"dm\" sentinel must NOT also land in group_ids[]"
     );
 }
 
@@ -1560,11 +1321,6 @@ fn v2_channel_allowed_users_fold_into_synthesized_peer_groups() {
 enabled = true
 bot_token = "tok"
 allowed_users = ["alice", "bob"]
-
-[channels.slack]
-enabled = true
-bot_token = "tok"
-allowed_users = ["@oncall"]
 "#,
     );
     let groups = v3
@@ -1588,159 +1344,6 @@ allowed_users = ["@oncall"]
         .filter_map(toml::Value::as_str)
         .collect();
     assert_eq!(discord_peers, vec!["alice", "bob"]);
-
-    let slack_group = groups
-        .get("slack_default")
-        .and_then(toml::Value::as_table)
-        .expect("slack allow-list folds into [peer_groups.slack_default]");
-    assert_eq!(
-        slack_group.get("channel").and_then(toml::Value::as_str),
-        Some("slack"),
-    );
-}
-
-#[test]
-fn v2_channel_allowed_users_fold_skips_wildcard_only_lists() {
-    // `allowed_users = ["*"]` means "anyone"; a peer group can't
-    // express that, so the synthesis is a no-op for those channels.
-    let v3 = migrate_v2(
-        r#"
-[channels.telegram]
-enabled = true
-bot_token = "tok"
-allowed_users = ["*"]
-"#,
-    );
-    assert!(
-        v3.get("peer_groups").is_none()
-            || v3
-                .get("peer_groups")
-                .and_then(toml::Value::as_table)
-                .map(|t| !t.contains_key("telegram_default"))
-                .unwrap_or(true),
-        "wildcard-only allowed_users must not synthesize a peer group"
-    );
-}
-
-#[test]
-fn v2_channel_allowed_users_fold_does_not_overwrite_authored_peer_group() {
-    // If the operator already authored a peer_group with the
-    // synthesized name, leave it alone — silent overwrite would lose
-    // their hand-curated `agents` list.
-    let v3 = migrate_v2(
-        r#"
-[channels.discord]
-enabled = true
-bot_token = "tok"
-allowed_users = ["alice"]
-
-[peer_groups.discord_default]
-channel = "discord.default"
-agents = ["researcher"]
-"#,
-    );
-    let group = v3
-        .get("peer_groups")
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("discord_default"))
-        .and_then(toml::Value::as_table)
-        .expect("authored group survives");
-    let agents: Vec<&str> = group
-        .get("agents")
-        .and_then(toml::Value::as_array)
-        .unwrap()
-        .iter()
-        .filter_map(toml::Value::as_str)
-        .collect();
-    assert_eq!(agents, vec!["researcher"]);
-    // The authored group has no `external_peers` field; the synthesizer
-    // must not have injected one.
-    assert!(group.get("external_peers").is_none());
-}
-
-#[test]
-fn v2_every_inbound_peer_field_folds_and_is_stripped() {
-    let v3 = migrate_v2(
-        r#"
-[channels.imessage]
-enabled = true
-allowed_contacts = ["+15551234567"]
-
-[channels.signal]
-enabled = true
-http_url = "http://localhost:8080"
-account = "+15555550100"
-allowed_from = ["+15551234567"]
-
-[channels.whatsapp]
-enabled = true
-session_path = "/var/lib/zeroclaw/whatsapp.db"
-allowed_numbers = ["+15551234567"]
-
-[channels.nostr]
-enabled = true
-relay_url = "wss://relay.example"
-private_key = "nsec1xxx"
-allowed_pubkeys = ["npub1abc"]
-
-[channels.email]
-enabled = true
-provider = "imap"
-imap_host = "imap.example"
-imap_port = 993
-smtp_host = "smtp.example"
-smtp_port = 587
-username = "bot@example"
-password = "p"
-from_address = "bot@example"
-allowed_senders = ["ops@example"]
-"#,
-    );
-
-    // Helper: assert the synthesized peer group has the expected
-    // username, and that the original field is no longer present on
-    // the channel block.
-    let pg = v3
-        .get("peer_groups")
-        .and_then(toml::Value::as_table)
-        .expect("peer_groups synthesized");
-    let channels = v3
-        .get("channels")
-        .and_then(toml::Value::as_table)
-        .expect("channels exists");
-
-    for (channel_type, field_name, expected_user) in [
-        ("imessage", "allowed_contacts", "+15551234567"),
-        ("signal", "allowed_from", "+15551234567"),
-        ("whatsapp", "allowed_numbers", "+15551234567"),
-        ("nostr", "allowed_pubkeys", "npub1abc"),
-        ("email", "allowed_senders", "ops@example"),
-    ] {
-        let group_name = format!("{channel_type}_default");
-        let group = pg
-            .get(&group_name)
-            .and_then(toml::Value::as_table)
-            .unwrap_or_else(|| panic!("peer_groups.{group_name} synthesized"));
-        let peer = group
-            .get("external_peers")
-            .and_then(toml::Value::as_array)
-            .unwrap()
-            .first()
-            .and_then(toml::Value::as_str)
-            .unwrap_or_else(|| panic!("external_peers[0] for {channel_type}"));
-        assert_eq!(peer, expected_user, "{channel_type} username");
-
-        let channel_alias = channels
-            .get(channel_type)
-            .and_then(toml::Value::as_table)
-            .and_then(|t| t.get("default"))
-            .and_then(toml::Value::as_table)
-            .unwrap_or_else(|| panic!("channels.{channel_type}.default present"));
-        assert!(
-            channel_alias.get(field_name).is_none(),
-            "channels.{channel_type}.default.{field_name} must be stripped after fold"
-        );
-    }
 }
 
 #[test]
@@ -1822,9 +1425,9 @@ enabled = true
 topic = "projects/p/topics/t"
 allowed_senders = ["ops@example"]
 
-[channels.imessage]
+[channels.webhook]
 enabled = true
-allowed_contacts = ["+15551234567"]
+port = 8080
 "#,
     );
 
@@ -1845,7 +1448,7 @@ allowed_contacts = ["+15551234567"]
     }
     assert!(
         channels
-            .get("imessage")
+            .get("webhook")
             .and_then(toml::Value::as_table)
             .is_some_and(|t| t.contains_key("default")),
         "live sibling channel must still migrate"
@@ -2223,61 +1826,6 @@ native_chrome_path = "/usr/bin/chromium"
 }
 
 #[test]
-fn v2_matrix_allowed_users_folds_and_allowed_rooms_stays() {
-    let v3 = migrate_v2(
-        r#"
-[channels.matrix]
-enabled = true
-homeserver = "https://matrix.org"
-access_token = "tok"
-allowed_users = ["@alice:matrix.org", "@bob:matrix.org"]
-allowed_rooms = ["!ops:matrix.org"]
-"#,
-    );
-
-    // 1. Synthesized peer group with the channel ref and MXIDs.
-    let group = v3
-        .get("peer_groups")
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("matrix_default"))
-        .and_then(toml::Value::as_table)
-        .expect("matrix allow-list folds into [peer_groups.matrix_default]");
-    let peers: Vec<&str> = group
-        .get("external_peers")
-        .and_then(toml::Value::as_array)
-        .unwrap()
-        .iter()
-        .filter_map(toml::Value::as_str)
-        .collect();
-    assert_eq!(peers, vec!["@alice:matrix.org", "@bob:matrix.org"]);
-
-    // 2. allowed_users is REMOVED from the channel block — peer
-    //    authorization is in peer_groups only.
-    let matrix = v3
-        .get("channels")
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("matrix"))
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("default"))
-        .and_then(toml::Value::as_table)
-        .expect("channels.matrix.default present after V2→V3");
-    assert!(
-        matrix.get("allowed_users").is_none(),
-        "channel-level allowed_users must be stripped after the fold"
-    );
-
-    // 3. allowed_rooms is container scope (rooms aren't peers); stays.
-    let rooms: Vec<&str> = matrix
-        .get("allowed_rooms")
-        .and_then(toml::Value::as_array)
-        .unwrap()
-        .iter()
-        .filter_map(toml::Value::as_str)
-        .collect();
-    assert_eq!(rooms, vec!["!ops:matrix.org"]);
-}
-
-#[test]
 fn v2_channels_voice_duplex_block_alias_wraps() {
     let raw = r#"
 default_provider = "openai"
@@ -2397,7 +1945,7 @@ fn v3_channel_types_covers_every_typed_channel_slot() {
     // Channel types that are intentionally NOT in V3_CHANNEL_TYPES:
     // they're folded into another channel type by a dedicated walker
     // step that runs before the alias-wrap loop.
-    let folded_into_sibling: HashSet<&str> = ["feishu"].into_iter().collect();
+    let folded_into_sibling: HashSet<&str> = HashSet::new();
 
     let typed_channel_slots: Vec<String> = Config::map_key_sections()
         .into_iter()
@@ -2681,7 +2229,7 @@ fn generate_v3_channel_breadth_lower_bound() {
     // Raise the bound only when adding more channels to the fixture. The
     // fixture's Linq, WATI, Nextcloud Talk and Gmail Push blocks are dropped
     // by design (retired channel types), so they do not count.
-    const MIN_CHANNEL_ALIASES: usize = 22;
+    const MIN_CHANNEL_ALIASES: usize = 14;
 
     let cfg = migrate_to_current(
         &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
@@ -2691,16 +2239,9 @@ fn generate_v3_channel_breadth_lower_bound() {
 
     let alias_count = cfg.channels.telegram.len()
         + cfg.channels.discord.len()
-        + cfg.channels.slack.len()
-        + cfg.channels.mattermost.len()
         + cfg.channels.webhook.len()
-        + cfg.channels.imessage.len()
-        + cfg.channels.matrix.len()
-        + cfg.channels.signal.len()
         + cfg.channels.whatsapp.len()
         + cfg.channels.mqtt.len()
-        + cfg.channels.irc.len()
-        + cfg.channels.lark.len()
         + cfg.channels.line.len()
         + cfg.channels.dingtalk.len()
         + cfg.channels.wecom.len()

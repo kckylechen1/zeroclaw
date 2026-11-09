@@ -689,7 +689,7 @@ impl FeatureCtx<'_> {
     }
 
     /// A pure alias: a non-meta feature whose only member is another local
-    /// feature (e.g. `channel-feishu = ["channel-lark"]`) - not separately
+    /// feature (e.g. `alias = ["feature"]`) - not separately
     /// selectable in `All`.
     fn is_alias(&self, feature: &str) -> bool {
         match self.graph.get(feature) {
@@ -793,7 +793,7 @@ mod tests {
     fn dist_matches_lean_release_contract() {
         let features = resolve_feature_list(&root(), &Selection::Dist).unwrap();
         let mut expected = resolve_feature_list(&root(), &Selection::Full).unwrap();
-        expected.extend(["channel-matrix", "channel-lark", "whatsapp-web"].map(str::to_owned));
+        expected.extend(["whatsapp-web"].map(str::to_owned));
         expected.sort();
         expected.dedup();
         assert_eq!(features, expected);
@@ -819,14 +819,18 @@ mod tests {
             container_excluded: &container_excluded,
         };
 
-        let mut expected = resolve_feature_list(&root(), &Selection::Dist).unwrap();
+        let dist = resolve_feature_list(&root(), &Selection::Dist).unwrap();
+        let mut expected = dist.clone();
         expected.extend(ctx.expand("channels-full"));
         expected.sort();
         expected.dedup();
 
         let broad = resolve_feature_list(&root(), &Selection::DistBroad).unwrap();
         assert_eq!(broad, expected);
-        assert!(broad.contains(&"channel-slack".to_string()));
+        assert!(broad.contains(&"channel-git".to_string()));
+        assert!(broad.contains(&"channel-line".to_string()));
+        assert!(!dist.contains(&"channel-line".to_string()));
+        assert!(!broad.contains(&"channel-slack".to_string()));
         assert!(!broad.contains(&"sandbox-bubblewrap".to_string()));
     }
 
@@ -871,20 +875,20 @@ mod tests {
             .unwrap();
         let extras = dist_extra_features(&pkg).unwrap();
         assert!(
-            extras.contains(&"channel-matrix".to_string()),
+            extras.contains(&"whatsapp-web".to_string()),
             "distribution extras come from Cargo.toml registry"
         );
-        assert!(extras.contains(&"channel-lark".to_string()));
-        assert!(extras.contains(&"whatsapp-web".to_string()));
+        assert!(!extras.contains(&"channel-matrix".to_string()));
+        assert!(!extras.contains(&"channel-lark".to_string()));
     }
 
     #[test]
     fn required_registry_list_rejects_malformed_metadata() {
         assert!(parse_required_registry_list(None, "dist_extra_features").is_err());
-        let wrong_type = serde_json::json!({ "dist_extra_features": "channel-lark" });
+        let wrong_type = serde_json::json!({ "dist_extra_features": "channel-webhook" });
         assert!(parse_required_registry_list(Some(&wrong_type), "dist_extra_features").is_err());
         let duplicate = serde_json::json!({
-            "dist_extra_features": ["channel-lark", "channel-lark"]
+            "dist_extra_features": ["channel-webhook", "channel-webhook"]
         });
         assert!(parse_required_registry_list(Some(&duplicate), "dist_extra_features").is_err());
     }

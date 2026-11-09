@@ -36,12 +36,13 @@ The transports below lost their in-process runners with #579/#581. Their
 `[channels.<kind>]` sections still parse; schema retirement is a separate,
 evidence-gated step tracked in [#584](https://github.com/kckylechen1/zeroclaw/issues/584); but nothing consumes them, and every CLI surface (`zeroclaw channel list`, `status`, `self-test`, doctor) reports a populated one as a **retired transport** rather than a connectable channel.
 
-`slack`, `mattermost`, `imessage`, `matrix`, `signal`, `whatsapp`, `irc`,
-`twitch`, `lark`, `line`, `dingtalk`, `wecom`, `wecom_ws`, `wechat`, `qq`,
+`whatsapp`, `line`, `dingtalk`, `wecom`, `wecom_ws`, `wechat`, `qq`,
 `twitter`, `mochat`, `nostr`, `clawdtalk`, `reddit`, `bluesky`, `git`,
-`voice_call`, `voice_wake`, `amqp`.
+`voice_call`, `voice_wake`, `amqp` (their schemas retire in bounded #584
+slices; `slack`, `mattermost`, `imessage`, `matrix`, `signal`, `irc`,
+`twitch`, and `lark` schemas are already removed and tombstone at load).
 
-Per-family retirement pages (they keep their old links): [Matrix](./matrix.md) · [Mattermost](./mattermost.md) · [Slack](./slack.md) · [LINE](./line.md) · [Signal](./signal.md) · [WhatsApp](./whatsapp.md) · [Other chat platforms](./chat-others.md) (iMessage, WeChat, DingTalk, Lark/Feishu, QQ, IRC, Mochat, Notion, Twitch) · [Social](./social.md) (Bluesky, Nostr, Twitter/X, Reddit) · [Git](./git.md) · [Voice](./voice.md) (ClawdTalk, Voice Call, Voice Wake) · [AMQP](./amqp.md).
+Per-family retirement pages (they keep their old links): [LINE](./line.md) · [WhatsApp](./whatsapp.md) · [Other chat platforms](./chat-others.md) (WeChat, DingTalk, QQ, Mochat, Notion) · [Social](./social.md) (Bluesky, Nostr, Twitter/X, Reddit) · [Git](./git.md) · [Voice](./voice.md) (ClawdTalk, Voice Call, Voice Wake) · [AMQP](./amqp.md).
 
 > **Also retired earlier:** the MQTT and filesystem SOP-trigger channels were retired when the SOP run side was removed; their sections are **rejected at config parse** with the migration message ([MQTT](./mqtt.md), [Filesystem](./filesystem.md)). The retired transports above still parse by contrast; that difference is exactly what #584's per-schema evidence step resolves.
 

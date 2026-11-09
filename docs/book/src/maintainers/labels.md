@@ -212,7 +212,6 @@ Each channel gets a `channel:<name>` label in addition to the base `channel` lab
 | `channel:email` | `email_channel.rs` |
 | `channel:imessage` | `imessage.rs` |
 | `channel:irc` | `irc.rs` |
-| `channel:lark` | `lark.rs` |
 | `channel:line` | `line.rs`, `channels/line.md` |
 | `channel:matrix` | `matrix.rs` |
 | `channel:mattermost` | `mattermost.rs` |

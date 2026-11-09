@@ -29,31 +29,6 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         compiled: cfg!(feature = "channel-discord"),
     },
     ChannelCompileSpec {
-        schema_name: Some("Slack"),
-        type_keys: &["slack"],
-        compiled: cfg!(feature = "channel-slack"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Mattermost"),
-        type_keys: &["mattermost"],
-        compiled: cfg!(feature = "channel-mattermost"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("iMessage"),
-        type_keys: &["imessage"],
-        compiled: cfg!(feature = "channel-imessage"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Matrix"),
-        type_keys: &["matrix"],
-        compiled: cfg!(feature = "channel-matrix"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Signal"),
-        type_keys: &["signal"],
-        compiled: cfg!(feature = "channel-signal"),
-    },
-    ChannelCompileSpec {
         // `[channels.whatsapp.<alias>]` is served only by the WhatsApp Web
         // backend, so the config type key shares its compile flag.
         schema_name: Some("WhatsApp Web"),
@@ -64,21 +39,6 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         schema_name: Some("Email"),
         type_keys: &["email"],
         compiled: cfg!(feature = "channel-email"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("IRC"),
-        type_keys: &["irc"],
-        compiled: cfg!(feature = "channel-irc"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Twitch"),
-        type_keys: &["twitch"],
-        compiled: cfg!(feature = "channel-twitch"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Lark"),
-        type_keys: &["lark", "feishu"],
-        compiled: cfg!(feature = "channel-lark"),
     },
     ChannelCompileSpec {
         schema_name: Some("DingTalk"),
@@ -311,9 +271,9 @@ mod tests {
     #[test]
     fn retired_transports_are_never_compiled_or_uncompiled() {
         let mut cfg = ChannelsConfig::default();
-        cfg.slack.insert(
+        cfg.wechat.insert(
             "default".to_string(),
-            zeroclaw_config::schema::SlackConfig::default(),
+            zeroclaw_config::schema::WeChatConfig::default(),
         );
 
         let compiled: BTreeSet<_> = compiled_channels(&cfg)
@@ -329,12 +289,25 @@ mod tests {
             .map(|info| info.name)
             .collect();
 
-        assert!(!compiled.contains("Slack"));
-        // A configured Slack section is retired, never "not compiled" —
-        // even when its stub feature happens to be enabled, rebuilding
-        // would not bring a runner back.
-        assert!(!uncompiled.contains("Slack"));
-        assert!(retired.contains("Slack"));
+        assert!(!compiled.contains("WeChat"));
+        // Rebuilding with the stub feature cannot restore the retired runner.
+        assert!(!uncompiled.contains("WeChat"));
+        assert!(retired.contains("WeChat"));
+        for removed in [
+            "Slack",
+            "Mattermost",
+            "iMessage",
+            "Matrix",
+            "Signal",
+            "IRC",
+            "Twitch",
+            "Lark",
+            "Feishu",
+        ] {
+            assert!(!compiled.contains(removed));
+            assert!(!uncompiled.contains(removed));
+            assert!(!retired.contains(removed));
+        }
     }
 
     #[test]

@@ -158,14 +158,17 @@ mod tests {
             .iter()
             .find(|t| t["stem"].as_str() == Some("all-features"))
             .unwrap();
-        assert!(
-            dist["features"]
-                .as_str()
-                .unwrap()
-                .contains("channel-matrix")
-        );
-        assert!(dist["features"].as_str().unwrap().contains("whatsapp-web"));
-        assert!(!dist["features"].as_str().unwrap().contains("channel-slack"));
+        let dist_features: Vec<_> = dist["features"].as_str().unwrap().split(',').collect();
+        assert!(dist_features.contains(&"channel-telegram"));
+        assert!(dist_features.contains(&"whatsapp-web"));
+        for removed in [
+            "channel-matrix",
+            "channel-slack",
+            "channel-feishu",
+            "channel-lark",
+        ] {
+            assert!(!dist_features.contains(&removed));
+        }
         assert!(
             all["features"]
                 .as_str()

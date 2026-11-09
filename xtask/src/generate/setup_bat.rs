@@ -118,7 +118,7 @@ mod tests {
         let presets = render_presets(&root()).unwrap();
         let (_, dist_and_rest) = presets.split_once(":build_dist").unwrap();
         let (dist, _) = dist_and_rest.split_once("goto :do_build").unwrap();
-        assert!(dist.contains("channel-matrix"));
+        assert!(!dist.contains("channel-matrix"));
         assert!(dist.contains("whatsapp-web"));
         assert!(!dist.contains("channel-slack"));
     }

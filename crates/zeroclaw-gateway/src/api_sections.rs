@@ -1484,27 +1484,30 @@ mod tests {
     #[test]
     fn channels_select_initializes_subsection_so_set_prop_works() {
         let mut cfg = empty_cfg();
-        assert!(cfg.channels.matrix.is_empty(), "fresh config: matrix unset");
-
-        cfg.create_map_key("channels.matrix", "mymatrixalias")
-            .expect("create_map_key must succeed for channels.matrix");
         assert!(
-            cfg.channels.matrix.contains_key("mymatrixalias"),
-            "channels.matrix must have alias after create_map_key",
+            cfg.channels.telegram.is_empty(),
+            "fresh config: telegram unset"
+        );
+
+        cfg.create_map_key("channels.telegram", "mytgalias")
+            .expect("create_map_key must succeed for channels.telegram");
+        assert!(
+            cfg.channels.telegram.contains_key("mytgalias"),
+            "channels.telegram must have alias after create_map_key",
         );
 
         // The form would issue a PATCH whose set_prop call hits this path.
         cfg.set_prop(
-            "channels.matrix.mymatrixalias.allowed_rooms",
+            "channels.telegram.mytgalias.excluded_tools",
             r#"["alice","bob"]"#,
         )
-        .expect("set_prop on initialized matrix subsection must succeed");
+        .expect("set_prop on initialized telegram subsection must succeed");
         assert_eq!(
             cfg.channels
-                .matrix
-                .get("mymatrixalias")
+                .telegram
+                .get("mytgalias")
                 .unwrap()
-                .allowed_rooms,
+                .excluded_tools,
             vec!["alice".to_string(), "bob".to_string()],
         );
     }
@@ -1605,7 +1608,7 @@ mod tests {
         assert!(!keys.is_empty(), "channel picker must not be empty");
         // Channels that are unconditionally compiled (no feature gate)
         // should always appear:
-        for expected in ["telegram", "slack", "discord"] {
+        for expected in ["telegram", "discord", "email"] {
             assert!(
                 keys.contains(&expected),
                 "expected `{expected}` in channels picker, got: {keys:?}"
@@ -1621,14 +1624,14 @@ mod tests {
     #[test]
     fn channels_picker_marks_configured_after_create_map_key() {
         let mut cfg = empty_cfg();
-        cfg.create_map_key("channels.matrix", "mymatrixalias")
-            .expect("create_map_key must succeed for channels.matrix");
+        cfg.create_map_key("channels.telegram", "mytgalias")
+            .expect("create_map_key must succeed for channels.telegram");
         let items = schema_walk_picker(&cfg, "channels");
-        let matrix = items.iter().find(|i| i.key == "matrix").unwrap();
+        let telegram = items.iter().find(|i| i.key == "telegram").unwrap();
         assert_eq!(
-            matrix.badge.as_deref(),
+            telegram.badge.as_deref(),
             Some("configured"),
-            "matrix should be marked configured after create_map_key"
+            "telegram should be marked configured after create_map_key"
         );
     }
 

@@ -19,19 +19,19 @@ pub use schema::{
     BrowserConfig, BuiltinHooksConfig, ChannelsConfig, ClassificationRule, Config, CostConfig,
     CronJobDecl, CronScheduleDecl, DataRetentionConfig, DeepgramSttConfig, DiscordConfig,
     DockerRuntimeConfig, EmbeddingRouteConfig, EstopConfig, GatewayConfig, GoogleSttConfig,
-    HeartbeatConfig, HooksConfig, HttpRequestConfig, IMessageConfig, IdentityConfig,
-    ImageGenConfig, KnowledgeConfig, LarkConfig, LinkEnricherConfig, LocalWhisperConfig,
-    MatrixConfig, McpConfig, McpServerConfig, McpTransport, MediaPipelineConfig, MemoryConfig,
-    MemoryPolicyConfig, ModelRouteConfig, MultimodalConfig, NodeTransportConfig, NodesConfig,
-    ObservabilityConfig, OpenAiSttConfig, OpenVpnTunnelConfig, OtpConfig, OtpMethod, PacingConfig,
-    PipelineConfig, ProxyConfig, ProxyScope, QueryClassificationConfig, ReliabilityConfig,
-    RiskProfileConfig, RuntimeConfig, SandboxBackend, SandboxConfig, SchedulerConfig, SearchMode,
-    SecretsConfig, SecurityConfig, SecurityOpsConfig, ShellToolConfig, SkillCreationConfig,
-    SkillImprovementConfig, SkillsConfig, SkillsPromptInjectionMode, SlackConfig, SopConfig,
-    SqliteStorageConfig, StorageConfig, StreamMode, TelegramConfig, TextBrowserConfig,
-    ToolFilterGroup, ToolFilterGroupMode, TranscriptionConfig, TtsConfig, TtsProviderConfig,
-    TunnelConfig, VerifiableIntentConfig, WebFetchConfig, WebSearchConfig, WebhookConfig,
-    WhatsAppChatPolicy, WhatsAppWebMode, read_persisted_proxy_for_boot,
+    HeartbeatConfig, HooksConfig, HttpRequestConfig, IdentityConfig, ImageGenConfig,
+    KnowledgeConfig, LinkEnricherConfig, LocalWhisperConfig, McpConfig, McpServerConfig,
+    McpTransport, MediaPipelineConfig, MemoryConfig, MemoryPolicyConfig, ModelRouteConfig,
+    MultimodalConfig, NodeTransportConfig, NodesConfig, ObservabilityConfig, OpenAiSttConfig,
+    OpenVpnTunnelConfig, OtpConfig, OtpMethod, PacingConfig, PipelineConfig, ProxyConfig,
+    ProxyScope, QueryClassificationConfig, ReliabilityConfig, RiskProfileConfig, RuntimeConfig,
+    SandboxBackend, SandboxConfig, SchedulerConfig, SearchMode, SecretsConfig, SecurityConfig,
+    SecurityOpsConfig, ShellToolConfig, SkillCreationConfig, SkillImprovementConfig, SkillsConfig,
+    SkillsPromptInjectionMode, SopConfig, SqliteStorageConfig, StorageConfig, StreamMode,
+    TelegramConfig, TextBrowserConfig, ToolFilterGroup, ToolFilterGroupMode, TranscriptionConfig,
+    TtsConfig, TtsProviderConfig, TunnelConfig, VerifiableIntentConfig, WebFetchConfig,
+    WebSearchConfig, WebhookConfig, WhatsAppChatPolicy, WhatsAppWebMode,
+    read_persisted_proxy_for_boot,
 };
 
 pub use schema::ModelProviderConfig;
@@ -82,71 +82,5 @@ mod tests {
         let config = Config::default();
 
         assert!(config.providers.models.is_empty());
-    }
-
-    #[test]
-    fn reexported_channel_configs_are_constructible() {
-        let telegram = TelegramConfig {
-            enabled: true,
-            bot_token: "token".into(),
-            api_base_url: zeroclaw_config::schema::TELEGRAM_OFFICIAL_API_BASE_URL.to_string(),
-            stream_mode: StreamMode::default(),
-            draft_update_interval_ms: 1000,
-            interrupt_on_new_message: false,
-            mention_only: false,
-            ack_reactions: None,
-            proxy_url: None,
-            approval_timeout_secs: 120,
-            excluded_tools: vec![],
-            reply_min_interval_secs: 0,
-            reply_queue_depth_max: 0,
-            debounce_ms: None,
-        };
-
-        let discord = DiscordConfig {
-            enabled: true,
-            bot_token: "token".into(),
-            guild_ids: vec!["123".into()],
-            channel_ids: vec![],
-            archive: false,
-            listen_to_bots: false,
-            interrupt_on_new_message: false,
-            mention_only: false,
-            slash_command_scope: schema::SlashCommandScope::default(),
-            proxy_url: None,
-            stream_mode: StreamMode::default(),
-            draft_update_interval_ms: 1000,
-            multi_message_delay_ms: 800,
-            stall_timeout_secs: 0,
-            slash_commands: false,
-            intents_mask: None,
-            reaction_notifications: zeroclaw_config::schema::DiscordReactionScope::Off,
-            approval_timeout_secs: 300,
-            excluded_tools: vec![],
-            reply_min_interval_secs: 0,
-            reply_queue_depth_max: 0,
-        };
-
-        let lark = LarkConfig {
-            enabled: true,
-            app_id: "app-id".into(),
-            app_secret: "app-secret".into(),
-            encrypt_key: None,
-            verification_token: None,
-            mention_only: false,
-            use_feishu: false,
-            receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
-            port: None,
-            proxy_url: None,
-            excluded_tools: vec![],
-            approval_timeout_secs: 300,
-            per_user_session: false,
-            ack_reactions: None,
-            stream_mode: StreamMode::default(),
-            draft_update_interval_ms: 1000,
-        };
-        assert_eq!(telegram.bot_token, "token");
-        assert_eq!(discord.guild_ids, vec!["123".to_string()]);
-        assert_eq!(lark.app_id, "app-id");
     }
 }

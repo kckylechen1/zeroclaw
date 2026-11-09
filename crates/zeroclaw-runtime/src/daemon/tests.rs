@@ -1,6 +1,5 @@
 use super::*;
 use tempfile::TempDir;
-use zeroclaw_config::schema::MattermostListenMode;
 
 mod cron_shutdown;
 
@@ -431,33 +430,6 @@ fn detects_dingtalk_as_supervised_channel() {
 }
 
 #[test]
-fn detects_mattermost_as_supervised_channel() {
-    let mut config = Config::default();
-    config.channels.mattermost.insert(
-        "default".to_string(),
-        zeroclaw_config::schema::MattermostConfig {
-            enabled: true,
-            url: "https://mattermost.example.com".into(),
-            bot_token: Some("token".into()),
-            login_id: None,
-            password: None,
-            channel_ids: vec!["channel-id".into()],
-            team_ids: vec![],
-            discover_dms: None,
-            thread_replies: Some(true),
-            mention_only: Some(false),
-            interrupt_on_new_message: false,
-            proxy_url: None,
-            listen_mode: MattermostListenMode::default(),
-            excluded_tools: vec![],
-            reply_min_interval_secs: 0,
-            reply_queue_depth_max: 0,
-        },
-    );
-    assert!(has_supervised_channels(&config));
-}
-
-#[test]
 fn detects_qq_as_supervised_channel() {
     let mut config = Config::default();
     config.channels.qq.insert(
@@ -549,11 +521,11 @@ fn resolve_delivery_rejects_retired_matrix_target() {
     // validation with the retired diagnostic instead of being accepted and
     // later dropped by the delivery layer.
     let mut config = Config::default();
-    config.heartbeat.target = Some("matrix".into());
-    config.heartbeat.to = Some("!room:example.org".into());
+    config.heartbeat.target = Some("wechat".into());
+    config.heartbeat.to = Some("wxid_example".into());
     config
         .channels
-        .matrix
+        .wechat
         .insert("default".to_string(), Default::default());
 
     let err = resolve_heartbeat_delivery(&config).unwrap_err();

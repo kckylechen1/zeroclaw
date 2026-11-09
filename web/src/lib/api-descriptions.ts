@@ -504,7 +504,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "gmail_push": "Gmail Pub/Sub push notification channel instances (`[channels.gmail_push.<alias>]`).",
     "imessage": "iMessage channel instances (`[channels.imessage.<alias>]`, macOS only).",
     "irc": "IRC channel instances (`[channels.irc.<alias>]`).",
-    "lark": "Lark channel instances (`[channels.lark.<alias>]`).",
     "line": "LINE Messaging API channel instances (`[channels.line.<alias>]`).",
     "linq": "Linq Partner API channel instances (`[channels.linq.<alias>]`).",
     "matrix": "Matrix channel instances (`[channels.matrix.<alias>]`).",
@@ -1534,12 +1533,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "vision": "Override the provider's vision (image input) capability.\n`None` (default) uses the provider family's built-in default. Several\nfamilies (llama.cpp, the generic OpenAI-compatible endpoint, etc.)\nassume vision-capable because they can serve multimodal models. Set\n`vision = false` for a text-only model served by such a family (e.g. a\ntext LLM behind llama.cpp) so image messages are routed to a configured\n`[multimodal] vision_model_provider` instead of being sent to a model\nthat rejects them. `Some(true)` forces vision on.",
     "wire_api": "Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination."
   },
-  "IMessageConfig": {
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "reply_min_interval_secs": "Per-(channel, recipient) outbound pacing floor in seconds.\nRange: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).",
-    "reply_queue_depth_max": "Per-(channel, recipient) outbound pacing queue depth.\nRange: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`\nand this value is `0`, the pacing wrapper substitutes\n`DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the\nnewest send is dropped and a `WARN` is logged."
-  },
   "IdentityConfig": {
     "aieos_inline": "Inline AIEOS JSON (alternative to file path)",
     "aieos_path": "Path to AIEOS JSON file (relative to workspace)",
@@ -1595,20 +1588,6 @@ export const fieldDescriptions: FieldDescriptions = {
   },
   "InitQuery": {
     "section": "Optional section prefix to scope the init pass (e.g. `model_providers`).\nWithout it, every uninitialized nested section gets its defaults."
-  },
-  "IrcConfig": {
-    "channels": "Channels to join on connect",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "mention_only": "When true, only respond to messages that mention the bot.\nOther messages in the channel are silently ignored.",
-    "nickname": "Bot nickname",
-    "nickserv_password": "NickServ IDENTIFY password",
-    "port": "IRC server port (default: 6697 for TLS)",
-    "sasl_password": "SASL PLAIN password (IRCv3)",
-    "server": "IRC server hostname",
-    "server_password": "Server password (for bouncers like ZNC)",
-    "username": "Username (defaults to nickname if not set)",
-    "verify_tls": "Verify TLS certificate (default: true)"
   },
   "JiraConfig": {
     "allowed_actions": "Actions the agent is permitted to call.\nValid values: `\"get_ticket\"`, `\"search_tickets\"`, `\"comment_ticket\"`,\n`\"list_projects\"`, `\"myself\"`, `\"list_transitions\"`,\n`\"transition_ticket\"`, `\"create_ticket\"`.\nDefaults to `[\"get_ticket\"]` (read-only).",
@@ -1705,24 +1684,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "uri": "Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field.",
     "vision": "Override the provider's vision (image input) capability.\n`None` (default) uses the provider family's built-in default. Several\nfamilies (llama.cpp, the generic OpenAI-compatible endpoint, etc.)\nassume vision-capable because they can serve multimodal models. Set\n`vision = false` for a text-only model served by such a family (e.g. a\ntext LLM behind llama.cpp) so image messages are routed to a configured\n`[multimodal] vision_model_provider` instead of being sent to a model\nthat rejects them. `Some(true)` forces vision on.",
     "wire_api": "Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination."
-  },
-  "LarkConfig": {
-    "ack_reactions": "Override for the top-level `ack_reactions` setting. When `None`, the\nchannel falls back to `[channels].ack_reactions`. When set\nexplicitly, it takes precedence.",
-    "app_id": "App ID from Lark/Feishu developer console",
-    "app_secret": "App Secret from Lark/Feishu developer console",
-    "approval_timeout_secs": "Time in seconds an approval card waits for user response before\nthe runtime auto-denies. Default: 300 (5 minutes).",
-    "draft_update_interval_ms": "Minimum interval between consecutive `update_draft` PATCH calls in\nmilliseconds. Default 1000 ms tunes to Feishu's 5 QPS-per-message\nedit cap; raise on enterprise plans with higher quotas.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "encrypt_key": "Encrypt key for webhook message decryption (optional)",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "mention_only": "When true, only respond to messages that @-mention the bot in groups.\nDirect messages are always processed.",
-    "per_user_session": "When `true`, group-chat sessions key on the sender's open_id, so\ndistinct members of the same group chat don't share conversation\ncontext. When `false` (default), all members of a group share one\nsession keyed on chat_id (matches the existing behavior). 1-on-1\nchats are unaffected (chat_id is already unique per user-bot pair).",
-    "port": "HTTP port for webhook mode only. Must be set when receive_mode = \"webhook\".\nNot required (and ignored) for websocket mode.",
-    "proxy_url": "Per-channel proxy URL (http, https, socks5, socks5h).\nOverrides the global `[proxy]` setting for this channel only.",
-    "receive_mode": "Event receive mode: \"websocket\" (default) or \"webhook\"",
-    "stream_mode": "Streaming mode for the LLM response: `off` (default) routes every\nresponse through `send()`; `partial` opens a Feishu interactive\ncard and edits it incrementally via `update_draft` /\n`finalize_draft`; `multi_message` is rejected for Lark (Feishu has\nno equivalent surface — falls back to `off` with a warning).",
-    "use_feishu": "Whether to use the Feishu (Chinese) endpoint instead of Lark (International)",
-    "verification_token": "Verification token for webhook validation (optional)"
   },
   "LeakDetectionConfig": {
     "enabled": "Enable outbound credential leak detection and redaction.",
@@ -1934,45 +1895,6 @@ export const fieldDescriptions: FieldDescriptions = {
   },
   "MarkdownStorageConfig": {
     "directory": "Optional override for the markdown root directory.\nWhen unset, defaults to `<workspace_dir>/memory/`."
-  },
-  "MatrixConfig": {
-    "access_token": "Matrix access token for the bot account. When unset, the channel\nfalls back to password login using `user_id` + `password`.",
-    "ack_reactions": "Override for the top-level `[channels].ack_reactions`. When\n`None`, falls back to the channels-wide default. When set\nexplicitly (`true`/`false`), takes precedence for this Matrix\ninstance only.",
-    "allowed_rooms": "Allowed Matrix room IDs. Empty = allow all rooms the bot has joined.\nEntries are matched literally against the canonical room ID\n(`!abc:server`) of each incoming message; `#room:server` aliases are\nnot resolved for this allowlist (they are resolved only for outbound\ndelivery targets such as cron `delivery.to`).",
-    "approval_timeout_secs": "Seconds to wait for operator approval on `always_ask` tools before auto-denying.",
-    "device_id": "Optional Matrix device ID.",
-    "draft_update_interval_ms": "Minimum interval (ms) between draft message edits in Partial mode.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "homeserver": "Matrix homeserver URL (e.g. `\"https://matrix.org\"`).",
-    "interrupt_on_new_message": "Whether to interrupt an in-flight agent response when a new message arrives.",
-    "mention_only": "When true, only respond to messages that @-mention the bot in groups.\nDirect messages are always processed.",
-    "multi_message_delay_ms": "Delay (ms) between sending each paragraph in MultiMessage mode.",
-    "password": "Optional login password for Matrix account (used for initial login flow).",
-    "recovery_key": "Optional Matrix recovery key for automatic E2EE key backup restore.\nWhen set, ZeroClaw recovers room keys and cross-signing secrets on startup.",
-    "reply_in_thread": "When true (default), replies are sent as thread replies. Starts a new thread from the\nincoming message when none exists. When false, only continues existing threads.",
-    "reply_min_interval_secs": "Per-(channel, recipient) outbound pacing floor in seconds.\nRange: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).",
-    "reply_queue_depth_max": "Per-(channel, recipient) outbound pacing queue depth.\nRange: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`\nand this value is `0`, the pacing wrapper substitutes\n`DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the\nnewest send is dropped and a `WARN` is logged.",
-    "stream_mode": "Streaming mode for progressive response delivery.\n`\"off\"` (default): single message. `\"partial\"`: edit-in-place draft.\n`\"multi_message\"`: paragraph-split delivery.",
-    "user_id": "Optional Matrix user ID (e.g. `\"@bot:matrix.org\"`)."
-  },
-  "MattermostConfig": {
-    "bot_token": "Mattermost bot access token. When unset, the channel falls back to\nthe login flow using `login_id` + `password`.",
-    "channel_ids": "Channel IDs to restrict the bot to. Empty or `[\"*\"]` = auto-discover\nevery channel the bot can read (public, private, DMs, group DMs) and\npoll them all. Explicit IDs disable discovery and pin the bot to the\nlisted channels only. Migrated from the legacy `channel_id` singular\nfield.",
-    "discover_dms": "When true (default), auto-discovery includes DM (`type=D`) and group\nDM (`type=G`) channels. Set false to restrict the bot to public and\nprivate team channels only. Has no effect when `channel_ids` lists\nexplicit IDs. Defaults to `true` at the call site via\n`discover_dms.unwrap_or(true)`.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "interrupt_on_new_message": "When true, a newer Mattermost message from the same sender in the same channel\ncancels the in-flight request and starts a fresh response with preserved history.",
-    "listen_mode": "Listen mode: `\"polling\"` (REST API every 3s, default) or `\"websocket\"`\n(persistent WebSocket connection to `/api/v4/websocket` for near-real-time\nevent delivery). WebSocket mode reduces server load and delivers events\nfaster but requires a WebSocket-capable Mattermost server (v4.0+).",
-    "login_id": "Login ID (email or username) for the password login flow. Used only\nwhen `bot_token` is unset; both `login_id` and `password` must be\nset together.",
-    "mention_only": "When true, only respond to messages that @-mention the bot. Other\nmessages in the channel are silently ignored. DM and group DM\nchannels always bypass this filter: a 1:1 (or small-group) direct\nconversation has no ambient noise to gate against, so every message\nis treated as addressed to the bot.",
-    "password": "Account password for the login flow. Used only when `bot_token` is\nunset; both `login_id` and `password` must be set together.",
-    "proxy_url": "Per-channel proxy URL (http, https, socks5, socks5h).\nOverrides the global `[proxy]` setting for this channel only.",
-    "reply_min_interval_secs": "Per-(channel, recipient) outbound pacing floor in seconds.\nRange: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).",
-    "reply_queue_depth_max": "Per-(channel, recipient) outbound pacing queue depth.\nRange: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`\nand this value is `0`, the pacing wrapper substitutes\n`DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the\nnewest send is dropped and a `WARN` is logged.",
-    "team_ids": "Team IDs to restrict auto-discovery to. Empty = discover across every\nteam the bot belongs to. Non-empty = only discover public/private\nchannels whose `team_id` is in this list. DMs and group DMs (which\nhave no team) are governed by `discover_dms` instead.",
-    "thread_replies": "When true (default), replies thread on the original post.\nWhen false, replies go to the channel root.",
-    "url": "Mattermost server URL (e.g. `\"https://mattermost.example.com\"`)."
   },
   "McpBundleConfig": {
     "exclude": "MCP server IDs removed from the grant. Deny wins: a name listed here is\nexcluded even if another referenced bundle includes it.",
@@ -3010,20 +2932,6 @@ export const fieldDescriptions: FieldDescriptions = {
   "ShellToolConfig": {
     "timeout_secs": "Maximum shell command execution time in seconds (default: 60)."
   },
-  "SignalConfig": {
-    "account": "E.164 phone number of the signal-cli account (e.g. \"+1234567890\").",
-    "approval_timeout_secs": "Seconds to wait for operator approval on `always_ask` tools before auto-denying.",
-    "dm_only": "When true, only accept direct messages and ignore all group traffic.\nMutually exclusive with `group_ids` (which is ignored when this is\nset). Migrated from the legacy `group_id = \"dm\"` sentinel.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "group_ids": "Group IDs to filter messages. Empty = accept all messages (DMs and\ngroups). When non-empty, only messages from listed groups are\naccepted (DMs are still accepted unless `dm_only` flips the policy\nto DMs-only). Migrated from the legacy `group_id` singular field.",
-    "http_url": "Base URL for the signal-cli HTTP daemon (e.g. `\"http://127.0.0.1:8686\"`).",
-    "ignore_attachments": "Skip messages that are attachment-only (no text body).",
-    "ignore_stories": "Skip incoming story messages.",
-    "proxy_url": "Per-channel proxy URL (http, https, socks5, socks5h).\nOverrides the global `[proxy]` setting for this channel only.",
-    "reply_min_interval_secs": "Per-(channel, recipient) outbound pacing floor in seconds.\nRange: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).",
-    "reply_queue_depth_max": "Per-(channel, recipient) outbound pacing queue depth.\nRange: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`\nand this value is `0`, the pacing wrapper substitutes\n`DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the\nnewest send is dropped and a `WARN` is logged."
-  },
   "SiliconflowModelProviderConfig": {
     "api_key": "Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly.",
     "chat_template_kwargs": "Arbitrary key/value pairs forwarded verbatim as a top-level\n`chat_template_kwargs` object in the request body of OpenAI-compatible\nproviders. Consumed by chat-template-aware backends such as vLLM,\nSGLang, and llama.cpp to pass model-family template variables that\ncontrol behaviour not exposed by other fields. Must be a JSON object\n(TOML inline table); non-object values are ignored with a warning.\nExample (Qwen3 thinking suppression):\n  `chat_template_kwargs = { enable_thinking = false }`",
@@ -3082,25 +2990,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "registry_url": "URL of the skills registry repository for bare-name installs.\nDefault: `https://github.com/zeroclaw-labs/zeroclaw-skills`",
     "skill_creation": "Autonomous skill creation from successful multi-step task executions.",
     "skill_improvement": "Automatic skill self-improvement after successful skill usage."
-  },
-  "SlackConfig": {
-    "app_token": "Slack app-level token for Socket Mode (xapp-...). When unset or empty,\nresolved at channel construction from `ZEROCLAW_SLACK_APP_TOKEN`, then\n`SLACK_APP_TOKEN`. `#[serde(default)]` makes omission explicit (an\n`Option` field is already omittable, but this keeps it consistent with\n`bot_token`).",
-    "approval_timeout_secs": "Seconds to wait for operator approval on `always_ask` tools before auto-denying.",
-    "bot_token": "Slack bot OAuth token (xoxb-...). Optional in config: when unset or\nempty it is resolved at channel construction from\n`ZEROCLAW_SLACK_BOT_TOKEN`, then `SLACK_BOT_TOKEN`. `#[serde(default)]`\nso a config that omits it still deserializes - the env fallback then\nsupplies it - instead of failing with `missing field 'bot_token'`.",
-    "cancel_reaction": "Emoji reaction name (without colons) that cancels an in-flight request.\nFor example, `\"x\"` means reacting with `:x:` cancels the task.\nLeave unset to disable reaction-based cancellation.",
-    "channel_ids": "Explicit list of channel IDs to watch.\nEmpty = listen across all accessible channels.\nMigrated from the legacy `channel_id` singular field.",
-    "draft_update_interval_ms": "Minimum interval (ms) between draft message edits to avoid Slack rate limits.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "interrupt_on_new_message": "When true, a newer Slack message from the same sender in the same channel\ncancels the in-flight request and starts a fresh response with preserved history.",
-    "mention_only": "When true, only respond to messages that @-mention the bot in groups.\nDirect messages remain allowed.",
-    "proxy_url": "Per-channel proxy URL (http, https, socks5, socks5h).\nOverrides the global `[proxy]` setting for this channel only.",
-    "reply_min_interval_secs": "Per-(channel, recipient) outbound pacing floor in seconds.\nRange: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).",
-    "reply_queue_depth_max": "Per-(channel, recipient) outbound pacing queue depth.\nRange: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`\nand this value is `0`, the pacing wrapper substitutes\n`DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the\nnewest send is dropped and a `WARN` is logged.",
-    "stream_drafts": "Enable progressive draft message streaming via `chat.update`.",
-    "strict_mention_in_thread": "When true (and `mention_only` is also true), messages inside a Slack\nthread must also @-mention the bot to trigger a response. By default,\nthread replies are allowed through without a mention so the bot can\nkeep a back-and-forth going without the user repeating @-mentions.\nSet this to true in channels shared with human discussion where the\nbot should stay silent unless explicitly addressed.",
-    "thread_replies": "When true (default), replies stay in the originating Slack thread.\nWhen false, replies go to the channel root instead.",
-    "use_markdown_blocks": "Use the newer Slack `markdown` block type (12 000 char limit, richer formatting).\nDefaults to false (uses universally supported `section` blocks with `mrkdwn`).\nEnable this only if your Slack workspace supports the `markdown` block type."
   },
   "SopApprovalConfig": {
     "groups": "Named approver groups: `group name -> members`. A member is matched against\nthe transport-derived (channel-authenticated) `ApprovalPrincipal` identity.\nA member may be source-qualified (`<source>:<identity>`, e.g. `http:ZeroClawOperator`,\n`ws:<subject>`, `agent:<alias>`) to grant rights on one transport only, or a\nbare identity (`alice`) to grant from any non-channel source. Channel members\nmust include the channel namespace (`channel:<channel-key>:<sender>`) so sender\nids from different channel aliases cannot collide. A future auth system adds a\nsecond resolver alongside this one; it does not replace channel identities.",
@@ -3342,13 +3231,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "pinggy": "Pinggy tunnel configuration (used when `tunnel_provider = \"pinggy\"`).",
     "tailscale": "Tailscale Funnel/Serve configuration (used when `tunnel_provider = \"tailscale\"`).",
     "tunnel_provider": "How the gateway gets exposed to the public internet so webhooks (Telegram, Slack, etc.) can reach it. `none` = keep it local, no tunnel; `cloudflare` = Cloudflare Tunnel via cloudflared (needs a Zero Trust account and token); `tailscale` = Tailscale Funnel/Serve (tailnet-only or public, no account beyond tailscale); `ngrok` = ngrok agent with auth token; `openvpn` = bring-your-own OpenVPN egress; `pinggy` = Pinggy SSH tunnels (quick one-shot URLs); `custom` = run an arbitrary command you define under `[tunnel.custom]`."
-  },
-  "TwitchConfig": {
-    "bot_username": "Twitch login name of the bot account (case-insensitive — lowercased\nbefore send).",
-    "channels": "Twitch channels to join. Each entry receives a `#` prefix if missing\nand is lowercased before send (Twitch channel names are\ncase-insensitive). E.g. `[\"mychannel\", \"#anotherchannel\"]`.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false`.",
-    "mention_only": "When true, only respond to messages that mention the bot's login\nname. Default: `false`.",
-    "oauth_token": "Twitch OAuth user-access token. The `oauth:` prefix is added\nautomatically if missing, so both `\"oauth:abcdef\"` and `\"abcdef\"`\nwork. Mint via <https://twitchapps.com/tmi/> or the Twitch CLI."
   },
   "TwitterConfig": {
     "bearer_token": "Twitter API v2 Bearer Token (OAuth 2.0)",
