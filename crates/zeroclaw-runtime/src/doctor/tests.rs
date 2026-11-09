@@ -716,7 +716,7 @@ fn doctor_warns_when_only_retired_transports_are_configured() {
     assert!(
         items
             .iter()
-            .any(|i| i.message.contains("retired transports configured (matrix)"))
+            .any(|i| i.message.contains("retired transports configured (wechat)"))
     );
 }
 
