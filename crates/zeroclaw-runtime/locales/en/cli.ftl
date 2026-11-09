@@ -603,6 +603,7 @@ cli-quickstart-error-unknown-risk-preset = unknown risk preset `{$preset}`
 cli-quickstart-error-unknown-runtime-preset = unknown runtime preset `{$preset}`
 cli-quickstart-error-channel-bound = channel `{$reference}` is already bound to agent `{$owner}`
 cli-quickstart-error-channel-required = channel type and alias are required
+cli-quickstart-error-channel-retired = channel type { $channel_type } is retired; it has no runner and cannot be configured
 cli-quickstart-error-channel-field-not-advertised = channel field `{$field}` is not available in Quickstart
 cli-quickstart-error-channel-token-required = Telegram bot token is required
 cli-quickstart-error-peer-group-name-required = peer-group name is required
