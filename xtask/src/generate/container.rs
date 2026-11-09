@@ -91,16 +91,16 @@ mod tests {
     #[test]
     fn dist_renders_lean_release_channels() {
         let b = render_features(&root(), &Selection::Dist, "        ").unwrap();
-        assert!(b.contains("channel-matrix"));
-        assert!(b.contains("channel-lark"));
         assert!(b.contains("whatsapp-web"));
+        assert!(!b.contains("channel-matrix"));
+        assert!(!b.contains("channel-lark"));
         assert!(!b.contains("channel-slack"));
     }
 
     #[test]
     fn all_renders_kitchen_sink() {
         let b = render_features(&root(), &Selection::All, "        ").unwrap();
-        assert!(b.contains("sandbox-bubblewrap") && b.contains("channel-matrix"));
+        assert!(b.contains("sandbox-bubblewrap") && b.contains("channel-git"));
     }
 
     #[test]

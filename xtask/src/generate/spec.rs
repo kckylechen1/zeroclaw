@@ -826,7 +826,7 @@ mod tests {
 
         let broad = resolve_feature_list(&root(), &Selection::DistBroad).unwrap();
         assert_eq!(broad, expected);
-        assert!(broad.contains(&"channel-slack".to_string()));
+        assert!(broad.contains(&"channel-git".to_string()));
         assert!(!broad.contains(&"sandbox-bubblewrap".to_string()));
     }
 

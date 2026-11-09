@@ -270,10 +270,14 @@ mod tests {
 
     #[test]
     fn retired_transports_are_never_compiled_or_uncompiled() {
-        // Retired transports have no schema since #584 Slice 3; a leftover
-        // config section cannot be configured at all, so all three views
-        // must stay empty against a default (live-only) ChannelsConfig.
-        let cfg = ChannelsConfig::default();
+        // WeChat still has a schema (batches after Slice 3 batch A retire
+        // it); a populated retired section must appear only in the retired
+        // view — never as compiled or as a rebuild hint.
+        let mut cfg = ChannelsConfig::default();
+        cfg.wechat.insert(
+            "default".to_string(),
+            zeroclaw_config::schema::WeChatConfig::default(),
+        );
 
         let compiled: BTreeSet<_> = compiled_channels(&cfg)
             .into_iter()
@@ -288,9 +292,24 @@ mod tests {
             .map(|info| info.name)
             .collect();
 
-        assert!(compiled.is_empty());
-        assert!(uncompiled.is_empty());
-        assert!(retired.is_empty());
+        assert!(!compiled.contains("WeChat"));
+        assert!(!uncompiled.contains("WeChat"));
+        assert!(retired.contains("WeChat"));
+        // Batch-A schemas are gone entirely: no view may name them.
+        for gone in [
+            "Slack",
+            "Mattermost",
+            "iMessage",
+            "Matrix",
+            "Signal",
+            "IRC",
+            "Twitch",
+            "Lark",
+        ] {
+            assert!(!compiled.contains(gone));
+            assert!(!uncompiled.contains(gone));
+            assert!(!retired.contains(gone));
+        }
     }
 
     #[test]

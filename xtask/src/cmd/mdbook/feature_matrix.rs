@@ -245,7 +245,7 @@ mod tests {
             );
         }
         // Spot-check one retired and one retained row.
-        assert!(retired.contains(&"Slack"));
+        assert!(retired.contains(&"WeChat"));
         assert!(!retired.contains(&"Telegram"));
     }
 }

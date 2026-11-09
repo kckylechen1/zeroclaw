@@ -198,7 +198,7 @@ mod tests {
         let f = spec::resolve_feature_list(&root(), &Selection::Dist)
             .unwrap()
             .join(",");
-        assert!(f.contains("channel-matrix"));
+        assert!(f.contains("whatsapp-web"));
         assert!(f.contains("whatsapp-web"));
         assert!(!f.contains("channel-slack"));
     }
