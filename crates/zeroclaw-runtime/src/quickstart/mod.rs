@@ -1482,6 +1482,24 @@ fn apply_channels(
                 }
                 let (config_channel_type, is_whatsapp_web) =
                     resolve_channel_quickstart_type(submitted_channel_type);
+                if zeroclaw_config::schema::is_retired_transport(config_channel_type) {
+                    // The picker never offers retired transports, but the
+                    // submit path must reject them too: nothing may create
+                    // new config sections for transports without a runner
+                    // (#584 Slice 3 deletes those schemas).
+                    errors.push(QuickstartError::for_surface(
+                        ctx,
+                        QuickstartStep::Channels,
+                        format!("channels[{idx}].channel_type"),
+                        format!(
+                            "channel type `{submitted_channel_type}` is retired; it has no \
+                             runner and cannot be configured"
+                        ),
+                        "cli-quickstart-error-channel-retired",
+                        &[("channel_type", submitted_channel_type)],
+                    ));
+                    continue;
+                }
                 if channel_exists(config, config_channel_type, alias) {
                     let alias_ref = format!("{config_channel_type}.{alias}");
                     errors.push(QuickstartError::for_surface(

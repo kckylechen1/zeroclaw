@@ -842,7 +842,7 @@ fn channel_fields_materialize_credential_free_channel() {
     let mut cfg = Config::default();
     let mut submission = fresh_submission("bot");
     submission.channels = vec![SelectorChoice::Fresh(fresh_channel(
-        "imessage",
+        "webhook",
         "local",
         &[],
     ))];
@@ -853,70 +853,35 @@ fn channel_fields_materialize_credential_free_channel() {
 
     assert!(errors.is_empty(), "apply_into errors: {errors:?}");
     assert!(applied.is_some());
-    assert!(channel_exists(&cfg, "imessage", "local"));
+    assert!(channel_exists(&cfg, "webhook", "local"));
 }
 
 #[tokio::test]
-async fn fresh_whatsapp_web_channel_persists_under_whatsapp_config_family() {
-    for submitted_type in ["whatsapp-web", "whatsapp_web"] {
+async fn retired_channel_types_are_rejected_by_quickstart_submit() {
+    for submitted_type in ["whatsapp-web", "whatsapp_web", "slack"] {
+        let mut cfg = Config::default();
         let mut submission = fresh_submission("bot");
         submission.channels = vec![SelectorChoice::Fresh(fresh_channel(
             submitted_type,
             "personal",
             &[],
         ))];
-        submission.peer_groups = vec![zeroclaw_config::presets::QuickstartPeerGroup {
-            name: "self_chat".into(),
-            channel: format!("{submitted_type}.personal"),
-            external_peers: vec!["*".into()],
-            ignore: vec![],
-        }];
+        let mut staged = Vec::new();
+        let mut errors = Vec::new();
+        let _applied = apply_into(&mut cfg, &submission, &mut staged, &mut errors, None);
 
-        let (dir, _applied) = apply_to_temp(submission).await;
-        let raw = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        let rejected = errors
+            .iter()
+            .any(|error| error.field == "channels[0].channel_type");
         assert!(
-            raw.contains("[channels.whatsapp.personal]"),
-            "WhatsApp Web quickstart must persist under the canonical WhatsApp config family:\n{raw}"
-        );
-        assert!(
-            !raw.contains("[channels.whatsapp-web.personal]")
-                && !raw.contains("[channels.whatsapp_web.personal]"),
-            "Quickstart must not write a non-schema WhatsApp Web table:\n{raw}"
-        );
-
-        let reloaded = reload(&dir);
-        let whatsapp = reloaded
-            .channels
-            .whatsapp
-            .get("personal")
-            .expect("canonical WhatsApp alias persisted");
-        let expected_session = dir
-            .path()
-            .join("state")
-            .join("whatsapp-web")
-            .join("personal.db")
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(
-            whatsapp.session_path.as_deref(),
-            Some(expected_session.as_str())
+            rejected,
+            "retired channel type `{submitted_type}` must be rejected at submit: {errors:?}"
         );
         assert!(
-            whatsapp.is_web_config(),
-            "fresh WhatsApp Web entry must seed a Web selector"
+            !toml::to_string(&cfg).unwrap().contains("[channels."),
+            "a rejected retired channel must not persist any section: {}",
+            toml::to_string(&cfg).unwrap()
         );
-        let agent = reloaded.agents.get("bot").expect("agent persisted");
-        let bound: Vec<String> = agent.channels.iter().map(|c| c.to_string()).collect();
-        assert_eq!(
-            bound,
-            vec!["whatsapp.personal".to_string()],
-            "agent must bind the canonical channel ref"
-        );
-        let group = reloaded
-            .peer_groups
-            .get("self_chat")
-            .expect("peer group persisted");
-        assert_eq!(group.channel, "whatsapp.personal");
     }
 }
 
