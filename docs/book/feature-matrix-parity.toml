@@ -42,44 +42,12 @@ hermes = "supported"
 openclaw = "supported"
 hermes = "supported"
 
-[channels.slack]
-openclaw = "supported"
-hermes = "supported"
-
-[channels.mattermost]
-openclaw = "supported"
-hermes = "supported"
-
-[channels.imessage]
-openclaw = "supported"
-hermes = "supported"
-
-[channels.matrix]
-openclaw = "supported"
-hermes = "supported"
-
-[channels.signal]
-openclaw = "supported"
-hermes = "supported"
-
 [channels.whatsapp-web]
 openclaw = "supported"
 hermes = "supported"
 
 [channels.email]
 openclaw = "none"
-hermes = "supported"
-
-[channels.twitch]
-openclaw = "supported"
-hermes = "none"
-
-[channels.irc]
-openclaw = "supported"
-hermes = "supported"
-
-[channels.lark]
-openclaw = "supported"
 hermes = "supported"
 
 [channels.dingtalk]

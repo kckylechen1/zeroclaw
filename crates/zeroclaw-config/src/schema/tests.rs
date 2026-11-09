@@ -2064,17 +2064,9 @@ async fn config_toml_roundtrip() {
                 },
             )]),
             discord: HashMap::new(),
-            slack: HashMap::new(),
-            mattermost: HashMap::new(),
             webhook: HashMap::new(),
-            imessage: HashMap::new(),
-            matrix: HashMap::new(),
-            signal: HashMap::new(),
             whatsapp: HashMap::new(),
             email: HashMap::new(),
-            irc: HashMap::new(),
-            twitch: HashMap::new(),
-            lark: HashMap::new(),
             line: HashMap::new(),
             dingtalk: HashMap::new(),
             wecom: HashMap::new(),
@@ -3051,25 +3043,12 @@ async fn config_save_encrypts_nested_credentials() {
         "api_token".to_string(),
         "Bearer http-request-credential".to_string(),
     )]);
-    config.channels.lark.insert(
+    config.channels.telegram.insert(
         "feishu".to_string(),
-        LarkConfig {
+        TelegramConfig {
             enabled: true,
-            app_id: "cli_feishu_123".into(),
-            app_secret: "feishu-secret".into(),
-            encrypt_key: Some("feishu-encrypt".into()),
-            verification_token: Some("feishu-verify".into()),
-            mention_only: false,
-            use_feishu: true,
-            receive_mode: LarkReceiveMode::Websocket,
-            port: None,
-            proxy_url: None,
-            excluded_tools: vec![],
-            approval_timeout_secs: 300,
-            per_user_session: false,
-            ack_reactions: None,
-            stream_mode: StreamMode::default(),
-            draft_update_interval_ms: default_draft_update_interval_ms(),
+            bot_token: "feishu-secret".into(),
+            ..TelegramConfig::default()
         },
     );
 
@@ -3239,35 +3218,9 @@ async fn config_save_encrypts_nested_credentials() {
         "Bearer http-request-credential"
     );
 
-    let feishu = stored.channels.lark.get("feishu").unwrap();
-    assert!(crate::secrets::SecretStore::is_encrypted(
-        &feishu.app_secret
-    ));
-    assert_eq!(store.decrypt(&feishu.app_secret).unwrap(), "feishu-secret");
-    assert!(
-        feishu
-            .encrypt_key
-            .as_deref()
-            .is_some_and(crate::secrets::SecretStore::is_encrypted)
-    );
-    assert_eq!(
-        store
-            .decrypt(feishu.encrypt_key.as_deref().unwrap())
-            .unwrap(),
-        "feishu-encrypt"
-    );
-    assert!(
-        feishu
-            .verification_token
-            .as_deref()
-            .is_some_and(crate::secrets::SecretStore::is_encrypted)
-    );
-    assert_eq!(
-        store
-            .decrypt(feishu.verification_token.as_deref().unwrap())
-            .unwrap(),
-        "feishu-verify"
-    );
+    let tg = stored.channels.telegram.get("feishu").unwrap();
+    assert!(crate::secrets::SecretStore::is_encrypted(&tg.bot_token));
+    assert_eq!(store.decrypt(&tg.bot_token).unwrap(), "feishu-secret");
 
     // Webhook auth_header — newly tagged `#[secret]`.
     let webhook = stored.channels.webhook.get("primary").unwrap();
@@ -3383,67 +3336,6 @@ async fn telegram_config_defaults_stream_off() {
 // `imessage_v2_allowed_contacts_fold_into_peer_groups` below; per-field
 // struct serde for `allowed_contacts` no longer applies.
 
-#[test]
-async fn imessage_v2_allowed_contacts_fold_into_peer_groups() {
-    // V2 TOML with `allowed_contacts` on the channel must be folded
-    // into a synthesized `peer_groups.imessage_default` group with
-    // each contact as an external peer.
-    let raw = r#"
-schema_version = 2
-
-[channels.imessage]
-enabled = true
-allowed_contacts = ["+1234567890", "user@icloud.com"]
-"#;
-    let parsed = crate::migration::migrate_to_current(raw).expect("migration succeeds");
-    let group = parsed
-        .peer_groups
-        .get("imessage_default")
-        .expect("V2 imessage.allowed_contacts must fold into peer_groups.imessage_default");
-    assert_eq!(group.channel, "imessage");
-    let usernames: Vec<&str> = group.external_peers.iter().map(|p| p.as_str()).collect();
-    assert_eq!(usernames, vec!["+1234567890", "user@icloud.com"]);
-}
-
-#[test]
-async fn matrix_config_backward_compatible_without_session_hints() {
-    // room_id in TOML is now migrated by prepare_table at the top level;
-    // a bare MatrixConfig parse just ignores unknown keys.
-    let toml = r#"
-homeserver = "https://matrix.org"
-access_token = "tok"
-allowed_users = ["@ops:matrix.org"]
-allowed_rooms = ["!ops:matrix.org"]
-"#;
-
-    let parsed: MatrixConfig = toml::from_str(toml).unwrap();
-    assert_eq!(parsed.homeserver, "https://matrix.org");
-    assert!(parsed.user_id.is_none());
-    assert!(parsed.device_id.is_none());
-    assert_eq!(parsed.allowed_rooms, vec!["!ops:matrix.org"]);
-}
-
-#[test]
-async fn matrix_config_reply_in_thread_defaults_to_true() {
-    let toml = r#"
-homeserver = "https://matrix.org"
-access_token = "tok"
-allowed_users = ["@u:matrix.org"]
-"#;
-    let parsed: MatrixConfig = toml::from_str(toml).unwrap();
-    assert!(parsed.reply_in_thread);
-}
-
-#[test]
-async fn signal_config_defaults() {
-    let json = r#"{"http_url":"http://127.0.0.1:8686","account":"+1234567890"}"#;
-    let parsed: SignalConfig = serde_json::from_str(json).unwrap();
-    assert!(parsed.group_ids.is_empty());
-    assert!(!parsed.dm_only);
-    assert!(!parsed.ignore_attachments);
-    assert!(!parsed.ignore_stories);
-}
-
 // ── Edge cases: serde(default) for non-secret optional fields ─────
 // The legacy `allowed_users` field is no longer carried on channel
 // configs (V3 moved inbound peer authorization into
@@ -3473,69 +3365,6 @@ allowed_users = ["111", "222"]
 }
 
 #[test]
-async fn slack_v2_allowed_users_fold_into_peer_groups() {
-    let raw = r#"
-schema_version = 2
-
-[channels.slack]
-enabled = true
-bot_token = "xoxb-tok"
-allowed_users = ["U111"]
-"#;
-    let parsed = crate::migration::migrate_to_current(raw).expect("migration succeeds");
-    let group = parsed
-        .peer_groups
-        .get("slack_default")
-        .expect("V2 slack.allowed_users must fold into peer_groups.slack_default");
-    assert_eq!(group.channel, "slack");
-    let usernames: Vec<&str> = group.external_peers.iter().map(|p| p.as_str()).collect();
-    assert_eq!(usernames, vec!["U111"]);
-}
-
-#[test]
-async fn slack_config_json_optional_fields_default_independently() {
-    // (json, channel_ids, mention_only, interrupt_on_new_message, thread_replies)
-    type Case<'a> = (&'a str, &'a [&'a str], bool, bool, Option<bool>);
-    let cases: [Case; 4] = [
-        (
-            r#"{"bot_token":"xoxb-tok","channel_ids":["C111","D222"]}"#,
-            &["C111", "D222"],
-            false,
-            false,
-            None,
-        ),
-        (
-            r#"{"bot_token":"xoxb-tok","mention_only":true}"#,
-            &[],
-            true,
-            false,
-            None,
-        ),
-        (
-            r#"{"bot_token":"xoxb-tok","interrupt_on_new_message":true}"#,
-            &[],
-            false,
-            true,
-            None,
-        ),
-        (
-            r#"{"bot_token":"xoxb-tok","thread_replies":false}"#,
-            &[],
-            false,
-            false,
-            Some(false),
-        ),
-    ];
-    for (json, channel_ids, mention_only, interrupt, thread_replies) in cases {
-        let parsed: SlackConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.channel_ids, channel_ids, "{json}");
-        assert_eq!(parsed.mention_only, mention_only, "{json}");
-        assert_eq!(parsed.interrupt_on_new_message, interrupt, "{json}");
-        assert_eq!(parsed.thread_replies, thread_replies, "{json}");
-    }
-}
-
-#[test]
 async fn interrupt_on_new_message_defaults_off_and_parses_true() {
     let discord = |json: &str| {
         serde_json::from_str::<DiscordConfig>(json)
@@ -3548,7 +3377,7 @@ async fn interrupt_on_new_message_defaults_off_and_parses_true() {
     ));
 
     let mattermost = |json: &str| {
-        serde_json::from_str::<MattermostConfig>(json)
+        serde_json::from_str::<TelegramConfig>(json)
             .unwrap()
             .interrupt_on_new_message
     };
@@ -3580,28 +3409,6 @@ guild_id = "123"
 "#;
     let parsed: DiscordConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(parsed.bot_token, "tok");
-}
-
-#[test]
-async fn slack_config_toml_with_channel_ids() {
-    let toml_str = r#"
-bot_token = "xoxb-tok"
-channel_ids = ["C123", "D456"]
-"#;
-    let parsed: SlackConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(parsed.channel_ids, vec!["C123", "D456"]);
-    assert!(!parsed.interrupt_on_new_message);
-    assert_eq!(parsed.thread_replies, None);
-    assert!(!parsed.mention_only);
-}
-
-#[test]
-async fn slack_config_toml_without_channel_ids_defaults_empty() {
-    let toml_str = r#"
-bot_token = "xoxb-tok"
-"#;
-    let parsed: SlackConfig = toml::from_str(toml_str).unwrap();
-    assert!(parsed.channel_ids.is_empty());
 }
 
 #[test]
@@ -3774,12 +3581,7 @@ async fn channels_with_whatsapp() {
         cli: true,
         telegram: HashMap::new(),
         discord: HashMap::new(),
-        slack: HashMap::new(),
-        mattermost: HashMap::new(),
         webhook: HashMap::new(),
-        imessage: HashMap::new(),
-        matrix: HashMap::new(),
-        signal: HashMap::new(),
         whatsapp: HashMap::from([(
             "default".to_string(),
             WhatsAppConfig {
@@ -3805,9 +3607,6 @@ async fn channels_with_whatsapp() {
             },
         )]),
         email: HashMap::new(),
-        irc: HashMap::new(),
-        twitch: HashMap::new(),
-        lark: HashMap::new(),
         line: HashMap::new(),
         dingtalk: HashMap::new(),
         wecom: HashMap::new(),
@@ -4152,91 +3951,6 @@ async fn env_override_lock() -> MutexGuard<'static, ()> {
     // module serialize against `env_overrides::tests` too. Without
     // this, tests across the two modules race on `ZEROCLAW_*` vars.
     crate::env_overrides::env_test_lock().await
-}
-
-#[test]
-async fn slack_config_deserializes_without_bot_token() {
-    // Regression for /: before `bot_token` became
-    // `Option<String>` + `#[serde(default)]`, a config that omitted it
-    // failed to deserialize with `missing field 'bot_token'`, aborting
-    // startup before the env-var fallback could ever run.
-    let parsed: SlackConfig =
-        toml::from_str("enabled = true\n").expect("SlackConfig must deserialize without bot_token");
-    assert!(parsed.bot_token.is_none());
-}
-
-#[test]
-async fn slack_config_deserializes_explicit_bot_token() {
-    let parsed: SlackConfig =
-        toml::from_str("enabled = true\nbot_token = \"xoxb-from-toml\"\n").unwrap();
-    assert_eq!(parsed.bot_token.as_deref(), Some("xoxb-from-toml"));
-}
-
-/// Set (`Some`) or clear (`None`) an env var. Callers must hold
-/// `env_override_lock()`. Used to snapshot-and-restore the Slack token
-/// vars so these tests leave the process environment exactly as found.
-fn set_or_clear_env(key: &str, value: Option<&str>) {
-    // SAFETY: callers serialize on env_override_lock().
-    unsafe {
-        match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
-}
-
-#[test]
-async fn slack_resolved_bot_token_falls_back_to_env() {
-    let _env_guard = env_override_lock().await;
-    let prev_bot = std::env::var("SLACK_BOT_TOKEN").ok();
-    let prev_zc = std::env::var("ZEROCLAW_SLACK_BOT_TOKEN").ok();
-    set_or_clear_env("ZEROCLAW_SLACK_BOT_TOKEN", None);
-    set_or_clear_env("SLACK_BOT_TOKEN", Some("xoxb-from-env"));
-
-    let cfg = SlackConfig {
-        bot_token: None,
-        ..Default::default()
-    };
-    assert_eq!(cfg.resolved_bot_token().as_deref(), Some("xoxb-from-env"));
-
-    set_or_clear_env("SLACK_BOT_TOKEN", prev_bot.as_deref());
-    set_or_clear_env("ZEROCLAW_SLACK_BOT_TOKEN", prev_zc.as_deref());
-}
-
-#[test]
-async fn slack_resolved_bot_token_prefers_zeroclaw_prefix() {
-    let _env_guard = env_override_lock().await;
-    let prev_bot = std::env::var("SLACK_BOT_TOKEN").ok();
-    let prev_zc = std::env::var("ZEROCLAW_SLACK_BOT_TOKEN").ok();
-    set_or_clear_env("SLACK_BOT_TOKEN", Some("xoxb-generic"));
-    set_or_clear_env("ZEROCLAW_SLACK_BOT_TOKEN", Some("xoxb-zeroclaw"));
-
-    let cfg = SlackConfig {
-        bot_token: None,
-        ..Default::default()
-    };
-    assert_eq!(cfg.resolved_bot_token().as_deref(), Some("xoxb-zeroclaw"));
-
-    set_or_clear_env("SLACK_BOT_TOKEN", prev_bot.as_deref());
-    set_or_clear_env("ZEROCLAW_SLACK_BOT_TOKEN", prev_zc.as_deref());
-}
-
-#[test]
-async fn slack_resolved_bot_token_prefers_config_over_env() {
-    let _env_guard = env_override_lock().await;
-    let prev_bot = std::env::var("SLACK_BOT_TOKEN").ok();
-    set_or_clear_env("SLACK_BOT_TOKEN", Some("xoxb-from-env"));
-
-    let cfg = SlackConfig {
-        bot_token: Some("xoxb-from-config".to_string()),
-        ..Default::default()
-    };
-    assert_eq!(
-        cfg.resolved_bot_token().as_deref(),
-        Some("xoxb-from-config")
-    );
-
-    set_or_clear_env("SLACK_BOT_TOKEN", prev_bot.as_deref());
 }
 
 #[test]
@@ -5152,34 +4866,19 @@ async fn load_or_init_decrypts_feishu_channel_secrets() {
         ..Default::default()
     };
     config.secrets.encrypt = true;
-    config.channels.lark.insert(
+    config.channels.telegram.insert(
         "feishu".to_string(),
-        LarkConfig {
+        TelegramConfig {
             enabled: true,
-            app_id: "cli_feishu_123".into(),
-            app_secret: "feishu-secret".into(),
-            encrypt_key: Some("feishu-encrypt".into()),
-            verification_token: Some("feishu-verify".into()),
-            mention_only: false,
-            use_feishu: true,
-            receive_mode: LarkReceiveMode::Websocket,
-            port: None,
-            proxy_url: None,
-            excluded_tools: vec![],
-            approval_timeout_secs: 300,
-            per_user_session: false,
-            ack_reactions: None,
-            stream_mode: StreamMode::default(),
-            draft_update_interval_ms: default_draft_update_interval_ms(),
+            bot_token: "feishu-secret".into(),
+            ..TelegramConfig::default()
         },
     );
     config.save().await.unwrap();
 
     let loaded = Box::pin(Config::load_or_init()).await.unwrap();
-    let feishu = loaded.channels.lark.get("feishu").unwrap();
-    assert_eq!(feishu.app_secret, "feishu-secret");
-    assert_eq!(feishu.encrypt_key.as_deref(), Some("feishu-encrypt"));
-    assert_eq!(feishu.verification_token.as_deref(), Some("feishu-verify"));
+    let tg = loaded.channels.telegram.get("feishu").unwrap();
+    assert_eq!(tg.bot_token, "feishu-secret");
 
     if let Some(home) = original_home {
         // SAFETY: test-only, single-threaded test runner.
@@ -5743,41 +5442,6 @@ async fn gateway_config_default_values() {
 }
 
 // ── Peripherals config ───────────────────────────────────────
-
-#[test]
-async fn lark_config_deserializes_without_optional_fields() {
-    let json = r#"{"app_id":"cli_123","app_secret":"secret"}"#;
-    let parsed: LarkConfig = serde_json::from_str(json).unwrap();
-    assert!(parsed.encrypt_key.is_none());
-    assert!(parsed.verification_token.is_none());
-    assert!(!parsed.mention_only);
-    assert!(!parsed.use_feishu);
-}
-
-#[test]
-async fn lark_v2_allowed_users_fold_into_peer_groups() {
-    // V2 `allowed_users` on a Lark channel migrates to a synthesized
-    // `peer_groups.lark_default` group. The wildcard `*` is dropped at
-    // synthesis (operator-explicit lists only); concrete user IDs
-    // round-trip through.
-    let raw = r#"
-schema_version = 2
-
-[channels.lark]
-enabled = true
-app_id = "cli_123"
-app_secret = "secret"
-allowed_users = ["user_alpha", "user_beta"]
-"#;
-    let parsed = crate::migration::migrate_to_current(raw).expect("migration succeeds");
-    let group = parsed
-        .peer_groups
-        .get("lark_default")
-        .expect("V2 lark.allowed_users must fold into peer_groups.lark_default");
-    assert_eq!(group.channel, "lark");
-    let usernames: Vec<&str> = group.external_peers.iter().map(|p| p.as_str()).collect();
-    assert_eq!(usernames, vec!["user_alpha", "user_beta"]);
-}
 
 // ── LINE ──────────────────────────────────────────────────
 
@@ -8259,119 +7923,24 @@ async fn cost_enforcement_config_defaults() {
 // ── Configurable macro tests ──
 
 #[test]
-async fn matrix_secret_fields_discovered() {
-    let mx = MatrixConfig {
-        enabled: true,
-        homeserver: "https://m.org".into(),
-        access_token: Some("tok".into()),
-        user_id: None,
-        device_id: None,
-        allowed_rooms: vec!["!r:m".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    let fields = mx.secret_fields();
-    assert_eq!(fields.len(), 3);
-    assert_eq!(fields[0].name, "channels.matrix.access_token");
-    assert_eq!(fields[0].category, "Channels");
-    assert!(fields[0].is_set);
-    assert_eq!(fields[1].name, "channels.matrix.recovery_key");
-    assert!(!fields[1].is_set);
-    assert_eq!(fields[2].name, "channels.matrix.password");
-    assert!(!fields[2].is_set);
-}
-
-#[test]
-async fn matrix_secret_fields_empty_not_set() {
-    let mx = MatrixConfig {
-        enabled: true,
-        homeserver: "https://m.org".into(),
-        access_token: None,
-        user_id: None,
-        device_id: None,
-        allowed_rooms: vec!["!r:m".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    let fields = mx.secret_fields();
-    assert!(!fields[0].is_set);
-}
-
-#[test]
 async fn set_secret_updates_field() {
-    let mut mx = MatrixConfig {
-        enabled: true,
-        homeserver: "https://m.org".into(),
-        access_token: Some("old".into()),
-        user_id: None,
-        device_id: None,
-        allowed_rooms: vec!["!r:m".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
+    let mut mx = TelegramConfig {
+        bot_token: "old".into(),
+        ..Default::default()
     };
-    mx.set_secret("channels.matrix.access_token", "new-token".into())
+    mx.set_secret("channels.telegram.bot_token", "new-token".into())
         .unwrap();
-    assert_eq!(mx.access_token.as_deref(), Some("new-token"));
+    assert_eq!(mx.bot_token, "new-token");
 }
 
 #[test]
 async fn set_secret_unknown_name_fails() {
-    let mut mx = MatrixConfig {
-        enabled: true,
-        homeserver: "https://m.org".into(),
-        access_token: Some("tok".into()),
-        user_id: None,
-        device_id: None,
-        allowed_rooms: vec!["!r:m".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
+    let mut mx = TelegramConfig {
+        bot_token: "tok".into(),
+        ..Default::default()
     };
     assert!(
-        mx.set_secret("channels.matrix.nonexistent", "val".into())
+        mx.set_secret("channels.telegram.nonexistent", "val".into())
             .is_err()
     );
 }
@@ -8386,35 +7955,18 @@ async fn config_tree_traversal_discovers_nested_secrets() {
         .ensure("anthropic", "default")
         .expect("anthropic typed slot")
         .api_key = Some("test-key".into());
-    config.channels.matrix.insert(
+    config.channels.telegram.insert(
         "default".to_string(),
-        MatrixConfig {
-            enabled: true,
-            homeserver: "https://m.org".into(),
-            access_token: Some("mx-tok".into()),
-            user_id: None,
-            device_id: None,
-            allowed_rooms: vec!["!r:m".into()],
-            interrupt_on_new_message: false,
-            stream_mode: StreamMode::default(),
-            draft_update_interval_ms: 1500,
-            multi_message_delay_ms: 800,
-            recovery_key: None,
-            mention_only: false,
-            password: None,
-            approval_timeout_secs: 300,
-            reply_in_thread: true,
-            ack_reactions: Some(true),
-            excluded_tools: vec![],
-            reply_min_interval_secs: 0,
-            reply_queue_depth_max: 0,
+        TelegramConfig {
+            bot_token: "old".into(),
+            ..Default::default()
         },
     );
 
     let fields = config.secret_fields();
     let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
-    assert!(names.contains(&"channels.matrix.access_token"));
-    assert!(names.contains(&"channels.matrix.recovery_key"));
+    assert!(names.contains(&"channels.telegram.bot_token"));
+
     assert!(
         names.contains(&"http_request.secrets"),
         "http_request.secrets must be classified as a secret map"
@@ -8424,85 +7976,20 @@ async fn config_tree_traversal_discovers_nested_secrets() {
 #[test]
 async fn config_set_secret_dispatches_to_child() {
     let mut config = Config::default();
-    config.channels.matrix.insert(
+    config.channels.telegram.insert(
         "default".to_string(),
-        MatrixConfig {
-            enabled: true,
-            homeserver: "https://m.org".into(),
-            access_token: Some("old".into()),
-            user_id: None,
-            device_id: None,
-            allowed_rooms: vec!["!r:m".into()],
-            interrupt_on_new_message: false,
-            stream_mode: StreamMode::default(),
-            draft_update_interval_ms: 1500,
-            multi_message_delay_ms: 800,
-            recovery_key: None,
-            mention_only: false,
-            password: None,
-            approval_timeout_secs: 300,
-            reply_in_thread: true,
-            ack_reactions: Some(true),
-            excluded_tools: vec![],
-            reply_min_interval_secs: 0,
-            reply_queue_depth_max: 0,
+        TelegramConfig {
+            bot_token: "old".into(),
+            ..Default::default()
         },
     );
 
     config
-        .set_secret("channels.matrix.access_token", "new".into())
+        .set_secret("channels.telegram.bot_token", "new".into())
         .unwrap();
     assert_eq!(
-        config
-            .channels
-            .matrix
-            .get("default")
-            .unwrap()
-            .access_token
-            .as_deref(),
-        Some("new")
-    );
-}
-
-#[test]
-async fn config_set_secret_dispatches_to_matrix_child() {
-    let mut config = Config::default();
-    config.channels.matrix.insert(
-        "default".to_string(),
-        MatrixConfig {
-            enabled: true,
-            homeserver: "https://m.org".into(),
-            access_token: Some("old".into()),
-            user_id: None,
-            device_id: None,
-            allowed_rooms: vec!["!r:m".into()],
-            interrupt_on_new_message: false,
-            stream_mode: StreamMode::default(),
-            draft_update_interval_ms: 1500,
-            multi_message_delay_ms: 800,
-            mention_only: false,
-            recovery_key: None,
-            password: None,
-            approval_timeout_secs: 300,
-            reply_in_thread: true,
-            ack_reactions: Some(true),
-            excluded_tools: vec![],
-            reply_min_interval_secs: 0,
-            reply_queue_depth_max: 0,
-        },
-    );
-    config
-        .set_secret("channels.matrix.access_token", "sk-test".into())
-        .unwrap();
-    assert_eq!(
-        config
-            .channels
-            .matrix
-            .get("default")
-            .unwrap()
-            .access_token
-            .as_deref(),
-        Some("sk-test")
+        config.channels.telegram.get("default").unwrap().bot_token,
+        "new"
     );
 }
 
@@ -8580,38 +8067,19 @@ async fn encrypt_decrypt_roundtrip_via_macro() {
     let dir = TempDir::new().unwrap();
     let store = crate::secrets::SecretStore::new(dir.path(), true);
 
-    let mut mx = MatrixConfig {
-        enabled: true,
-        homeserver: "https://m.org".into(),
-        access_token: Some("plaintext-token".into()),
-        user_id: None,
-        device_id: None,
-        allowed_rooms: vec!["!r:m".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
+    let mut mx = TelegramConfig {
+        bot_token: "plaintext-token".into(),
+        ..Default::default()
     };
 
     // Encrypt
     mx.encrypt_secrets(&store).unwrap();
-    assert!(crate::secrets::SecretStore::is_encrypted(
-        mx.access_token.as_deref().unwrap_or_default()
-    ));
-    assert_ne!(mx.access_token.as_deref(), Some("plaintext-token"));
+    assert!(crate::secrets::SecretStore::is_encrypted(&mx.bot_token));
+    assert_ne!(mx.bot_token, "plaintext-token");
 
     // Decrypt
     mx.decrypt_secrets(&store).unwrap();
-    assert_eq!(mx.access_token.as_deref(), Some("plaintext-token"));
+    assert_eq!(mx.bot_token, "plaintext-token");
 }
 
 #[test]
@@ -8619,34 +8087,17 @@ async fn encrypt_skips_already_encrypted() {
     let dir = TempDir::new().unwrap();
     let store = crate::secrets::SecretStore::new(dir.path(), true);
 
-    let mut mx = MatrixConfig {
-        enabled: true,
-        homeserver: "https://m.org".into(),
-        access_token: Some("plaintext-token".into()),
-        user_id: None,
-        device_id: None,
-        allowed_rooms: vec!["!r:m".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
+    let mut mx = TelegramConfig {
+        bot_token: "plaintext-token".into(),
+        ..Default::default()
     };
 
     mx.encrypt_secrets(&store).unwrap();
-    let first_encrypted = mx.access_token.clone();
+    let first_encrypted = mx.bot_token.clone();
 
     // Encrypt again — should be idempotent
     mx.encrypt_secrets(&store).unwrap();
-    assert_eq!(mx.access_token, first_encrypted);
+    assert_eq!(mx.bot_token, first_encrypted);
 }
 
 #[test]
@@ -8654,92 +8105,67 @@ async fn encrypt_no_op_on_disabled_store() {
     let dir = TempDir::new().unwrap();
     let store = crate::secrets::SecretStore::new(dir.path(), false);
 
-    let mut mx = MatrixConfig {
-        enabled: true,
-        homeserver: "https://m.org".into(),
-        access_token: Some("plaintext-token".into()),
-        user_id: None,
-        device_id: None,
-        allowed_rooms: vec!["!r:m".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
+    let mut mx = TelegramConfig {
+        bot_token: "plaintext-token".into(),
+        ..Default::default()
     };
 
     mx.encrypt_secrets(&store).unwrap();
     // With encryption disabled, value should stay plaintext
-    assert_eq!(mx.access_token.as_deref(), Some("plaintext-token"));
+    assert_eq!(mx.bot_token, "plaintext-token");
 }
 
 // ── Property method tests ──
 
-fn test_matrix_config() -> MatrixConfig {
-    MatrixConfig {
-        enabled: true,
-        homeserver: "https://m.org".into(),
-        access_token: Some("tok".into()),
-        user_id: Some("@bot:m.org".into()),
-        device_id: None,
-        allowed_rooms: vec!["!r:m".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
+fn test_telegram_config() -> TelegramConfig {
+    TelegramConfig {
+        bot_token: "tok".into(),
+        api_base_url: "https://m.org".into(),
+        proxy_url: Some("@bot:m.org".into()),
         draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
+        ..Default::default()
     }
 }
 
 #[test]
 async fn prop_fields_returns_typed_entries() {
-    let mx = test_matrix_config();
+    let mx = test_telegram_config();
     let fields = mx.prop_fields();
     let by_name: std::collections::HashMap<&str, &crate::traits::PropFieldInfo> =
         fields.iter().map(|f| (f.name.as_str(), f)).collect();
 
     // String field
-    let homeserver = by_name["channels.matrix.homeserver"];
+    let homeserver = by_name["channels.telegram.api_base_url"];
     assert_eq!(homeserver.type_hint, "String");
     assert_eq!(homeserver.display_value, "https://m.org");
 
     // Option<String> — set
-    let user_id = by_name["channels.matrix.user_id"];
+    let user_id = by_name["channels.telegram.proxy_url"];
     assert_eq!(user_id.type_hint, "Option<String>");
     assert_eq!(user_id.display_value, "@bot:m.org");
 
-    // Option<String> — unset
-    let device_id = by_name["channels.matrix.device_id"];
-    assert_eq!(device_id.display_value, "<unset>");
+    // Option<String> — unset (proxy_url cleared on a clone)
+    let mut cleared = test_telegram_config();
+    cleared.proxy_url = None;
+    let fields = cleared.prop_fields();
+    let unset = fields
+        .iter()
+        .find(|f| f.name == "channels.telegram.proxy_url")
+        .expect("proxy_url field present");
+    assert_eq!(unset.display_value, "<unset>");
 
     // u64 field
-    let interval = by_name["channels.matrix.draft_update_interval_ms"];
+    let interval = by_name["channels.telegram.draft_update_interval_ms"];
     assert_eq!(interval.type_hint, "u64");
     assert_eq!(interval.display_value, "1500");
 
     // Enum field
-    let stream = by_name["channels.matrix.stream_mode"];
+    let stream = by_name["channels.telegram.stream_mode"];
     assert!(stream.is_enum());
     assert!(stream.enum_variants.is_some());
 
     // Secret field — masked
-    let token = by_name["channels.matrix.access_token"];
+    let token = by_name["channels.telegram.bot_token"];
     assert!(token.is_secret);
     assert_eq!(token.display_value, "****");
 
@@ -8877,126 +8303,131 @@ async fn generated_config_types_keep_schema_descriptions() {
 
 #[test]
 async fn get_prop_returns_values_by_path() {
-    let mx = test_matrix_config();
+    let mx = test_telegram_config();
 
     assert_eq!(
-        mx.get_prop("channels.matrix.homeserver").unwrap(),
+        mx.get_prop("channels.telegram.api_base_url").unwrap(),
         "https://m.org"
     );
     assert_eq!(
-        mx.get_prop("channels.matrix.draft_update_interval_ms")
+        mx.get_prop("channels.telegram.draft_update_interval_ms")
             .unwrap(),
         "1500"
     );
     assert_eq!(
-        mx.get_prop("channels.matrix.user_id").unwrap(),
+        mx.get_prop("channels.telegram.proxy_url").unwrap(),
         "@bot:m.org"
     );
-    assert_eq!(mx.get_prop("channels.matrix.device_id").unwrap(), "<unset>");
+    assert_eq!(
+        mx.get_prop("channels.telegram.mention_only").unwrap(),
+        "false"
+    );
     // Secrets return masked value
     assert_eq!(
-        mx.get_prop("channels.matrix.access_token").unwrap(),
+        mx.get_prop("channels.telegram.bot_token").unwrap(),
         "**** (encrypted)"
     );
 }
 
 #[test]
 async fn get_prop_unknown_path_fails() {
-    let mx = test_matrix_config();
-    assert!(mx.get_prop("channels.matrix.nonexistent").is_err());
+    let mx = test_telegram_config();
+    assert!(mx.get_prop("channels.telegram.nonexistent").is_err());
 }
 
 #[test]
 async fn set_prop_string() {
-    let mut mx = test_matrix_config();
-    mx.set_prop("channels.matrix.homeserver", "https://new.org")
+    let mut mx = test_telegram_config();
+    mx.set_prop("channels.telegram.api_base_url", "https://new.org")
         .unwrap();
-    assert_eq!(mx.homeserver, "https://new.org");
+    assert_eq!(mx.api_base_url, "https://new.org");
 }
 
 #[test]
 async fn set_prop_bool() {
-    let mut mx = test_matrix_config();
-    mx.set_prop("channels.matrix.interrupt_on_new_message", "true")
+    let mut mx = test_telegram_config();
+    mx.set_prop("channels.telegram.interrupt_on_new_message", "true")
         .unwrap();
     assert!(mx.interrupt_on_new_message);
 }
 
 #[test]
 async fn set_prop_bool_rejects_invalid() {
-    let mut mx = test_matrix_config();
+    let mut mx = test_telegram_config();
     let err = mx
-        .set_prop("channels.matrix.interrupt_on_new_message", "yes")
+        .set_prop("channels.telegram.interrupt_on_new_message", "yes")
         .unwrap_err();
     assert!(err.to_string().contains("bool"));
 }
 
 #[test]
 async fn set_prop_u64() {
-    let mut mx = test_matrix_config();
-    mx.set_prop("channels.matrix.draft_update_interval_ms", "3000")
+    let mut mx = test_telegram_config();
+    mx.set_prop("channels.telegram.draft_update_interval_ms", "3000")
         .unwrap();
     assert_eq!(mx.draft_update_interval_ms, 3000);
 }
 
 #[test]
 async fn set_prop_u64_rejects_invalid() {
-    let mut mx = test_matrix_config();
+    let mut mx = test_telegram_config();
     assert!(
-        mx.set_prop("channels.matrix.draft_update_interval_ms", "abc")
+        mx.set_prop("channels.telegram.draft_update_interval_ms", "abc")
             .is_err()
     );
 }
 
 #[test]
 async fn set_prop_option_string_set_and_clear() {
-    let mut mx = test_matrix_config();
-    mx.set_prop("channels.matrix.user_id", "@new:m.org")
+    let mut mx = test_telegram_config();
+    mx.set_prop("channels.telegram.proxy_url", "@new:m.org")
         .unwrap();
-    assert_eq!(mx.user_id.as_deref(), Some("@new:m.org"));
+    assert_eq!(mx.proxy_url.as_deref(), Some("@new:m.org"));
 
     // Empty string clears Option
-    mx.set_prop("channels.matrix.user_id", "").unwrap();
-    assert!(mx.user_id.is_none());
+    mx.set_prop("channels.telegram.proxy_url", "").unwrap();
+    assert!(mx.proxy_url.is_none());
 }
 
 #[test]
 async fn set_prop_enum() {
-    let mut mx = test_matrix_config();
-    mx.set_prop("channels.matrix.stream_mode", "partial")
+    let mut mx = test_telegram_config();
+    mx.set_prop("channels.telegram.stream_mode", "partial")
         .unwrap();
     assert_eq!(mx.stream_mode, StreamMode::Partial);
 
-    mx.set_prop("channels.matrix.stream_mode", "multi_message")
+    mx.set_prop("channels.telegram.stream_mode", "multi_message")
         .unwrap();
     assert_eq!(mx.stream_mode, StreamMode::MultiMessage);
 }
 
 #[test]
 async fn set_prop_enum_rejects_invalid() {
-    let mut mx = test_matrix_config();
+    let mut mx = test_telegram_config();
     let err = mx
-        .set_prop("channels.matrix.stream_mode", "invalid")
+        .set_prop("channels.telegram.stream_mode", "invalid")
         .unwrap_err();
     assert!(err.to_string().contains("expected one of"));
 }
 
 #[test]
 async fn set_prop_unknown_path_fails() {
-    let mut mx = test_matrix_config();
-    assert!(mx.set_prop("channels.matrix.nonexistent", "val").is_err());
+    let mut mx = test_telegram_config();
+    assert!(mx.set_prop("channels.telegram.nonexistent", "val").is_err());
 }
 
 #[test]
 async fn prop_is_secret_static_check() {
-    assert!(MatrixConfig::prop_is_secret("channels.matrix.access_token"));
-    assert!(MatrixConfig::prop_is_secret("channels.matrix.recovery_key"));
-    assert!(!MatrixConfig::prop_is_secret("channels.matrix.homeserver"));
-    assert!(!MatrixConfig::prop_is_secret(
-        "channels.matrix.interrupt_on_new_message"
+    assert!(TelegramConfig::prop_is_secret(
+        "channels.telegram.bot_token"
+    ));
+    assert!(!TelegramConfig::prop_is_secret(
+        "channels.telegram.api_base_url"
+    ));
+    assert!(!TelegramConfig::prop_is_secret(
+        "channels.telegram.interrupt_on_new_message"
     ));
 }
-
 #[test]
 async fn apply_env_overrides_rejects_schema_version() {
     let _env_guard = env_override_lock().await;
@@ -9024,20 +8455,20 @@ async fn apply_env_overrides_rejects_schema_version() {
 async fn prop_is_env_overridden_reflects_env_overridden_paths() {
     // Empty by default — no env applied.
     let mut cfg = Config::default();
-    assert!(!cfg.prop_is_env_overridden("channels.matrix.homeserver"));
+    assert!(!cfg.prop_is_env_overridden("channels.telegram.api_base_url"));
     assert!(!cfg.prop_is_env_overridden("gateway.request_timeout_secs"));
 
     // Populate the field directly (the same set that
     // `apply_env_overrides` returns from `load_or_init`).
     cfg.env_overridden_paths = std::collections::HashSet::from([
-        "channels.matrix.homeserver".to_string(),
+        "channels.telegram.api_base_url".to_string(),
         "gateway.request_timeout_secs".to_string(),
     ]);
 
     // True for paths in the list, false for anything else.
-    assert!(cfg.prop_is_env_overridden("channels.matrix.homeserver"));
+    assert!(cfg.prop_is_env_overridden("channels.telegram.api_base_url"));
     assert!(cfg.prop_is_env_overridden("gateway.request_timeout_secs"));
-    assert!(!cfg.prop_is_env_overridden("channels.matrix.access_token"));
+    assert!(!cfg.prop_is_env_overridden("channels.telegram.bot_token"));
     assert!(!cfg.prop_is_env_overridden("gateway.host"));
     // Empty path / non-schema path → false.
     assert!(!cfg.prop_is_env_overridden(""));
@@ -9477,11 +8908,11 @@ api_key = "op://zeroclaw/provider/openai-api-key"
 
 #[test]
 async fn enum_variants_callback_returns_values() {
-    let mx = test_matrix_config();
+    let mx = test_telegram_config();
     let fields = mx.prop_fields();
     let stream_field = fields
         .iter()
-        .find(|f| f.name == "channels.matrix.stream_mode")
+        .find(|f| f.name == "channels.telegram.stream_mode")
         .unwrap();
     let variants = (stream_field.enum_variants.unwrap())();
     assert!(variants.contains(&"off".to_string()));
@@ -10337,91 +9768,63 @@ async fn discord_alias_create_survives_incremental_save() {
 #[test]
 async fn init_defaults_instantiates_none_sections() {
     let mut config = Config::default();
-    assert!(config.channels.matrix.is_empty());
+    assert!(config.channels.telegram.is_empty());
 
     // Channels are HashMaps — init_defaults cannot insert a default key
     // (there is no meaningful default alias). Callers use create_map_key.
     config
-        .create_map_key("channels.matrix", "default")
-        .expect("create_map_key should insert a default matrix entry");
+        .create_map_key("channels.telegram", "default")
+        .expect("create_map_key should insert a default telegram entry");
     assert!(
-        config.channels.matrix.contains_key("default"),
+        config.channels.telegram.contains_key("default"),
         "create_map_key must add the 'default' alias"
     );
 
     // init_defaults on an already-populated map section is a no-op.
-    let initialized = config.init_defaults(Some("channels.matrix"));
+    let initialized = config.init_defaults(Some("channels.telegram"));
     assert!(
-        !initialized.contains(&"channels.matrix"),
-        "init_defaults should not report channels.matrix when entry already exists"
-    );
-}
-
-#[test]
-async fn deserialized_matrix_set_prop_round_trips_vec_string() {
-    // Mirror the real-world daemon flow: config loaded from disk where
-    // [channels.matrix] is present (possibly with all default fields),
-    // then a PATCH from the dashboard hits set_prop.
-    let toml_src = r#"
-schema_version = 3
-
-[channels.matrix.default]
-enabled = false
-homeserver = ""
-access_token = ""
-allowed_rooms = []
-allowed_users = []
-"#;
-    let mut config: Config = toml::from_str(toml_src).expect("parse toml");
-    assert!(
-        config.channels.matrix.contains_key("default"),
-        "matrix must have a 'default' alias after deserialize"
-    );
-
-    config
-        .set_prop(
-            "channels.matrix.default.allowed_rooms",
-            r#"["alice","bob"]"#,
-        )
-        .expect("set_prop should succeed against deserialized matrix");
-    assert_eq!(
-        config.channels.matrix.get("default").unwrap().allowed_rooms,
-        vec!["alice".to_string(), "bob".to_string()],
+        !initialized.contains(&"channels.telegram"),
+        "init_defaults should not report channels.telegram when entry already exists"
     );
 }
 
 #[test]
 async fn init_defaults_then_set_prop_round_trips_vec_string() {
     // Regression for Channels picker → form → save:
-    // 1. create_map_key inserts channels.matrix["default"] = MatrixConfig::default()
-    // 2. set_prop on channels.matrix.default.allowed_rooms must accept a JSON-array
+    // 1. create_map_key inserts channels.telegram["default"] = TelegramConfig::default()
+    // 2. set_prop on channels.telegram.default.excluded_tools must accept a JSON-array
     //    string (the shape coerce_for_set_prop emits for Vec<String>).
     // 3. get_prop reads it back.
     let mut config = Config::default();
     config
-        .create_map_key("channels.matrix", "default")
-        .expect("create_map_key should insert a default matrix entry");
-    assert!(config.channels.matrix.contains_key("default"));
+        .create_map_key("channels.telegram", "default")
+        .expect("create_map_key should insert a default telegram entry");
+    assert!(config.channels.telegram.contains_key("default"));
 
     // prop_fields must surface the kebab path so the form can render it.
     let has_field = config
         .prop_fields()
         .iter()
-        .any(|f| f.name == "channels.matrix.default.allowed_rooms");
+        .any(|f| f.name == "channels.telegram.default.excluded_tools");
     assert!(
         has_field,
-        "channels.matrix.default.allowed_rooms must appear in prop_fields after init"
+        "channels.telegram.default.excluded_tools must appear in prop_fields after init"
     );
 
     // set_prop with the JSON-array string the gateway PATCH path produces.
     config
         .set_prop(
-            "channels.matrix.default.allowed_rooms",
+            "channels.telegram.default.excluded_tools",
             r#"["alice","bob"]"#,
         )
         .expect("set_prop should accept JSON-array string for Vec<String>");
     assert_eq!(
-        config.channels.matrix.get("default").unwrap().allowed_rooms,
+        config
+            .channels
+            .telegram
+            .get("default")
+            .unwrap()
+            .excluded_tools,
         vec!["alice".to_string(), "bob".to_string()],
     );
 }
@@ -10707,15 +10110,20 @@ async fn init_defaults_skips_already_set() {
     let mut config = Config::default();
     config
         .channels
-        .matrix
-        .insert("default".to_string(), test_matrix_config());
+        .telegram
+        .insert("default".to_string(), test_telegram_config());
 
-    let initialized = config.init_defaults(Some("channels.matrix"));
+    let initialized = config.init_defaults(Some("channels.telegram"));
     // Already set — should not re-initialize
-    assert!(!initialized.contains(&"channels.matrix"));
+    assert!(!initialized.contains(&"channels.telegram"));
     // Original value preserved
     assert_eq!(
-        config.channels.matrix.get("default").unwrap().homeserver,
+        config
+            .channels
+            .telegram
+            .get("default")
+            .unwrap()
+            .api_base_url,
         "https://m.org"
     );
 }
@@ -10725,23 +10133,28 @@ async fn nested_get_set_prop_traverses_config_tree() {
     let mut config = Config::default();
     config
         .channels
-        .matrix
-        .insert("default".to_string(), test_matrix_config());
+        .telegram
+        .insert("default".to_string(), test_telegram_config());
 
-    // get_prop traverses Config → ChannelsConfig → channels.matrix["default"] → MatrixConfig
+    // get_prop traverses Config → ChannelsConfig → channels.telegram["default"] → TelegramConfig
     assert_eq!(
         config
-            .get_prop("channels.matrix.default.homeserver")
+            .get_prop("channels.telegram.default.api_base_url")
             .unwrap(),
         "https://m.org"
     );
 
     // set_prop traverses the same path
     config
-        .set_prop("channels.matrix.default.homeserver", "https://new.org")
+        .set_prop("channels.telegram.default.api_base_url", "https://new.org")
         .unwrap();
     assert_eq!(
-        config.channels.matrix.get("default").unwrap().homeserver,
+        config
+            .channels
+            .telegram
+            .get("default")
+            .unwrap()
+            .api_base_url,
         "https://new.org"
     );
 }
@@ -10893,8 +10306,8 @@ async fn channels_root_settings_stay_on_direct_prop_surface() {
     config.init_defaults(None);
     config
         .channels
-        .matrix
-        .insert("default".into(), MatrixConfig::default());
+        .telegram
+        .insert("default".into(), TelegramConfig::default());
 
     let paths: Vec<_> = config
         .prop_fields()
@@ -10921,11 +10334,11 @@ async fn channels_root_settings_stay_on_direct_prop_surface() {
     assert!(
         paths
             .iter()
-            .any(|path| path == "channels.matrix.default.enabled"),
+            .any(|path| path == "channels.telegram.default.enabled"),
         "fixture should include a nested channel alias field"
     );
     assert!(
-        !direct_channel_paths.contains(&"channels.matrix.default.enabled"),
+        !direct_channel_paths.contains(&"channels.telegram.default.enabled"),
         "global channel settings must not include per-alias fields"
     );
 }
@@ -10958,8 +10371,8 @@ async fn credential_shaped_prop_fields_have_explicit_classification() {
     );
     config
         .channels
-        .matrix
-        .insert("default".into(), MatrixConfig::default());
+        .telegram
+        .insert("default".into(), TelegramConfig::default());
 
     let fields = config.prop_fields();
     let missing: Vec<_> = fields
@@ -11013,8 +10426,8 @@ async fn prop_fields_carry_credential_classification_from_schema_fields() {
     );
     config
         .channels
-        .matrix
-        .insert("default".into(), MatrixConfig::default());
+        .telegram
+        .insert("default".into(), TelegramConfig::default());
 
     let fields = config.prop_fields();
     let class_for = |name: &str| {
@@ -11037,7 +10450,7 @@ async fn prop_fields_carry_credential_classification_from_schema_fields() {
         Some(crate::config::CredentialSurfaceClass::EncryptedSecret)
     );
     assert_eq!(
-        class_for("channels.matrix.default.access_token"),
+        class_for("channels.telegram.default.bot_token"),
         Some(crate::config::CredentialSurfaceClass::EncryptedSecret)
     );
     // model_routes and embedding_routes are now #[nested] Vec fields —
@@ -11079,7 +10492,7 @@ async fn prop_fields_carry_credential_classification_from_schema_fields() {
         "providers.transcription.local_whisper.default.bearer_token"
     ));
     assert!(Config::prop_is_secret(
-        "channels.matrix.default.access_token"
+        "channels.telegram.default.bot_token"
     ));
 }
 
@@ -11331,19 +10744,6 @@ async fn channel_approval_timeout_secs_defaults_to_300() {
     let discord: DiscordConfig = serde_json::from_str(r#"{"bot_token":"tok"}"#).unwrap();
     assert_eq!(discord.approval_timeout_secs, 300);
 
-    let slack: SlackConfig = serde_json::from_str(r#"{"bot_token":"tok"}"#).unwrap();
-    assert_eq!(slack.approval_timeout_secs, 300);
-
-    let signal: SignalConfig =
-        serde_json::from_str(r#"{"http_url":"http://localhost","account":"+1"}"#).unwrap();
-    assert_eq!(signal.approval_timeout_secs, 300);
-
-    let matrix: MatrixConfig = serde_json::from_str(
-        r#"{"homeserver":"https://matrix.org","access_token":"tok","allowed_users":[]}"#,
-    )
-    .unwrap();
-    assert_eq!(matrix.approval_timeout_secs, 300);
-
     let whatsapp: WhatsAppConfig = serde_json::from_str(r#"{}"#).unwrap();
     assert_eq!(whatsapp.approval_timeout_secs, 300);
 }
@@ -11353,22 +10753,6 @@ async fn channel_approval_timeout_secs_explicit_override() {
     let discord: DiscordConfig =
         serde_json::from_str(r#"{"bot_token":"tok","approval_timeout_secs":60}"#).unwrap();
     assert_eq!(discord.approval_timeout_secs, 60);
-
-    let slack: SlackConfig =
-        serde_json::from_str(r#"{"bot_token":"tok","approval_timeout_secs":120}"#).unwrap();
-    assert_eq!(slack.approval_timeout_secs, 120);
-
-    let signal: SignalConfig = serde_json::from_str(
-        r#"{"http_url":"http://localhost","account":"+1","approval_timeout_secs":90}"#,
-    )
-    .unwrap();
-    assert_eq!(signal.approval_timeout_secs, 90);
-
-    let matrix: MatrixConfig = serde_json::from_str(
-        r#"{"homeserver":"https://matrix.org","access_token":"tok","allowed_users":[],"approval_timeout_secs":45}"#,
-    )
-    .unwrap();
-    assert_eq!(matrix.approval_timeout_secs, 45);
 
     let whatsapp: WhatsAppConfig =
         serde_json::from_str(r#"{"approval_timeout_secs":180}"#).unwrap();
@@ -13327,7 +12711,11 @@ async fn channel_presence_names_are_unique_and_undeliverable_set_is_fixed() {
         .map(|(name, _, _, _)| *name)
         .collect();
     undeliverable.sort_unstable();
-    let mut expected: Vec<&str> = crate::schema::RETIRED_TRANSPORT_KINDS.to_vec();
+    let mut expected: Vec<&str> = crate::schema::RETIRED_TRANSPORT_KINDS
+        .to_vec()
+        .into_iter()
+        .filter(|kind| !SCHEMA_DELETED.contains(kind))
+        .collect();
     expected.extend_from_slice(&["voice_duplex"]);
     expected.sort_unstable();
     assert_eq!(
@@ -13336,6 +12724,17 @@ async fn channel_presence_names_are_unique_and_undeliverable_set_is_fixed() {
          update channel_presence and is_channel_deliverable together"
     );
 }
+
+const SCHEMA_DELETED: &[&str] = &[
+    "slack",
+    "mattermost",
+    "imessage",
+    "matrix",
+    "signal",
+    "irc",
+    "twitch",
+    "lark",
+];
 
 #[test]
 async fn retired_transport_kinds_complement_the_live_surfaces() {
@@ -13354,14 +12753,23 @@ async fn retired_transport_kinds_complement_the_live_surfaces() {
          the voice-duplex Node path (#584)"
     );
 
-    // Every RETIRED_TRANSPORT_KINDS entry is a real registry row, and
-    // channels()' display kinds resolve through the same predicate.
+    // Every RETIRED_TRANSPORT_KINDS entry still resolves through the
+    // predicate, but Slice 3-deleted schemas have no registry row at all:
+    // a leftover section cannot even be configured, so bind/heartbeat
+    // rejection plus the load-time tombstone are their only surfaces.
     for kind in crate::schema::RETIRED_TRANSPORT_KINDS {
-        assert!(
-            presence.iter().any(|(name, _, _, _)| name == kind),
-            "RETIRED_TRANSPORT_KINDS entry {kind} has no channel_presence row"
-        );
         assert!(crate::schema::is_retired_transport(kind), "{kind}");
+        if SCHEMA_DELETED.contains(kind) {
+            assert!(
+                !presence.iter().any(|(name, _, _, _)| name == kind),
+                "schema-deleted kind {kind} must not have a channel_presence row"
+            );
+        } else {
+            assert!(
+                presence.iter().any(|(name, _, _, _)| name == kind),
+                "RETIRED_TRANSPORT_KINDS entry {kind} has no channel_presence row"
+            );
+        }
     }
     for info in ChannelsConfig::default().channels() {
         assert_eq!(
@@ -13378,7 +12786,7 @@ async fn retired_transport_kinds_complement_the_live_surfaces() {
     assert!(crate::schema::is_retired_transport("voice-wake"));
     assert!(!crate::schema::is_retired_transport("telegram"));
     let cfg = ChannelsConfig::default();
-    assert!(cfg.is_retired_channel("Slack"));
+    assert!(!cfg.is_known_channel("Slack"));
     assert!(!cfg.is_known_channel("linq"));
 }
 

@@ -169,8 +169,6 @@ non_row_features = [
 # distribution artifacts. This list is the complete positive policy beyond
 # `default`; target-specific exclusions are resolved from the table below.
 dist_extra_features = [
-    "channel-matrix",
-    "channel-lark",
     "whatsapp-web",
 ]
 
@@ -246,12 +244,7 @@ default-channels = [
 
 # Historical broad channel bundle. Preserves the older default channel surface.
 channels-full = [
-    "default-channels", "channel-lark",
-    "channel-line",
-    "channel-slack", "channel-signal",
-    "channel-mattermost", "channel-irc", "channel-imessage",
-    "channel-dingtalk", "channel-qq", "channel-bluesky", "channel-git",
-    "channel-twitch", "channel-twitter", "channel-reddit", "channel-notion", "channel-amqp",
+    "default-channels", "channel-line", "channel-dingtalk", "channel-qq", "channel-bluesky", "channel-git", "channel-twitter", "channel-reddit", "channel-notion", "channel-amqp",
     "channel-mochat", "channel-wecom", "channel-wecom-ws", "channel-clawdtalk",
     "channel-voice-call",
 ]
@@ -266,16 +259,8 @@ schema-export = ["dep:zeroclaw-schema-markdown", "zeroclaw-config/schema-export"
 # Channel feature flags retained for CLI/installer preset compatibility.
 channel-email = ["zeroclaw-runtime?/email-tools"]
 channel-telegram = []
-channel-lark = []
 channel-nostr = []
-channel-matrix = []
 channel-discord = []
-channel-slack = []
-channel-signal = []
-channel-mattermost = []
-channel-irc = []
-channel-twitch = []
-channel-imessage = []
 channel-dingtalk = []
 channel-qq = []
 channel-bluesky = []
@@ -303,7 +288,7 @@ channel-voice-call = []
 channel-line = []
 # Feishu uses the same channel implementation as Lark; `use_feishu = true`
 # selects Feishu endpoints at runtime.
-channel-feishu = ["channel-lark"]
+channel-feishu = []
 whatsapp-web = []
 voice-wake = []
 memory-tachi = ["zeroclaw-memory/tachi"]
@@ -329,7 +314,7 @@ ci-all = [
     "voice-surface",
     "agent-runtime",
     "channels-full",
-    "channel-nostr", "channel-matrix", "whatsapp-web",
+    "channel-nostr", "whatsapp-web",
     "observability-prometheus",
     "sandbox-landlock", "sandbox-bubblewrap",
     "zeroclaw-runtime/heavy-tests",

@@ -36,7 +36,9 @@ struct SeedMockChannel;
 
 impl ::zeroclaw_api::attribution::Attributable for SeedMockChannel {
     fn role(&self) -> ::zeroclaw_api::attribution::Role {
-        ::zeroclaw_api::attribution::Role::Channel(::zeroclaw_api::attribution::ChannelKind::Matrix)
+        ::zeroclaw_api::attribution::Role::Channel(
+            ::zeroclaw_api::attribution::ChannelKind::Telegram,
+        )
     }
 
     fn alias(&self) -> &str {

@@ -793,7 +793,7 @@ mod tests {
     fn dist_matches_lean_release_contract() {
         let features = resolve_feature_list(&root(), &Selection::Dist).unwrap();
         let mut expected = resolve_feature_list(&root(), &Selection::Full).unwrap();
-        expected.extend(["channel-matrix", "channel-lark", "whatsapp-web"].map(str::to_owned));
+        expected.extend(["whatsapp-web"].map(str::to_owned));
         expected.sort();
         expected.dedup();
         assert_eq!(features, expected);
@@ -871,11 +871,11 @@ mod tests {
             .unwrap();
         let extras = dist_extra_features(&pkg).unwrap();
         assert!(
-            extras.contains(&"channel-matrix".to_string()),
+            extras.contains(&"whatsapp-web".to_string()),
             "distribution extras come from Cargo.toml registry"
         );
-        assert!(extras.contains(&"channel-lark".to_string()));
-        assert!(extras.contains(&"whatsapp-web".to_string()));
+        assert!(!extras.contains(&"channel-matrix".to_string()));
+        assert!(!extras.contains(&"channel-lark".to_string()));
     }
 
     #[test]

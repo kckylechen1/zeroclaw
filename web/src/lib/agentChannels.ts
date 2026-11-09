@@ -40,16 +40,10 @@ interface IdentityField {
 // `ChannelsConfig` and the picker derives from there; this table only
 // names which field to surface alongside the composite.
 const CHANNEL_IDENTITY: Record<string, IdentityField> = {
-  matrix: { field: 'user_id', label: 'user' },
   discord: { field: 'guild_ids', label: 'guilds' },
-  slack: { field: 'channel_ids', label: 'channels' },
-  mattermost: { field: 'channel_ids', label: 'channels' },
   telegram: { field: 'bot_token', label: '' }, // bot identity, no separate id
-  signal: { field: 'user_id', label: 'user' },
-  imessage: { field: 'user_id', label: 'user' },
   whatsapp: { field: 'user_id', label: 'user' },
   email: { field: 'address', label: '' },
-  irc: { field: 'nickname', label: 'nick' },
 };
 
 /** Parse a config-encoded value into a short identity string. The

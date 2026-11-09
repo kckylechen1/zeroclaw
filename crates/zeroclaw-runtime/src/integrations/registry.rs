@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use zeroclaw_api::config_metadata::ChannelConfig;
     use zeroclaw_config::schema::Config;
-    use zeroclaw_config::schema::{IMessageConfig, MatrixConfig, StreamMode, TelegramConfig};
+    use zeroclaw_config::schema::{StreamMode, TelegramConfig};
 
     #[test]
     fn registry_has_entries() {
@@ -189,16 +189,14 @@ mod tests {
     }
 
     #[test]
-    fn retired_transports_produce_no_integration_entry_even_when_configured() {
-        let mut config = Config::default();
-        config
-            .channels
-            .slack
-            .insert("default".to_string(), Default::default());
+    fn retired_transports_produce_no_integration_entry() {
+        let config = Config::default();
         let entries = all_integrations(&config);
         assert!(
-            entries.iter().all(|e| e.name != "Slack"),
-            "retired transport Slack must not appear as an integration"
+            entries
+                .iter()
+                .all(|e| e.name != "Slack" && e.name != "Matrix"),
+            "retired transports must never surface as integrations"
         );
     }
 
@@ -237,40 +235,6 @@ mod tests {
         let display_name = <TelegramConfig as ChannelConfig>::name();
         let tg = entries.iter().find(|e| e.name == display_name).unwrap();
         assert!(matches!(tg.status, IntegrationStatus::Available));
-    }
-
-    #[test]
-    fn imessage_and_matrix_are_retired_not_available() {
-        // The in-process runners are gone (#579/#581); their config sections
-        // feed nothing, so neither may surface as an Available/Active Chat
-        // integration — even when a section is populated.
-        let mut config = Config::default();
-        config.channels.imessage.insert(
-            "default".to_string(),
-            IMessageConfig {
-                enabled: true,
-                excluded_tools: vec![],
-                reply_min_interval_secs: 0,
-                reply_queue_depth_max: 0,
-            },
-        );
-        config.channels.matrix.insert(
-            "default".to_string(),
-            MatrixConfig {
-                homeserver: "https://m.org".into(),
-                ..Default::default()
-            },
-        );
-        let entries = all_integrations(&config);
-        for display_name in [
-            <IMessageConfig as ChannelConfig>::name(),
-            <MatrixConfig as ChannelConfig>::name(),
-        ] {
-            assert!(
-                entries.iter().all(|e| e.name != display_name),
-                "retired transport {display_name} must not appear in the registry"
-            );
-        }
     }
 
     /// Look up a toggle integration's status by its descriptor display

@@ -35,6 +35,8 @@ use serde::{Deserialize, Serialize};
 ///   compatibility shims will be removed in a later announced window.
 /// - `inbound_webhook_channel_removed`: a `[channels.linq]`, `[channels.wati]`,
 ///   `[channels.nextcloud_talk]` or `[channels.gmail_push]` section is still
+/// - `retired_channel_transport_removed`: a `[channels.<type>]` section for a
+///   transport whose schema was deleted by #584 Slice 3 (no runner, no tools).
 ///   present. These channels received messages only through gateway webhook
 ///   routes that were removed, so the channel types were deleted; the section
 ///   is ignored (see `RETIRED_CONFIG_SURFACES`).
@@ -149,6 +151,14 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("browser_delegate", "raw_launcher_config_removed"),
     ("subagents", "subagents_config_removed"),
     ("channels.linq", "inbound_webhook_channel_removed"),
+    ("channels.slack", "retired_channel_transport_removed"),
+    ("channels.mattermost", "retired_channel_transport_removed"),
+    ("channels.imessage", "retired_channel_transport_removed"),
+    ("channels.matrix", "retired_channel_transport_removed"),
+    ("channels.signal", "retired_channel_transport_removed"),
+    ("channels.irc", "retired_channel_transport_removed"),
+    ("channels.twitch", "retired_channel_transport_removed"),
+    ("channels.lark", "retired_channel_transport_removed"),
     ("channels.wati", "inbound_webhook_channel_removed"),
     ("channels.nextcloud_talk", "inbound_webhook_channel_removed"),
     ("channels.gmail_push", "inbound_webhook_channel_removed"),

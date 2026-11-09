@@ -69,17 +69,9 @@ fn default_v2_schema_version() -> u32 {
 pub const V3_CHANNEL_TYPES: &[&str] = &[
     "telegram",
     "discord",
-    "slack",
-    "mattermost",
     "webhook",
-    "imessage",
-    "matrix",
-    "signal",
     "whatsapp",
     "email",
-    "irc",
-    "twitch",
-    "lark",
     "line",
     "dingtalk",
     "wecom",
@@ -988,8 +980,6 @@ fn alias_wrap_channels(channels_value: toml::Value, peer_groups: &mut toml::Tabl
     // discord_history-only user with `enabled=true` survives into V3.
     fold_discord_history(&mut channels_table);
 
-    let stashed_feishu_v2 = strip_feishu_block(&mut channels_table);
-
     // Retired SOP run-side channels: MQTT/filesystem were
     // SOP-trigger-only fan-in with no remaining runtime. Drop their tables
     // during migration (loudly) instead of porting them into a config that
@@ -1070,68 +1060,7 @@ fn alias_wrap_channels(channels_value: toml::Value, peer_groups: &mut toml::Tabl
         }
     }
 
-    inject_feishu_as_lark_alias(&mut new_channels, stashed_feishu_v2);
-
     new_channels
-}
-
-/// Pre-alias-wrap: remove the V2 `[channels.feishu]` block from `channels`
-/// (so the alias-wrap loop doesn't process it) and return its body for
-/// post-wrap injection as `[channels.lark.feishu]`.
-fn strip_feishu_block(channels: &mut toml::Table) -> Option<toml::Table> {
-    let feishu_value = channels.remove("feishu")?;
-    match feishu_value {
-        toml::Value::Table(t) => Some(t),
-        _ => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "[channels.feishu] is not a table; dropping during fold to lark"
-            );
-            None
-        }
-    }
-}
-
-fn inject_feishu_as_lark_alias(new_channels: &mut toml::Table, feishu_table: Option<toml::Table>) {
-    let Some(mut feishu_table) = feishu_table else {
-        return;
-    };
-
-    feishu_table.insert("use_feishu".to_string(), toml::Value::Boolean(true));
-
-    let lark_entry = new_channels
-        .entry("lark".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    let Some(lark_aliases) = lark_entry.as_table_mut() else {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "[channels.lark] is not a table; cannot inject feishu alias"
-        );
-        return;
-    };
-
-    if lark_aliases.contains_key("feishu") {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "[channels.lark.feishu] already exists; the V2 [channels.feishu] \
-             block was dropped to avoid clobbering it. Recover the dropped \
-             value from the pre-migration <config>.backup if needed."
-        );
-        return;
-    }
-
-    lark_aliases.insert("feishu".to_string(), toml::Value::Table(feishu_table));
-    ::zeroclaw_log::record!(
-        INFO,
-        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-        "[channels.feishu] folded into [channels.lark.feishu] (use_feishu=true)"
-    );
 }
 
 fn fold_discord_history(channels: &mut toml::Table) {
@@ -1222,51 +1151,12 @@ fn apply_v2_to_v3_channel_folds(channel_type: &str, instance: &mut toml::Table) 
                 "channels.discord.guild_id folded into channels.discord.guild_ids[]"
             );
         }
-        "mattermost" if fold_string_into_array(instance, "channel_id", "channel_ids") => {
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                "channels.mattermost.channel_id folded into channels.mattermost.channel_ids[]"
-            );
-        }
         "reddit" if fold_string_into_array(instance, "subreddit", "subreddits") => {
             ::zeroclaw_log::record!(
                 INFO,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
                 "channels.reddit.subreddit folded into channels.reddit.subreddits[]"
             );
-        }
-        "signal" => {
-            // Special: V2 group_id="dm" was a sentinel meaning "DMs only".
-            // V3 splits that into a typed dm_only bool. Other group_id
-            // values fold into group_ids[] like the simpler renames.
-            if let Some(toml::Value::String(group_id)) = instance.remove("group_id")
-                && !group_id.is_empty()
-            {
-                if group_id == "dm" {
-                    instance.insert("dm_only".to_string(), toml::Value::Boolean(true));
-                    ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                        "channels.signal.group_id=\"dm\" → channels.signal.dm_only=true"
-                    );
-                } else {
-                    let entry = instance
-                        .entry("group_ids".to_string())
-                        .or_insert_with(|| toml::Value::Array(Vec::new()));
-                    if let Some(arr) = entry.as_array_mut() {
-                        let already = arr.iter().any(|v| v.as_str() == Some(group_id.as_str()));
-                        if !already {
-                            arr.push(toml::Value::String(group_id));
-                        }
-                    }
-                    ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                        "channels.signal.group_id folded into channels.signal.group_ids[]"
-                    );
-                }
-            }
         }
         "whatsapp" => {
             // The WhatsApp Cloud API backend was deleted (its gateway webhook
@@ -1299,12 +1189,8 @@ fn fold_channel_peer_auth_into_peer_groups(
     peer_groups: &mut toml::Table,
 ) {
     let Some(field_name) = (match channel_type {
-        "telegram" | "discord" | "slack" | "mattermost" | "matrix" | "irc" | "lark" | "line"
-        | "feishu" | "dingtalk" | "wecom" | "wechat" | "qq" | "twitter" | "mochat" => {
-            Some("allowed_users")
-        }
-        "imessage" => Some("allowed_contacts"),
-        "signal" => Some("allowed_from"),
+        "telegram" | "discord" | "line" | "dingtalk" | "wecom" | "wechat" | "qq" | "twitter"
+        | "mochat" => Some("allowed_users"),
         "whatsapp" => Some("allowed_numbers"),
         "email" => Some("allowed_senders"),
         "nostr" => Some("allowed_pubkeys"),

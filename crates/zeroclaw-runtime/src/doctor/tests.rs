@@ -677,9 +677,9 @@ fn doctor_flags_retired_transports_alongside_live_channels() {
             ..Default::default()
         },
     );
-    config.channels.slack.insert(
+    config.channels.wechat.insert(
         "default".to_string(),
-        zeroclaw_config::schema::SlackConfig::default(),
+        zeroclaw_config::schema::WeChatConfig::default(),
     );
 
     let mut items = Vec::new();
@@ -693,16 +693,16 @@ fn doctor_flags_retired_transports_alongside_live_channels() {
         .iter()
         .find(|i| i.message.contains("retired transports configured"))
         .expect("retired section should be named");
-    assert!(retired.message.contains("slack"));
+    assert!(retired.message.contains("wechat"));
     assert_eq!(retired.severity, Severity::Warn);
 }
 
 #[test]
 fn doctor_warns_when_only_retired_transports_are_configured() {
     let mut config = Config::default();
-    config.channels.matrix.insert(
+    config.channels.wechat.insert(
         "default".to_string(),
-        zeroclaw_config::schema::MatrixConfig::default(),
+        zeroclaw_config::schema::WeChatConfig::default(),
     );
 
     let mut items = Vec::new();

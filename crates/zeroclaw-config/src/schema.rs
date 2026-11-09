@@ -34,12 +34,7 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "model_provider.openrouter",
     "channel.dingtalk",
     "channel.discord",
-    "channel.lark",
-    "channel.matrix",
-    "channel.mattermost",
     "channel.qq",
-    "channel.signal",
-    "channel.slack",
     "channel.telegram",
     "channel.wechat",
     "tool.browser",
@@ -56,6 +51,11 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
 /// leftover `proxy.services` entry does not fail config load, but no longer
 /// advertised: nothing consumes them.
 const RETIRED_PROXY_SERVICE_KEYS: &[&str] = &[
+    "channel.lark",
+    "channel.matrix",
+    "channel.mattermost",
+    "channel.signal",
+    "channel.slack",
     "channel.nextcloud_talk",
     "channel.wati",
     "channel.whatsapp",
@@ -10662,30 +10662,10 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub discord: HashMap<String, DiscordConfig>,
-    /// Slack bot channel instances (`[channels.slack.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub slack: HashMap<String, SlackConfig>,
-    /// Mattermost bot channel instances (`[channels.mattermost.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub mattermost: HashMap<String, MattermostConfig>,
     /// Webhook channel instances (`[channels.webhook.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub webhook: HashMap<String, WebhookConfig>,
-    /// iMessage channel instances (`[channels.imessage.<alias>]`, macOS only).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub imessage: HashMap<String, IMessageConfig>,
-    /// Matrix channel instances (`[channels.matrix.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub matrix: HashMap<String, MatrixConfig>,
-    /// Signal channel instances (`[channels.signal.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub signal: HashMap<String, SignalConfig>,
     /// WhatsApp channel instances (`[channels.whatsapp.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -10694,18 +10674,6 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub email: HashMap<String, crate::scattered_types::EmailConfig>,
-    /// IRC channel instances (`[channels.irc.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub irc: HashMap<String, IrcConfig>,
-    /// Twitch chat channel instances (`[channels.twitch.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub twitch: HashMap<String, TwitchConfig>,
-    /// Lark channel instances (`[channels.lark.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub lark: HashMap<String, LarkConfig>,
     /// LINE Messaging API channel instances (`[channels.line.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -10899,41 +10867,6 @@ impl ChannelsConfig {
                 retired: false,
             },
             ChannelInfo {
-                kind: "slack",
-                name: "Slack",
-                desc: "connect your bot",
-                configured: !self.slack.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "mattermost",
-                name: "Mattermost",
-                desc: "connect to your bot",
-                configured: !self.mattermost.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "imessage",
-                name: "iMessage",
-                desc: "macOS only",
-                configured: !self.imessage.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "matrix",
-                name: "Matrix",
-                desc: "self-hosted chat",
-                configured: !self.matrix.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "signal",
-                name: "Signal",
-                desc: "An open-source, encrypted messaging service",
-                configured: !self.signal.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
                 kind: "whatsapp-web",
                 name: "WhatsApp Web",
                 desc: "native WhatsApp Web (wa-rs)",
@@ -10945,27 +10878,6 @@ impl ChannelsConfig {
                 name: "Email",
                 desc: "email_search/email_read tool config",
                 configured: !self.email.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "twitch",
-                name: "Twitch",
-                desc: "Twitch chat (IRC)",
-                configured: !self.twitch.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "irc",
-                name: "IRC",
-                desc: "IRC over TLS",
-                configured: !self.irc.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "lark",
-                name: "Lark",
-                desc: "Lark Bot",
-                configured: !self.lark.is_empty(),
                 retired: false,
             },
             ChannelInfo {
@@ -11104,17 +11016,9 @@ impl ChannelsConfig {
     pub fn has_any_enabled(&self) -> bool {
         self.telegram.values().any(|c| c.enabled)
             || self.discord.values().any(|c| c.enabled)
-            || self.slack.values().any(|c| c.enabled)
-            || self.mattermost.values().any(|c| c.enabled)
             || self.webhook.values().any(|c| c.enabled)
-            || self.imessage.values().any(|c| c.enabled)
-            || self.matrix.values().any(|c| c.enabled)
-            || self.signal.values().any(|c| c.enabled)
             || self.whatsapp.values().any(|c| c.enabled)
             || self.email.values().any(|c| c.enabled)
-            || self.irc.values().any(|c| c.enabled)
-            || self.twitch.values().any(|c| c.enabled)
-            || self.lark.values().any(|c| c.enabled)
             || self.line.values().any(|c| c.enabled)
             || self.dingtalk.values().any(|c| c.enabled)
             || self.wecom.values().any(|c| c.enabled)
@@ -11142,21 +11046,13 @@ impl ChannelsConfig {
     /// retired transports (`retired`), so a name-addressed outbound surface
     /// such as `heartbeat.target` refuses them at validation instead of
     /// accepting a target the delivery layer silently drops.
-    pub fn channel_presence(&self) -> [(&'static str, bool, bool, bool); 30] {
+    pub fn channel_presence(&self) -> [(&'static str, bool, bool, bool); 22] {
         [
             ("telegram", !self.telegram.is_empty(), true, false),
             ("discord", !self.discord.is_empty(), true, false),
-            ("slack", !self.slack.is_empty(), false, true),
-            ("mattermost", !self.mattermost.is_empty(), false, true),
             ("webhook", !self.webhook.is_empty(), true, false),
-            ("imessage", !self.imessage.is_empty(), false, true),
-            ("matrix", !self.matrix.is_empty(), false, true),
-            ("signal", !self.signal.is_empty(), false, true),
             ("whatsapp", !self.whatsapp.is_empty(), false, true),
             ("email", !self.email.is_empty(), true, false),
-            ("irc", !self.irc.is_empty(), false, true),
-            ("twitch", !self.twitch.is_empty(), false, true),
-            ("lark", !self.lark.is_empty(), false, true),
             ("line", !self.line.is_empty(), false, true),
             ("dingtalk", !self.dingtalk.is_empty(), false, true),
             ("wecom", !self.wecom.is_empty(), false, true),
@@ -11238,17 +11134,9 @@ impl Default for ChannelsConfig {
             cli: true,
             telegram: HashMap::new(),
             discord: HashMap::new(),
-            slack: HashMap::new(),
-            mattermost: HashMap::new(),
             webhook: HashMap::new(),
-            imessage: HashMap::new(),
-            matrix: HashMap::new(),
-            signal: HashMap::new(),
             whatsapp: HashMap::new(),
             email: HashMap::new(),
-            irc: HashMap::new(),
-            twitch: HashMap::new(),
-            lark: HashMap::new(),
             line: HashMap::new(),
             dingtalk: HashMap::new(),
             wecom: HashMap::new(),
@@ -11338,10 +11226,6 @@ fn default_channel_approval_timeout_secs() -> u64 {
     300
 }
 
-fn default_matrix_draft_update_interval_ms() -> u64 {
-    1500
-}
-
 /// Telegram bot channel configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -11362,6 +11246,7 @@ pub struct TelegramConfig {
     /// salvage pass. `validate_bot_token` below still requires a real token
     /// once `enabled = true`.
     #[secret]
+    #[credential_class = "encrypted_secret"]
     #[tab(Connection)]
     #[serde(default)]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
@@ -11657,148 +11542,8 @@ impl ChannelConfig for DiscordConfig {
     }
 }
 
-/// Slack bot channel configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.slack"]
-#[allow(clippy::struct_excessive_bools)]
-pub struct SlackConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Slack bot OAuth token (xoxb-...). Optional in config: when unset or
-    /// empty it is resolved at channel construction from
-    /// `ZEROCLAW_SLACK_BOT_TOKEN`, then `SLACK_BOT_TOKEN`. `#[serde(default)]`
-    /// so a config that omits it still deserializes - the env fallback then
-    /// supplies it - instead of failing with `missing field 'bot_token'`.
-    ///
-    #[secret]
-    #[serde(default)]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub bot_token: Option<String>,
-    /// Slack app-level token for Socket Mode (xapp-...). When unset or empty,
-    /// resolved at channel construction from `ZEROCLAW_SLACK_APP_TOKEN`, then
-    /// `SLACK_APP_TOKEN`. `#[serde(default)]` makes omission explicit (an
-    /// `Option` field is already omittable, but this keeps it consistent with
-    /// `bot_token`).
-    #[secret]
-    #[serde(default)]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub app_token: Option<String>,
-    /// Explicit list of channel IDs to watch.
-    /// Empty = listen across all accessible channels.
-    /// Migrated from the legacy `channel_id` singular field.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub channel_ids: Vec<String>,
-    /// When true, a newer Slack message from the same sender in the same channel
-    /// cancels the in-flight request and starts a fresh response with preserved history.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub interrupt_on_new_message: bool,
-    /// When true (default), replies stay in the originating Slack thread.
-    /// When false, replies go to the channel root instead.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub thread_replies: Option<bool>,
-    /// When true, only respond to messages that @-mention the bot in groups.
-    /// Direct messages remain allowed.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub mention_only: bool,
-    /// When true (and `mention_only` is also true), messages inside a Slack
-    /// thread must also @-mention the bot to trigger a response. By default,
-    /// thread replies are allowed through without a mention so the bot can
-    /// keep a back-and-forth going without the user repeating @-mentions.
-    /// Set this to true in channels shared with human discussion where the
-    /// bot should stay silent unless explicitly addressed.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub strict_mention_in_thread: bool,
-    /// Use the newer Slack `markdown` block type (12 000 char limit, richer formatting).
-    /// Defaults to false (uses universally supported `section` blocks with `mrkdwn`).
-    /// Enable this only if your Slack workspace supports the `markdown` block type.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub use_markdown_blocks: bool,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-    /// Enable progressive draft message streaming via `chat.update`.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub stream_drafts: bool,
-    /// Minimum interval (ms) between draft message edits to avoid Slack rate limits.
-    #[tab(Behavior)]
-    #[serde(default = "default_slack_draft_update_interval_ms")]
-    pub draft_update_interval_ms: u64,
-    /// Emoji reaction name (without colons) that cancels an in-flight request.
-    /// For example, `"x"` means reacting with `:x:` cancels the task.
-    /// Leave unset to disable reaction-based cancellation.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub cancel_reaction: Option<String>,
-    /// Seconds to wait for operator approval on `always_ask` tools before auto-denying.
-    #[tab(Behavior)]
-    #[serde(default = "default_channel_approval_timeout_secs")]
-    pub approval_timeout_secs: u64,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-    /// Per-(channel, recipient) outbound pacing floor in seconds.
-    /// Range: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).
-    #[serde(default)]
-    pub reply_min_interval_secs: u64,
-    /// Per-(channel, recipient) outbound pacing queue depth.
-    /// Range: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`
-    /// and this value is `0`, the pacing wrapper substitutes
-    /// `DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the
-    /// newest send is dropped and a `WARN` is logged.
-    #[serde(default)]
-    pub reply_queue_depth_max: u16,
-}
-
 fn default_slack_draft_update_interval_ms() -> u64 {
     1200
-}
-
-impl ChannelConfig for SlackConfig {
-    fn name() -> &'static str {
-        "Slack"
-    }
-    fn desc() -> &'static str {
-        "connect your bot"
-    }
-}
-
-impl SlackConfig {
-    /// Resolve the effective Slack bot token: the configured `bot_token` when
-    /// set and non-empty, else the `ZEROCLAW_SLACK_BOT_TOKEN` env var, else
-    /// `SLACK_BOT_TOKEN`. Returns `None` when none is available. Resolving here
-    /// (rather than writing the env value back into the config struct) keeps an
-    /// env-supplied secret out of any config that might later be persisted to
-    /// disk.
-    pub fn resolved_bot_token(&self) -> Option<String> {
-        resolve_slack_token(self.bot_token.as_deref(), "BOT")
-    }
-
-    /// Resolve the effective Slack app-level (Socket Mode) token: configured
-    /// `app_token` when set and non-empty, else `ZEROCLAW_SLACK_APP_TOKEN`,
-    /// else `SLACK_APP_TOKEN`. Returns `None` when none is available.
-    pub fn resolved_app_token(&self) -> Option<String> {
-        resolve_slack_token(self.app_token.as_deref(), "APP")
-    }
 }
 
 /// Shared token resolution for [`SlackConfig`]: a non-empty configured value
@@ -11839,122 +11584,6 @@ pub enum MattermostListenMode {
     Polling,
     /// Connect to `/api/v4/websocket` for near-real-time event delivery.
     Websocket,
-}
-
-/// Mattermost bot channel configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.mattermost"]
-pub struct MattermostConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Mattermost server URL (e.g. `"https://mattermost.example.com"`).
-    #[tab(Connection)]
-    pub url: String,
-    /// Mattermost bot access token. When unset, the channel falls back to
-    /// the login flow using `login_id` + `password`.
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    #[serde(default)]
-    pub bot_token: Option<String>,
-    /// Login ID (email or username) for the password login flow. Used only
-    /// when `bot_token` is unset; both `login_id` and `password` must be
-    /// set together.
-    #[tab(Connection)]
-    #[serde(default)]
-    pub login_id: Option<String>,
-    /// Account password for the login flow. Used only when `bot_token` is
-    /// unset; both `login_id` and `password` must be set together.
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    #[serde(default)]
-    pub password: Option<String>,
-    /// Channel IDs to restrict the bot to. Empty or `["*"]` = auto-discover
-    /// every channel the bot can read (public, private, DMs, group DMs) and
-    /// poll them all. Explicit IDs disable discovery and pin the bot to the
-    /// listed channels only. Migrated from the legacy `channel_id` singular
-    /// field.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub channel_ids: Vec<String>,
-    /// Team IDs to restrict auto-discovery to. Empty = discover across every
-    /// team the bot belongs to. Non-empty = only discover public/private
-    /// channels whose `team_id` is in this list. DMs and group DMs (which
-    /// have no team) are governed by `discover_dms` instead.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub team_ids: Vec<String>,
-    /// When true (default), auto-discovery includes DM (`type=D`) and group
-    /// DM (`type=G`) channels. Set false to restrict the bot to public and
-    /// private team channels only. Has no effect when `channel_ids` lists
-    /// explicit IDs. Defaults to `true` at the call site via
-    /// `discover_dms.unwrap_or(true)`.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub discover_dms: Option<bool>,
-    /// When true (default), replies thread on the original post.
-    /// When false, replies go to the channel root.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub thread_replies: Option<bool>,
-    /// When true, only respond to messages that @-mention the bot. Other
-    /// messages in the channel are silently ignored. DM and group DM
-    /// channels always bypass this filter: a 1:1 (or small-group) direct
-    /// conversation has no ambient noise to gate against, so every message
-    /// is treated as addressed to the bot.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub mention_only: Option<bool>,
-    /// When true, a newer Mattermost message from the same sender in the same channel
-    /// cancels the in-flight request and starts a fresh response with preserved history.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub interrupt_on_new_message: bool,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-
-    /// Listen mode: `"polling"` (REST API every 3s, default) or `"websocket"`
-    /// (persistent WebSocket connection to `/api/v4/websocket` for near-real-time
-    /// event delivery). WebSocket mode reduces server load and delivers events
-    /// faster but requires a WebSocket-capable Mattermost server (v4.0+).
-    #[serde(default)]
-    pub listen_mode: MattermostListenMode,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-    /// Per-(channel, recipient) outbound pacing floor in seconds.
-    /// Range: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).
-    #[serde(default)]
-    pub reply_min_interval_secs: u64,
-    /// Per-(channel, recipient) outbound pacing queue depth.
-    /// Range: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`
-    /// and this value is `0`, the pacing wrapper substitutes
-    /// `DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the
-    /// newest send is dropped and a `WARN` is logged.
-    #[serde(default)]
-    pub reply_queue_depth_max: u16,
-}
-
-impl ChannelConfig for MattermostConfig {
-    fn name() -> &'static str {
-        "Mattermost"
-    }
-    fn desc() -> &'static str {
-        "connect to your bot"
-    }
 }
 
 /// Webhook channel configuration.
@@ -12058,241 +11687,6 @@ impl ChannelConfig for WebhookConfig {
     }
     fn desc() -> &'static str {
         "HTTP endpoint"
-    }
-}
-
-/// iMessage channel configuration (macOS only).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.imessage"]
-pub struct IMessageConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-    /// Per-(channel, recipient) outbound pacing floor in seconds.
-    /// Range: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).
-    #[serde(default)]
-    pub reply_min_interval_secs: u64,
-    /// Per-(channel, recipient) outbound pacing queue depth.
-    /// Range: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`
-    /// and this value is `0`, the pacing wrapper substitutes
-    /// `DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the
-    /// newest send is dropped and a `WARN` is logged.
-    #[serde(default)]
-    pub reply_queue_depth_max: u16,
-}
-
-impl ChannelConfig for IMessageConfig {
-    fn name() -> &'static str {
-        "iMessage"
-    }
-    fn desc() -> &'static str {
-        "macOS only"
-    }
-}
-
-/// Matrix channel configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.matrix"]
-pub struct MatrixConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Matrix homeserver URL (e.g. `"https://matrix.org"`).
-    #[tab(Connection)]
-    pub homeserver: String,
-    /// Matrix access token for the bot account. When unset, the channel
-    /// falls back to password login using `user_id` + `password`.
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    #[serde(default)]
-    pub access_token: Option<String>,
-    /// Optional Matrix user ID (e.g. `"@bot:matrix.org"`).
-    #[tab(Connection)]
-    #[serde(default)]
-    pub user_id: Option<String>,
-    /// Optional Matrix device ID.
-    #[tab(Connection)]
-    #[serde(default)]
-    pub device_id: Option<String>,
-    /// Allowed Matrix room IDs. Empty = allow all rooms the bot has joined.
-    /// Entries are matched literally against the canonical room ID
-    /// (`!abc:server`) of each incoming message; `#room:server` aliases are
-    /// not resolved for this allowlist (they are resolved only for outbound
-    /// delivery targets such as cron `delivery.to`).
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub allowed_rooms: Vec<String>,
-    /// Whether to interrupt an in-flight agent response when a new message arrives.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub interrupt_on_new_message: bool,
-    /// Streaming mode for progressive response delivery.
-    /// `"off"` (default): single message. `"partial"`: edit-in-place draft.
-    /// `"multi_message"`: paragraph-split delivery.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub stream_mode: StreamMode,
-    /// Minimum interval (ms) between draft message edits in Partial mode.
-    #[tab(Behavior)]
-    #[serde(default = "default_matrix_draft_update_interval_ms")]
-    pub draft_update_interval_ms: u64,
-    /// Delay (ms) between sending each paragraph in MultiMessage mode.
-    #[tab(Behavior)]
-    #[serde(default = "default_multi_message_delay_ms")]
-    pub multi_message_delay_ms: u64,
-    /// When true, only respond to messages that @-mention the bot in groups.
-    /// Direct messages are always processed.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub mention_only: bool,
-    /// Optional Matrix recovery key for automatic E2EE key backup restore.
-    /// When set, ZeroClaw recovers room keys and cross-signing secrets on startup.
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    #[serde(default)]
-    pub recovery_key: Option<String>,
-    /// Optional login password for Matrix account (used for initial login flow).
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    #[serde(default)]
-    pub password: Option<String>,
-    /// Seconds to wait for operator approval on `always_ask` tools before auto-denying.
-    #[tab(Behavior)]
-    #[serde(default = "default_channel_approval_timeout_secs")]
-    pub approval_timeout_secs: u64,
-    /// When true (default), replies are sent as thread replies. Starts a new thread from the
-    /// incoming message when none exists. When false, only continues existing threads.
-    #[tab(Behavior)]
-    #[serde(default = "default_true")]
-    pub reply_in_thread: bool,
-    /// Override for the top-level `[channels].ack_reactions`. When
-    /// `None`, falls back to the channels-wide default. When set
-    /// explicitly (`true`/`false`), takes precedence for this Matrix
-    /// instance only.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub ack_reactions: Option<bool>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-    /// Per-(channel, recipient) outbound pacing floor in seconds.
-    /// Range: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).
-    #[serde(default)]
-    pub reply_min_interval_secs: u64,
-    /// Per-(channel, recipient) outbound pacing queue depth.
-    /// Range: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`
-    /// and this value is `0`, the pacing wrapper substitutes
-    /// `DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the
-    /// newest send is dropped and a `WARN` is logged.
-    #[serde(default)]
-    pub reply_queue_depth_max: u16,
-}
-
-impl ChannelConfig for MatrixConfig {
-    fn name() -> &'static str {
-        "Matrix"
-    }
-    fn desc() -> &'static str {
-        "self-hosted chat"
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.signal"]
-pub struct SignalConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Base URL for the signal-cli HTTP daemon (e.g. `"http://127.0.0.1:8686"`).
-    #[tab(Connection)]
-    pub http_url: String,
-    /// E.164 phone number of the signal-cli account (e.g. "+1234567890").
-    #[tab(Connection)]
-    pub account: String,
-    /// Group IDs to filter messages. Empty = accept all messages (DMs and
-    /// groups). When non-empty, only messages from listed groups are
-    /// accepted (DMs are still accepted unless `dm_only` flips the policy
-    /// to DMs-only). Migrated from the legacy `group_id` singular field.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub group_ids: Vec<String>,
-    /// When true, only accept direct messages and ignore all group traffic.
-    /// Mutually exclusive with `group_ids` (which is ignored when this is
-    /// set). Migrated from the legacy `group_id = "dm"` sentinel.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub dm_only: bool,
-    /// Skip messages that are attachment-only (no text body).
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub ignore_attachments: bool,
-    /// Skip incoming story messages.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub ignore_stories: bool,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-    /// Seconds to wait for operator approval on `always_ask` tools before auto-denying.
-    #[tab(Behavior)]
-    #[serde(default = "default_channel_approval_timeout_secs")]
-    pub approval_timeout_secs: u64,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-    /// Per-(channel, recipient) outbound pacing floor in seconds.
-    /// Range: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).
-    #[serde(default)]
-    pub reply_min_interval_secs: u64,
-    /// Per-(channel, recipient) outbound pacing queue depth.
-    /// Range: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`
-    /// and this value is `0`, the pacing wrapper substitutes
-    /// `DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the
-    /// newest send is dropped and a `WARN` is logged.
-    #[serde(default)]
-    pub reply_queue_depth_max: u16,
-}
-
-impl ChannelConfig for SignalConfig {
-    fn name() -> &'static str {
-        "Signal"
-    }
-    fn desc() -> &'static str {
-        "An open-source, encrypted messaging service"
     }
 }
 
@@ -12465,17 +11859,7 @@ impl ChannelConfig for WhatsAppConfig {
     }
 }
 
-impl_reply_pacing!(
-    TelegramConfig,
-    DiscordConfig,
-    SlackConfig,
-    MattermostConfig,
-    WebhookConfig,
-    IMessageConfig,
-    MatrixConfig,
-    SignalConfig,
-    WhatsAppConfig,
-);
+impl_reply_pacing!(TelegramConfig, DiscordConfig, WebhookConfig, WhatsAppConfig,);
 
 impl WhatsAppConfig {
     /// Any Web-only selector that signals WhatsApp Web intent. `mode`
@@ -12666,123 +12050,6 @@ fn default_amqp_durable_ack() -> bool {
     true
 }
 
-/// IRC channel configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.irc"]
-pub struct IrcConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// IRC server hostname
-    #[tab(Advanced)]
-    pub server: String,
-    /// IRC server port (default: 6697 for TLS)
-    #[tab(Advanced)]
-    #[serde(default = "default_irc_port")]
-    pub port: u16,
-    /// Bot nickname
-    #[tab(Advanced)]
-    pub nickname: String,
-    /// Username (defaults to nickname if not set)
-    #[tab(Connection)]
-    pub username: Option<String>,
-    /// Channels to join on connect
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub channels: Vec<String>,
-    /// Server password (for bouncers like ZNC)
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub server_password: Option<String>,
-    /// NickServ IDENTIFY password
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub nickserv_password: Option<String>,
-    /// SASL PLAIN password (IRCv3)
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub sasl_password: Option<String>,
-    /// Verify TLS certificate (default: true)
-    #[tab(Advanced)]
-    pub verify_tls: Option<bool>,
-    /// When true, only respond to messages that mention the bot.
-    /// Other messages in the channel are silently ignored.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub mention_only: bool,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for IrcConfig {
-    fn name() -> &'static str {
-        "IRC"
-    }
-    fn desc() -> &'static str {
-        "IRC over TLS"
-    }
-}
-
-/// Twitch chat channel configuration. A thin adapter over IRC
-/// (`irc.chat.twitch.tv:6697` over TLS); see the `twitch` channel module.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.twitch"]
-pub struct TwitchConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false`.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Twitch login name of the bot account (case-insensitive — lowercased
-    /// before send).
-    #[tab(Connection)]
-    pub bot_username: String,
-    /// Twitch OAuth user-access token. The `oauth:` prefix is added
-    /// automatically if missing, so both `"oauth:abcdef"` and `"abcdef"`
-    /// work. Mint via <https://twitchapps.com/tmi/> or the Twitch CLI.
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub oauth_token: String,
-    /// Twitch channels to join. Each entry receives a `#` prefix if missing
-    /// and is lowercased before send (Twitch channel names are
-    /// case-insensitive). E.g. `["mychannel", "#anotherchannel"]`.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub channels: Vec<String>,
-    /// When true, only respond to messages that mention the bot's login
-    /// name. Default: `false`.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub mention_only: bool,
-}
-
-impl ChannelConfig for TwitchConfig {
-    fn name() -> &'static str {
-        "Twitch"
-    }
-    fn desc() -> &'static str {
-        "Twitch chat (IRC)"
-    }
-}
-
-fn default_irc_port() -> u16 {
-    6697
-}
-
 /// How ZeroClaw receives events from Feishu / Lark.
 ///
 /// - `websocket` (default) — persistent WSS long-connection; no public URL required.
@@ -12794,116 +12061,6 @@ pub enum LarkReceiveMode {
     #[default]
     Websocket,
     Webhook,
-}
-
-/// Lark/Feishu configuration for messaging integration.
-/// Lark is the international version; Feishu is the Chinese version.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.lark"]
-pub struct LarkConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// App ID from Lark/Feishu developer console
-    #[tab(Connection)]
-    pub app_id: String,
-    /// App Secret from Lark/Feishu developer console
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub app_secret: String,
-    /// Encrypt key for webhook message decryption (optional)
-    #[serde(default)]
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub encrypt_key: Option<String>,
-    /// Verification token for webhook validation (optional)
-    #[serde(default)]
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub verification_token: Option<String>,
-    /// When true, only respond to messages that @-mention the bot in groups.
-    /// Direct messages are always processed.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub mention_only: bool,
-    /// Whether to use the Feishu (Chinese) endpoint instead of Lark (International)
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub use_feishu: bool,
-    /// Event receive mode: "websocket" (default) or "webhook"
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub receive_mode: LarkReceiveMode,
-    /// HTTP port for webhook mode only. Must be set when receive_mode = "webhook".
-    /// Not required (and ignored) for websocket mode.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub port: Option<u16>,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-
-    /// Time in seconds an approval card waits for user response before
-    /// the runtime auto-denies. Default: 300 (5 minutes).
-    #[tab(Behavior)]
-    #[serde(default = "default_channel_approval_timeout_secs")]
-    pub approval_timeout_secs: u64,
-    /// When `true`, group-chat sessions key on the sender's open_id, so
-    /// distinct members of the same group chat don't share conversation
-    /// context. When `false` (default), all members of a group share one
-    /// session keyed on chat_id (matches the existing behavior). 1-on-1
-    /// chats are unaffected (chat_id is already unique per user-bot pair).
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub per_user_session: bool,
-
-    /// Override for the top-level `ack_reactions` setting. When `None`, the
-    /// channel falls back to `[channels].ack_reactions`. When set
-    /// explicitly, it takes precedence.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub ack_reactions: Option<bool>,
-
-    /// Streaming mode for the LLM response: `off` (default) routes every
-    /// response through `send()`; `partial` opens a Feishu interactive
-    /// card and edits it incrementally via `update_draft` /
-    /// `finalize_draft`; `multi_message` is rejected for Lark (Feishu has
-    /// no equivalent surface — falls back to `off` with a warning).
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub stream_mode: StreamMode,
-
-    /// Minimum interval between consecutive `update_draft` PATCH calls in
-    /// milliseconds. Default 1000 ms tunes to Feishu's 5 QPS-per-message
-    /// edit cap; raise on enterprise plans with higher quotas.
-    #[tab(Behavior)]
-    #[serde(default = "default_draft_update_interval_ms")]
-    pub draft_update_interval_ms: u64,
-}
-
-impl ChannelConfig for LarkConfig {
-    fn name() -> &'static str {
-        "Lark"
-    }
-    fn desc() -> &'static str {
-        "Lark Bot"
-    }
 }
 
 /// DM (1:1 chat) access policy for the LINE channel.
@@ -16301,12 +15458,7 @@ impl Config {
         }
         rows("telegram", &c.telegram)
             .chain(rows("discord", &c.discord))
-            .chain(rows("slack", &c.slack))
-            .chain(rows("mattermost", &c.mattermost))
             .chain(rows("webhook", &c.webhook))
-            .chain(rows("imessage", &c.imessage))
-            .chain(rows("matrix", &c.matrix))
-            .chain(rows("signal", &c.signal))
             .chain(rows("whatsapp", &c.whatsapp))
             .collect()
     }
