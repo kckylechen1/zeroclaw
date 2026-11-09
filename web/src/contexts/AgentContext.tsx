@@ -1,8 +1,9 @@
 import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import type { ApprovalDecision, PendingApproval, WsMessage } from '@/types/api';
-import { WebSocketClient, getOrCreateSessionId } from '@/lib/ws';
+import { WebSocketClient, getOrCreateSessionId, isSideQueryRequestId } from '@/lib/ws';
 import { generateUUID } from '@/lib/uuid';
 import { t } from '@/lib/i18n';
+import { sideQueryQuestion } from '@/lib/slashCommands';
 import { getProp, putProp, listProps, getStatus, getSessionMessages, abortSession, deleteSession } from '@/lib/api';
 import { primeModelProviderCatalog, modelProviderDisplayName } from '@/lib/modelProviders';
 import type { ToolCallInfo } from '@/components/ToolCallCard';
@@ -32,11 +33,13 @@ export interface ChatMessage {
   local?: boolean;
   /**
    * Locally-generated info/system message produced by web slash-command
-   * handlers (`/help`, `/model`, unknown-command notices). Excluded from
+   * handlers (`/help`, `/model`, `/btw`, unknown-command notices). Excluded from
    * persistence so command output does not pollute localStorage and reappear
    * as fake assistant replies on reload. See #7137.
    */
   ephemeral?: boolean;
+  /** Read-only /btw exchange, kept only in this mounted chat view. */
+  sideQuery?: boolean;
   /** User-visible lifecycle notice, rendered distinctly from agent output. */
   notice?: boolean;
 }
@@ -65,10 +68,15 @@ interface ActiveTurn {
 
 /** Grace for a hole to be filled by an in-flight / requested replay. */
 const HOLE_GRACE_MS = 3_000;
+// Match gateway limits; allow its default 60s timeout to arrive first.
+const MAX_SIDE_QUERIES = 4;
+const MAX_SIDE_QUERY_BYTES = 16 * 1024;
+const SIDE_QUERY_TIMEOUT_MS = 65_000;
 
 interface AgentContextValue {
   messages: ChatMessage[];
   sendMessage: (content: string, attachments?: string[]) => void;
+  sendSideQuery: (question: string, attachments?: string[]) => boolean;
   steerMessage: (content: string, attachments?: string[]) => boolean;
   canSteer: boolean;
   steeringPending: boolean;
@@ -168,6 +176,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     requestId: string; parentRequestId: string; turnId: string; epoch: string;
     timer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
+  const sideQueriesRef = useRef(new Map<string, {
+    messageId: string;
+    timer: ReturnType<typeof setTimeout>;
+  }>());
 
   const wsRef = useRef<WebSocketClient | null>(null);
   const pendingContentRef = useRef('');
@@ -272,6 +284,65 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     ]);
   }, []);
 
+  const settleSideQuery = useCallback((requestId: string, content: string, notice = false) => {
+    const pending = sideQueriesRef.current.get(requestId);
+    if (!pending) return; // Duplicate, retired attachment or unknown broadcast.
+    clearTimeout(pending.timer);
+    sideQueriesRef.current.delete(requestId);
+    localMessageMutationVersionRef.current += 1;
+    setMessages((prev) => prev.map((message) => message.id === pending.messageId
+      ? { ...message, content, markdown: !notice, notice }
+      : message));
+  }, []);
+
+  const clearSideQueries = useCallback((notice?: string) => {
+    const pending = [...sideQueriesRef.current.values()];
+    sideQueriesRef.current.clear();
+    for (const query of pending) clearTimeout(query.timer);
+    if (!notice || pending.length === 0) return;
+    const ids = new Set(pending.map((query) => query.messageId));
+    localMessageMutationVersionRef.current += 1;
+    setMessages((prev) => prev.map((message) => ids.has(message.id)
+      ? { ...message, content: notice, markdown: false, notice: true }
+      : message));
+  }, []);
+
+  const sendSideQuery = useCallback((rawQuestion: string, attachments?: string[]): boolean => {
+    const question = rawQuestion.trim();
+    if (attachments?.length) {
+      addNotice(t('agent.btw_attachments'));
+      return false;
+    }
+    if (!question || new TextEncoder().encode(question).length > MAX_SIDE_QUERY_BYTES) {
+      addNotice(t('agent.btw_invalid'));
+      return false;
+    }
+    if (sideQueriesRef.current.size >= MAX_SIDE_QUERIES) {
+      addNotice(t('agent.btw_busy'));
+      return false;
+    }
+    try {
+      const requestId = wsRef.current?.sendSideQuery(question);
+      if (!requestId) {
+        addNotice(t('agent.btw_not_ready'));
+        return false;
+      }
+      const messageId = generateUUID();
+      const timer = setTimeout(() => settleSideQuery(requestId, t('agent.btw_unknown'), true), SIDE_QUERY_TIMEOUT_MS);
+      sideQueriesRef.current.set(requestId, { messageId, timer });
+      localMessageMutationVersionRef.current += 1;
+      setMessages((prev) => [
+        ...prev,
+        { id: generateUUID(), role: 'user', content: `/btw ${question}`, timestamp: new Date(), local: true, ephemeral: true, sideQuery: true },
+        { id: messageId, role: 'agent', content: t('agent.btw_pending'), timestamp: new Date(), ephemeral: true, sideQuery: true },
+      ]);
+      return true;
+    } catch {
+      addNotice(t('agent.send_error'));
+      return false;
+    }
+  }, [addNotice, settleSideQuery]);
+
   const settleSteering = useCallback((notice?: string) => {
     const pending = pendingSteerRef.current;
     if (!pending) return;
@@ -316,6 +387,32 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   // `turn_event.event` payload is an ordinary display frame, so it recurses
   // through this same handler rather than a parallel display path.
   const handleWsMessage = useCallback(function handleWsMessage(msg: WsMessage) {
+    // /btw is not a main turn: neither its ACK nor any result/error may bind,
+    // finalize, resume or clear the main stream/Stop state. Results use `id`
+    // even on S2; admission receipts use `request_id`.
+    const sideRequestId = msg.request_id ?? msg.id;
+    if (msg.type === 'btw_response' || msg.type === 'btw_error') {
+      if (sideRequestId) {
+        settleSideQuery(sideRequestId, msg.type === 'btw_response'
+          ? (msg.full_response ?? msg.content ?? '')
+          : t('agent.btw_failed').replace('{message}', msg.message ?? msg.code ?? t('agent.unknown_error')),
+        msg.type === 'btw_error');
+      }
+      return;
+    }
+    if (isSideQueryRequestId(sideRequestId)) {
+      if (msg.type === 'error' || msg.type === 'turn_error'
+        || (msg.type === 'turn_ack' && msg.status !== 'btw')
+        || (msg.type === 'ack' && msg.status !== 'accepted')) {
+        settleSideQuery(sideRequestId, t('agent.btw_failed').replace('{message}',
+          msg.message ?? msg.code ?? msg.status ?? t('agent.unknown_error')), true);
+      }
+      // Includes late errors after timeout/disconnect, which must stay inert
+      // even after their pending entry has been retired.
+      return;
+    }
+    if (msg.type === 'turn_ack' && msg.status === 'btw') return;
+
     /** Apply ONE ordered `turn_event` wrapper (its seq is next in order). */
     const applyTurnEvent = (active: ActiveTurn, wrapper: WsMessage) => {
       const inner = wrapper.event;
@@ -819,7 +916,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         setPendingApproval(null);
         break;
     }
-  }, [addNotice, finalizeActiveTurn, releaseTerminalWaiter, settleSteering]);
+  }, [addNotice, finalizeActiveTurn, releaseTerminalWaiter, settleSteering, settleSideQuery]);
 
   // Wire up a WebSocketClient instance with version-guarded callbacks.
   const attachSocketCallbacks = useCallback((ws: WebSocketClient) => {
@@ -853,6 +950,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setConnected(false);
       setSteeringAvailable(false);
       settleSteering(t('agent.steer_unknown'));
+      clearSideQueries(t('agent.btw_unknown'));
 
       if (pendingModelSwitchRef.current) {
         // We intentionally closed the old socket; non-normal codes mean the reconnect failed.
@@ -883,6 +981,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
 
     ws.onNegotiationError = (code, unsentRequestIds) => {
       if (version !== wsVersionRef.current) return;
+      clearSideQueries(t('agent.btw_unknown'));
       const active = activeTurnRef.current;
       if (active && !unsentRequestIds.includes(active.requestId) && !active.terminalSeen) {
         addNotice(t('agent.turn_outcome_unknown'));
@@ -896,7 +995,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       if (version !== wsVersionRef.current) return;
       handleWsMessage(msg);
     };
-  }, [handleWsMessage, addNotice, finalizeActiveTurn, settleSteering]);
+  }, [handleWsMessage, addNotice, finalizeActiveTurn, settleSteering, clearSideQueries]);
 
   // WebSocket bound to the configured agent. Re-keys (via the outer
   // <AgentProvider key={alias}>) when the alias changes.
@@ -910,9 +1009,10 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       const pending = pendingSteerRef.current;
       if (pending?.timer) clearTimeout(pending.timer);
       pendingSteerRef.current = null;
+      clearSideQueries();
       ws.disconnect();
     };
-  }, [attachSocketCallbacks, agentAlias]);
+  }, [attachSocketCallbacks, agentAlias, clearSideQueries]);
 
   // Fetch current model and available models from config.
   useEffect(() => {
@@ -982,9 +1082,13 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   }, [modelInfoVersion, agentAlias]);
 
   const sendMessage = useCallback((content: string, attachments?: string[]) => {
+    const question = sideQueryQuestion(content);
+    if (question !== null) {
+      sendSideQuery(question, attachments);
+      return;
+    }
     if (!wsRef.current?.connected) return;
-    // Explicit steer is the only busy-turn input path; never replace the
-    // active request's event/cancel correlation with an ordinary message.
+    // A new main message must never replace an active turn's event/cancel correlation.
     if (activeTurnRef.current) return;
     try {
       // S2 (#549): admission carries a client-minted request_id; every later
@@ -1017,9 +1121,11 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     } catch {
       setError(t('agent.send_error'));
     }
-  }, []);
+  }, [sendSideQuery]);
 
   const steerMessage = useCallback((content: string, attachments?: string[]): boolean => {
+    const question = sideQueryQuestion(content);
+    if (question !== null) return sendSideQuery(question, attachments);
     const ws = wsRef.current;
     const active = activeTurnRef.current;
     if (!ws?.canSteer || !ws.epoch || !active?.turnId || active.terminalSeen
@@ -1041,7 +1147,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setError(t('agent.send_error'));
       return false;
     }
-  }, [settleSteering]);
+  }, [settleSteering, sendSideQuery]);
 
   const switchModel = useCallback(async (model: string) => {
     if (modelLoading) return; // debounce
@@ -1146,6 +1252,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       // Tear down the old socket and create a fresh one.
       // The backend will read the updated config when the new socket opens
       // and construct a new Agent with the selected model.
+      clearSideQueries(t('agent.btw_unknown'));
       const oldWs = wsRef.current;
       if (oldWs) {
         oldWs.onOpen = null;
@@ -1179,7 +1286,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       setModelLoading(false);
       setError(err instanceof Error ? err.message : t('agent.failed_switch_model'));
     }
-  }, [attachSocketCallbacks, modelLoading, typing, agentAlias, waitForTerminal, finalizeActiveTurn]);
+  }, [attachSocketCallbacks, modelLoading, typing, agentAlias, waitForTerminal, finalizeActiveTurn, clearSideQueries]);
 
   const deleteMessage = useCallback((id: string) => {
     localMessageMutationVersionRef.current += 1;
@@ -1190,6 +1297,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
     // Retire this pane's request/control correlation before rebuilding its
     // attachment. A late receipt or timer cannot bind to the cleared view.
     finalizeActiveTurn();
+    clearSideQueries();
     // Optimistically wipe the rendered transcript and any in-flight streaming
     // state. Bumping the mutation version fences off a racing hydration fetch
     // so it can't repopulate the just-cleared view.
@@ -1231,6 +1339,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
       // the alias-bound effect will reconnect on its own — nothing to do here.
       const oldWs = wsRef.current;
       if (oldWs) {
+        clearSideQueries(t('agent.btw_unknown'));
         oldWs.onOpen = null;
         oldWs.onClose = null;
         oldWs.onError = null;
@@ -1246,7 +1355,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         ws.connect();
       }
     })();
-  }, [agentAlias, attachSocketCallbacks, finalizeActiveTurn]);
+  }, [agentAlias, attachSocketCallbacks, finalizeActiveTurn, clearSideQueries]);
 
   const addLocalMessage = useCallback((content: string) => {
     localMessageMutationVersionRef.current += 1;
@@ -1278,6 +1387,7 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
   const value: AgentContextValue = {
     messages,
     sendMessage,
+    sendSideQuery,
     steerMessage,
     canSteer: connected && steeringAvailable && !stopRequested,
     steeringPending,

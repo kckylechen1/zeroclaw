@@ -20,6 +20,7 @@ import {
   isSlashCommand,
   matchCommands,
   parseCommand,
+  sideQueryQuestion,
   type CommandSpec,
 } from '@/lib/slashCommands';
 import { Button } from '@/components/ui';
@@ -113,6 +114,7 @@ export function AgentChatInner({
   const {
     messages,
     sendMessage,
+    sendSideQuery,
     steerMessage,
     canSteer,
     steeringPending,
@@ -138,6 +140,9 @@ export function AgentChatInner({
 
   const { draft, saveDraft, clearDraft } = useDraft(`${DRAFT_KEY_PREFIX}.${agentAlias}`);
   const [input, setInput] = useState(draft);
+  // The gateway also reserves /btw after the documented // escape is removed.
+  const sideQuestion = sideQueryQuestion(input.trim().replace(/^\/\//, '/'));
+  const isSideQuery = sideQuestion !== null;
   const [attachments, setAttachments] = useState<{ id: string; name: string }[]>([]);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -243,14 +248,17 @@ export function AgentChatInner({
   /**
    * Slash-command dispatcher (#7137). Returns true when `trimmed` was handled
    * as a command (and therefore must NOT be sent to the model as a prompt).
-   * Commands drive existing session primitives — clear/reset and model switch —
-   * and surface their feedback as local info messages, never to the gateway.
+   * Local commands drive existing session primitives; /btw uses a separate,
+   * read-only gateway request and keeps its output out of chat history.
    */
   const runCommand = useCallback((trimmed: string): boolean => {
     if (!isSlashCommand(trimmed)) return false;
 
     const { command, args } = parseCommand(trimmed);
     switch (command) {
+      case 'btw':
+        return sendSideQuery(args, attachments.map((attachment) => attachment.id));
+
       case 'help':
         addLocalMessage(helpText());
         return true;
@@ -305,20 +313,24 @@ export function AgentChatInner({
         addLocalMessage(t('agent.cmd_unknown').replace('{cmd}', `/${command}`));
         return true;
     }
-  }, [addLocalMessage, clearAllMessages, currentModel, availableModels, switchModel, modelLoading]);
+  }, [addLocalMessage, clearAllMessages, currentModel, availableModels, switchModel, modelLoading, sendSideQuery, attachments]);
 
   const handleSend = () => {
     const trimmed = input.trim();
-    if (!trimmed) return;
+    if (!trimmed || uploadingAttachment) return;
 
     // Slash commands are dispatched BEFORE the connectivity check so purely
     // local commands like /help still work during transient disconnects.
     // Network-dependent commands (/clear, /model) self-recover via their own
     // reconnect paths inside the context. #7137
-    if (typing) {
+    // Side queries remain available while a turn runs, even when steering is
+    // unavailable or awaiting a receipt. They must never enter the steer path.
+    if (sideQuestion !== null) {
+      if (!sendSideQuery(sideQuestion, attachments.map((attachment) => attachment.id))) return;
+    } else if (typing) {
       if (!steerMessage(trimmed, attachments.length > 0 ? attachments.map((a) => a.id) : undefined)) return;
     } else if (isSlashCommand(trimmed)) {
-      runCommand(trimmed);
+      if (!runCommand(trimmed)) return;
     } else {
       if (!connected) return;
       // `//` is the documented escape for a literal leading slash (#7223);
@@ -730,6 +742,10 @@ export function AgentChatInner({
               if (uploadingAttachment) return;
               if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                 e.preventDefault();
+                if (isSideQuery) {
+                  setAttachmentError(t('agent.btw_attachments'));
+                  return;
+                }
                 void addAttachmentFiles(e.dataTransfer.files);
               }
             }}
@@ -738,16 +754,16 @@ export function AgentChatInner({
             placeholder={!connected
               ? t('agent.connecting')
               : typing
-                ? canSteer ? t('agent.steer_placeholder') : t('agent.running')
+                ? canSteer ? t('agent.steer_placeholder') : t('agent.btw_placeholder')
                 : t('agent.type_message')}
-            disabled={!connected || (typing && (!canSteer || steeringPending))}
+            disabled={!connected}
             className="flex-1 px-4 text-sm resize-none rounded-[var(--radius-md)] border border-pc-border bg-pc-input text-pc-text placeholder:text-pc-text-muted transition-colors focus:outline-none focus:border-pc-accent focus:ring-2 focus:ring-pc-accent/30 disabled:opacity-40"
             style={{ minHeight: '40px', maxHeight: '200px', paddingTop: '9px', paddingBottom: '9px' }}
           />
           <Button
             variant="ghost"
             size="md"
-            disabled={!connected || (typing && (!canSteer || steeringPending)) || uploadingAttachment}
+            disabled={!connected || isSideQuery || (typing && (!canSteer || steeringPending)) || uploadingAttachment}
             onClick={() => fileInputRef.current?.click()}
             aria-label={t('agent.attach')}
             title={t('agent.attach')}
@@ -755,16 +771,16 @@ export function AgentChatInner({
           >
             <Paperclip className={`h-4 w-4 ${uploadingAttachment ? 'animate-pulse' : ''}`} />
           </Button>
-          {typing && canSteer && (
+          {typing && (canSteer || isSideQuery) && (
             <Button
               variant="primary"
               size="md"
               onClick={handleSend}
-              disabled={!input.trim() || steeringPending || uploadingAttachment}
-              aria-label={t('agent.steer')}
-              title={t('agent.steer')}
+              disabled={!connected || !input.trim() || (!isSideQuery && steeringPending) || uploadingAttachment}
+              aria-label={t(isSideQuery ? 'agent.btw_send' : 'agent.steer')}
+              title={t(isSideQuery ? 'agent.btw_send' : 'agent.steer')}
             >
-              {steeringPending ? t('agent.steer_pending') : t('agent.steer')}
+              {isSideQuery ? t('agent.btw_send') : steeringPending ? t('agent.steer_pending') : t('agent.steer')}
             </Button>
           )}
           {typing ? (
@@ -784,9 +800,9 @@ export function AgentChatInner({
               variant="primary"
               size="md"
               onClick={handleSend}
-              disabled={!connected || !input.trim()}
+              disabled={!connected || !input.trim() || uploadingAttachment}
               className="flex-shrink-0 w-10 px-0"
-              aria-label={t('agent.send')}
+              aria-label={t(isSideQuery ? 'agent.btw_send' : 'agent.send')}
             >
               <Send className="h-4 w-4" />
             </Button>
@@ -896,6 +912,9 @@ const MessageItem = memo(function MessageItem({
               : 'bg-pc-elevated border-pc-border'
           }`}
         >
+          {msg.sideQuery && (
+            <p className="text-[10px] mb-1 text-pc-text-muted">{t('agent.btw_label')}</p>
+          )}
           {msg.thinking && (
             <details className="mb-2">
               <summary className="text-xs cursor-pointer select-none text-pc-text-muted">{t('agentchat.thinking')}</summary>
