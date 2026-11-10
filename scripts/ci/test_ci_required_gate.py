@@ -3,13 +3,9 @@ import unittest
 from required_gate import ALL_JOBS, FULL_JOBS, PR_ONLY_JOBS, validate
 
 
-def result_set(full=False, docs_build=False, event="pull_request", windows=False, selfhosted=True):
+def result_set(full=False, docs_build=False, event="pull_request", windows=False):
     needs = {job: {"result": "skipped", "outputs": {}} for job in ALL_JOBS}
-    needs["changes"] = {"result": "success", "outputs": {
-        "full": str(full).lower(),
-        "docs_build": str(docs_build).lower(),
-        "selfhosted_ok": str(selfhosted).lower(),
-    }}
+    needs["changes"] = {"result": "success", "outputs": {"full": str(full).lower(), "docs_build": str(docs_build).lower()}}
     needs["docs-style"]["result"] = "success"
     if full:
         for job in FULL_JOBS:
@@ -17,8 +13,6 @@ def result_set(full=False, docs_build=False, event="pull_request", windows=False
         if event == "push":
             for job in PR_ONLY_JOBS:
                 needs[job]["result"] = "skipped"
-        if not selfhosted:
-            needs["build-macos"]["result"] = "skipped"
         needs["windows-clippy-tools-changes"]["outputs"]["run"] = str(windows).lower()
     if docs_build:
         needs["docs-build"]["result"] = "success"
@@ -37,19 +31,8 @@ class GateTests(unittest.TestCase):
     def test_accepts_selected_windows_checks(self):
         self.assertEqual(validate(result_set(full=True, windows=True), "pull_request"), [])
 
-    def test_selfhosted_lane_skipped_for_fork_prs_only(self):
-        # Fork PR heads never reach the self-hosted runner; the lane is skipped
-        # there and required everywhere else (same-repo PRs, pushes, merges).
-        self.assertEqual(validate(result_set(full=True, selfhosted=False), "pull_request"), [])
-        for event in ("push", "merge_group"):
-            needs = result_set(full=True, selfhosted=False)
-            self.assertTrue(validate(needs, event))
-        needs = result_set(full=True)
-        needs["build-macos"]["result"] = "skipped"
-        self.assertTrue(validate(needs, "pull_request"))
-
     def test_failure_cancellation_or_unexpected_skip_cannot_pass(self):
-        for job in ("docs-style", "lint", "test", "web-permission-tests", "check-32bit", "build", "build-macos"):
+        for job in ("docs-style", "lint", "test", "web-permission-tests", "check-32bit", "build"):
             for result in ("failure", "cancelled", "skipped", "neutral", None):
                 with self.subTest(job=job, result=result):
                     needs = result_set(full=True)
@@ -66,7 +49,7 @@ class GateTests(unittest.TestCase):
             needs = result_set()
             needs["changes"]["result"] = status
             self.assertTrue(validate(needs, "pull_request"))
-        for output in ("full", "docs_build", "selfhosted_ok"):
+        for output in ("full", "docs_build"):
             for value in (None, "", "True", True):
                 needs = result_set()
                 needs["changes"]["outputs"][output] = value

@@ -40,10 +40,6 @@ jobs:
       full: ${{ steps.scope.outputs.full }}
       docs_build: ${{ steps.scope.outputs.docs_build }}
       base_sha: ${{ steps.scope.outputs.base_sha }}
-      # The aarch64-darwin check runs on a self-hosted runner owned by this
-      # fork. Never send fork PR code to it: same-repo heads, pushes and
-      # merge queues only.
-      selfhosted_ok: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -309,45 +305,6 @@ jobs:
 
   # ── Post-format build + check fan-out ─────────────────────────────────────
 
-  # Same compile surface as the hosted matrix, on the fork's own ARM64 Mac.
-  # The hosted macos-15 pool starves at peak hours (queued jobs are dropped
-  # as cancelled with no runner); the local runner removes that dependency.
-  build-macos:
-    name: Check aarch64-apple-darwin self-hosted
-    needs: [changes, fmt]
-    if: needs.changes.outputs.full == 'true' && needs.changes.outputs.selfhosted_ok == 'true'
-    runs-on: [self-hosted, mac-aarch64-local]
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: 1.96.1
-          targets: aarch64-apple-darwin
-      - name: Ensure web/dist placeholder exists
-        shell: bash
-        run: mkdir -p web/dist && touch web/dist/.gitkeep
-      - name: Check aarch64-apple-darwin
-        shell: bash
-        env:
-          # Shared personal machine; leave headroom for local builds.
-          CARGO_BUILD_JOBS: "6"
-        run: |
-          set +e
-          cargo_log="${RUNNER_TEMP}/cargo-check-aarch64.log"
-          SECONDS=0
-          cargo check --profile ci --locked --target aarch64-apple-darwin 2>&1 | tee "$cargo_log"
-          cargo_status=${PIPESTATUS[0]}
-          duration_seconds=$SECONDS
-          {
-            echo "## Check aarch64-apple-darwin (self-hosted) summary"
-            echo "| Field | Value |"
-            echo "| --- | --- |"
-            echo "| Exit status | \`${cargo_status}\` |"
-            echo "| Duration | \`${duration_seconds}s\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$cargo_status"
-
   build:
     name: ${{ matrix.label }} ${{ matrix.target }}
     needs: [changes, fmt]
@@ -362,6 +319,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
             cmd: build
             label: Build
+          - os: macos-26
+            target: aarch64-apple-darwin
+            cmd: check
+            label: Check
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             cmd: check
@@ -878,7 +839,7 @@ jobs:
   gate:
     name: CI Required Gate
     if: always()
-    needs: [changes, fmt, repo-structure, lint, windows-clippy-tools-changes, windows-clippy-tools, build, build-macos, check, check-32bit, test, security, nix-eval, nix-hash-drift, docs-style, docs-build, installer-drift, web-permission-tests]
+    needs: [changes, fmt, repo-structure, lint, windows-clippy-tools-changes, windows-clippy-tools, build, check, check-32bit, test, security, nix-eval, nix-hash-drift, docs-style, docs-build, installer-drift, web-permission-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
