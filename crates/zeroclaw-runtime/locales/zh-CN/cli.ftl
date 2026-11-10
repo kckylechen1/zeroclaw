@@ -605,8 +605,20 @@ cli-auth-callback-capture-failed = 回调捕获失败：{$error}
 cli-auth-run-paste-redirect = 运行 `zeroclaw auth paste-redirect --model-provider {$provider} --profile {$profile}`
 cli-auth-xai-no-pending-login = 未找到待处理的 xAI 登录。请先运行 `zeroclaw auth login --model-provider xai`。
 cli-auth-paste-redirect-requires-input = paste-redirect 需要重定向 URL 或 OAuth 代码
-cli-locales-fetched = {"  "}已获取 {$name} -> {$path}
-cli-locales-skipped = {"  "}已跳过 {$name}：不在上游（{$path}；已尝试 {$refs}）
+cli-locales-about = 恢复当前构建自带的语言文件
+cli-locales-long-about =
+    将当前构建自带的 Fluent (.ftl) 翻译目录恢复到 <config-dir>/data/ftl/<locale>/。
+    为兼容旧用法，命令仍叫 fetch；无需联网，也不会下载上游翻译目录。
+
+    语言可选 en 或 zh-CN。默认恢复全部目录，也可用 --catalog 选择 cli,tools。
+
+    示例：
+      zeroclaw locales fetch zh-CN
+      zeroclaw locales fetch zh-CN --catalog tools
+cli-locales-fetch-about = 离线恢复当前构建自带的 FTL 语言文件
+cli-locales-restored = {"  "}已恢复内嵌 {$name} -> {$path}
+cli-locales-missing-builtin = 当前构建未包含 {$locale} 的 {$name} 翻译目录
+cli-locales-none-selected = 请至少选择一个翻译目录：cli、tools
 cli-locales-installed = 已为“{$locale}”在 {$dir} 下安装 {$count} 个目录
 cli-browse-header = {$path}（{$count} 个条目）
 cli-browse-empty = （空）

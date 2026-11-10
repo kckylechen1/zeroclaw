@@ -12140,30 +12140,18 @@ fn default_config_dir() -> Result<PathBuf> {
 
 /// Canonical on-disk directory for a locale's runtime FTL catalogues:
 /// `<config_dir>/data/ftl/<locale>/`. This is where `zeroclaw locales fetch`
-/// writes downloaded translations and where the runtime i18n loader reads them.
+/// restores bundled translations and where the runtime i18n loader reads them.
 /// `<config_dir>` honors `ZEROCLAW_CONFIG_DIR` and otherwise defaults to
 /// `~/.zeroclaw`.
 pub fn ftl_locale_dir(locale: &str) -> Result<PathBuf> {
     Ok(default_config_dir()?.join("data").join("ftl").join(locale))
 }
 
-/// The FTL catalogues that `zeroclaw locales fetch` can download, as
-/// `(name, upstream-path-template, output-filename)`. `{locale}` is
-/// substituted per request. This is the single
+/// The FTL catalogues that `zeroclaw locales fetch` can restore from the
+/// current build, as `(name, output-filename)`. This is the single
 /// source of truth — a caller supplies only a catalog *name* matched against
 /// this table, never a path.
-pub const FTL_CATALOGS: &[(&str, &str, &str)] = &[
-    (
-        "cli",
-        "crates/zeroclaw-runtime/locales/{locale}/cli.ftl",
-        "cli.ftl",
-    ),
-    (
-        "tools",
-        "crates/zeroclaw-runtime/locales/{locale}/tools.ftl",
-        "tools.ftl",
-    ),
-];
+pub const FTL_CATALOGS: &[(&str, &str)] = &[("cli", "cli.ftl"), ("tools", "tools.ftl")];
 
 /// Build a default path string by joining `relative` onto the resolved
 /// platform config dir. The form sees the resolved absolute path

@@ -141,7 +141,11 @@ fn load_cli_strings(locale: &str) -> HashMap<String, String> {
             map.extend(format_ftl_messages(locale_ftl, locale));
         }
         if let Some(locale_ftl) = load_ftl_from_disk(locale, "cli.ftl") {
-            map.extend(format_ftl_messages(&locale_ftl, locale));
+            map.extend(
+                format_ftl_messages(&locale_ftl, locale)
+                    .into_iter()
+                    .filter(|(key, _)| !build_owned_cli_string(key)),
+            );
         }
     }
     map
@@ -173,10 +177,29 @@ fn load_cli_ftl_sources(locale: &str) -> CliFtlSources {
 }
 
 fn builtin_cli_ftl_source(locale: &str) -> Option<&'static str> {
-    match locale {
-        "zh-CN" => Some(include_str!("../locales/zh-CN/cli.ftl")),
+    builtin_catalog(locale, "cli")
+}
+
+/// Catalogues shipped with this build. The compatibility `locales fetch`
+/// command restores these exact bytes, never catalogues from another release
+/// or repository whose command contracts may differ from this fork.
+pub fn builtin_catalog(locale: &str, catalog: &str) -> Option<&'static str> {
+    match (locale, catalog) {
+        ("en", "cli") => Some(include_str!("../locales/en/cli.ftl")),
+        ("en", "tools") => Some(include_str!("../locales/en/tools.ftl")),
+        ("zh-CN", "cli") => Some(include_str!("../locales/zh-CN/cli.ftl")),
+        ("zh-CN", "tools") => Some(include_str!("../locales/zh-CN/tools.ftl")),
         _ => None,
     }
+}
+
+/// These command contracts diverge from upstream. Previously downloaded
+/// translations must not advertise the upstream updater, catalogue downloader,
+/// or the retired native Telegram runner. Other disk customizations still win.
+fn build_owned_cli_string(key: &str) -> bool {
+    ["cli-update-", "cli-locales-", "cli-telegram-"]
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
 }
 
 fn format_cli_string_with_args(
@@ -184,7 +207,8 @@ fn format_cli_string_with_args(
     key: &str,
     args: &[(&str, &str)],
 ) -> Option<String> {
-    if let Some(locale_ftl) = sources.disk.as_deref()
+    if !build_owned_cli_string(key)
+        && let Some(locale_ftl) = sources.disk.as_deref()
         && let Some(value) = format_ftl_message(locale_ftl, &sources.locale, key, args)
     {
         return Some(value);
@@ -470,6 +494,51 @@ mod tests {
             available_locales().iter().all(|o| !o.label.is_empty()),
             "every registry entry carries a display label"
         );
+    }
+
+    #[test]
+    fn selectable_locales_have_every_restorable_catalog() {
+        for locale in available_locales() {
+            for (catalog, _) in zeroclaw_config::schema::FTL_CATALOGS {
+                let source = builtin_catalog(&locale.code, catalog)
+                    .unwrap_or_else(|| panic!("missing bundled {catalog} for {}", locale.code));
+                assert!(FluentResource::try_new(source.to_string()).is_ok());
+            }
+        }
+        assert!(builtin_catalog("ja", "cli").is_none());
+        assert!(builtin_catalog("zh-CN", "../cli").is_none());
+    }
+
+    #[test]
+    fn stale_disk_catalog_cannot_override_fork_command_contracts() {
+        for locale in ["zh-CN", "ja"] {
+            let sources = CliFtlSources {
+                locale: locale.to_string(),
+                disk: Some(
+                    "cli-update-source-only = Download and install upstream releases\n\
+                     cli-locales-installed = stale { $count }\n\
+                     cli-wechat-connected = custom translation\n"
+                        .to_string(),
+                ),
+                builtin: builtin_cli_ftl_source(locale),
+            };
+            let update =
+                format_cli_string_with_args(&sources, "cli-update-source-only", &[]).unwrap();
+            assert!(update.contains("./install.sh --source"));
+            assert!(!update.contains("Download and install"));
+            let restored = format_cli_string_with_args(
+                &sources,
+                "cli-locales-installed",
+                &[("count", "2"), ("locale", locale), ("dir", "/tmp/catalogs")],
+            )
+            .unwrap();
+            assert!(restored.contains("2") && restored.contains("/tmp/catalogs"));
+            assert!(!restored.contains("stale"));
+            assert_eq!(
+                format_cli_string_with_args(&sources, "cli-wechat-connected", &[]).as_deref(),
+                Some("custom translation"),
+            );
+        }
     }
 
     #[test]

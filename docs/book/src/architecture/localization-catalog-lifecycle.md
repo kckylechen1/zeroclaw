@@ -21,10 +21,10 @@ English Fluent files are authored sources. Keys identify messages, while values 
 
 Storage and loading are separate concerns:
 
-- Runtime CLI strings always have embedded English. The loader can also use translated CLI catalogs embedded by `builtin_cli_ftl_source`, then applies a disk catalog as the highest-priority locale source.
+- Runtime CLI strings always have embedded English. The loader can also use translated CLI catalogs embedded by `builtin_cli_ftl_source`, then applies a disk catalog as the highest-priority locale source for ordinary messages. Updater, locale-installation, and Telegram command strings use the current build's catalogs because these contracts differ from upstream and retired native runners.
 - Runtime prompt-facing tool descriptions always have embedded English and overlay translated `tools.ftl` values from disk; optional missing lookups return no value.
 - `zeroclaw-tools` independently embeds English and loads disk `tools.ftl` for tool-owned schema and result strings because its crate cannot depend on runtime; required missing lookups render a visible `{key}` marker.
-- `zeroclaw locales fetch` downloads selected runtime catalogs into that shared disk locale directory using the catalog paths declared by `zeroclaw-config`.
+- `zeroclaw locales fetch` restores selected catalogs from the running binary into that shared disk locale directory. The compatibility command performs no network access. Catalogue names and output filenames are declared by `zeroclaw-config`; `zeroclaw_runtime::i18n::builtin_catalog` owns the bundled contents. A registry check covers every supported locale and catalogue pair.
 
 For runtime and tools, English remains the base map. A translated disk or built-in catalog replaces keys it contains; absent translated keys keep their English value. Required lookups report a key absent from every available source and render a visible `{key}` marker rather than silently inventing text; optional runtime tool-description lookups return no value.
 
@@ -80,7 +80,7 @@ For detailed commands, provider configuration, batching, adding a locale, and re
 - Tool-owned Fluent loader: `crates/zeroclaw-tools/src/i18n.rs`
 - Runtime Fluent catalogs: `crates/zeroclaw-runtime/locales/`
 - Fluent tooling: `xtask/src/cmd/fluent/`
-- Catalog download map: `zeroclaw_config::schema::FTL_CATALOGS`
+- Catalog installation map: `zeroclaw_config::schema::FTL_CATALOGS`
 - gettext extraction and merge: `xtask/src/cmd/mdbook/sync.rs`
 - gettext safety checks: `xtask/src/cmd/mdbook/check.rs`
 - gettext fill and repair: `tools/fill-translations/`
