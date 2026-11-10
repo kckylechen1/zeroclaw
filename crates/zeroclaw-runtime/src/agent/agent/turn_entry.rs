@@ -84,7 +84,7 @@ impl Agent {
         self.history
             .push(ConversationMessage::Chat(ChatMessage::user(enriched)));
 
-        let active_dispatcher = {
+        let (active_dispatcher, initial_vision_provider) = {
             let base_provider_messages = self.tool_dispatcher.to_provider_messages(&self.history);
             let (vision_provider_box, _degrade_strip_images) =
                 match crate::agent::turn::resolve_vision_provider(
@@ -105,7 +105,10 @@ impl Agent {
                 .as_ref()
                 .map(|resolved| resolved.provider.as_ref())
                 .unwrap_or(self.model_provider.as_ref());
-            tool_dispatcher_for_provider(&self.config, active_provider)
+            (
+                tool_dispatcher_for_provider(&self.config, active_provider),
+                vision_provider_box,
+            )
         };
 
         if let Err(error) = self.rebuild_system_prompt_for_dispatcher(active_dispatcher.as_ref()) {
@@ -115,9 +118,27 @@ impl Agent {
 
         let provider_messages = active_dispatcher.to_provider_messages(&self.history);
         let _side_query_turn_guard = self.side_query.enter_turn(&turn_id);
+        let (side_provider, side_provider_name, side_model) =
+            initial_vision_provider.as_ref().map_or_else(
+                || {
+                    (
+                        Arc::clone(&self.model_provider),
+                        self.model_provider_name.as_str(),
+                        effective_model.as_str(),
+                    )
+                },
+                |resolved| {
+                    (
+                        Arc::clone(&resolved.provider),
+                        resolved.provider_name.as_str(),
+                        resolved.model.as_str(),
+                    )
+                },
+            );
         self.side_query.update_live_messages(
-            &self.model_provider_name,
-            &effective_model,
+            side_provider,
+            side_provider_name,
+            side_model,
             &provider_messages,
             Some(&turn_id),
         );
@@ -246,7 +267,7 @@ impl Agent {
                     },
                     Some(&repetition_guard),
                     false,
-                    Some(&self.side_query),
+                    Some((&self.side_query, &self.model_provider)),
                     None,
                 ),
             )
@@ -404,7 +425,7 @@ impl Agent {
         self.append_streamed_user_message_to_history(user_message, &mut new_msgs, &turn_id)
             .await;
 
-        let active_dispatcher = {
+        let (active_dispatcher, initial_vision_provider) = {
             let base_provider_messages = self.tool_dispatcher.to_provider_messages(&self.history);
             let (vision_provider_box, _degrade_strip_images) =
                 match crate::agent::turn::resolve_vision_provider(
@@ -430,7 +451,10 @@ impl Agent {
                 .as_ref()
                 .map(|resolved| resolved.provider.as_ref())
                 .unwrap_or(self.model_provider.as_ref());
-            tool_dispatcher_for_provider(&self.config, active_provider)
+            (
+                tool_dispatcher_for_provider(&self.config, active_provider),
+                vision_provider_box,
+            )
         };
 
         if let Err(error) = self.rebuild_system_prompt_for_dispatcher(active_dispatcher.as_ref()) {
@@ -445,9 +469,27 @@ impl Agent {
 
         let provider_messages = active_dispatcher.to_provider_messages(&self.history);
         let _side_query_turn_guard = self.side_query.enter_turn(&turn_id);
+        let (side_provider, side_provider_name, side_model) =
+            initial_vision_provider.as_ref().map_or_else(
+                || {
+                    (
+                        Arc::clone(&self.model_provider),
+                        self.model_provider_name.as_str(),
+                        effective_model.as_str(),
+                    )
+                },
+                |resolved| {
+                    (
+                        Arc::clone(&resolved.provider),
+                        resolved.provider_name.as_str(),
+                        resolved.model.as_str(),
+                    )
+                },
+            );
         self.side_query.update_live_messages(
-            &self.model_provider_name,
-            &effective_model,
+            side_provider,
+            side_provider_name,
+            side_model,
             &provider_messages,
             Some(&turn_id),
         );
@@ -674,7 +716,7 @@ impl Agent {
                     },
                     Some(&repetition_guard),
                     true,
-                    Some(&self.side_query),
+                    Some((&self.side_query, &self.model_provider)),
                     Some(&dispatched_route),
                 ),
             );

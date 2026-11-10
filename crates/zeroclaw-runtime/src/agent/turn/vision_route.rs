@@ -1,11 +1,12 @@
 //! Vision model-provider routing and per-iteration message preparation.
 
 use anyhow::Result;
+use std::sync::Arc;
 use zeroclaw_config::schema::{Config, MultimodalConfig};
 use zeroclaw_providers::{ChatMessage, ModelProvider, ProviderCapabilityError, multimodal};
 
 pub(crate) struct ResolvedVisionProvider {
-    pub(crate) provider: Box<dyn ModelProvider>,
+    pub(crate) provider: Arc<dyn ModelProvider>,
     pub(crate) provider_name: String,
     pub(crate) model: String,
 }
@@ -80,7 +81,7 @@ pub(crate) fn resolve_vision_provider(
                 .into());
             }
             Some(ResolvedVisionProvider {
-                provider: vp_instance,
+                provider: Arc::from(vp_instance),
                 provider_name: vp.clone(),
                 model: vision_model,
             })
