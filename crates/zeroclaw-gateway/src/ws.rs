@@ -1596,7 +1596,7 @@ fn handle_btw_frame(
         );
     };
 
-    spawn_ws_btw_query(
+    let _task = spawn_ws_btw_query(
         state,
         conversation,
         side_query,
@@ -1624,9 +1624,11 @@ pub(super) fn spawn_ws_btw_query(
     permit: tokio::sync::OwnedSemaphorePermit,
     question: String,
     request_id: Option<String>,
-) {
+) -> tokio::task::JoinHandle<()> {
+    let retention = state.ws_conversations.retain_for_side_query(conversation);
     let state = state.clone();
     let conversation = Arc::clone(conversation);
+    let (reset_revision, cancel) = conversation.side_query_generation();
     let observed_turn_id = conversation.active_turn_id();
     let (_, agent_alias) = conversation
         .key()
@@ -1647,14 +1649,20 @@ pub(super) fn spawn_ws_btw_query(
         ))
     });
     zeroclaw_spawn::spawn!(async move {
+        let _retention = retention;
         let _permit = permit;
         let query_result = zeroclaw_runtime::agent::cost::TOOL_LOOP_TURN_USAGE
             .scope(
                 turn_usage,
-                zeroclaw_runtime::agent::cost::TOOL_LOOP_COST_TRACKING_CONTEXT
-                    .scope(cost_tracking_context, side_query.ask(&question, None)),
+                zeroclaw_runtime::agent::cost::TOOL_LOOP_COST_TRACKING_CONTEXT.scope(
+                    cost_tracking_context,
+                    side_query.ask(&question, Some(&cancel)),
+                ),
             )
             .await;
+        if cancel.is_cancelled() {
+            return;
+        }
         match query_result {
             Ok(resp) => {
                 let leak_detection = state.config.read().security.leak_detection.clone();
@@ -1678,7 +1686,7 @@ pub(super) fn spawn_ws_btw_query(
                     frame["turn_id"] = serde_json::Value::String(turn_id);
                 }
                 stamp_request_id(&mut frame, request_id.as_deref());
-                conversation.publish(&frame);
+                conversation.publish_side_query(&frame, reset_revision);
             }
             Err(err) => {
                 let leak_detection = state.config.read().security.leak_detection.clone();
@@ -1695,10 +1703,10 @@ pub(super) fn spawn_ws_btw_query(
                     frame["turn_id"] = serde_json::Value::String(turn_id);
                 }
                 stamp_request_id(&mut frame, request_id.as_deref());
-                conversation.publish(&frame);
+                conversation.publish_side_query(&frame, reset_revision);
             }
         }
-    });
+    })
 }
 
 /// Record a client request as accepted: in the session store when it keeps
@@ -3315,6 +3323,7 @@ mod tests {
     struct ScriptedProvider {
         vision: bool,
         gate: Arc<tokio::sync::Semaphore>,
+        side_query_gate: Option<Arc<SideQueryTestGate>>,
         seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
         systems: Arc<parking_lot::Mutex<Vec<String>>>,
         corrections:
@@ -3350,7 +3359,12 @@ mod tests {
                         zeroclaw_runtime::agent::side_query::BTW_SIDE_QUERY_INSTRUCTION,
                     )
             });
-            if !is_side_query {
+            if is_side_query {
+                if let Some(gate) = &self.side_query_gate {
+                    gate.entered.notify_one();
+                    gate.release.acquire().await?.forget();
+                }
+            } else {
                 self.gate.acquire().await?.forget();
                 self.corrections.lock().push(
                     zeroclaw_api::review::OWNER_CORRECTION_CONTEXT
@@ -3433,11 +3447,17 @@ mod tests {
         include!("ws/device_tests.rs");
     }
 
+    struct SideQueryTestGate {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+    }
+
     struct SharedChat {
         vision: bool,
         state: AppState,
         scope: WsTurnScope,
         gate: Arc<tokio::sync::Semaphore>,
+        side_query_gate: Option<Arc<SideQueryTestGate>>,
         seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
         systems: Arc<parking_lot::Mutex<Vec<String>>>,
         corrections:
@@ -3465,6 +3485,7 @@ mod tests {
                     bridge: None,
                 },
                 gate: Arc::new(tokio::sync::Semaphore::new(0)),
+                side_query_gate: None,
                 seen: Arc::default(),
                 systems: Arc::default(),
                 corrections: Arc::default(),
@@ -3487,6 +3508,7 @@ mod tests {
                     let provider = ScriptedProvider {
                         vision: self.vision,
                         gate: Arc::clone(&self.gate),
+                        side_query_gate: self.side_query_gate.clone(),
                         seen: Arc::clone(&self.seen),
                         systems: Arc::clone(&self.systems),
                         corrections: Arc::clone(&self.corrections),
@@ -4518,6 +4540,97 @@ mod tests {
                 .iter()
                 .all(|m| !m.content.contains("side answer") && !m.content.contains("/btw"))
         );
+    }
+
+    #[tokio::test]
+    async fn session_delete_invalidates_in_flight_btw_and_allows_a_fresh_query() {
+        const TOKEN: &str = "owner-delete-btw-fixture";
+        let gate = Arc::new(SideQueryTestGate {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let mut chat = SharedChat::new();
+        chat.side_query_gate = Some(gate.clone());
+        chat.state.pairing = Arc::new(zeroclaw_runtime::security::pairing::PairingGuard::new(
+            false,
+            &[TOKEN.into()],
+        ));
+        chat.scope.auth_subject = Some(zeroclaw_config::tokens::hash_token(TOKEN));
+        chat.state.session_backend = Some(Arc::new(
+            zeroclaw_infra::session_sqlite::SqliteSessionBackend::new(chat._tmp.path()).unwrap(),
+        ));
+        let conversation_key = format!("{}\u{1f}web", chat.scope.session_key);
+        let backend = chat.state.session_backend.as_deref().unwrap();
+        stamp_session(backend, &chat.scope.session_key, "web", None);
+        let mut subscriber = chat.attach_key(&conversation_key).await;
+        chat.gate.add_permits(1);
+        let ack = chat
+            .send(&subscriber, message_with_id("deleted history", "main"))
+            .unwrap();
+        assert_eq!(ack["status"], "accepted");
+        let frames = frames_until_end(&mut subscriber).await;
+        assert_eq!(frames.last().unwrap()["type"], "done");
+        let history = backend.load(&chat.scope.session_key);
+        assert_eq!(history[0].role, "user");
+        assert!(history[0].content.ends_with("] deleted history"));
+
+        let side_query = subscriber.conversation.side_query.clone().unwrap();
+        let permit = side_query.try_acquire_slot().unwrap();
+        let old = spawn_ws_btw_query(
+            &chat.state,
+            &subscriber.conversation,
+            side_query,
+            permit,
+            "echo:old side answer".into(),
+            Some("old".into()),
+        );
+        let limit = Duration::from_secs(5);
+        tokio::time::timeout(limit, gate.entered.notified())
+            .await
+            .expect("provider must hold the query before deletion");
+
+        drop(subscriber);
+        assert_eq!(chat.state.ws_conversations.len(), 1);
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {TOKEN}").parse().unwrap(),
+        );
+        let response = crate::api::handle_api_session_delete(
+            axum::extract::State(chat.state.clone()),
+            headers,
+            axum::extract::Path(chat.scope.session_id.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(!backend.session_exists(&chat.scope.session_key));
+        tokio::time::timeout(limit, old)
+            .await
+            .expect("deletion must cancel the provider without waiting for its response")
+            .unwrap();
+        assert_eq!(chat.state.ws_conversations.len(), 0);
+
+        gate.release.add_permits(1);
+        let mut subscriber = chat.attach_key(&conversation_key).await;
+        let ack = chat
+            .send(
+                &subscriber,
+                message_with_id("/btw echo:fresh answer", "fresh"),
+            )
+            .unwrap();
+        assert_eq!(ack["status"], "accepted");
+        let frame = tokio::time::timeout(limit, subscriber.frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(frame.is_current(subscriber.conversation.reset_revision()));
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["type"], "btw_response");
+        assert_eq!(frame["id"], "fresh");
+        assert_eq!(frame["content"], "fresh answer");
+        assert_eq!(chat.seen.lock().last().unwrap().len(), 1);
     }
 
     #[tokio::test]
