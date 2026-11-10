@@ -22,12 +22,15 @@ Proposed on 2026-10-30. Not accepted until the owner approves it.
 
 Merging this document records a proposal. It does not accept the architecture, activate a feature, change a protected contract, or claim device acceptance. Issue #374 remains the execution index; implementation requires its own bounded review and evidence.
 
+Amended on 2026-11-10 with the device audio facts reported in #626: the vendor recognition engine runs on the device and is open source, so reusing it is a candidate rather than a rejected cloud path (Context, §7, §9, §12), and the microphone array's channel layout must be checked for a playback reference before an echo-cancellation design is chosen (§3). The echo-cancellation, capture-while-frozen and light-ownership questions of slice 1 are still open.
+
 This record preserves the authority boundaries of ADR-017 and builds on the proposed ADR-019 and ADR-020. It proposes where full-duplex speech (listening while speaking, with interruption) runs, what the body must add to support it, and how an optional voice front harness with its own small model attaches (§10).
 
 ## Context
 
 - The inspected voice path on the Yonbo X1 (#535) is half-duplex and turn-based: the vendor app recognizes speech, sends text to `GPTUrl`, which points at the owner's Mac adapter; the adapter calls the brain and returns `say` audio through `TTSUrl`. The reported owner boot chain freezes the vendor recognition processes (`asr.xapp`, `audio_capture.x`) and mutes the speaker. The vendor wake word ("元宝") did not gate capture in that probe. This is deployment evidence, not proof that the repository successor has been installed.
 - The device probes in #535 report a SmartIC USB microphone that streams regardless of capture switches, a speaker, PulseAudio, an RK3568 (4 × A55, corrected by the later device-tree probe), an NPU, and an unused hardware VAD block. The RGB light is driven by the vendor playback process (`audio_play.xapp`), so audio playback and the light are coupled. This design places conversational model inference on the DGX Spark or the Mac; device feasibility and audio ownership remain acceptance work.
+- The #626 survey, with the vendor capture processes thawed in an owner-attended window, observed the dialogue process reading an 8-channel, 16 kHz, 16-bit PulseAudio source from the microphone array and streaming it over a local socket to the recognition process, which is built on sherpa-onnx with its models stored on the device. Recognition is therefore local, not a cloud service. Whether any of the eight channels is a playback loopback is not yet known. The speaker sink is 48 kHz stereo.
 - On the body, the voice surface (#512) renders only the final reply for voice; streamed voice chunks are empty. A spoken reply therefore cannot start until the whole reply is finished. Turn controls (#498) already allow cancelling a turn.
 - ADR-020 §8 proposes publishing pre-tool acknowledgement text before the call runs. An already clear, authorized instruction does not need another confirmation merely because work is slow or delegated. Publication does not prove playback or that a person heard it.
 - Full duplex needs, in order of dependency: acoustic echo cancellation (AEC) using the speaker signal as a reference, so the robot does not hear itself; voice activity detection (VAD); streaming recognition; end-of-turn detection; streaming synthesis; interruption (barge-in) handling; and scoped playback receipts separate from canonical conversation history.
@@ -56,7 +59,8 @@ The splits follow ADR-019 §2: AEC must run next to the speaker and microphone (
 ### 3. Echo cancellation runs on the device, continuously
 
 - AEC runs on the device, where the microphone and the playback reference share a clock. It does not run on the adapter host, where network jitter would break the alignment.
-- Preferred: PulseAudio's echo-cancel module with the WebRTC method, if the vendor build supports it. Otherwise the device process runs a WebRTC audio-processing or speexdsp canceller itself, and must then own playback so it has the reference.
+- First establish the microphone array's channel map. If it carries a playback loopback channel, that channel is the reference and already shares the capture clock, which is simpler than reconstructing one from the playback path.
+- Otherwise preferred: PulseAudio's echo-cancel module with the WebRTC method, if the vendor build supports it. Otherwise the device process runs a WebRTC audio-processing or speexdsp canceller itself, and must then own playback so it has the reference.
 - AEC stays on for the whole conversation window, not only while the robot speaks, because the room's echo tail continues after playback ends.
 
 ### 4. The body streams spoken text
@@ -88,7 +92,7 @@ The deterministic adapter owns these protocol controls; they are not extra model
 - Audio leaves the device only after a wake trigger (a wake word detected on the device, or a touch or button) and only during an open conversation window. The window closes after a silence timeout. The light shows whenever the microphone is open to the adapter.
 - Wake-word recognition runs on the device: first on the CPU, later on the NPU if supported and measured. Hardware VAD can be a speech/activity prefilter; it is not itself a wake-word recognizer.
 - Voice input is unverified speaker input (#512): it never becomes owner evidence for learning, and a spoken answer never satisfies an approval (ADR-020 §8).
-- The vendor cloud keeps receiving no audio: the vendor recognition path stays frozen.
+- No audio goes to the vendor cloud. The vendor capture and recognition processes stay frozen by default. Thawing them, or running the same on-device engine under the device voice process (§9), is allowed only inside the wake and window bounds above, and only if the vendor dialogue process cannot forward audio or text off the device.
 
 ### 8. Voice state and attention state
 
@@ -101,6 +105,7 @@ The adapter's local duplex state (listening, speaker active, robot speaking, ove
 
 | Candidate | Possible role | Notes |
 | --- | --- | --- |
+| sherpa-onnx with the models already on the robot | recognition, on the device | local and open source; removes the audio uplink for recognition, at the cost of device CPU and of depending on vendor-shipped model files; measure latency and accuracy against the host candidates |
 | FunASR streaming (`paraformer-zh-streaming`) or Fun-ASR-Nano | recognition | local; FunSpeech packages it with CosyVoice |
 | CosyVoice streaming | synthesis | local; same family as the synthesis inside MiniCPM-o, which may help voice consistency |
 | macOS `say` | synthesis fallback | available on a configured Mac with the required voice; not a portable fallback |
@@ -202,7 +207,7 @@ Proposed targets, to be measured and adjusted by the owner:
 - **Letting the front harness answer simple questions directly.** Deciding what is simple is a decision, and decisions belong to the body.
 - **AEC on the adapter host.** The reference and microphone would not share a clock.
 - **Streaming the room to the host all the time.** Listening is bounded by the wake trigger and the conversation window.
-- **The vendor cloud recognition and synthesis path** for ZeroClaw conversations.
+- **Any vendor cloud path** for ZeroClaw conversations. The vendor's on-device recognition engine is a candidate under §9, not part of this exclusion.
 
 ## Consequences
 
@@ -256,6 +261,7 @@ This ADR is implemented when:
 ## Open questions
 
 - Can a new process capture the microphone while the vendor capture processes are frozen, or do they hold the device? (Slice 1.)
+- Does the 8-channel microphone source include a playback loopback channel? (Slice 1.)
 - Is PulseAudio echo cancellation available on the vendor build? (Slice 1.)
 - If the device takes over playback, how is the light driven? (Slice 1.)
 - Which audio transport: an extension of the N3B1 link, or a separate authenticated stream?

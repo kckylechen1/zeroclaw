@@ -65,7 +65,7 @@ Each tool, MCP integration, and Node capability declares one of two replay class
 | `safe` | Rerunning after a crash cannot cause a second effect: it only reads, or it passes an idempotency key the receiving side honors | memory search, weather, `tachi_staff` `status` and `result`, Node `info` |
 | `never` (default) | An interrupted call is never rerun. The model is told it was interrupted, with any stored output, and the outcome is reported as unknown | sending a message for the owner, Tachi `start` and `cancel`, any Node action that moves or plays |
 
-The default is `never`. A capability becomes `safe` only by an explicit declaration that a reviewer checks. This turns the existing `SubmissionUnknown` and unknown-device-outcome rules into one property of every capability rather than special cases. Tachi `start` stays `never` until Tachi offers a start idempotency key (#2003).
+The default is `never`. A capability becomes `safe` only by an explicit declaration that a reviewer checks. For a Node capability that declaration lives in the kernel's capability catalog (#630), beside its schema and risk class. A device advertises names only and cannot declare its own capability replayable. This turns the existing `SubmissionUnknown` and unknown-device-outcome rules into one property of every capability rather than special cases. Tachi `start` stays `never` until Tachi offers a start idempotency key (#2003).
 
 A replay label alone never overrides a stricter existing admission, approval,
 or unknown-outcome rule. In particular, Node metadata does not authorize
