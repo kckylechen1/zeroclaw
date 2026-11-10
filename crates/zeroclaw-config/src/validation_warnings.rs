@@ -159,6 +159,14 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("channels.irc", "retired_channel_transport_removed"),
     ("channels.twitch", "retired_channel_transport_removed"),
     ("channels.lark", "retired_channel_transport_removed"),
+    ("channels.line", "retired_channel_transport_removed"),
+    ("channels.dingtalk", "retired_channel_transport_removed"),
+    ("channels.wecom", "retired_channel_transport_removed"),
+    ("channels.wecom_ws", "retired_channel_transport_removed"),
+    ("channels.wechat", "retired_channel_transport_removed"),
+    ("channels.qq", "retired_channel_transport_removed"),
+    ("channels.twitter", "retired_channel_transport_removed"),
+    ("channels.mochat", "retired_channel_transport_removed"),
     ("channels.feishu", "retired_channel_transport_removed"),
     ("channels_config.slack", "retired_channel_transport_removed"),
     (
@@ -183,6 +191,29 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
         "retired_channel_transport_removed",
     ),
     ("channels_config.lark", "retired_channel_transport_removed"),
+    ("channels_config.line", "retired_channel_transport_removed"),
+    (
+        "channels_config.dingtalk",
+        "retired_channel_transport_removed",
+    ),
+    ("channels_config.wecom", "retired_channel_transport_removed"),
+    (
+        "channels_config.wecom_ws",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.wechat",
+        "retired_channel_transport_removed",
+    ),
+    ("channels_config.qq", "retired_channel_transport_removed"),
+    (
+        "channels_config.twitter",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.mochat",
+        "retired_channel_transport_removed",
+    ),
     (
         "channels_config.feishu",
         "retired_channel_transport_removed",

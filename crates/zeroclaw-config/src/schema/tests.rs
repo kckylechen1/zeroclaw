@@ -1861,7 +1861,6 @@ async fn channels_default() {
     assert!(c.cli);
     assert!(c.telegram.is_empty());
     assert!(c.discord.is_empty());
-    assert!(c.wecom_ws.is_empty());
     assert!(!c.show_tool_calls);
     assert_eq!(
         c.max_concurrent_per_channel,
@@ -1899,63 +1898,6 @@ async fn validate_rejects_zero_channel_max_concurrent_per_channel() {
             .contains("channels.max_concurrent_per_channel must be greater than 0"),
         "got: {err}"
     );
-}
-
-#[test]
-async fn wecom_ws_config_serde_defaults_and_secret_metadata() {
-    let toml = r#"
-        enabled = true
-        bot_id = "bot-123"
-        secret = "sk-test"
-        allowed_users = ["zeroclaw_user"]
-        allowed_groups = ["zeroclaw_group"]
-        bot_name = "danya"
-        proxy_url = "http://127.0.0.1:7890"
-    "#;
-    let parsed: WeComWsConfig = toml::from_str(toml).unwrap();
-
-    assert!(parsed.enabled);
-    assert_eq!(parsed.bot_id, "bot-123");
-    assert_eq!(parsed.secret, "sk-test");
-    assert_eq!(parsed.allowed_users, vec!["zeroclaw_user"]);
-    assert_eq!(parsed.allowed_groups, vec!["zeroclaw_group"]);
-    assert_eq!(parsed.bot_name.as_deref(), Some("danya"));
-    assert_eq!(parsed.file_retention_days, 7);
-    assert_eq!(parsed.max_file_size_mb, 20);
-    assert_eq!(parsed.stream_mode, StreamMode::Partial);
-    assert_eq!(parsed.proxy_url.as_deref(), Some("http://127.0.0.1:7890"));
-    assert!(parsed.excluded_tools.is_empty());
-    assert_eq!(WeComWsConfig::default().file_retention_days, 7);
-    assert_eq!(WeComWsConfig::default().max_file_size_mb, 20);
-    assert_eq!(WeComWsConfig::default().stream_mode, StreamMode::Partial);
-    assert!(WeComWsConfig::default().bot_name.is_none());
-    assert!(WeComWsConfig::default().proxy_url.is_none());
-    assert!(WeComWsConfig::prop_is_secret("channels.wecom_ws.secret"));
-}
-
-#[test]
-async fn config_parses_wecom_ws_separate_from_wecom_webhook() {
-    let toml = r#"
-        [channels.wecom.default]
-        enabled = true
-        webhook_key = "webhook-key"
-
-        [channels.wecom_ws.default]
-        enabled = true
-        bot_id = "bot-123"
-        secret = "sk-test"
-        allowed_users = ["zeroclaw_user"]
-    "#;
-    let parsed: Config = toml::from_str(toml).unwrap();
-
-    assert_eq!(
-        parsed.channels.wecom.get("default").unwrap().webhook_key,
-        "webhook-key"
-    );
-    let ws = parsed.channels.wecom_ws.get("default").unwrap();
-    assert_eq!(ws.bot_id, "bot-123");
-    assert_eq!(ws.allowed_users, vec!["zeroclaw_user"]);
-    assert_eq!(ws.stream_mode, StreamMode::Partial);
 }
 
 // ── Serde round-trip ─────────────────────────────────────
@@ -2067,14 +2009,6 @@ async fn config_toml_roundtrip() {
             webhook: HashMap::new(),
             whatsapp: HashMap::new(),
             email: HashMap::new(),
-            line: HashMap::new(),
-            dingtalk: HashMap::new(),
-            wecom: HashMap::new(),
-            wecom_ws: HashMap::new(),
-            wechat: HashMap::new(),
-            qq: HashMap::new(),
-            twitter: HashMap::new(),
-            mochat: HashMap::new(),
             nostr: HashMap::new(),
             clawdtalk: HashMap::new(),
             reddit: HashMap::new(),
@@ -3610,14 +3544,6 @@ async fn channels_with_whatsapp() {
             },
         )]),
         email: HashMap::new(),
-        line: HashMap::new(),
-        dingtalk: HashMap::new(),
-        wecom: HashMap::new(),
-        wecom_ws: HashMap::new(),
-        wechat: HashMap::new(),
-        qq: HashMap::new(),
-        twitter: HashMap::new(),
-        mochat: HashMap::new(),
         nostr: HashMap::new(),
         clawdtalk: HashMap::new(),
         reddit: HashMap::new(),
@@ -4689,6 +4615,94 @@ async fn load_or_init_warns_about_retired_feishu_and_lark_settings() {
     }
 }
 
+// Real file loading must diagnose the pre-migration path, while preserving
+// adjacent live credentials, guild/channel restrictions and peer allowlists.
+async fn assert_retired_channel_settings_load_with_warning(settings: &[(&str, &str)]) {
+    let _env_guard = env_override_lock().await;
+    let dir = TempDir::new().unwrap();
+    let _config_guard = EnvValueGuard::set("ZEROCLAW_CONFIG_DIR", dir.path());
+    let config_path = dir.path().join("config.toml");
+    const RETIRED_SECRET: &str = "synthetic-retired-credential";
+    for version in 1..=3 {
+        let (stamp, root, alias) = match version {
+            1 => ("", "channels_config", ""),
+            2 => ("schema_version = 2\n", "channels", ""),
+            _ => ("schema_version = 3\n", "channels", ".default"),
+        };
+        for (kind, fields) in settings {
+            let retired_path = format!("{root}.{kind}");
+            let allowlist = if version < 3 {
+                "allowed_users = ['retained-peer']\n"
+            } else {
+                ""
+            };
+            let peer_group = if version == 3 {
+                "[agents.default]\nchannels = ['discord.default']\n\n[peer_groups.discord_default]\nchannel = 'discord'\nagents = ['default']\nexternal_peers = ['retained-peer']\nignore = []\n"
+            } else {
+                ""
+            };
+            let contents = format!(
+                "{stamp}[{retired_path}{alias}]\nenabled = false\n{fields}\nallowed_users = ['retired-peer']\n\n\
+                 [{root}.discord{alias}]\nenabled = true\nbot_token = 'synthetic-live-token'\n\
+                 guild_ids = ['retained-guild']\nchannel_ids = ['retained-channel']\n\
+                 mention_only = true\nlisten_to_bots = false\n{allowlist}\n\
+                 [{root}.email{alias}]\nenabled = false\nimap_host = 'imap.example.test'\n\
+                 smtp_host = 'smtp.example.test'\nusername = 'synthetic@example.test'\n\
+                 password = 'synthetic-live-password'\nfrom_address = 'synthetic@example.test'\n\n\
+                 {peer_group}"
+            );
+            fs::write(&config_path, contents).await.unwrap();
+            let config = Box::pin(Config::load_or_init()).await.unwrap();
+            let discord = &config.channels.discord["default"];
+            assert_eq!(discord.bot_token, "synthetic-live-token");
+            assert_eq!(discord.guild_ids, ["retained-guild"]);
+            assert_eq!(discord.channel_ids, ["retained-channel"]);
+            assert!(discord.mention_only);
+            assert!(!discord.listen_to_bots);
+            let email = &config.channels.email["default"];
+            assert_eq!(email.password, "synthetic-live-password");
+            assert_eq!(email.username, "synthetic@example.test");
+            let group = &config.peer_groups["discord_default"];
+            assert_eq!(group.channel.to_string(), "discord");
+            assert_eq!(
+                group
+                    .external_peers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                ["retained-peer"]
+            );
+            assert!(group.ignore.is_empty());
+            assert!(!group.admin_for_agent_scope);
+            assert!(!config.peer_groups.contains_key(&format!("{kind}_default")));
+            let warnings = config.collect_warnings();
+            let retired: Vec<_> = warnings.iter().filter(|w| w.path == retired_path).collect();
+            assert_eq!(
+                retired.len(),
+                1,
+                "V{version} {retired_path} must warn exactly once"
+            );
+            assert_eq!(retired[0].code, "retired_channel_transport_removed");
+            assert!(retired[0].message.contains("Remove the section."));
+            assert!(warnings.iter().all(|w| !w.message.contains(RETIRED_SECRET)));
+        }
+    }
+}
+
+#[test]
+async fn load_or_init_warns_about_retired_batch_b_channel_settings() {
+    assert_retired_channel_settings_load_with_warning(&[
+        ("line", "channel_access_token = 'synthetic-retired-credential'\nchannel_secret = 'synthetic-retired-credential'\ndm_policy = 'allowlist'\ngroup_policy = 'mention'"),
+        ("dingtalk", "client_id = 'synthetic-client'\nclient_secret = 'synthetic-retired-credential'"),
+        ("wecom", "webhook_key = 'synthetic-retired-credential'"),
+        ("wecom_ws", "bot_id = 'synthetic-bot'\nsecret = 'synthetic-retired-credential'\nallowed_groups = ['retired-group']"),
+        ("wechat", "api_base_url = 'https://synthetic-retired-credential.example.test'"),
+        ("qq", "app_id = 'synthetic-app'\napp_secret = 'synthetic-retired-credential'"),
+        ("twitter", "bearer_token = 'synthetic-retired-credential'"),
+        ("mochat", "api_url = 'https://example.test'\napi_token = 'synthetic-retired-credential'"),
+    ]).await;
+}
+
 #[test]
 async fn load_or_init_retired_pairing_dashboard_section_parses_with_tombstone_warning() {
     // Section-parse finding: `[gateway.pairing_dashboard]` in a config
@@ -5516,117 +5530,6 @@ async fn gateway_config_default_values() {
 // ── Peripherals config ───────────────────────────────────────
 
 // ── LINE ──────────────────────────────────────────────────
-
-#[test]
-async fn line_config_toml_roundtrip() {
-    // Full [channels.line] TOML block — covers every user-facing field.
-    //
-    // channel_access_token and channel_secret can be omitted here and
-    // supplied via LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET env vars
-    // instead; both fields default to "" when absent.
-    let toml = r#"
-[channels_config.line.default]
-enabled = true
-channel_access_token = "ChannelAccessToken=="
-channel_secret = "abc123secret"
-dm_policy = "pairing"
-group_policy = "mention"
-allowed_users = []
-webhook_port = 8443
-sender_name = "Popcorn"
-"#;
-    let config: Config = toml::from_str(toml).unwrap();
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(ln.channel_access_token, "ChannelAccessToken==");
-    assert_eq!(ln.channel_secret, "abc123secret");
-    assert_eq!(ln.dm_policy, LineDmPolicy::Pairing);
-    assert_eq!(ln.group_policy, LineGroupPolicy::Mention);
-    assert_eq!(ln.webhook_port, 8443);
-    assert!(ln.proxy_url.is_none());
-    assert_eq!(ln.sender_name.as_deref(), Some("Popcorn"));
-}
-
-#[test]
-async fn line_config_defaults() {
-    // Minimal config — only the required secret fields are provided.
-    // All optional fields should resolve to documented defaults.
-    let toml = r#"
-[channels_config.line.default]
-channel_access_token = "tok"
-channel_secret = "sec"
-"#;
-    let config: Config = toml::from_str(toml).unwrap();
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(
-        ln.dm_policy,
-        LineDmPolicy::Pairing,
-        "dm_policy default is pairing"
-    );
-    assert_eq!(
-        ln.group_policy,
-        LineGroupPolicy::Mention,
-        "group_policy default is mention"
-    );
-    assert_eq!(ln.webhook_port, 8443, "webhook_port default is 8443");
-    assert!(ln.proxy_url.is_none());
-    assert!(ln.sender_name.is_none(), "sender_name default is None");
-}
-
-#[test]
-async fn line_config_allowlist_policy() {
-    // dm_policy = allowlist; the user ID list itself now lives on the
-    // V3 `peer_groups.line_default` group (synthesized from V2's
-    // `allowed_users`), not on the LineConfig struct.
-    let toml = r#"
-schema_version = 2
-
-[channels.line]
-enabled = true
-channel_access_token = "tok"
-channel_secret = "sec"
-dm_policy = "allowlist"
-allowed_users = ["Uabc123", "Udef456"]
-"#;
-    let config = crate::migration::migrate_to_current(toml).expect("migration succeeds");
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(ln.dm_policy, LineDmPolicy::Allowlist);
-    let group = config
-        .peer_groups
-        .get("line_default")
-        .expect("V2 line.allowed_users must fold into peer_groups.line_default");
-    let usernames: Vec<&str> = group.external_peers.iter().map(|p| p.as_str()).collect();
-    assert_eq!(usernames, vec!["Uabc123", "Udef456"]);
-}
-
-#[test]
-async fn line_config_open_policies() {
-    // dm_policy = open + group_policy = open — most permissive combination.
-    let toml = r#"
-[channels_config.line.default]
-channel_access_token = "tok"
-channel_secret = "sec"
-dm_policy = "open"
-group_policy = "open"
-"#;
-    let config: Config = toml::from_str(toml).unwrap();
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(ln.dm_policy, LineDmPolicy::Open);
-    assert_eq!(ln.group_policy, LineGroupPolicy::Open);
-}
-
-#[test]
-async fn line_config_group_disabled() {
-    // group_policy = disabled — bot ignores all group/room messages.
-    let toml = r#"
-[channels_config.line.default]
-channel_access_token = "tok"
-channel_secret = "sec"
-group_policy = "disabled"
-"#;
-    let config: Config = toml::from_str(toml).unwrap();
-    let ln = config.channels.line.get("default").unwrap();
-    assert_eq!(ln.group_policy, LineGroupPolicy::Disabled);
-}
 
 // ── Config file permission hardening (Unix only) ───────────────
 
@@ -12806,6 +12709,14 @@ const SCHEMA_DELETED: &[&str] = &[
     "irc",
     "twitch",
     "lark",
+    "line",
+    "dingtalk",
+    "wecom",
+    "wecom_ws",
+    "wechat",
+    "qq",
+    "twitter",
+    "mochat",
     "feishu",
 ];
 

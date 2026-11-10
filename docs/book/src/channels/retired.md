@@ -10,10 +10,10 @@ channel. The [channels overview](./overview.md) lists the live surfaces.
 - Matrix: schema removed (#584 Slice 3); leftover `[channels.matrix]` sections tombstone at load
 - Slack: schema removed (#584 Slice 3); leftover `[channels.slack]` sections tombstone at load
 - Mattermost: schema removed (#584 Slice 3); leftover `[channels.mattermost]` sections tombstone at load
-- [LINE](./line.md)
+- LINE: schema removed (#584 Slice 3); leftover `[channels.line]` sections tombstone at load
 - Signal: schema removed (#584 Slice 3); leftover `[channels.signal]` sections tombstone at load
 - [WhatsApp](./whatsapp.md)
-- [Other chat platforms](./chat-others.md): iMessage, WeChat, DingTalk, Lark/Feishu, QQ, IRC, Mochat, Notion, Twitch
+- [Other chat platforms](./chat-others.md): chat transports whose schemas are removed (iMessage, WeChat, DingTalk, Lark/Feishu, QQ, IRC, Mochat, Twitch); Notion is a retired SaaS integration
 - [Social](./social.md): Bluesky, Nostr, Twitter/X, Reddit
 - [Git](./git.md)
 - [Voice](./voice.md): ClawdTalk, Voice Call, Voice Wake

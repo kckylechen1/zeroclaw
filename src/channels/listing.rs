@@ -41,31 +41,6 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         compiled: cfg!(feature = "channel-email"),
     },
     ChannelCompileSpec {
-        schema_name: Some("DingTalk"),
-        type_keys: &["dingtalk"],
-        compiled: cfg!(feature = "channel-dingtalk"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("WeCom"),
-        type_keys: &["wecom"],
-        compiled: cfg!(feature = "channel-wecom"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("WeCom WebSocket"),
-        type_keys: &["wecom-ws", "wecom_ws"],
-        compiled: cfg!(feature = "channel-wecom-ws"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("WeChat"),
-        type_keys: &["wechat"],
-        compiled: cfg!(feature = "channel-wechat"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("QQ Official"),
-        type_keys: &["qq"],
-        compiled: cfg!(feature = "channel-qq"),
-    },
-    ChannelCompileSpec {
         schema_name: Some("Nostr"),
         type_keys: &["nostr"],
         compiled: cfg!(feature = "channel-nostr"),
@@ -89,21 +64,6 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         schema_name: Some("Git"),
         type_keys: &["git"],
         compiled: cfg!(feature = "channel-git"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("X/Twitter"),
-        type_keys: &["twitter"],
-        compiled: cfg!(feature = "channel-twitter"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Mochat"),
-        type_keys: &["mochat"],
-        compiled: cfg!(feature = "channel-mochat"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("LINE"),
-        type_keys: &["line"],
-        compiled: cfg!(feature = "channel-line"),
     },
     ChannelCompileSpec {
         schema_name: Some("Voice Call"),
@@ -271,9 +231,12 @@ mod tests {
     #[test]
     fn retired_transports_are_never_compiled_or_uncompiled() {
         let mut cfg = ChannelsConfig::default();
-        cfg.wechat.insert(
+        cfg.whatsapp.insert(
             "default".to_string(),
-            zeroclaw_config::schema::WeChatConfig::default(),
+            zeroclaw_config::schema::WhatsAppConfig {
+                session_path: Some("wa.db".into()),
+                ..Default::default()
+            },
         );
 
         let compiled: BTreeSet<_> = compiled_channels(&cfg)
@@ -289,10 +252,13 @@ mod tests {
             .map(|info| info.name)
             .collect();
 
-        assert!(!compiled.contains("WeChat"));
+        assert!(!compiled.contains("WhatsApp"));
         // Rebuilding with the stub feature cannot restore the retired runner.
-        assert!(!uncompiled.contains("WeChat"));
-        assert!(retired.contains("WeChat"));
+        assert!(!uncompiled.contains("WhatsApp"));
+        assert!(
+            retired.iter().any(|n| n.contains("WhatsApp")),
+            "retired set must contain the WhatsApp entry: {retired:?}"
+        );
         for removed in [
             "Slack",
             "Mattermost",

@@ -206,10 +206,7 @@ slim-control = [
     "gateway",
     "channel-acp-server",
     "channel-webhook",
-    "channel-wechat",
-    "channel-wecom",
-    "channel-wecom-ws",
-]
+    ]
 
 # Concrete integration families forwarded from zeroclaw-tools. Default-on so
 # the standard build keeps the pre-feature compiled surface and registry; a
@@ -244,8 +241,7 @@ default-channels = [
 
 # Historical broad channel bundle. Preserves the older default channel surface.
 channels-full = [
-    "default-channels", "channel-line", "channel-dingtalk", "channel-qq", "channel-bluesky", "channel-git", "channel-twitter", "channel-reddit", "channel-notion", "channel-amqp",
-    "channel-mochat", "channel-wecom", "channel-wecom-ws", "channel-clawdtalk",
+    "default-channels", "channel-bluesky", "channel-git", "channel-reddit", "channel-notion", "channel-amqp", "channel-clawdtalk",
     "channel-voice-call",
 ]
 
@@ -261,20 +257,13 @@ channel-email = ["zeroclaw-runtime?/email-tools"]
 channel-telegram = []
 channel-nostr = []
 channel-discord = []
-channel-dingtalk = []
-channel-qq = []
 channel-bluesky = []
 channel-git = []
 provider-github = []
 provider-gitea = []
-channel-twitter = []
 channel-reddit = []
 channel-notion = []
 channel-amqp = []
-channel-mochat = []
-channel-wechat = []
-channel-wecom = []
-channel-wecom-ws = []
 channel-clawdtalk = []
 channel-webhook = []
 channel-acp-server = []
@@ -285,7 +274,6 @@ channel-acp-server = []
 # (e.g. the `component` test) can cfg-gate the node-only fields.
 nodes = ["zeroclaw-gateway?/nodes"]
 channel-voice-call = []
-channel-line = []
 whatsapp-web = []
 voice-wake = []
 memory-tachi = ["zeroclaw-memory/tachi"]

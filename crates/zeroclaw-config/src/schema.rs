@@ -10675,38 +10675,7 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub email: HashMap<String, crate::scattered_types::EmailConfig>,
-    /// LINE Messaging API channel instances (`[channels.line.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub line: HashMap<String, LineConfig>,
-    /// DingTalk channel instances (`[channels.dingtalk.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub dingtalk: HashMap<String, DingTalkConfig>,
-    /// WeCom (WeChat Enterprise) Bot Webhook channel instances (`[channels.wecom.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub wecom: HashMap<String, WeComConfig>,
-    /// WeCom AI Bot WebSocket channel instances (`[channels.wecom_ws.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub wecom_ws: HashMap<String, WeComWsConfig>,
-    /// WeChat personal iLink Bot channel instances (`[channels.wechat.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub wechat: HashMap<String, WeChatConfig>,
-    /// QQ Official Bot channel instances (`[channels.qq.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub qq: HashMap<String, QQConfig>,
-    /// X/Twitter channel instances (`[channels.twitter.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub twitter: HashMap<String, TwitterConfig>,
-    /// Mochat customer service channel instances (`[channels.mochat.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub mochat: HashMap<String, MochatConfig>,
+    /// Nostr channel instances (`[channels.nostr.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub nostr: HashMap<String, NostrConfig>,
@@ -10882,41 +10851,6 @@ impl ChannelsConfig {
                 retired: false,
             },
             ChannelInfo {
-                kind: "dingtalk",
-                name: "DingTalk",
-                desc: "DingTalk Stream Mode",
-                configured: !self.dingtalk.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "wecom",
-                name: "WeCom",
-                desc: "WeCom Bot Webhook",
-                configured: !self.wecom.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "wecom-ws",
-                name: "WeCom WebSocket",
-                desc: "WeCom AI Bot long connection",
-                configured: !self.wecom_ws.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "wechat",
-                name: "WeChat",
-                desc: "WeChat iLink Bot",
-                configured: !self.wechat.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "qq",
-                name: "QQ Official",
-                desc: "Tencent QQ Bot",
-                configured: !self.qq.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
                 kind: "nostr",
                 name: "Nostr",
                 desc: "Nostr DMs",
@@ -10949,27 +10883,6 @@ impl ChannelsConfig {
                 name: "Git",
                 desc: "Git forge (GitHub, Gitea, Forgejo): issues, PRs & events",
                 configured: !self.git.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "twitter",
-                name: "X/Twitter",
-                desc: "X/Twitter Bot via API v2",
-                configured: !self.twitter.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "mochat",
-                name: "Mochat",
-                desc: "Mochat Customer Service",
-                configured: !self.mochat.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "line",
-                name: "LINE",
-                desc: "connect your LINE bot",
-                configured: !self.line.is_empty(),
                 retired: false,
             },
             ChannelInfo {
@@ -11020,14 +10933,6 @@ impl ChannelsConfig {
             || self.webhook.values().any(|c| c.enabled)
             || self.whatsapp.values().any(|c| c.enabled)
             || self.email.values().any(|c| c.enabled)
-            || self.line.values().any(|c| c.enabled)
-            || self.dingtalk.values().any(|c| c.enabled)
-            || self.wecom.values().any(|c| c.enabled)
-            || self.wecom_ws.values().any(|c| c.enabled)
-            || self.wechat.values().any(|c| c.enabled)
-            || self.qq.values().any(|c| c.enabled)
-            || self.twitter.values().any(|c| c.enabled)
-            || self.mochat.values().any(|c| c.enabled)
             || self.nostr.values().any(|c| c.enabled)
             || self.clawdtalk.values().any(|c| c.enabled)
             || self.reddit.values().any(|c| c.enabled)
@@ -11047,21 +10952,13 @@ impl ChannelsConfig {
     /// retired transports (`retired`), so a name-addressed outbound surface
     /// such as `heartbeat.target` refuses them at validation instead of
     /// accepting a target the delivery layer silently drops.
-    pub fn channel_presence(&self) -> [(&'static str, bool, bool, bool); 22] {
+    pub fn channel_presence(&self) -> [(&'static str, bool, bool, bool); 14] {
         [
             ("telegram", !self.telegram.is_empty(), true, false),
             ("discord", !self.discord.is_empty(), true, false),
             ("webhook", !self.webhook.is_empty(), true, false),
             ("whatsapp", !self.whatsapp.is_empty(), false, true),
             ("email", !self.email.is_empty(), true, false),
-            ("line", !self.line.is_empty(), false, true),
-            ("dingtalk", !self.dingtalk.is_empty(), false, true),
-            ("wecom", !self.wecom.is_empty(), false, true),
-            ("wecom_ws", !self.wecom_ws.is_empty(), false, true),
-            ("wechat", !self.wechat.is_empty(), false, true),
-            ("qq", !self.qq.is_empty(), false, true),
-            ("twitter", !self.twitter.is_empty(), false, true),
-            ("mochat", !self.mochat.is_empty(), false, true),
             ("nostr", !self.nostr.is_empty(), false, true),
             ("clawdtalk", !self.clawdtalk.is_empty(), false, true),
             ("reddit", !self.reddit.is_empty(), false, true),
@@ -11138,14 +11035,6 @@ impl Default for ChannelsConfig {
             webhook: HashMap::new(),
             whatsapp: HashMap::new(),
             email: HashMap::new(),
-            line: HashMap::new(),
-            dingtalk: HashMap::new(),
-            wecom: HashMap::new(),
-            wecom_ws: HashMap::new(),
-            wechat: HashMap::new(),
-            qq: HashMap::new(),
-            twitter: HashMap::new(),
-            mochat: HashMap::new(),
             nostr: HashMap::new(),
             clawdtalk: HashMap::new(),
             reddit: HashMap::new(),
@@ -12022,119 +11911,6 @@ fn default_amqp_durable_ack() -> bool {
     true
 }
 
-/// DM (1:1 chat) access policy for the LINE channel.
-#[derive(
-    Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, zeroclaw_macros::ConfigEnum,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum LineDmPolicy {
-    /// Respond to every DM regardless of who sent it.
-    Open,
-    /// Require a one-time `/bind <code>` handshake before responding (default).
-    /// ZeroClaw prints the bind code on startup; send it once to unlock access.
-    #[default]
-    Pairing,
-    /// Respond only to LINE user IDs listed in `allowed_users`.
-    Allowlist,
-}
-
-/// Group / multi-person chat policy for the LINE channel.
-#[derive(
-    Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, zeroclaw_macros::ConfigEnum,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum LineGroupPolicy {
-    /// Respond to every message in group/room chats.
-    Open,
-    /// Respond only when the bot is @mentioned (default).
-    #[default]
-    Mention,
-    /// Ignore all messages in group/room chats.
-    Disabled,
-}
-
-/// LINE Messaging API channel configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.line"]
-pub struct LineConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Long-lived channel access token (from LINE Developers Console).
-    /// Used for both the Reply API and the Push API fallback.
-    /// Falls back to the `LINE_CHANNEL_ACCESS_TOKEN` environment variable if empty.
-    #[serde(default)]
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub channel_access_token: String,
-    /// Channel secret (from LINE Developers Console).
-    /// Used to verify the `X-Line-Signature` header on incoming webhooks.
-    /// Falls back to the `LINE_CHANNEL_SECRET` environment variable if empty.
-    #[serde(default)]
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub channel_secret: String,
-    /// DM (1:1 chat) access policy. Default: `pairing`.
-    ///
-    /// - `open`: respond to everyone
-    /// - `pairing`: require one-time `/bind <code>` handshake on first contact
-    /// - `allowlist`: respond only to user IDs listed in `allowed_users`
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub dm_policy: LineDmPolicy,
-    /// Group / multi-person chat policy. Default: `mention`.
-    ///
-    /// - `open`: respond to every message
-    /// - `mention`: respond only when @mentioned
-    /// - `disabled`: ignore all group messages
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub group_policy: LineGroupPolicy,
-    /// TCP port the embedded webhook server listens on. Default: `8443`.
-    #[tab(Advanced)]
-    #[serde(default = "default_line_webhook_port")]
-    pub webhook_port: u16,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-
-    /// Display name shown as the sender in LINE chat bubbles.
-    /// Defaults to `"AI"` when unset or empty.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub sender_name: Option<String>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-fn default_line_webhook_port() -> u16 {
-    8443
-}
-
-impl ChannelConfig for LineConfig {
-    fn name() -> &'static str {
-        "LINE"
-    }
-    fn desc() -> &'static str {
-        "connect your LINE bot"
-    }
-}
-
 // ── Security Config ─────────────────────────────────────────────────
 
 /// Security configuration for audit logging, OTP, e-stop, IAM/SSO, and WebAuthn.
@@ -12666,339 +12442,6 @@ impl Default for AuditConfig {
             max_size_mb: default_audit_max_size_mb(),
             sign_events: false,
         }
-    }
-}
-
-/// DingTalk configuration for Stream Mode messaging
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.dingtalk"]
-pub struct DingTalkConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Client ID (AppKey) from DingTalk developer console
-    #[tab(Connection)]
-    pub client_id: String,
-    /// Client Secret (AppSecret) from DingTalk developer console
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub client_secret: String,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for DingTalkConfig {
-    fn name() -> &'static str {
-        "DingTalk"
-    }
-    fn desc() -> &'static str {
-        "DingTalk Stream Mode"
-    }
-}
-
-/// WeCom (WeChat Enterprise) Bot Webhook configuration
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.wecom"]
-pub struct WeComConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Webhook key from WeCom Bot configuration
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub webhook_key: String,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for WeComConfig {
-    fn name() -> &'static str {
-        "WeCom"
-    }
-    fn desc() -> &'static str {
-        "WeCom Bot Webhook"
-    }
-}
-
-fn default_wecom_ws_file_retention_days() -> u32 {
-    7
-}
-
-fn default_wecom_ws_max_file_size_mb() -> u64 {
-    20
-}
-
-fn default_wecom_ws_stream_mode() -> StreamMode {
-    StreamMode::Partial
-}
-
-/// WeCom AI Bot WebSocket configuration.
-///
-/// This is distinct from webhook-based [`WeComConfig`] and uses the WeCom AI
-/// Bot long-connection API for inbound messages and active-session replies.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.wecom_ws"]
-pub struct WeComWsConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Bot ID for WeCom WebSocket subscription.
-    pub bot_id: String,
-    /// Secret for WeCom WebSocket subscription authentication.
-    #[secret]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub secret: String,
-    /// Allowed WeCom user IDs. Empty = deny all, "*" = allow all users.
-    #[serde(default)]
-    pub allowed_users: Vec<String>,
-    /// Allowed WeCom group chat IDs. Empty = deny all groups, "*" = allow all groups.
-    #[serde(default)]
-    pub allowed_groups: Vec<String>,
-    /// Display name or mention alias of the WeCom AI bot, for example `danya`.
-    ///
-    /// WeCom group text often arrives as plain text such as `@danya say hi`;
-    /// passing this name through lets the generic reply-intent precheck
-    /// recognize that a group message was addressed to the bot.
-    #[serde(default)]
-    pub bot_name: Option<String>,
-    /// File retention days for downloaded WeCom attachments under the workspace cache.
-    #[serde(default = "default_wecom_ws_file_retention_days")]
-    pub file_retention_days: u32,
-    /// Maximum accepted file size in MiB for WeCom attachment download attempts.
-    #[serde(default = "default_wecom_ws_max_file_size_mb")]
-    pub max_file_size_mb: u64,
-    /// Streaming mode for progressive draft delivery over the WeCom long connection.
-    #[serde(default = "default_wecom_ws_stream_mode")]
-    pub stream_mode: StreamMode,
-    /// Optional per-channel proxy override. Falls back to the global proxy config when empty.
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl Default for WeComWsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bot_id: String::new(),
-            secret: String::new(),
-            allowed_users: Vec::new(),
-            allowed_groups: Vec::new(),
-            bot_name: None,
-            file_retention_days: default_wecom_ws_file_retention_days(),
-            max_file_size_mb: default_wecom_ws_max_file_size_mb(),
-            stream_mode: default_wecom_ws_stream_mode(),
-            proxy_url: None,
-            excluded_tools: Vec::new(),
-        }
-    }
-}
-
-impl ChannelConfig for WeComWsConfig {
-    fn name() -> &'static str {
-        "WeCom WebSocket"
-    }
-    fn desc() -> &'static str {
-        "WeCom AI Bot long connection"
-    }
-}
-
-/// WeChat personal iLink Bot channel configuration.
-///
-/// Uses the iLink Bot API (`ilinkai.weixin.qq.com`) with QR-code login.
-/// The bot token is obtained by scanning a QR code and persisted to disk
-/// so subsequent restarts do not require re-scanning.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.wechat"]
-pub struct WeChatConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Override the iLink API base URL. Default: `https://ilinkai.weixin.qq.com`.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub api_base_url: Option<String>,
-    /// Override the CDN base URL. Default: `https://novac2c.cdn.weixin.qq.com/c2c`.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub cdn_base_url: Option<String>,
-    /// Directory to persist bot token and sync cursor.
-    /// Default: `~/.zeroclaw/wechat/`.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub state_dir: Option<String>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for WeChatConfig {
-    fn name() -> &'static str {
-        "WeChat"
-    }
-    fn desc() -> &'static str {
-        "WeChat iLink Bot"
-    }
-}
-
-/// QQ Official Bot configuration (Tencent QQ Bot SDK)
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.qq"]
-pub struct QQConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// App ID from QQ Bot developer console
-    #[tab(Connection)]
-    pub app_id: String,
-    /// App Secret from QQ Bot developer console
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub app_secret: String,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for QQConfig {
-    fn name() -> &'static str {
-        "QQ Official"
-    }
-    fn desc() -> &'static str {
-        "Tencent QQ Bot"
-    }
-}
-
-/// X/Twitter channel configuration (Twitter API v2)
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.twitter"]
-pub struct TwitterConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Twitter API v2 Bearer Token (OAuth 2.0)
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub bearer_token: String,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for TwitterConfig {
-    fn name() -> &'static str {
-        "X/Twitter"
-    }
-    fn desc() -> &'static str {
-        "X/Twitter Bot via API v2"
-    }
-}
-
-/// Mochat channel configuration (Mochat customer service API)
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.mochat"]
-pub struct MochatConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Mochat API base URL
-    #[tab(Advanced)]
-    pub api_url: String,
-    /// Mochat API token
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub api_token: String,
-    /// Poll interval in seconds for new messages. Default: 5
-    #[tab(Advanced)]
-    #[serde(default = "default_mochat_poll_interval")]
-    pub poll_interval_secs: u64,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-fn default_mochat_poll_interval() -> u64 {
-    5
-}
-
-impl ChannelConfig for MochatConfig {
-    fn name() -> &'static str {
-        "Mochat"
-    }
-    fn desc() -> &'static str {
-        "Mochat Customer Service"
     }
 }
 

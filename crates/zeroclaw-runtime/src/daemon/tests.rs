@@ -414,38 +414,6 @@ fn detects_supervised_channels_present() {
 }
 
 #[test]
-fn detects_dingtalk_as_supervised_channel() {
-    let mut config = Config::default();
-    config.channels.dingtalk.insert(
-        "default".to_string(),
-        zeroclaw_config::schema::DingTalkConfig {
-            enabled: true,
-            client_id: "client_id".into(),
-            client_secret: "client_secret".into(),
-            proxy_url: None,
-            excluded_tools: vec![],
-        },
-    );
-    assert!(has_supervised_channels(&config));
-}
-
-#[test]
-fn detects_qq_as_supervised_channel() {
-    let mut config = Config::default();
-    config.channels.qq.insert(
-        "default".to_string(),
-        zeroclaw_config::schema::QQConfig {
-            enabled: true,
-            app_id: "app-id".into(),
-            app_secret: "app-secret".into(),
-            proxy_url: None,
-            excluded_tools: vec![],
-        },
-    );
-    assert!(has_supervised_channels(&config));
-}
-
-#[test]
 fn webhook_only_config_is_supervised() {
     let mut config = Config::default();
     config.channels.webhook.insert(
@@ -521,11 +489,11 @@ fn resolve_delivery_rejects_retired_matrix_target() {
     // validation with the retired diagnostic instead of being accepted and
     // later dropped by the delivery layer.
     let mut config = Config::default();
-    config.heartbeat.target = Some("wechat".into());
-    config.heartbeat.to = Some("wxid_example".into());
+    config.heartbeat.target = Some("whatsapp".into());
+    config.heartbeat.to = Some("+15550001111".into());
     config
         .channels
-        .wechat
+        .whatsapp
         .insert("default".to_string(), Default::default());
 
     let err = resolve_heartbeat_delivery(&config).unwrap_err();

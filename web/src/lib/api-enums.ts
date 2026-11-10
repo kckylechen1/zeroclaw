@@ -102,16 +102,6 @@ export const enumValues: EnumValues = {
   "KiloEndpoint": [
     "gateway"
   ],
-  "LineDmPolicy": [
-    "open",
-    "pairing",
-    "allowlist"
-  ],
-  "LineGroupPolicy": [
-    "open",
-    "mention",
-    "disabled"
-  ],
   "LogLlmRequestPayload": [
     "off",
     "redacted",

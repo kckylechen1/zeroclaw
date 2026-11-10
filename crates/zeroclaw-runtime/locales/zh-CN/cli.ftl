@@ -53,21 +53,6 @@ cli-channel-doctor-about = 对已配置的渠道运行健康检查
 cli-channel-add-about = 添加新的渠道配置
 cli-channel-remove-about = 移除渠道配置
 cli-channel-send-about = 向已配置的渠道发送一次性消息
-cli-wechat-pairing-required = 🔐 需要绑定 WeChat。一次性绑定码：{$code}
-cli-wechat-send-bind-command = 请在 WeChat 中发送 `{$command} <code>`。
-cli-wechat-qr-login = 📱 WeChat 二维码登录（{$attempt}/{$max}）
-cli-wechat-scan-to-connect = 请使用 WeChat 扫码连接。
-cli-wechat-qr-url = 二维码 URL：{$url}
-cli-wechat-qr-expired-giving-up = WeChat 二维码已过期 {$max} 次，停止重试。
-cli-wechat-qr-fetch-failed = 获取 WeChat 二维码失败。
-cli-wechat-qr-fetch-status-failed = 获取 WeChat 二维码失败（{$status}）：{$body}
-cli-wechat-missing-response-field = WeChat 响应缺少 {$field}。
-cli-wechat-scanned-confirm = 👀 已扫码！请在手机上确认...
-cli-wechat-qr-expired-refreshing = ⏳ 二维码已过期，正在刷新...
-cli-wechat-login-confirmed-missing-field = 登录已确认，但缺少 {$field}。
-cli-wechat-connected = ✅ WeChat 已连接！
-cli-wechat-bound-success = ✅ WeChat 账号绑定成功。现在可以和 ZeroClaw 对话了。
-cli-wechat-invalid-bind-code = ❌ 绑定码无效。请重试。
 cli-skills-list-about = 列出所有已安装的技能
 cli-skills-audit-about = 审计技能源目录或已安装的技能名称
 cli-skills-audit-failed = 技能审核失败。
@@ -282,40 +267,6 @@ channel-whatsapp-web-feature-missing-warning = ⚠ WhatsApp Web 已配置，但�
 channel-whatsapp-web-feature-missing-build = 使用以下命令构建/运行：cargo build --features whatsapp-web
 channel-whatsapp-web-feature-missing-install = 如果已安装到 PATH，请使用以下命令重新安装：cargo install --path . --force --locked --features whatsapp-web
 channel-whatsapp-web-feature-missing-error = WhatsApp Web 通道需要 'whatsapp-web' 功能。使用以下命令启用：cargo build --features whatsapp-web（或者，如果已安装到 PATH：cargo install --path . --force --locked --features whatsapp-web）
-channel-wecom-ws-stream-bootstrap = 正在处理中，请稍候。
-channel-wecom-ws-stop-ack = 已停止当前消息处理。
-channel-wecom-ws-voice-unavailable = 我现在无法处理语音消息 {$emoji}
-channel-wecom-ws-unsupported-message = 暂不支持该消息类型。
-channel-wecom-ws-welcome = 你好，欢迎来找我聊天 {$emoji}
-channel-wecom-ws-supplemental-message =
-    {"["}补充消息]
-    {$extra}
-channel-wecom-ws-group-allowlist-missing =
-    管理员尚未配置 WeCom allowlist，当前机器人不接收任何群消息。
-
-    群 chatid: {$chatid}
-    发送者 userid: {$userid}
-
-    请在 {$allowed_groups_path} 或 {$allowed_users_path} 中加入允许项，也可以临时设置为 ["*"] 进行测试。
-channel-wecom-ws-group-access-denied =
-    当前群未被允许使用此机器人。
-
-    群 chatid: {$chatid}
-    发送者 userid: {$userid}
-
-    请管理员将该群加入 {$allowed_groups_path}，或将你的 userid 加入 {$allowed_users_path}。
-channel-wecom-ws-dm-allowlist-missing =
-    管理员尚未配置 WeCom allowlist，当前机器人不接收任何消息。
-
-    你的 userid: {$userid}
-
-    请在 {$allowed_users_path} 中加入允许项，也可以临时设置为 ["*"] 进行测试。
-channel-wecom-ws-dm-access-denied =
-    你没有权限使用此机器人。
-
-    你的 userid: {$userid}
-
-    请管理员将你的 userid 加入 {$allowed_users_path}。
 channel-discord-interaction-unauthorized = 你没有权限在此处使用该命令。
 channel-discord-interaction-malformed = 未知或格式错误的命令。
 channel-discord-interaction-unavailable = 该命令已不可用，或其输入为空。

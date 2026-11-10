@@ -18,15 +18,6 @@ name = "Production Control"
 [agents.default]
 acp_enable_mcp = false
 
-# Lean channels (included in slim-control)
-[channels.wechat.default]
-enabled = true
-api_base_url = "https://ilinkai.weixin.qq.com"
-
-[channels.wecom.default]
-enabled = true
-webhook_key = "test-webhook-key"
-
 # Broad channels (not included in slim-control)
 # Telegram channel settings
 [channels.telegram.default]
@@ -78,10 +69,10 @@ async fn cross_build_full_save_preserves_uncompiled_channel_sections() {
     assert_eq!(
         config
             .channels
-            .wechat
+            .email
             .get("default")
-            .and_then(|c| c.api_base_url.as_deref()),
-        Some("https://ilinkai.weixin.qq.com")
+            .map(|c| c.imap_host.as_str()),
+        Some("imap.example.com")
     );
     assert_eq!(
         config
@@ -114,8 +105,8 @@ async fn cross_build_full_save_preserves_uncompiled_channel_sections() {
         .expect("read saved config");
 
     assert!(
-        saved_raw.contains("[channels.wechat.default]"),
-        "WeChat section must exist in saved config"
+        saved_raw.contains("[channels.email.default]"),
+        "Email section must exist in saved config"
     );
     assert!(
         saved_raw.contains("[channels.telegram.default]"),
@@ -180,10 +171,10 @@ async fn cross_build_dirty_save_preserves_untouched_sections() {
     config.loaded_from = Some(config_path.clone());
 
     // Modify only a single field and mark it dirty
-    if let Some(wechat) = config.channels.wechat.get_mut("default") {
-        wechat.api_base_url = Some("https://modified.ilink.api".to_string());
+    if let Some(email) = config.channels.email.get_mut("default") {
+        email.imap_host = "modified.example.com".to_string();
     }
-    config.mark_dirty("channels.wechat.default.api_base_url");
+    config.mark_dirty("channels.email.default.imap_host");
 
     // Save only dirty paths
     config.save_dirty().await.expect("save_dirty succeeds");
@@ -194,8 +185,8 @@ async fn cross_build_dirty_save_preserves_untouched_sections() {
 
     // Verify the modified field changed
     assert!(
-        saved_raw.contains("api_base_url = \"https://modified.ilink.api\""),
-        "modified api_base_url must be written"
+        saved_raw.contains("imap_host = \"modified.example.com\""),
+        "modified imap_host must be written"
     );
 
     // Verify untouched broad channels and comments are preserved verbatim
@@ -269,14 +260,14 @@ async fn cross_build_parent_table_edit_preserves_sibling_entries() {
 
     // Add a second wechat alias via create_map_key
     let created = config
-        .create_map_key("channels.wechat", "secondary")
-        .expect("create wechat secondary alias");
+        .create_map_key("channels.email", "secondary")
+        .expect("create email secondary alias");
     assert!(created);
 
-    if let Some(sec) = config.channels.wechat.get_mut("secondary") {
-        sec.api_base_url = Some("https://secondary.ilink.api".to_string());
+    if let Some(sec) = config.channels.email.get_mut("secondary") {
+        sec.imap_host = "secondary.example.com".to_string();
     }
-    config.mark_dirty("channels.wechat.secondary.api_base_url");
+    config.mark_dirty("channels.email.secondary.imap_host");
 
     config.save_dirty().await.expect("save_dirty succeeds");
 
@@ -284,9 +275,9 @@ async fn cross_build_parent_table_edit_preserves_sibling_entries() {
         .await
         .expect("read saved config");
 
-    // Both wechat default and secondary must exist, plus all uncompiled channels
-    assert!(saved_raw.contains("https://ilinkai.weixin.qq.com"));
-    assert!(saved_raw.contains("https://secondary.ilink.api"));
+    // Both email default and secondary must exist, plus all broad channels
+    assert!(saved_raw.contains("smtp.example.com"));
+    assert!(saved_raw.contains("secondary.example.com"));
     assert!(saved_raw.contains("[channels.telegram.default]"));
     assert!(saved_raw.contains("[channels.discord.default]"));
 }

@@ -3743,7 +3743,6 @@ export interface components {
             debounce_ms: number;
             /** @description DingTalk channel instances (`[channels.dingtalk.<alias>]`). */
             dingtalk?: {
-                [key: string]: components["schemas"]["DingTalkConfig"];
             };
             /** @description Discord bot channel instances (`[channels.discord.<alias>]`). */
             discord?: {
@@ -3772,7 +3771,6 @@ export interface components {
             };
             /** @description LINE Messaging API channel instances (`[channels.line.<alias>]`). */
             line?: {
-                [key: string]: components["schemas"]["LineConfig"];
             };
             /** @description Linq Partner API channel instances (`[channels.linq.<alias>]`). */
             linq?: {
@@ -3805,7 +3803,6 @@ export interface components {
             message_timeout_secs: number;
             /** @description Mochat customer service channel instances (`[channels.mochat.<alias>]`). */
             mochat?: {
-                [key: string]: components["schemas"]["MochatConfig"];
             };
             /** @description Nextcloud Talk bot channel instances (`[channels.nextcloud_talk.<alias>]`). */
             nextcloud_talk?: {
@@ -3816,7 +3813,6 @@ export interface components {
             };
             /** @description QQ Official Bot channel instances (`[channels.qq.<alias>]`). */
             qq?: {
-                [key: string]: components["schemas"]["QQConfig"];
             };
             /** @description Reddit channel instances (`[channels.reddit.<alias>]`). */
             reddit?: {
@@ -3862,7 +3858,6 @@ export interface components {
             };
             /** @description X/Twitter channel instances (`[channels.twitter.<alias>]`). */
             twitter?: {
-                [key: string]: components["schemas"]["TwitterConfig"];
             };
             /** @description Voice call channel instances (`[channels.voice_call.<alias>]`). */
             voice_call?: {
@@ -3886,15 +3881,12 @@ export interface components {
             };
             /** @description WeChat personal iLink Bot channel instances (`[channels.wechat.<alias>]`). */
             wechat?: {
-                [key: string]: components["schemas"]["WeChatConfig"];
             };
             /** @description WeCom (WeChat Enterprise) Bot Webhook channel instances (`[channels.wecom.<alias>]`). */
             wecom?: {
-                [key: string]: components["schemas"]["WeComConfig"];
             };
             /** @description WeCom AI Bot WebSocket channel instances (`[channels.wecom_ws.<alias>]`). */
             wecom_ws?: {
-                [key: string]: components["schemas"]["WeComWsConfig"];
             };
             /** @description WhatsApp channel instances (`[channels.whatsapp.<alias>]`). */
             whatsapp?: {
@@ -7081,33 +7073,6 @@ export interface components {
              * @default null
              */
             to: string | null;
-        };
-        /** @description DingTalk configuration for Stream Mode messaging */
-        DingTalkConfig: {
-            /** @description Client ID (AppKey) from DingTalk developer console */
-            client_id: string;
-            /** @description Client Secret (AppSecret) from DingTalk developer console */
-            client_secret: string;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * @description Per-channel proxy URL (http, https, socks5, socks5h).
-             *     Overrides the global `[proxy]` setting for this channel only.
-             * @default null
-             */
-            proxy_url: string | null;
         };
         /** @description Discord bot channel configuration. */
         DiscordConfig: {
@@ -11936,77 +11901,6 @@ export interface components {
             /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
             wire_api?: components["schemas"]["WireApi"] | null;
         };
-        /** @description LINE Messaging API channel configuration. */
-        LineConfig: {
-            /**
-             * @description Long-lived channel access token (from LINE Developers Console).
-             *     Used for both the Reply API and the Push API fallback.
-             *     Falls back to the `LINE_CHANNEL_ACCESS_TOKEN` environment variable if empty.
-             * @default
-             */
-            channel_access_token: string;
-            /**
-             * @description Channel secret (from LINE Developers Console).
-             *     Used to verify the `X-Line-Signature` header on incoming webhooks.
-             *     Falls back to the `LINE_CHANNEL_SECRET` environment variable if empty.
-             * @default
-             */
-            channel_secret: string;
-            /**
-             * @description DM (1:1 chat) access policy. Default: `pairing`.
-             *
-             *     - `open`: respond to everyone
-             *     - `pairing`: require one-time `/bind <code>` handshake on first contact
-             *     - `allowlist`: respond only to user IDs listed in `allowed_users`
-             * @default pairing
-             */
-            dm_policy: components["schemas"]["LineDmPolicy"];
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * @description Group / multi-person chat policy. Default: `mention`.
-             *
-             *     - `open`: respond to every message
-             *     - `mention`: respond only when @mentioned
-             *     - `disabled`: ignore all group messages
-             * @default mention
-             */
-            group_policy: components["schemas"]["LineGroupPolicy"];
-            /**
-             * @description Per-channel proxy URL (http, https, socks5, socks5h).
-             *     Overrides the global `[proxy]` setting for this channel only.
-             * @default null
-             */
-            proxy_url: string | null;
-            /**
-             * @description Display name shown as the sender in LINE chat bubbles.
-             *     Defaults to `"AI"` when unset or empty.
-             * @default null
-             */
-            sender_name: string | null;
-            /**
-             * Format: uint16
-             * @description TCP port the embedded webhook server listens on. Default: `8443`.
-             * @default 8443
-             */
-            webhook_port: number;
-        };
-        /** @description DM (1:1 chat) access policy for the LINE channel. */
-        LineDmPolicy: "open" | "pairing" | "allowlist";
-        /** @description Group / multi-person chat policy for the LINE channel. */
-        LineGroupPolicy: "open" | "mention" | "disabled";
         /**
          * @description Automatic link understanding for inbound channel messages (`[link_enricher]`).
          *
@@ -14050,33 +13944,6 @@ export interface components {
             vision?: boolean | null;
             /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
             wire_api?: components["schemas"]["WireApi"] | null;
-        };
-        /** @description Mochat channel configuration (Mochat customer service API) */
-        MochatConfig: {
-            /** @description Mochat API token */
-            api_token: string;
-            /** @description Mochat API base URL */
-            api_url: string;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * Format: uint64
-             * @description Poll interval in seconds for new messages. Default: 5
-             * @default 5
-             */
-            poll_interval_secs: number;
         };
         /**
          * @description Token-cost rates for a single chat / completion model, in USD per
@@ -18370,33 +18237,6 @@ export interface components {
         };
         /** @description Proxy application scope — determines which outbound traffic uses the proxy. */
         ProxyScope: "environment" | "zeroclaw" | "services";
-        /** @description QQ Official Bot configuration (Tencent QQ Bot SDK) */
-        QQConfig: {
-            /** @description App ID from QQ Bot developer console */
-            app_id: string;
-            /** @description App Secret from QQ Bot developer console */
-            app_secret: string;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * @description Per-channel proxy URL (http, https, socks5, socks5h).
-             *     Overrides the global `[proxy]` setting for this channel only.
-             * @default null
-             */
-            proxy_url: string | null;
-        };
         /**
          * @description Qdrant vector database backend (`[storage.qdrant.<alias>]`).
          *
@@ -22036,25 +21876,6 @@ export interface components {
              */
             tunnel_provider: string;
         };
-        /** @description X/Twitter channel configuration (Twitter API v2) */
-        TwitterConfig: {
-            /** @description Twitter API v2 Bearer Token (OAuth 2.0) */
-            bearer_token: string;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-        };
         /**
          * UpgradeAcceptedResponse
          * @description 202 body for `POST /api/version/upgrade`: the id to poll status with.
@@ -22984,131 +22805,6 @@ export interface components {
              * @default null
              */
             tenant_id: string | null;
-        };
-        /**
-         * @description WeChat personal iLink Bot channel configuration.
-         *
-         *     Uses the iLink Bot API (`ilinkai.weixin.qq.com`) with QR-code login.
-         *     The bot token is obtained by scanning a QR code and persisted to disk
-         *     so subsequent restarts do not require re-scanning.
-         */
-        WeChatConfig: {
-            /**
-             * @description Override the iLink API base URL. Default: `https://ilinkai.weixin.qq.com`.
-             * @default null
-             */
-            api_base_url: string | null;
-            /**
-             * @description Override the CDN base URL. Default: `https://novac2c.cdn.weixin.qq.com/c2c`.
-             * @default null
-             */
-            cdn_base_url: string | null;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * @description Directory to persist bot token and sync cursor.
-             *     Default: `~/.zeroclaw/wechat/`.
-             * @default null
-             */
-            state_dir: string | null;
-        };
-        /** @description WeCom (WeChat Enterprise) Bot Webhook configuration */
-        WeComConfig: {
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /** @description Webhook key from WeCom Bot configuration */
-            webhook_key: string;
-        };
-        /**
-         * @description WeCom AI Bot WebSocket configuration.
-         *
-         *     This is distinct from webhook-based [`WeComConfig`] and uses the WeCom AI
-         *     Bot long-connection API for inbound messages and active-session replies.
-         */
-        WeComWsConfig: {
-            /**
-             * @description Allowed WeCom group chat IDs. Empty = deny all groups, "*" = allow all groups.
-             * @default []
-             */
-            allowed_groups: string[];
-            /**
-             * @description Allowed WeCom user IDs. Empty = deny all, "*" = allow all users.
-             * @default []
-             */
-            allowed_users: string[];
-            /** @description Bot ID for WeCom WebSocket subscription. */
-            bot_id: string;
-            /**
-             * @description Display name or mention alias of the WeCom AI bot, for example `danya`.
-             *
-             *     WeCom group text often arrives as plain text such as `@danya say hi`;
-             *     passing this name through lets the generic reply-intent precheck
-             *     recognize that a group message was addressed to the bot.
-             * @default null
-             */
-            bot_name: string | null;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * Format: uint32
-             * @description File retention days for downloaded WeCom attachments under the workspace cache.
-             * @default 7
-             */
-            file_retention_days: number;
-            /**
-             * Format: uint64
-             * @description Maximum accepted file size in MiB for WeCom attachment download attempts.
-             * @default 20
-             */
-            max_file_size_mb: number;
-            /**
-             * @description Optional per-channel proxy override. Falls back to the global proxy config when empty.
-             * @default null
-             */
-            proxy_url: string | null;
-            /** @description Secret for WeCom WebSocket subscription authentication. */
-            secret: string;
-            /**
-             * @description Streaming mode for progressive draft delivery over the WeCom long connection.
-             * @default partial
-             */
-            stream_mode: components["schemas"]["StreamMode"];
         };
         /**
          * @description WebAuthn / FIDO2 hardware key authentication configuration (`[security.webauthn]`).

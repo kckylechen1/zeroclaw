@@ -1,13 +1,11 @@
 # Other Chat Platforms
 
-The chat transports that used to live on this page; iMessage, IRC,
-Lark/Feishu, and Twitch (schemas removed, tombstoned at load), WeChat
-personal iLink Bot, DingTalk, QQ, and Mochat (sections still parse, retired);
-are RETIRED: the in-process channel runners were removed with the
-`zeroclaw-channels` crate (#579, #581) and the first schema batch was
-deleted under [#584](https://github.com/kckylechen1/zeroclaw/issues/584)
-Slice 3. Leftover sections for removed schemas tombstone at load; the rest
-report as retired transports until their own deletion slice.
+The chat transports that used to live on this page (iMessage, IRC,
+Lark/Feishu, Twitch, WeChat personal iLink Bot, DingTalk, QQ, and Mochat)
+are RETIRED and their schemas are removed: the runners went with the
+`zeroclaw-channels` crate (#579, #581) and the schemas were deleted under
+[#584](https://github.com/kckylechen1/zeroclaw/issues/584) Slice 3.
+Leftover sections tombstone at load with a structured warning.
 
 ## Live chat surfaces
 

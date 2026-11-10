@@ -337,7 +337,7 @@ bot_token = "test_token"
     let parsed: Config = toml::from_str(toml_str).expect("multi-channel config should parse");
     assert!(!parsed.channels.telegram.is_empty());
     assert!(!parsed.channels.discord.is_empty());
-    assert!(parsed.channels.wecom.is_empty());
+    assert!(parsed.channels.amqp.is_empty());
 }
 
 #[test]
