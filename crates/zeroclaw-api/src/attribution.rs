@@ -64,7 +64,6 @@ pub enum ChannelKind {
     Notion,
     Telegram,
     Webhook,
-    WhatsappWeb,
     Plugin,
 }
 
@@ -414,7 +413,6 @@ mod tests {
             (ChannelKind::Notion, "notion"),
             (ChannelKind::Telegram, "telegram"),
             (ChannelKind::Webhook, "webhook"),
-            (ChannelKind::WhatsappWeb, "whatsapp_web"),
             (ChannelKind::Plugin, "plugin"),
         ] {
             assert_eq!(kind.as_wire(), wire);
@@ -447,6 +445,9 @@ mod tests {
             "voice_call",
             "voice_wake",
             "amqp",
+            "whatsapp",
+            "whatsapp-web",
+            "whatsapp_web",
         ] {
             assert!(
                 retired.parse::<ChannelKind>().is_err(),

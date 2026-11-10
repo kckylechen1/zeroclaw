@@ -761,8 +761,7 @@ See all available features:
   fi
 
   # `--preset full` must actually deliver the broad feature bundle the
-  # installer advertises (whatsapp-web, channel-matrix, the heavyweight
-  # extras), not
+  # installer advertises (optional channel features and heavyweight extras), not
   # Cargo's lean `default`. Resolve the explicit feature list from the
   # canonical registry (`cargo generate features --selection all`), the same
   # source of truth the release workflow consumes, and build with

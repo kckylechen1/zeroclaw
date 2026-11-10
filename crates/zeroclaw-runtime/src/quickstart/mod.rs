@@ -567,29 +567,9 @@ fn build_channel_type_options(
         .collect()
 }
 
-fn resolve_channel_quickstart_type(channel_type: &str) -> (&str, bool) {
-    match channel_type {
-        "whatsapp-web" | "whatsapp_web" => ("whatsapp", true),
-        other => (other, false),
-    }
-}
-
 fn canonical_quickstart_channel_ref(reference: &str) -> Option<String> {
     let (channel_type, alias) = split_ref(reference.trim())?;
-    let (config_channel_type, _) = resolve_channel_quickstart_type(channel_type);
-    Some(format!("{config_channel_type}.{alias}"))
-}
-
-fn default_whatsapp_web_session_path(config: &Config, alias: &str) -> String {
-    config
-        .config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("state")
-        .join("whatsapp-web")
-        .join(format!("{alias}.db"))
-        .to_string_lossy()
-        .into_owned()
+    Some(format!("{channel_type}.{alias}"))
 }
 
 /// Walk the serialised form of `value` and yield `<type>.<alias>` refs
@@ -1480,8 +1460,7 @@ fn apply_channels(
                     ));
                     continue;
                 }
-                let (config_channel_type, is_whatsapp_web) =
-                    resolve_channel_quickstart_type(submitted_channel_type);
+                let config_channel_type = submitted_channel_type;
                 if zeroclaw_config::schema::is_retired_transport(config_channel_type) {
                     // The picker never offers retired transports, but the
                     // submit path must reject them too: nothing may create
@@ -1565,19 +1544,6 @@ fn apply_channels(
                         ));
                         failed = true;
                         break;
-                    }
-                }
-                if !failed && is_whatsapp_web {
-                    let default_path = default_whatsapp_web_session_path(config, alias);
-                    if let Err(err) =
-                        staged.set_prop_persistent(&format!("{prefix}.session_path"), &default_path)
-                    {
-                        errors.push(QuickstartError::new(
-                            QuickstartStep::Channels,
-                            format!("channels[{idx}].channel_type"),
-                            err.to_string(),
-                        ));
-                        failed = true;
                     }
                 }
                 if !failed

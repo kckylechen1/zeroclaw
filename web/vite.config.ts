@@ -63,7 +63,6 @@ export default defineConfig(({ command }) => ({
       // breaks a refresh on the pairing page (same fix as the /acp regex above).
       "^/pair(?:/code)?(?:\\?.*)?$": { target: gatewayTarget, changeOrigin: true },
       "/webhook":        { target: gatewayTarget, changeOrigin: true },
-      "/whatsapp":       { target: gatewayTarget, changeOrigin: true },
       "/hooks":          { target: gatewayTarget, changeOrigin: true },
     },
   },

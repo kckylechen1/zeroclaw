@@ -1843,15 +1843,15 @@ fn validate_heartbeat_channel_config(config: &Config, channel: &str) -> Result<(
     if config.gateway.bridges.contains_key(channel) {
         return Ok(());
     }
-    if !config.channels.is_known_channel(channel) {
-        anyhow::bail!("unsupported heartbeat.target channel: {channel}");
-    }
     if config.channels.is_retired_channel(channel) {
         anyhow::bail!(
             "heartbeat.target is set to {channel} but its transport runner is retired \
              (#584) — no delivery path exists; target the Telegram bridge, webhook \
              ingress, or another bridge name instead"
         );
+    }
+    if !config.channels.is_known_channel(channel) {
+        anyhow::bail!("unsupported heartbeat.target channel: {channel}");
     }
     if !config.channels.is_channel_configured(channel) {
         anyhow::bail!(

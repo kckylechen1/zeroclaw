@@ -1315,52 +1315,38 @@ allowed_users = ["alice", "bob"]
 }
 
 #[test]
-fn v2_whatsapp_cloud_fields_are_dropped_not_ported() {
-    // The WhatsApp Cloud API backend was deleted. V2 -> V3 must drop its
-    // fields from the WhatsApp table while the table itself, its Web
-    // fields and its allowlist fold keep migrating.
-    let v3 = migrate_v2(
-        r#"
+fn v2_whatsapp_does_not_activate_or_synthesize_peer_groups() {
+    let raw = r#"schema_version = 2
 [channels.whatsapp]
 enabled = true
-access_token = "tok"
-phone_number_id = "id"
-verify_token = "v"
-app_secret = "sec"
-proxy_url = "socks5://127.0.0.1:1080"
-pair_phone = "15551234567"
-allowed_numbers = ["+15551234567"]
-"#,
-    );
-    let alias = v3
-        .get("channels")
-        .and_then(|c| c.get("whatsapp"))
-        .and_then(|w| w.get("default"))
-        .and_then(toml::Value::as_table)
-        .expect("channels.whatsapp.default survives");
-    for field in [
-        "access_token",
-        "phone_number_id",
-        "verify_token",
-        "app_secret",
-        "proxy_url",
-    ] {
-        assert!(alias.get(field).is_none(), "{field} must be dropped");
-    }
-    assert_eq!(
-        alias.get("pair_phone").and_then(toml::Value::as_str),
-        Some("15551234567")
-    );
-    assert_eq!(
-        alias.get("enabled").and_then(toml::Value::as_bool),
-        Some(true)
-    );
+session_path = "/tmp/retired-whatsapp.db"
+access_token = "retired-token"
+app_secret = "retired-secret"
+allowed_numbers = ["+15555550102"]
+allowed_groups = ["group-id"]
+dm_policy = "allowlist"
+group_policy = "allowlist"
+
+[channels.webhook]
+enabled = true
+port = 8080
+"#;
+    let config = migrate_to_current(raw).expect("retired WhatsApp config must load");
+    assert_eq!(config.channels.webhook["default"].port, 8080);
     assert!(
-        v3.get("peer_groups")
-            .and_then(|g| g.get("whatsapp_default"))
-            .is_some(),
-        "allowed_numbers still folds into a peer group"
+        config.peer_groups.is_empty(),
+        "retired allowlists must not become live peer groups"
     );
+    assert!(!config.channels.is_known_channel("whatsapp"));
+    assert!(
+        !toml::to_string(&config)
+            .unwrap()
+            .contains("[channels.whatsapp")
+    );
+    let warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(raw);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].path, "channels.whatsapp");
+    assert_eq!(warnings[0].code, "retired_channel_transport_removed");
 }
 
 #[test]
@@ -2052,6 +2038,28 @@ fn generate_never_emits_retired_config_surfaces() {
     for target in 1..=CURRENT_SCHEMA_VERSION {
         let raw = generate(target, &GenerateOptions::default())
             .unwrap_or_else(|e| panic!("generate({target}) failed: {e:#}"));
+        // Pin WhatsApp independently of the tombstone registry: forgetting its
+        // registration must still fail for all generator schema versions.
+        let value: toml::Value = toml::from_str(&raw).unwrap();
+        let root = if target == 1 {
+            "channels_config"
+        } else {
+            "channels"
+        };
+        let channels = value[root].as_table().unwrap();
+        assert!(!channels.contains_key("whatsapp"));
+        for retained in ["telegram", "discord", "webhook", "email"] {
+            assert!(
+                channels.contains_key(retained),
+                "generate({target}) must retain {retained}"
+            );
+        }
+        assert!(
+            value
+                .get("transcription")
+                .and_then(|transcription| transcription.get("transcribe_non_ptt_audio"))
+                .is_none()
+        );
         let mut warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
         warnings.extend(zeroclaw_config::validation_warnings::retired_field_tombstones(&raw));
         assert!(
@@ -2248,7 +2256,7 @@ fn generate_v3_covers_every_v3_top_level_section() {
 }
 
 #[test]
-fn generate_v3_preserves_retained_channels_and_retires_batches_b_and_c() {
+fn generate_v3_preserves_retained_channels_and_retires_transports() {
     // Pin the fixture's retained aliases and meaningful fields, rather than a
     // count another alias could accidentally satisfy after losing a channel.
     let generated = generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
@@ -2292,14 +2300,6 @@ fn generate_v3_preserves_retained_channels_and_retires_batches_b_and_c() {
             "username": "zeroclaw@example.com",
             "password": "email-password",
             "from_address": "zeroclaw@example.com"
-        },
-        "whatsapp": {
-            "enabled": false,
-            "mention_only": false,
-            "mode": "business",
-            "dm_policy": "allowlist",
-            "group_policy": "allowlist",
-            "self_chat_mode": false
         }
     });
     let expected_fields = expected_fields.as_object().unwrap();
@@ -2341,10 +2341,6 @@ fn generate_v3_preserves_retained_channels_and_retires_batches_b_and_c() {
         "discord": {
             "agents": ["complex_agent"],
             "external_peers": ["222233334444"]
-        },
-        "whatsapp": {
-            "agents": ["complex_agent"],
-            "external_peers": ["+15555550102"]
         }
     });
     let expected_peers = expected_peers.as_object().unwrap();
@@ -2411,12 +2407,43 @@ fn generate_v3_preserves_retained_channels_and_retires_batches_b_and_c() {
         "voice_call",
         "voice_wake",
         "amqp",
+        "whatsapp",
     ] {
         assert!(
             channels.get(kind).is_none(),
             "retired {kind} must have no alias"
         );
         assert!(!cfg.peer_groups.contains_key(&format!("{kind}_default")));
+    }
+
+    // The original fixture still exercises real legacy WhatsApp auth and
+    // allowlist settings. Retirement must be explicit and must not advertise
+    // a replacement or carry those restrictions onto another transport.
+    assert!(channels.get("whatsapp").is_none());
+    assert!(!cfg.peer_groups.contains_key("whatsapp_default"));
+    let warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(V1_FIXTURE);
+    let whatsapp_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|warning| warning.path == "channels_config.whatsapp")
+        .collect();
+    assert_eq!(
+        whatsapp_warnings.len(),
+        1,
+        "legacy WhatsApp must warn explicitly"
+    );
+    let warning = whatsapp_warnings[0];
+    assert_eq!(warning.code, "retired_channel_transport_removed");
+    assert!(warning.message.contains("no runtime consumer"));
+    assert!(warning.message.contains("Remove the section."));
+    let fixture: toml::Value = toml::from_str(V1_FIXTURE).unwrap();
+    for field in ["access_token", "app_secret", "verify_token"] {
+        let secret = fixture["channels_config"]["whatsapp"][field]
+            .as_str()
+            .unwrap();
+        assert!(
+            !warning.message.contains(secret),
+            "retirement must not expose {field}"
+        );
     }
 }
 

@@ -858,17 +858,18 @@ fn channel_fields_materialize_credential_free_channel() {
 
 #[tokio::test]
 async fn retired_channel_types_are_rejected_by_quickstart_submit() {
-    for submitted_type in ["whatsapp-web", "whatsapp_web", "slack"] {
+    for submitted_type in ["whatsapp", "whatsapp-web", "whatsapp_web", "slack"] {
         let mut cfg = Config::default();
+        let before = serde_json::to_value(&cfg).unwrap();
+        let before_dirty_paths = cfg.dirty_paths.clone();
         let mut submission = fresh_submission("bot");
         submission.channels = vec![SelectorChoice::Fresh(fresh_channel(
             submitted_type,
             "personal",
             &[],
         ))];
-        let mut staged = Vec::new();
         let mut errors = Vec::new();
-        let _applied = apply_into(&mut cfg, &submission, &mut staged, &mut errors, None);
+        let refs = apply_channels(&mut cfg, &submission.channels, &mut errors, None);
 
         let rejected = errors
             .iter()
@@ -877,6 +878,9 @@ async fn retired_channel_types_are_rejected_by_quickstart_submit() {
             rejected,
             "retired channel type `{submitted_type}` must be rejected at submit: {errors:?}"
         );
+        assert!(refs.is_empty());
+        assert_eq!(serde_json::to_value(&cfg).unwrap(), before);
+        assert_eq!(cfg.dirty_paths, before_dirty_paths);
         assert!(
             !toml::to_string(&cfg).unwrap().contains("[channels."),
             "a rejected retired channel must not persist any section: {}",

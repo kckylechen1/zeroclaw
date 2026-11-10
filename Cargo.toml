@@ -149,8 +149,8 @@ libc = "0.2"
 
 # Installer/surface metadata: which `[features]` are internal aggregates or
 # meta toggles rather than user-selectable rows. This bit is NOT derivable from
-# the feature graph (e.g. `embedded-web` and `whatsapp-web` are structurally
-# identical single cross-crate refs but one is meta and one is a real row), so
+# the feature graph (e.g. `embedded-web` is a meta toggle despite its
+# single cross-crate reference), so
 # it lives here in the canonical registry. install.sh and `cargo cmd convert`
 # both read this; neither shadows it with its own list.
 [package.metadata.zeroclaw]
@@ -165,13 +165,6 @@ non_row_features = [
     "embedded-web",
     "voice-surface",
 ]
-# Features intentionally added to the lean Cargo defaults for standard
-# distribution artifacts. This list is the complete positive policy beyond
-# `default`; target-specific exclusions are resolved from the table below.
-dist_extra_features = [
-    "whatsapp-web",
-]
-
 # Features whose build needs system C libraries or tooling the minimal static
 # container image (StageX, no system package manager) does not provide. Excluded
 # from the container kitchen-sink (Selection::All) so the all-features image
@@ -183,7 +176,6 @@ container_excluded_features = [
 # Compatibility exclusions for standard distribution artifacts. Release
 # workflows pass only their target triple; feature policy stays here.
 [package.metadata.zeroclaw.dist_target_exclusions]
-aarch64-linux-android = ["whatsapp-web"]
 arm-unknown-linux-gnueabihf = ["observability-prometheus"]
 armv7-unknown-linux-gnueabihf = ["observability-prometheus"]
 
@@ -265,7 +257,6 @@ channel-acp-server = []
 # package needs this forward so targets that construct `gateway::AppState`
 # (e.g. the `component` test) can cfg-gate the node-only fields.
 nodes = ["zeroclaw-gateway?/nodes"]
-whatsapp-web = []
 memory-tachi = ["zeroclaw-memory/tachi"]
 
 # Backends and platform flags — each forwards to ONE crate
@@ -288,7 +279,7 @@ ci-all = [
     "nodes",
     "voice-surface",
     "agent-runtime",
-    "channels-full", "whatsapp-web",
+    "channels-full",
     "observability-prometheus",
     "sandbox-landlock", "sandbox-bubblewrap",
     "zeroclaw-runtime/heavy-tests",

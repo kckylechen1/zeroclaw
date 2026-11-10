@@ -162,13 +162,6 @@ pub fn non_row_features(
     read_registry_list(pkg, "non_row_features")
 }
 
-/// Features intentionally added to Cargo defaults for standard distribution
-/// artifacts. This policy is not derivable from the feature graph, so it lives
-/// in the canonical registry rather than in release or packaging scripts.
-pub fn dist_extra_features(pkg: &cargo_metadata::Package) -> anyhow::Result<Vec<String>> {
-    required_registry_list(pkg, "dist_extra_features")
-}
-
 /// Target-specific compatibility exclusions for standard distribution builds.
 /// Release workflows provide a target triple and never duplicate this policy.
 pub fn dist_target_exclusions(
@@ -195,20 +188,6 @@ fn read_registry_list(pkg: &cargo_metadata::Package, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn required_registry_list(pkg: &cargo_metadata::Package, key: &str) -> anyhow::Result<Vec<String>> {
-    parse_required_registry_list(pkg.metadata.get("zeroclaw"), key)
-}
-
-fn parse_required_registry_list(
-    registry: Option<&serde_json::Value>,
-    key: &str,
-) -> anyhow::Result<Vec<String>> {
-    let value = registry
-        .and_then(|zeroclaw| zeroclaw.get(key))
-        .ok_or_else(|| anyhow::Error::msg(format!("missing [package.metadata.zeroclaw] {key}")))?;
-    parse_nonempty_string_list(value, &format!("[package.metadata.zeroclaw] {key}"))
 }
 
 fn parse_nonempty_string_list(
@@ -393,13 +372,11 @@ fn resolve_feature_list_from_package(
 ) -> anyhow::Result<Vec<String>> {
     let all_features: Vec<String> = root.features.keys().cloned().collect();
     let non_row = non_row_features(meta, root);
-    let dist_extra = dist_extra_features(root)?;
     let container_excluded = container_excluded_features(root);
     let ctx = FeatureCtx {
         graph: &root.features,
         all: &all_features,
         non_row: &non_row,
-        dist_extra: &dist_extra,
         container_excluded: &container_excluded,
     };
     selection.to_feature_list(&ctx)
@@ -471,7 +448,6 @@ pub fn resolve(manifest_dir: &Path, selection: &Selection) -> anyhow::Result<Res
 
     let all_features: Vec<String> = root.features.keys().cloned().collect();
     let non_row = non_row_features(&meta, root);
-    let dist_extra = dist_extra_features(root)?;
     let container_excluded = container_excluded_features(root);
     let default_features = expand_default(&root.features, &non_row);
 
@@ -479,7 +455,6 @@ pub fn resolve(manifest_dir: &Path, selection: &Selection) -> anyhow::Result<Res
         graph: &root.features,
         all: &all_features,
         non_row: &non_row,
-        dist_extra: &dist_extra,
         container_excluded: &container_excluded,
     };
     let cargo_flags = selection.to_cargo_flags(&ctx)?;
@@ -526,9 +501,8 @@ pub enum Selection {
     Full,
     /// Kernel only (`--no-default-features`).
     Minimal,
-    /// Standard binary distribution: lean Cargo defaults plus the explicit
-    /// registry-owned distribution additions. The set a single-artifact
-    /// package manager ships.
+    /// Standard binary distribution: lean Cargo defaults, resolved explicitly
+    /// for single-artifact package managers.
     Dist,
     /// Measurement-only broad distribution: `Dist` plus the canonical
     /// `channels-full` aggregate. Not offered by installer menus until a
@@ -611,13 +585,6 @@ impl Selection {
             Selection::Full => ctx.expand("default"),
             Selection::Dist | Selection::DistBroad => {
                 let mut s = ctx.expand("default");
-                for feature in ctx.dist_extra {
-                    anyhow::ensure!(
-                        ctx.all.contains(feature),
-                        "unknown dist_extra_features entry `{feature}` (not in [features])"
-                    );
-                    s.push(feature.clone());
-                }
                 if matches!(self, Selection::DistBroad) {
                     s.extend(ctx.expand("channels-full"));
                 }
@@ -663,7 +630,6 @@ pub struct FeatureCtx<'a> {
     pub graph: &'a std::collections::BTreeMap<String, Vec<String>>,
     pub all: &'a [String],
     pub non_row: &'a [String],
-    pub dist_extra: &'a [String],
     pub container_excluded: &'a [String],
 }
 
@@ -793,16 +759,9 @@ mod tests {
     #[test]
     fn dist_matches_lean_release_contract() {
         let features = resolve_feature_list(&root(), &Selection::Dist).unwrap();
-        // #584: the beyond-default half of the lean release is whatever
-        // `[package.metadata.zeroclaw] dist_extra_features` declares, read
-        // straight out of Cargo.toml instead of a channel name a batch retires.
-        let extras = ts::registry_string_list("dist_extra_features");
-        ts::require_non_empty("dist extras", Cause::Retired, extras.len());
-        let mut expected = resolve_feature_list(&root(), &Selection::Full).unwrap();
-        expected.extend(extras);
-        expected.sort();
-        expected.dedup();
+        let expected = resolve_feature_list(&root(), &Selection::Full).unwrap();
         assert_eq!(features, expected);
+        assert!(!features.contains(&"whatsapp-web".to_string()));
         // Positive control: the lean release still ships every channel surface
         // #584 protects, sampled from the live registry rather than named.
         let protected = ts::protected_retained_channel_features();
@@ -825,13 +784,11 @@ mod tests {
         let pkg = workspace_root_package(&meta).unwrap();
         let all_features: Vec<String> = pkg.features.keys().cloned().collect();
         let non_row = non_row_features(&meta, pkg);
-        let dist_extra = dist_extra_features(pkg).unwrap();
         let container_excluded = container_excluded_features(pkg);
         let ctx = FeatureCtx {
             graph: &pkg.features,
             all: &all_features,
             non_row: &non_row,
-            dist_extra: &dist_extra,
             container_excluded: &container_excluded,
         };
 
@@ -885,6 +842,7 @@ mod tests {
         }
         // Removed channels stay absent forever.
         assert!(!broad.contains(&"channel-slack".to_string()));
+        assert!(!broad.contains(&"whatsapp-web".to_string()));
         assert!(!broad.contains(&"sandbox-bubblewrap".to_string()));
     }
 
@@ -913,38 +871,6 @@ mod tests {
             "all is the kitchen sink"
         );
         assert!(dist.cargo_flags.len() < all.cargo_flags.len());
-    }
-
-    #[test]
-    fn dist_extras_read_from_registry() {
-        let meta = cargo_metadata::MetadataCommand::new()
-            .manifest_path(root().join("Cargo.toml"))
-            .no_deps()
-            .exec()
-            .unwrap();
-        let pkg = meta
-            .root_package()
-            .cloned()
-            .or_else(|| meta.workspace_packages().into_iter().next().cloned())
-            .unwrap();
-        let extras = dist_extra_features(&pkg).unwrap();
-        // #584: compared against Cargo.toml itself (independent text parse).
-        let declared = ts::registry_string_list("dist_extra_features");
-        ts::require_non_empty("dist extras", Cause::Retired, declared.len());
-        assert_eq!(extras, declared, "extras come from the Cargo.toml registry");
-        assert!(!extras.contains(&"channel-matrix".to_string()));
-        assert!(!extras.contains(&"channel-lark".to_string()));
-    }
-
-    #[test]
-    fn required_registry_list_rejects_malformed_metadata() {
-        assert!(parse_required_registry_list(None, "dist_extra_features").is_err());
-        let wrong_type = serde_json::json!({ "dist_extra_features": "channel-webhook" });
-        assert!(parse_required_registry_list(Some(&wrong_type), "dist_extra_features").is_err());
-        let duplicate = serde_json::json!({
-            "dist_extra_features": ["channel-webhook", "channel-webhook"]
-        });
-        assert!(parse_required_registry_list(Some(&duplicate), "dist_extra_features").is_err());
     }
 
     #[test]

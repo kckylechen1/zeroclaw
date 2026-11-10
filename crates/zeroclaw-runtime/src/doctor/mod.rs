@@ -1150,11 +1150,6 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
     let live_configured = all_channels
         .iter()
         .any(|info| info.configured && !info.retired);
-    let retired_configured: Vec<&str> = all_channels
-        .iter()
-        .filter(|info| info.configured && info.retired)
-        .map(|info| info.kind)
-        .collect();
 
     if live_configured {
         items.push(DiagItem::ok(
@@ -1167,20 +1162,6 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
             "no live channel configured — run `zeroclaw quickstart` to set one up",
         ));
     }
-    // A populated retired section is dead weight even next to live ones:
-    // always name it so the operator removes it (#584).
-    if !retired_configured.is_empty() {
-        items.push(DiagItem::warn(
-            cat,
-            format!(
-                "retired transports configured ({}): their sections parse but no \
-                 runner exists — remove them; live surfaces are the Telegram bridge, \
-                 webhook ingress, Email tools, and Discord archive search",
-                retired_configured.join(", ")
-            ),
-        ));
-    }
-
     // Enabled bot channels with no token: a partial alias survives the
     // resilient load (`bot_token` has a serde default), so it never
     // reaches `degraded_sections` — doctor must name the unset field here

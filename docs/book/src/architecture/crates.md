@@ -194,7 +194,7 @@ The microkernel roadmap (RFC #5574) defines a feature-flag taxonomy. The practic
   ACP server, webhook, WeChat, WeCom, and WeCom WebSocket channels
 - `ci-all`: everything on, for CI
 - `channel-<name>`: opt-in per channel (e.g. `channel-matrix`, `channel-discord`)
-- `gateway`, `whatsapp-web`: opt-in capability groups
+- `gateway`: opt-in capability group
 
 Providers are not feature-gated; they all compile in. Channel selection is the main per-build knob. Read the top-level `Cargo.toml` `[features]` table for the full list.
 

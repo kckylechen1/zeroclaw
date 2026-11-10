@@ -217,74 +217,36 @@ mod tests {
     }
 
     #[test]
-    fn channel_column_matches_retirement_from_walk() {
+    fn channel_column_covers_every_retained_registry_row() {
         let parity = load_parity(&root()).unwrap();
-        let cfg = ChannelsConfig::default();
-        let registry: Vec<(&str, bool)> = cfg
-            .channels()
-            .into_iter()
-            .map(|info| (info.name, info.retired))
-            .collect();
-        let rows_of = |retired: bool| -> Vec<&str> {
-            registry
-                .iter()
-                .filter(move |(_, r)| *r == retired)
-                .map(|(n, _)| *n)
-                .collect()
-        };
-        let (retired, retained) = (rows_of(true), rows_of(false));
+        let registry = ChannelsConfig::default().channels();
         let rows = channels_rows(&parity).unwrap();
-        for r in &rows {
-            let name = r.label.trim_end_matches(" (retired)");
-            // The expectation comes from the live registry, never from the
-            // row's own suffix: deriving it from the label made this loop
-            // vacuous whenever the suffix itself went missing.
-            let is_retired = registry.iter().any(|(n, ret)| *n == name && *ret);
-            assert_eq!(
-                r.zeroclaw,
-                if is_retired {
-                    Status::None
-                } else {
-                    Status::Supported
-                },
-                "row {} status must follow the registry retired flag",
-                r.label
-            );
-            assert_eq!(
-                r.label.ends_with(" (retired)"),
-                is_retired,
-                "row {} label must mark retirement",
-                r.label
-            );
-        }
-        // #584: both sides of the matrix are sampled from the live registry, so
-        // retiring a schema moves the sample instead of re-pinning a name (this
-        // row used to assert `retired.contains(&"WeChat")`). Non-empty asserted
-        // first so the walks above cannot pass vacuously, and every registry row
-        // must render with the status its flag implies.
         ts::require_non_empty("matrix rows", Cause::Protected, rows.len());
-        ts::require_non_empty("retired rows", Cause::Retired, retired.len());
-        ts::require_non_empty("retained rows", Cause::Protected, retained.len());
-        for name in &retired {
-            assert!(
-                rows.iter()
-                    .any(|r| r.label == format!("{name} (retired)") && r.zeroclaw == Status::None),
-                "retired transport {name} must render as a retired, unsupported row"
+        ts::require_non_empty("retained rows", Cause::Protected, registry.len());
+        // The last retired schema is gone. Pin that end state explicitly,
+        // while retaining exact coverage and supported status for every row.
+        assert!(registry.iter().all(|info| !info.retired));
+        let expected: std::collections::BTreeSet<_> =
+            registry.iter().map(|info| info.name).collect();
+        let actual: std::collections::BTreeSet<_> =
+            rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            rows.len(),
+            registry.len(),
+            "matrix rows must not duplicate a surface"
+        );
+        for row in &rows {
+            assert_eq!(
+                row.zeroclaw,
+                Status::Supported,
+                "{} must remain supported",
+                row.label
             );
         }
-        for name in &retained {
+        for removed in ["Slack", "Feishu", "Lark", "WhatsApp Web"] {
             assert!(
-                rows.iter()
-                    .any(|r| r.label == *name && r.zeroclaw == Status::Supported),
-                "retained surface {name} must render as a supported row"
-            );
-        }
-        assert!(!retired.contains(&"Telegram"));
-        for removed in ["Slack", "Feishu", "Lark"] {
-            assert!(
-                !rows
-                    .iter()
-                    .any(|r| r.label.trim_end_matches(" (retired)") == removed),
+                !rows.iter().any(|row| row.label == removed),
                 "removed channel {removed} must not have a matrix row"
             );
         }

@@ -32,22 +32,18 @@ The `channel-email` root feature forwards to the `email-tools` runtime feature a
 
 ## Retired transports
 
-The transports below lost their in-process runners with #579/#581. Their
-`[channels.<kind>]` sections still parse; schema retirement is a separate,
-evidence-gated step tracked in [#584](https://github.com/kckylechen1/zeroclaw/issues/584); but nothing consumes them, and every CLI surface (`zeroclaw channel list`, `status`, `self-test`, doctor) reports a populated one as a **retired transport** rather than a connectable channel.
+The legacy transports lost their in-process runners with #579/#581. Their
+schemas have now been removed in the bounded [#584](https://github.com/kckylechen1/zeroclaw/issues/584)
+slices. Leftover sections, including their V1 `channels_config` spelling,
+produce retirement warnings at load and are discarded; they do not activate
+a channel.
 
-`whatsapp`, `nostr`, `clawdtalk`, `reddit`, `bluesky`, `git`,
-`voice_call`, `voice_wake`, `amqp` (their schemas retire in bounded #584
-slices; the other retired transport schemas are already removed and
-tombstone at load).
+Per-family retirement pages: [Other chat platforms](./chat-others.md) (Notion) · [Social](./social.md) (retired social transports) · [Voice](./voice.md) (voice duplex Node path).
 
-Per-family retirement pages (they keep their old links): [WhatsApp](./whatsapp.md) · [Other chat platforms](./chat-others.md) (Notion) · [Social](./social.md) (retired social transports) · [Voice](./voice.md) (voice duplex Node path).
+> **Also retired earlier:** the MQTT and filesystem SOP-trigger channels were retired when the SOP run side was removed; their sections are **rejected at config parse** with the migration message ([MQTT](./mqtt.md), [Filesystem](./filesystem.md)). The retired transport sections above load with a retirement warning and are discarded.
 
-> **Also retired earlier:** the MQTT and filesystem SOP-trigger channels were retired when the SOP run side was removed; their sections are **rejected at config parse** with the migration message ([MQTT](./mqtt.md), [Filesystem](./filesystem.md)). The retired transports above still parse by contrast; that difference is exactly what #584's per-schema evidence step resolves.
-
-For historical context, the old `channel-*` cargo features remain as empty
-compatibility stubs (installer preset compatibility); enabling them does not
-bring a runner back. `channels-full`/`--preset full` therefore no longer add
+The retired transport Cargo features and installer selections have also been
+removed. `channels-full`/`--preset full` therefore no longer add
 channels; the live surface set is the table above.
 
 ## Configuration

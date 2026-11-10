@@ -42,10 +42,6 @@ hermes = "supported"
 openclaw = "supported"
 hermes = "supported"
 
-[channels.whatsapp-web]
-openclaw = "supported"
-hermes = "supported"
-
 [channels.email]
 openclaw = "none"
 hermes = "supported"

@@ -92,9 +92,8 @@ mod tests {
     #[test]
     fn dist_renders_lean_release_channels() {
         let b = render_features(&root(), &Selection::Dist, "        ").unwrap();
-        // #584: sampled from the live registry and the Cargo.toml
-        // distribution-extra registry, so neither a retirement batch nor a
-        // silently emptied registry can make these walks pass vacuously.
+        // #584: sample the protected surfaces from the live registry.
+        // An empty sample must never make the walk pass vacuously.
         let protected = ts::protected_retained_channel_features();
         ts::require_non_empty("protected sample", Cause::Protected, protected.len());
         for feature in protected {
@@ -103,19 +102,12 @@ mod tests {
                 "dist render must ship the protected channel feature {feature}"
             );
         }
-        let extras = ts::registry_string_list("dist_extra_features");
-        ts::require_non_empty("dist extras", Cause::Retired, extras.len());
-        for feature in extras {
-            assert!(
-                b.contains(&feature),
-                "dist render must ship the registered distribution extra {feature}"
-            );
-        }
         // Removed channels stay absent forever.
         assert!(!b.contains("channel-slack"));
         assert!(!b.contains("channel-matrix"));
         assert!(!b.contains("channel-lark"));
         assert!(!b.contains("channel-feishu"));
+        assert!(!b.contains("whatsapp-web"));
     }
 
     #[test]
@@ -140,6 +132,7 @@ mod tests {
         // Removed channels stay absent forever.
         assert!(!b.contains("channel-lark"));
         assert!(!b.contains("channel-feishu"));
+        assert!(!b.contains("whatsapp-web"));
     }
 
     #[test]

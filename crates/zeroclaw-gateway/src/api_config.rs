@@ -5057,6 +5057,7 @@ mod tests {
     async fn channel_bind_rejects_retired_transport() {
         let tmp = tempfile::tempdir().unwrap();
         let config = config_with_telegram_alias(&tmp, "alerts");
+        config.save().await.unwrap();
         let mut state = test_state(config);
         state.pairing = Arc::new(PairingGuard::new(
             true,
@@ -5065,28 +5066,37 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("authorization", "Bearer paired-fixture".parse().unwrap());
 
-        let (status, json) = response_json(
-            handle_api_channel_bind(
-                axum::extract::State(state.clone()),
-                headers,
-                axum::Json(ChannelBindBody {
-                    channel_type: "wechat".to_string(),
-                    alias: "alerts".to_string(),
-                    identity: "wx-id".to_string(),
-                }),
+        let before = serde_json::to_value(&*state.config.read()).unwrap();
+        let on_disk_before = std::fs::read(&state.config.read().config_path).unwrap();
+        for retired in ["wechat", "whatsapp", "whatsapp-web", "whatsapp_web"] {
+            let (status, json) = response_json(
+                handle_api_channel_bind(
+                    axum::extract::State(state.clone()),
+                    headers.clone(),
+                    axum::Json(ChannelBindBody {
+                        channel_type: retired.to_string(),
+                        alias: "alerts".to_string(),
+                        identity: "retired-id".to_string(),
+                    }),
+                )
+                .await,
             )
-            .await,
-        )
-        .await;
+            .await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(
-            json["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("does not support identity binding"),
-            "expected retired-transport rejection, got: {json}"
-        );
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{retired}");
+            assert!(
+                json["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("does not support identity binding"),
+                "expected retired-transport rejection for {retired}, got: {json}"
+            );
+            assert_eq!(serde_json::to_value(&*state.config.read()).unwrap(), before);
+            assert_eq!(
+                std::fs::read(&state.config.read().config_path).unwrap(),
+                on_disk_before
+            );
+        }
     }
 
     /// Trust-boundary regression: binding into a `[channels.telegram.<alias>]`
