@@ -362,27 +362,23 @@ impl LogLevel {
 #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
 #[derive(Subcommand, Debug)]
 enum TelegramCommands {
-    /// Record an operator skip marker for a poisoned Telegram update
+    /// Explain migration of the retired Telegram skip command
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Record an operator skip marker for a poisoned Telegram update (a \
-permanently-failing update that blocks its bot head-of-line). The running \
-daemon consumes the marker on its next retry (within a few seconds), \
-archives the raw payload as a dead letter under its data directory, and \
-advances its offset past the update. Nothing is ever dropped automatically.
-
-Examples:
-  zeroclaw telegram skip-update --alias work --update-id 12345 --reason 'corrupted voice blob'")]
+The in-process Telegram listener and its skip markers are retired. \
+This compatibility command returns a migration error without writing a marker. \
+Telegram intake and cursor recovery belong to zeroclaw-bridge-telegram; \
+this command cannot skip a bridge update.")]
     SkipUpdate {
-        /// Bot alias under `[channels.telegram.<alias>]`
+        /// Legacy bot alias (accepted for compatibility)
         #[arg(long)]
         alias: String,
 
-        /// The `update_id` shown in the escalation log
+        /// Legacy update ID (accepted for compatibility)
         #[arg(long)]
         update_id: i64,
 
-        /// Why the update is being skipped (archived with the dead letter)
+        /// Legacy skip reason (accepted for compatibility)
         #[arg(long)]
         reason: Option<String>,
     },
@@ -964,19 +960,14 @@ Examples:
     },
 
     #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
-    /// Telegram channel operator tooling
+    /// Compatibility diagnostics for retired Telegram operator tooling
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Operator tooling for the Telegram channel.
+The in-process Telegram listener is retired. Telegram intake and cursor \
+recovery belong to zeroclaw-bridge-telegram.
 
-skip-update records an explicit skip marker for a poisoned Telegram update \
-(a permanently-failing update that blocks the bot head-of-line). The running \
-daemon consumes the marker on its next retry, archives the raw payload as a \
-dead letter under its data directory, and advances past the update. Nothing \
-is ever dropped automatically.
-
-Examples:
-  zeroclaw telegram skip-update --alias work --update-id 12345 --reason 'corrupted voice blob'")]
+skip-update remains parseable for compatibility and returns a migration \
+error. It does not write a skip marker or advance the bridge cursor.")]
     Telegram {
         #[command(subcommand)]
         telegram_command: TelegramCommands,
@@ -2638,7 +2629,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 alias,
                 update_id,
                 reason,
-            } => commands::telegram::run_skip_update(&config, &alias, update_id, reason),
+            } => commands::telegram::run_skip_update(&alias, update_id, reason),
         },
 
         #[cfg(feature = "agent-runtime")]

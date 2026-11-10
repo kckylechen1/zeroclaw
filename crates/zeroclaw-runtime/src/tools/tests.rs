@@ -158,7 +158,7 @@ fn sop_run_tools_stay_retired_from_the_registry() {
 }
 
 #[tokio::test]
-async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
+async fn retired_tools_stay_absent_without_removing_human_channel_tools() {
     // Wall 2 raw-launcher retirement: the Parent-visible raw harness/vendor
     // launch tools are retired together with their config sections. No
     // registry path may re-admit them; harness execution goes through the
@@ -179,14 +179,15 @@ async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
         enabled: false,
         ..BrowserConfig::default()
     };
-    let cfg = test_config(&tmp);
+    let mut cfg = test_config(&tmp);
+    cfg.composition = Some(zeroclaw_config::composition::Composition::Full);
     let risk = zeroclaw_config::schema::RiskProfileConfig {
         sandbox_enabled: Some(false),
         sandbox_backend: Some("none".to_string()),
         ..zeroclaw_config::schema::RiskProfileConfig::default()
     };
 
-    let tools = all_tools_with_runtime(
+    let registry = all_tools_with_runtime(
         Arc::new(cfg.clone()),
         &security,
         &risk,
@@ -205,9 +206,8 @@ async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
         None,
         None,
         None,
-    )
-    .tools;
-    let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+    );
+    let names: Vec<&str> = registry.tools.iter().map(|tool| tool.name()).collect();
 
     for tool_name in [
         "claude_code",
@@ -226,6 +226,18 @@ async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
         names.contains(&"shell"),
         "positive control: ordinary tools should still register"
     );
+    assert!(
+        !names.contains(&"send_via")
+            && !registry
+                .unfiltered_tool_arcs
+                .iter()
+                .any(|tool| tool.name() == "send_via"),
+        "send_via has no turn-routing consumer and must not be offered or elevated"
+    );
+    assert!(names.contains(&"ask_user"));
+    assert!(names.contains(&"escalate_to_human"));
+    assert!(registry.ask_user_handle.is_some());
+    assert!(registry.escalate_handle.is_some());
 }
 
 #[test]
