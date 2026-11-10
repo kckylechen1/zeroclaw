@@ -10128,8 +10128,9 @@ pub struct HeartbeatConfig {
     /// Optional fallback task text when `HEARTBEAT.md` has no task entries.
     #[serde(default)]
     pub message: Option<String>,
-    /// Optional delivery channel for heartbeat output (for example: `telegram`).
-    /// When omitted, auto-selects the first configured channel.
+    /// Optional `[gateway.bridges.<name>]` destination for heartbeat output.
+    /// Must allow `/ws/bridge` delivery (no `device` or `owner` scope).
+    /// When omitted together with `to`, tasks run without external delivery.
     #[serde(default, alias = "channel")]
     pub target: Option<String>,
     /// Optional delivery recipient/chat identifier (required when `target` is
@@ -10150,8 +10151,8 @@ pub struct HeartbeatConfig {
     /// within this window, an alert is sent. `0` disables. Default: `0`.
     #[serde(default)]
     pub deadman_timeout_minutes: u32,
-    /// Channel for dead-man's switch alerts (e.g. `telegram`). Falls back to
-    /// the heartbeat delivery channel.
+    /// Delivery-capable `[gateway.bridges.<name>]` for dead-man's switch
+    /// alerts. Falls back to the heartbeat delivery bridge.
     #[serde(default)]
     pub deadman_channel: Option<String>,
     /// Recipient for dead-man's switch alerts. Falls back to `to`.
