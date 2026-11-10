@@ -95,3 +95,91 @@ fn config_dir_equals_flag_after_subcommand_drives_locale() {
         "`status --config-dir=<ja-dir> --help` must render the on-disk retired-locale overlay; got:\n{help}"
     );
 }
+
+#[test]
+fn stale_downloaded_catalog_cannot_restore_upstream_update_help() {
+    for locale in ["zh-CN", "ja"] {
+        let tmp = tempfile::tempdir().unwrap();
+        write_locale_config(tmp.path(), locale);
+        let disk_catalog = tmp.path().join(format!("data/ftl/{locale}/cli.ftl"));
+        std::fs::create_dir_all(disk_catalog.parent().unwrap()).unwrap();
+        std::fs::write(
+            disk_catalog,
+            "cli-update-about = STALE_DOWNLOAD_AND_INSTALL\n\
+             cli-update-long-about = STALE_DOWNLOAD_AND_INSTALL --check --force\n",
+        )
+        .unwrap();
+        let help = help_stdout([
+            OsString::from("--config-dir"),
+            tmp.path().as_os_str().to_owned(),
+            OsString::from("update"),
+            OsString::from("--help"),
+        ]);
+        assert!(help.contains("./install.sh --source"), "{locale}: {help}");
+        assert!(!help.contains("STALE_DOWNLOAD_AND_INSTALL"), "{help}");
+    }
+}
+
+#[tokio::test]
+async fn locales_fetch_restores_same_build_catalogs_without_network() {
+    use std::io::ErrorKind;
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir().unwrap();
+    write_locale_config(tmp.path(), "zh-CN");
+    let destination = tmp.path().join("data/ftl/zh-CN");
+    std::fs::create_dir_all(&destination).unwrap();
+    std::fs::write(destination.join("cli.ftl"), "cli-update-about = stale\n").unwrap();
+    let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+
+    for catalogs in [Some("tools"), None] {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_zeroclaw"));
+        command
+            .kill_on_drop(true)
+            .arg("--config-dir")
+            .arg(tmp.path())
+            .args(["locales", "fetch", "zh-CN"])
+            .env("RUST_LOG", "off")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy");
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            command.env(key, &proxy_url);
+        }
+        if let Some(catalogs) = catalogs {
+            command.args(["--catalog", catalogs]);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+            .await
+            .expect("bundled catalogue installation must not wait for network")
+            .expect("run real locales command");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("tools.ftl")).unwrap(),
+            include_str!("../../crates/zeroclaw-runtime/locales/zh-CN/tools.ftl"),
+        );
+        let cli = std::fs::read_to_string(destination.join("cli.ftl")).unwrap();
+        if catalogs.is_some() {
+            assert_eq!(cli, "cli-update-about = stale\n");
+        } else {
+            assert_eq!(cli, ZH_CN_CLI_FTL);
+        }
+        match proxy.accept() {
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            other => panic!("locales fetch attempted a network connection: {other:?}"),
+        }
+    }
+}

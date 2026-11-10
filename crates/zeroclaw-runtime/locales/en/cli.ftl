@@ -716,8 +716,20 @@ cli-auth-xai-no-pending-login = No pending xAI login found. Run `zeroclaw auth l
 cli-auth-paste-redirect-requires-input = paste-redirect requires the redirect URL or OAuth code
 
 # ── locales fetch ──
-cli-locales-fetched = {"  "}fetched {$name} -> {$path}
-cli-locales-skipped = {"  "}skipped {$name}: not on upstream ({$path}; tried {$refs})
+cli-locales-about = Restore the locale files shipped with this build
+cli-locales-long-about =
+    Restore this build's Fluent (.ftl) catalogues under <config-dir>/data/ftl/<locale>/.
+    The compatibility command name is fetch; it needs no network access and never downloads upstream catalogues.
+
+    Choose en or zh-CN. Restore every catalogue by default, or select cli,tools with --catalog.
+
+    Examples:
+      zeroclaw locales fetch zh-CN
+      zeroclaw locales fetch zh-CN --catalog tools
+cli-locales-fetch-about = Restore this build's translated FTL files without network access
+cli-locales-restored = {"  "}restored bundled {$name} -> {$path}
+cli-locales-missing-builtin = Catalogue {$name} for {$locale} is not included in this build
+cli-locales-none-selected = Select at least one catalogue: cli, tools
 cli-locales-installed = Installed {$count} catalogue(s) for '{$locale}' under {$dir}
 
 # ── browse (zeroclaw browse) ──
