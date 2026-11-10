@@ -101,24 +101,10 @@ fn restore_fixture(path: &Path, kind: KernelStoreKind) {
         .unwrap();
     close_connection(conn).unwrap();
     checkpoint(path).unwrap();
-    // Match the legacy generator's fresh-reader census. On the connection
-    // that creates vec0, SQLite reports some backing tables as `shadow`;
-    // their durable DDL and column shapes are unchanged after reopening.
+    // Reopen through the production DDL-first guard; SQLite 3.54 identifies
+    // the same vec0 backing tables as shadows without changing their schema.
     let conn = open_read_only_snapshot(path).unwrap();
-    assert_eq!(format::objects(&conn).unwrap(), schema.objects);
-    let shapes = format::table_shapes(&conn).unwrap();
-    assert_eq!(
-        shapes.keys().collect::<Vec<_>>(),
-        schema.tables.keys().collect::<Vec<_>>(),
-        "restored fixture table names"
-    );
-    for (name, expected) in &schema.tables {
-        assert_eq!(
-            shapes.get(name),
-            Some(expected),
-            "restored fixture table shape: {name}"
-        );
-    }
+    schema::verify_legacy_schema(&conn, &format::objects(&conn).unwrap(), &schema).unwrap();
     close_connection(conn).unwrap();
 }
 

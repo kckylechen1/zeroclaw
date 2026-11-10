@@ -1,7 +1,7 @@
 {
-  "portable-kernel-1.9.0": "sha256-07jqtd4bLsPeAx3Is4B6aIRg16S7bERUeIu5PNIm1jI=",
-  "memcore-2.0.0": "sha256-07jqtd4bLsPeAx3Is4B6aIRg16S7bERUeIu5PNIm1jI=",
-  "vault-kit-0.1.0": "sha256-07jqtd4bLsPeAx3Is4B6aIRg16S7bERUeIu5PNIm1jI=",
+  "portable-kernel-1.9.0": "sha256-kxhHtWBLi0If1Equ5qBvB3R0VSoEcTEec5EiOxCzR0Q=",
+  "memcore-2.0.0": "sha256-kxhHtWBLi0If1Equ5qBvB3R0VSoEcTEec5EiOxCzR0Q=",
+  "vault-kit-0.1.0": "sha256-kxhHtWBLi0If1Equ5qBvB3R0VSoEcTEec5EiOxCzR0Q=",
   "wacore-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
   "wacore-appstate-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
   "wacore-binary-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
