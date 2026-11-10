@@ -809,9 +809,15 @@ cli-skills-install-skill-not-in-catalog =
     可用技能：{$available}
 cli-skills-install-skill-not-in-catalog-empty = 在 {$url} 中未找到技能 '{$skill}'：没有 skills/ 目录或其为空
 cli-skills-install-skill-requires-git = --skill <名称> 需要一个 git 仓库 URL 作为来源（收到的是 '{$source}'）
-telegram-skip-update-failed = 记录机器人 '{$alias}' 更新 {$update_id} 的跳过标记失败：{$error}
-telegram-skip-update-pending = 机器人 '{$alias}' 更新 {$update_id} 的跳过标记已在等待中。
-telegram-skip-update-written = 已记录机器人 '{$alias}' 更新 {$update_id} 的跳过标记。运行中的守护进程会在下次重试（几秒内）时应用它，并将载荷作为死信归档到其数据目录下。
+cli-telegram-about = 已退役 Telegram 运维命令的兼容性提示
+cli-telegram-long-about =
+    进程内 Telegram 监听器已退役。Telegram 消息接入和游标恢复由 zeroclaw-bridge-telegram 负责。
+
+    skip-update 保留参数解析以兼容旧调用，并返回迁移错误。它不会写入跳过标记，也不会推进桥接器游标。
+cli-telegram-skip-update-about = 查看已退役 Telegram 跳过命令的迁移说明
+cli-telegram-skip-update-long-about =
+    进程内 Telegram 监听器及其跳过标记已退役。这个兼容命令会返回迁移错误，不会写入标记。Telegram 消息接入和游标恢复由 zeroclaw-bridge-telegram 负责；本命令无法跳过桥接器的更新。
+telegram-skip-update-retired = 进程内 Telegram 监听器和 telegram skip-update 命令已退役，未写入跳过标记。Telegram 消息接入和游标恢复由 zeroclaw-bridge-telegram 负责；本命令无法跳过桥接器的更新。
 tool-runtime-command-build-failed = 构建运行时命令失败：{$error}
 tool-runtime-command-docker-allowed-root = 构建运行时命令失败：无法规范化 Docker 工作区根 {$path}：{$cause}
 tool-runtime-command-docker-workspace-path = 构建运行时命令失败：无法规范化 Docker 工作区路径 {$path}：{$cause}

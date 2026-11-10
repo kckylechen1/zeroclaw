@@ -72,9 +72,6 @@ pub use zeroclaw_tools::memory_store::MemoryStoreTool;
 pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::propose_soul_change::ProposeSoulChangeTool;
 pub use zeroclaw_tools::screenshot::ScreenshotTool;
-pub use zeroclaw_tools::send_via::{
-    AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
-};
 pub use zeroclaw_tools::sessions::{
     SessionsCurrentTool, SessionsHistoryTool, SessionsListTool, SessionsSendTool,
 };
@@ -547,20 +544,6 @@ pub fn all_tools(
     )
 }
 
-/// Peer groups that include `agent_alias`, cloned from `config`. Used as the
-/// live resolver body for `send_via` authority (and the snapshot fallback).
-fn filter_agent_peer_groups(
-    config: &Config,
-    agent_alias: &str,
-) -> HashMap<String, zeroclaw_config::multi_agent::PeerGroupConfig> {
-    config
-        .peer_groups
-        .iter()
-        .filter(|(_, pg)| pg.agents.iter().any(|a| a.as_str() == agent_alias))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
-
 /// Create full tool registry including memory tools.
 #[allow(
     clippy::implicit_hasher,
@@ -592,9 +575,8 @@ pub fn all_tools_with_runtime(
     // callers.
     _is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
-    // Live config handle for `send_via` peer-group authority. `Some` from the
-    // channel daemon (so reloads take effect); `None` for one-shot / non-channel
-    // callers, which fall back to a snapshot of `root_config`.
+    // Live config handle for task authority and reminder resolution. Daemon
+    // callers observe reloads; one-shot callers use the root config snapshot.
     live_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
     // Unified spawn lineage (SA-9): the lineage of the run this registry
     // is being built for. Spawn-capable tools constructed here carry it,
@@ -1162,21 +1144,6 @@ pub fn all_tools_with_runtime(
     let ask_user_tool =
         AskUserTool::new(security.clone(), ask_user_handle.as_ref().cloned().unwrap());
     tool_arcs.push(Arc::new(ask_user_tool));
-
-    {
-        let agent_peer_groups: AgentPeerGroupResolver = if let Some(live) = live_config.clone() {
-            let alias = agent_alias.to_string();
-            Arc::new(move || filter_agent_peer_groups(&live.read(), &alias))
-        } else {
-            let snapshot = filter_agent_peer_groups(root_config, agent_alias);
-            Arc::new(move || snapshot.clone())
-        };
-        tool_arcs.push(Arc::new(SendViaTool::new(
-            security.clone(),
-            ask_user_handle.as_ref().cloned().unwrap(),
-            agent_peer_groups,
-        )));
-    }
 
     // Human escalation tool — always registered; owns its own late-bound channel map.
     let escalate_handle: Option<PerToolChannelHandle> = Some(Arc::new(RwLock::new(HashMap::new())));

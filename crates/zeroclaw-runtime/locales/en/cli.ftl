@@ -931,9 +931,15 @@ tool-runtime-command-docker-workspace-path = Failed to build runtime command: Fa
 tool-runtime-command-docker-allowed-root = Failed to build runtime command: Failed to canonicalize Docker workspace root {$path}: {$cause}
 
 # ── Telegram operator tooling ──
-telegram-skip-update-written = Skip marker recorded for update {$update_id} on bot '{$alias}'. The running daemon applies it on its next retry (within a few seconds) and archives the payload as a dead letter under its data directory.
-telegram-skip-update-pending = A skip marker for update {$update_id} on bot '{$alias}' is already pending.
-telegram-skip-update-failed = Failed to record the skip marker for update {$update_id} on bot '{$alias}': {$error}
+cli-telegram-about = Compatibility diagnostics for retired Telegram operator tooling
+cli-telegram-long-about =
+    The in-process Telegram listener is retired. Telegram intake and cursor recovery belong to zeroclaw-bridge-telegram.
+
+    skip-update remains parseable for compatibility and returns a migration error. It does not write a skip marker or advance the bridge cursor.
+cli-telegram-skip-update-about = Explain migration of the retired Telegram skip command
+cli-telegram-skip-update-long-about =
+    The in-process Telegram listener and its skip markers are retired. This compatibility command returns a migration error without writing a marker. Telegram intake and cursor recovery belong to zeroclaw-bridge-telegram; this command cannot skip a bridge update.
+telegram-skip-update-retired = The in-process Telegram listener and telegram skip-update are retired. No skip marker was written. Telegram intake and cursor recovery belong to zeroclaw-bridge-telegram; this command cannot skip a bridge update.
 
 # ── Task-scoped preference runtime command ──
 channel-runtime-task-pref-set = Task preference recorded for this session only: {$kind}: {$statement}

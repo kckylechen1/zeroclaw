@@ -55,7 +55,6 @@ pub mod note_owner_correction;
 pub mod pipeline;
 pub mod propose_soul_change;
 pub mod screenshot;
-pub mod send_via;
 pub mod sessions;
 pub mod tachi_admission;
 pub mod tachi_delegation;
