@@ -336,3 +336,123 @@ fn companion_legacy_normalization_is_detected_and_never_published() {
         "migration readback differs",
     );
 }
+
+#[test]
+fn reopened_vec_shadows_preserve_the_canonical_legacy_inventory() {
+    for kind in [KernelStoreKind::Memory, KernelStoreKind::Companion] {
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().join("legacy.db");
+        restore_fixture(&path, kind);
+        let before = source::census(&path).unwrap();
+        let expected = schema::manifest(kind).unwrap();
+        let conn = open_read_only_snapshot(&path).unwrap();
+        let shapes = format::table_shapes(&conn).unwrap();
+        for name in [
+            "memories_vec_chunks",
+            "memories_vec_info",
+            "memories_vec_rowids",
+        ] {
+            assert_eq!(expected.tables[name].kind, "table");
+            assert_eq!(shapes[name].kind, "shadow");
+        }
+        assert_eq!(shapes["memories_vec_vector_chunks00"].kind, "table");
+        assert_ne!(shapes, expected.tables);
+        let inventory = schema::inspect(&conn, kind).unwrap();
+        assert_eq!(inventory.schema.objects, expected.objects);
+        assert_eq!(inventory.schema.tables, expected.tables);
+        assert_eq!(
+            inventory.projection["memories_vec"],
+            expected.tables["memories_vec"]
+        );
+        assert_eq!(
+            inventory.schema_sha256,
+            snapshot::bytes_digest(&serde_json::to_vec(&expected.objects).unwrap())
+        );
+        conn.execute_batch("ROLLBACK").unwrap();
+        close_connection(conn).unwrap();
+        assert_eq!(source::census(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn vec_shadow_compatibility_rejects_other_kinds_names_and_shape_drift() {
+    for kind in [KernelStoreKind::Memory, KernelStoreKind::Companion] {
+        let expected = schema::manifest(kind).unwrap().tables;
+        let mut shadows = expected.clone();
+        for name in [
+            "memories_vec_chunks",
+            "memories_vec_info",
+            "memories_vec_rowids",
+        ] {
+            shadows.get_mut(name).unwrap().kind = "shadow".into();
+        }
+        assert!(schema::legacy_table_shapes_match(&expected, &expected));
+        assert!(schema::legacy_table_shapes_match(&shadows, &expected));
+        for (name, wrong_kind) in [
+            ("memories", "shadow"),
+            ("memories_vec_vector_chunks00", "shadow"),
+            ("memories_vec_info", "virtual"),
+            ("memories_vec_info", "view"),
+            ("memories_vec", "table"),
+        ] {
+            let mut changed = shadows.clone();
+            changed.get_mut(name).unwrap().kind = wrong_kind.into();
+            assert!(
+                !schema::legacy_table_shapes_match(&changed, &expected),
+                "must reject {name} as {wrong_kind}"
+            );
+        }
+        let mut extra = shadows.clone();
+        extra.insert(
+            "memories_vec_unknown".into(),
+            shadows["memories_vec_info"].clone(),
+        );
+        assert!(!schema::legacy_table_shapes_match(&extra, &expected));
+        let mut missing = shadows.clone();
+        missing.remove("memories_vec");
+        assert!(!schema::legacy_table_shapes_match(&missing, &expected));
+        let changes: &[fn(&mut format::TableShape)] = &[
+            |shape| shape.without_rowid = !shape.without_rowid,
+            |shape| shape.strict = !shape.strict,
+            |shape| shape.columns[0].name.push_str("_changed"),
+            |shape| shape.columns[0].declared_type.push_str("_changed"),
+            |shape| shape.columns[0].not_null = !shape.columns[0].not_null,
+            |shape| shape.columns[0].default = Some("NULL".into()),
+            |shape| shape.columns[0].primary_key += 1,
+            |shape| shape.columns[0].hidden += 1,
+            |shape| {
+                shape.columns.pop();
+            },
+        ];
+        for name in [
+            "memories_vec",
+            "memories_vec_chunks",
+            "memories_vec_info",
+            "memories_vec_rowids",
+        ] {
+            for change in changes {
+                let mut changed = shadows.clone();
+                change(changed.get_mut(name).unwrap());
+                assert!(!schema::legacy_table_shapes_match(&changed, &expected));
+            }
+        }
+    }
+}
+
+#[test]
+fn vec_shadow_compatibility_requires_authentic_parent_and_backing_ddl() {
+    for kind in [KernelStoreKind::Memory, KernelStoreKind::Companion] {
+        for sql in [
+            "CREATE TABLE memories_vec_unknown (payload TEXT)",
+            "ALTER TABLE memories_vec_info ADD COLUMN unaccounted TEXT",
+            "DROP TABLE memories_vec; CREATE VIRTUAL TABLE memories_vec USING vec0(id TEXT PRIMARY KEY, embedding float[16])",
+            "DROP TABLE memories_vec; CREATE TABLE memories_vec(id TEXT PRIMARY KEY, embedding BLOB)",
+        ] {
+            assert_refused(
+                kind,
+                |conn| conn.execute_batch(sql).unwrap(),
+                "legacy schema object",
+            );
+        }
+    }
+}
