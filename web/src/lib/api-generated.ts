@@ -1397,95 +1397,6 @@ export interface components {
             workspace: components["schemas"]["AgentWorkspaceConfig"];
         };
         /**
-         * @description Generic AMQP 0-9-1 channel configuration (RabbitMQ, Fedora Messaging, etc.).
-         *
-         *     Subscribes to an exchange via routing keys and lifts each delivery into an
-         *     inbound `ChannelMessage`. The mapping from a JSON delivery body to message
-         *     fields is config-driven (`content_template`, `thread_id_field`) so a new
-         *     source — Anitya, an internal bus, anything publishing JSON — is onboarded by
-         *     configuration rather than code.
-         *     Where a fan-in delivery is routed once consumed. Used by AMQP, which carries
-         *     this field to choose between the agent loop, the SOP engine, or both.
-         *     Agent-loop channels (Telegram, Discord, Slack, ...) do not carry a `dispatch`
-         *     field: their fan-in is trigger-driven, opting in via a SOP `channel` trigger
-         *     while the normal agent turn always runs. The mode is source-agnostic.
-         */
-        AmqpConfig: {
-            /**
-             * @description AMQP broker URL. Use `amqp://` for plain or `amqps://` for TLS
-             *     (e.g. `amqps://fedora:@rabbitmq.fedoraproject.org/%2Fpublic_pubsub`).
-             */
-            amqp_url: string;
-            /** @description Path to the CA certificate bundle for `amqps://` connections. */
-            ca_cert?: string | null;
-            /**
-             * @description Path to the client certificate for broker mutual-TLS auth
-             *     (Fedora Messaging requires a client cert).
-             */
-            client_cert?: string | null;
-            /** @description Path to the client private key matching `client_cert`. */
-            client_key?: string | null;
-            /**
-             * @description Template for the inbound message content. `{field}` placeholders are
-             *     interpolated from the JSON delivery body's top-level keys. When empty,
-             *     the raw delivery body is used verbatim.
-             * @default
-             */
-            content_template: string;
-            /**
-             * @description Acknowledgement mode. When `true` (default), deliveries are acked only
-             *     after the message is durably handed to the agent loop, giving
-             *     at-least-once semantics: a crash before hand-off redelivers the event.
-             *     Set `false` for at-most-once (broker acks on dispatch), which silently
-             *     drops in-flight events on crash and is only appropriate for
-             *     non-side-effecting, drop-on-overload consumers.
-             * @default true
-             */
-            durable_ack: boolean;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /** @description Exchange to bind the consumer queue to (e.g. `amq.topic`). */
-            exchange: string;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * @description Queue name. Leave unset for a server-generated, transient,
-             *     auto-deleted, exclusive queue. Set a stable name (UUID recommended)
-             *     only when durable delivery across reconnects is required.
-             */
-            queue?: string | null;
-            /**
-             * @description Routing keys to bind. Scope these to the topics of interest; binding
-             *     `#` consumes the entire exchange and is almost never what you want.
-             * @default []
-             */
-            routing_keys: string[];
-            /**
-             * @description Value placed in `ChannelMessage.sender` for every delivery from this
-             *     source (e.g. `anitya`). Lets the orchestrator's self-loop guard and
-             *     per-channel routing identify the origin.
-             * @default amqp
-             */
-            sender_label: string;
-            /**
-             * @description Dotted path into the JSON delivery body whose value becomes the
-             *     message `thread_ts`, correlating replies to the originating event
-             *     (e.g. `message.project.name`). Empty disables threading.
-             * @default
-             */
-            thread_id_field: string;
-        };
-        /**
          * @description Anthropic model model_provider config. No family-specific extras yet — typed
          *     slot reserved for future Anthropic-only knobs (cache_control, beta
          *     headers) so they land cleanly without another schema rework.
@@ -3290,27 +3201,6 @@ export interface components {
             /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
             wire_api?: components["schemas"]["WireApi"] | null;
         };
-        /** @description Bluesky channel configuration (AT Protocol). */
-        BlueskyConfig: {
-            /** @description App-specific password (from Bluesky settings). */
-            app_password: string;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /** @description Bluesky handle (e.g. `"mybot.bsky.social"`). */
-            handle: string;
-        };
         /** @description A non-channel trigger source and the fields needed to configure it. */
         BoundTriggerSource: {
             /**
@@ -3718,15 +3608,12 @@ export interface components {
             ack_reactions: boolean;
             /** @description AMQP channel instances (`[channels.amqp.<alias>]`). */
             amqp?: {
-                [key: string]: components["schemas"]["AmqpConfig"];
             };
             /** @description Bluesky channel instances (`[channels.bluesky.<alias>]`). */
             bluesky?: {
-                [key: string]: components["schemas"]["BlueskyConfig"];
             };
             /** @description ClawdTalk voice channel instances (`[channels.clawdtalk.<alias>]`). */
             clawdtalk?: {
-                [key: string]: components["schemas"]["ClawdTalkConfig"];
             };
             /**
              * @description Enable the CLI interactive channel. Default: `true`.
@@ -3757,7 +3644,6 @@ export interface components {
              *     the first provider; the `provider` field selects the forge.
              */
             git?: {
-                [key: string]: components["schemas"]["GitConfig"];
             };
             /** @description Gmail Pub/Sub push notification channel instances (`[channels.gmail_push.<alias>]`). */
             gmail_push?: {
@@ -3809,14 +3695,12 @@ export interface components {
                 [key: string]: components["schemas"]["NextcloudTalkConfig"];
             };
             nostr?: {
-                [key: string]: components["schemas"]["NostrConfig"];
             };
             /** @description QQ Official Bot channel instances (`[channels.qq.<alias>]`). */
             qq?: {
             };
             /** @description Reddit channel instances (`[channels.reddit.<alias>]`). */
             reddit?: {
-                [key: string]: components["schemas"]["RedditConfig"];
             };
             /**
              * @description Session persistence backend: `"jsonl"` (legacy) or `"sqlite"` (new default).
@@ -3861,7 +3745,6 @@ export interface components {
             };
             /** @description Voice call channel instances (`[channels.voice_call.<alias>]`). */
             voice_call?: {
-                [key: string]: components["schemas"]["VoiceCallConfig"];
             };
             /** @description Voice duplex instances (`[channels.voice_duplex.<alias>]`). */
             voice_duplex?: {
@@ -3869,7 +3752,6 @@ export interface components {
             };
             /** @description Voice wake word detection channel instances (`[channels.voice_wake.<alias>]`). */
             voice_wake?: {
-                [key: string]: components["schemas"]["VoiceWakeConfig"];
             };
             /** @description WATI WhatsApp Business API channel instances (`[channels.wati.<alias>]`). */
             wati?: {
@@ -4001,29 +3883,6 @@ export interface components {
              * @default zc-claude-
              */
             tmux_prefix: string;
-        };
-        ClawdTalkConfig: {
-            /** @default [] */
-            allowed_destinations: string[];
-            api_key: string;
-            connection_id: string;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            from_number: string;
-            /** @default null */
-            webhook_secret: string | null;
         };
         /**
          * @description Controls the read-only cloud transformation analysis tools:
@@ -9073,150 +8932,6 @@ export interface components {
             vision?: boolean | null;
             /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
             wire_api?: components["schemas"]["WireApi"] | null;
-        };
-        /**
-         * @description Git-forge channel configuration (polling-based; no webhook required).
-         *
-         *     A `provider` selects the forge. GitHub authenticates as a GitHub App:
-         *     a short-lived RS256 JWT signed with the app's private key is exchanged
-         *     for per-installation access tokens. Gitea and Forgejo use a personal
-         *     access token against the instance's `/api/v1` endpoint, named by the
-         *     required `api_base_url`. Inbound issue/PR comments are polled from the
-         *     forge REST API, so the daemon needs no inbound network exposure.
-         */
-        GitConfig: {
-            /**
-             * @description Personal access token for Gitea/Forgejo API requests. The token needs
-             *     repository read access plus issue/PR comment write access for replies
-             *     and reactions. Gitea/Forgejo provider only.
-             * @default
-             */
-            access_token: string;
-            /**
-             * @description Gitea/Forgejo API base URL, including `/api/v1`, for example
-             *     `https://git.example.org/api/v1` (for the public Gitea service:
-             *     `https://gitea.com/api/v1`). Required when `provider` is `"gitea"`
-             *     or `"forgejo"` - there is no default host, because every API
-             *     request carries `access_token`; the channel fails closed at
-             *     startup rather than send the token to an endpoint the operator
-             *     never named. Gitea/Forgejo provider only.
-             */
-            api_base_url?: string | null;
-            /**
-             * Format: uint64
-             * @description GitHub App ID (shown on the app's settings page). GitHub provider only.
-             * @default 0
-             */
-            app_id: number;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Per-event routing table, keyed by normalized event type
-             *     (`"issue_comment.created"`, `"pull_request.opened"`,
-             *     `"workflow_run.failed"`, …). Event types absent from the table fall
-             *     back to the conversational default: `issue_comment.created`,
-             *     `issues.opened`, and `pull_request.opened` are delivered as
-             *     messages (mention-gated); everything else is ignored. Which API
-             *     endpoints are polled is derived from this table; routing an event
-             *     type is also subscribing to it.
-             * @default {}
-             */
-            events: {
-                [key: string]: components["schemas"]["GitEventRoute"];
-            };
-            /**
-             * @description Also poll the repository Events API (`/repos/{owner}/{repo}/events`)
-             *     as a broad backbone transport: one conditional (ETag) request per
-             *     repository per tick, so an idle repo costs almost nothing. Caveats:
-             *     events arrive with a delay of up to ~5 minutes and the feed carries
-             *     no Actions/check events (workflow runs always use their dedicated
-             *     endpoint). Items also surfaced by a targeted endpoint are
-             *     de-duplicated. Default: `false`.
-             * @default false
-             */
-            events_backbone: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * Format: uint64
-             * @description Installation ID to act as. When unset, the app's installations are
-             *     listed on first use and a sole installation is auto-selected;
-             *     startup fails if the app has zero or multiple installations.
-             */
-            installation_id?: number | null;
-            /**
-             * @description Process comments authored by other bot accounts. The app's own
-             *     comments are always ignored. Default: `false`.
-             * @default false
-             */
-            listen_to_bots: boolean;
-            /**
-             * @description Only respond to comments that @-mention the app's bot login.
-             *     Default: `true`.
-             * @default true
-             */
-            mention_only: boolean;
-            /**
-             * Format: uint64
-             * @description Poll interval in seconds for new issues and comments. Values below
-             *     15 are clamped to 15. Default: `30`.
-             * @default 30
-             */
-            poll_interval_secs: number;
-            /**
-             * @description RS256 private key PEM, the contents of the `.pem` file GitHub
-             *     generates on the app's settings page, inline and encrypted at rest.
-             *     Include the BEGIN/END lines. GitHub provider only.
-             */
-            private_key?: string | null;
-            /**
-             * @description Filesystem path to the RS256 private key `.pem` file, read at startup
-             *     when `private_key` (inline PEM) is unset. Backward-compatible fallback
-             *     for configs that predate the inline-PEM field. GitHub provider only.
-             */
-            private_key_path?: string | null;
-            /**
-             * @description Git forge provider. Supported: `"github"`, `"gitea"`, and
-             *     `"forgejo"` (Forgejo uses the Gitea-compatible REST provider).
-             *     Default: `"github"`.
-             * @default github
-             */
-            provider: string;
-            /** @description Per-channel proxy override for GitHub API requests. */
-            proxy_url?: string | null;
-            /**
-             * @description Repositories to poll, as `owner/repo`. Empty = every repository
-             *     visible to the installation.
-             * @default []
-             */
-            repos: string[];
-        };
-        /**
-         * @description Routing for one normalized git-forge event type, keyed in
-         *     `[channels.git.<alias>.events]` by the event type string
-         *     (`"pull_request.opened" = { sop = "pr-triage" }`).
-         *
-         *     An entry with neither `message = true` nor a `sop` explicitly ignores the
-         *     event type (overriding the conversational default).
-         */
-        GitEventRoute: {
-            /**
-             * @description Deliver the event into the agent loop as a normal channel message.
-             * @default false
-             */
-            message: boolean;
-            /** @description Route the event to the named SOP through channel-sourced SOP ingress. */
-            sop?: string | null;
         };
         /** @description Named model_provider profile definition. */
         GithubModelsModelProviderConfig: {
@@ -15440,35 +15155,6 @@ export interface components {
              */
             mdns: components["schemas"]["MdnsConfig"];
         };
-        /** @description Nostr channel configuration (NIP-04 + NIP-17 private messages) */
-        NostrConfig: {
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /** @description Private key in hex or nsec bech32 format */
-            private_key: string;
-            /**
-             * @description Relay URLs (wss://). Defaults to popular public relays if omitted.
-             * @default [
-             *       "wss://relay.damus.io",
-             *       "wss://nos.lol",
-             *       "wss://relay.primal.net",
-             *       "wss://relay.snort.social"
-             *     ]
-             */
-            relays: string[];
-        };
         /** @description Named model_provider profile definition. */
         NovitaModelProviderConfig: {
             /** @description Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly. */
@@ -18627,38 +18313,6 @@ export interface components {
             vision?: boolean | null;
             /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
             wire_api?: components["schemas"]["WireApi"] | null;
-        };
-        /** @description Reddit channel configuration (OAuth2 bot). */
-        RedditConfig: {
-            /** @description Reddit OAuth2 client ID. */
-            client_id: string;
-            /** @description Reddit OAuth2 client secret. */
-            client_secret: string;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /** @description Reddit OAuth2 refresh token for persistent access. */
-            refresh_token: string;
-            /**
-             * @description Subreddits to filter messages (without `r/` prefix). Empty = accept
-             *     from any subreddit the bot has access to. Migrated from the legacy
-             *     `subreddit` singular field.
-             * @default []
-             */
-            subreddits: string[];
-            /** @description Reddit bot username (without `u/` prefix). */
-            username: string;
         };
         /** @description Named model_provider profile definition. */
         RekaModelProviderConfig: {
@@ -22655,45 +22309,6 @@ export interface components {
             /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
             wire_api?: components["schemas"]["WireApi"] | null;
         };
-        VoiceCallConfig: {
-            account_id: string;
-            auth_token: string;
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            from_number: string;
-            /**
-             * Format: uint64
-             * @default 3600
-             */
-            max_call_duration_secs: number;
-            /** @default twilio */
-            model_provider: components["schemas"]["VoiceProvider"];
-            /** @default true */
-            require_outbound_approval: boolean;
-            /** @default true */
-            transcription_logging: boolean;
-            /** @default null */
-            tts_voice: string | null;
-            /** @default null */
-            webhook_base_url: string | null;
-            /**
-             * Format: uint16
-             * @default 8090
-             */
-            webhook_port: number;
-        };
         /**
          * @description Voice duplex configuration (`[channels.voice_duplex]`).
          *
@@ -22715,61 +22330,6 @@ export interface components {
              * @default []
              */
             excluded_tools: string[];
-        };
-        /**
-         * @description Which telephony model_provider to use.
-         * @enum {string}
-         */
-        VoiceProvider: "twilio" | "telnyx" | "plivo";
-        /**
-         * @description Voice wake word detection channel configuration.
-         *
-         *     Listens on the default microphone for a configurable wake word,
-         *     then captures the following utterance and transcribes it via the
-         *     existing transcription API.
-         */
-        VoiceWakeConfig: {
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * Format: float
-             * @description RMS energy threshold for voice activity detection. Samples below
-             *     this level are treated as silence. Default: `0.01`.
-             * @default 0.009999999776482582
-             */
-            energy_threshold: number;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * Format: uint32
-             * @description Maximum capture duration in seconds before forcing transcription.
-             *     Default: `30`.
-             * @default 30
-             */
-            max_capture_secs: number;
-            /**
-             * Format: uint32
-             * @description Silence timeout in milliseconds: how long to wait after the last
-             *     energy spike before finalizing a capture window. Default: `2000`.
-             * @default 2000
-             */
-            silence_timeout_ms: number;
-            /**
-             * @description Wake word phrase to listen for (case-insensitive substring match).
-             *     Default: `"hey zeroclaw"`.
-             * @default hey zeroclaw
-             */
-            wake_word: string;
         };
         /** @description WATI WhatsApp Business API channel configuration. */
         WatiConfig: {

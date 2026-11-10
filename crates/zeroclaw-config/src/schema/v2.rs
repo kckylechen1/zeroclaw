@@ -72,15 +72,7 @@ pub const V3_CHANNEL_TYPES: &[&str] = &[
     "webhook",
     "whatsapp",
     "email",
-    "nostr",
-    "clawdtalk",
-    "reddit",
-    "bluesky",
-    "git",
-    "voice_call",
-    "voice_wake",
     "voice_duplex",
-    "amqp",
 ];
 
 impl V2Config {
@@ -1143,13 +1135,6 @@ fn apply_v2_to_v3_channel_folds(channel_type: &str, instance: &mut toml::Table) 
                 "channels.discord.guild_id folded into channels.discord.guild_ids[]"
             );
         }
-        "reddit" if fold_string_into_array(instance, "subreddit", "subreddits") => {
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                "channels.reddit.subreddit folded into channels.reddit.subreddits[]"
-            );
-        }
         "whatsapp" => {
             // The WhatsApp Cloud API backend was deleted (its gateway webhook
             // route was removed). Drop its fields loudly instead of porting
@@ -1184,7 +1169,6 @@ fn fold_channel_peer_auth_into_peer_groups(
         "telegram" | "discord" => Some("allowed_users"),
         "whatsapp" => Some("allowed_numbers"),
         "email" => Some("allowed_senders"),
-        "nostr" => Some("allowed_pubkeys"),
         _ => None,
     }) else {
         return;

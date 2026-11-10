@@ -255,7 +255,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
     # Release build — zeroclawlabs (all channels)
     # >>> generated:container-fat by `cargo generate installers` - do not edit <<<
-    ZEROCLAW_FEATURES="agent-runtime,channel-acp-server,channel-amqp,channel-bluesky,channel-clawdtalk,channel-discord,channel-email,channel-git,channel-nostr,channel-notion,channel-reddit,channel-telegram,channel-voice-call,channel-webhook,gateway,integrations-saas,memory-tachi,nodes,observability-prometheus,provider-gitea,provider-github,sandbox-bubblewrap,sandbox-landlock,schema-export,whatsapp-web"
+    ZEROCLAW_FEATURES="agent-runtime,channel-acp-server,channel-discord,channel-email,channel-notion,channel-telegram,channel-webhook,gateway,integrations-saas,memory-tachi,nodes,observability-prometheus,provider-gitea,provider-github,sandbox-bubblewrap,sandbox-landlock,schema-export,whatsapp-web"
 # >>> end generated:container-fat <<<
     CARGO_TARGET_DIR=/target \
     cargo build \

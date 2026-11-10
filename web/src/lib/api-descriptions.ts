@@ -112,21 +112,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "tts_provider": "TTS provider as a dotted alias reference (`<type>.<alias>`,\ne.g. `\"openai.<alias>\"`). Resolves through `tts_providers.<type>.<alias>`.\nEmpty = no TTS for this agent (there is no global default-provider concept;\nevery agent that wants TTS sets its own `tts_provider`).",
     "workspace": "Per-agent workspace block (`[agents.<alias>.workspace]`).\nHolds the agent's filesystem path, cross-agent access allowlist,\nfilesystem-escape boolean, and cross-agent memory allowlist.\nDefault is fully jailed (no cross-agent access). See\n`crate::multi_agent::AgentWorkspaceConfig`."
   },
-  "AmqpConfig": {
-    "amqp_url": "AMQP broker URL. Use `amqp://` for plain or `amqps://` for TLS\n(e.g. `amqps://fedora:@rabbitmq.fedoraproject.org/%2Fpublic_pubsub`).",
-    "ca_cert": "Path to the CA certificate bundle for `amqps://` connections.",
-    "client_cert": "Path to the client certificate for broker mutual-TLS auth\n(Fedora Messaging requires a client cert).",
-    "client_key": "Path to the client private key matching `client_cert`.",
-    "content_template": "Template for the inbound message content. `{field}` placeholders are\ninterpolated from the JSON delivery body's top-level keys. When empty,\nthe raw delivery body is used verbatim.",
-    "durable_ack": "Acknowledgement mode. When `true` (default), deliveries are acked only\nafter the message is durably handed to the agent loop, giving\nat-least-once semantics: a crash before hand-off redelivers the event.\nSet `false` for at-most-once (broker acks on dispatch), which silently\ndrops in-flight events on crash and is only appropriate for\nnon-side-effecting, drop-on-overload consumers.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "exchange": "Exchange to bind the consumer queue to (e.g. `amq.topic`).",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "queue": "Queue name. Leave unset for a server-generated, transient,\nauto-deleted, exclusive queue. Set a stable name (UUID recommended)\nonly when durable delivery across reconnects is required.",
-    "routing_keys": "Routing keys to bind. Scope these to the topics of interest; binding\n`#` consumes the entire exchange and is almost never what you want.",
-    "sender_label": "Value placed in `ChannelMessage.sender` for every delivery from this\nsource (e.g. `anitya`). Lets the orchestrator's self-loop guard and\nper-channel routing identify the origin.",
-    "thread_id_field": "Dotted path into the JSON delivery body whose value becomes the\nmessage `thread_ts`, correlating replies to the originating event\n(e.g. `message.project.name`). Empty disables threading."
-  },
   "AnthropicModelProviderConfig": {
     "api_key": "Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly.",
     "chat_template_kwargs": "Arbitrary key/value pairs forwarded verbatim as a top-level\n`chat_template_kwargs` object in the request body of OpenAI-compatible\nproviders. Consumed by chat-template-aware backends such as vLLM,\nSGLang, and llama.cpp to pass model-family template variables that\ncontrol behaviour not exposed by other fields. Must be a JSON object\n(TOML inline table); non-object values are ignored with a warning.\nExample (Qwen3 thinking suppression):\n  `chat_template_kwargs = { enable_thinking = false }`",
@@ -419,12 +404,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "vision": "Override the provider's vision (image input) capability.\n`None` (default) uses the provider family's built-in default. Several\nfamilies (llama.cpp, the generic OpenAI-compatible endpoint, etc.)\nassume vision-capable because they can serve multimodal models. Set\n`vision = false` for a text-only model served by such a family (e.g. a\ntext LLM behind llama.cpp) so image messages are routed to a configured\n`[multimodal] vision_model_provider` instead of being sent to a model\nthat rejects them. `Some(true)` forces vision on.",
     "wire_api": "Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination."
   },
-  "BlueskyConfig": {
-    "app_password": "App-specific password (from Bluesky settings).",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "handle": "Bluesky handle (e.g. `\"mybot.bsky.social\"`)."
-  },
   "BoundTriggerSource": {
     "condition": "The payload contract a `condition` on this source may reference. Absent\nfor sources whose triggers carry no condition (`cron`, `manual`,\n`webhook`)."
   },
@@ -555,10 +534,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "session_ttl": "Session time-to-live in seconds before auto-cleanup (default: 3600)",
     "ssh_host": "SSH host for session handoff links (e.g. \"myhost.example.com\")",
     "tmux_prefix": "Prefix for tmux session names (default: \"zc-claude-\")"
-  },
-  "ClawdTalkConfig": {
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel."
   },
   "CloudOpsConfig": {
     "cost_threshold_monthly_usd": "Monthly USD threshold to flag cost items. Default: 100.0.",
@@ -1268,28 +1243,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "uri": "Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field.",
     "vision": "Override the provider's vision (image input) capability.\n`None` (default) uses the provider family's built-in default. Several\nfamilies (llama.cpp, the generic OpenAI-compatible endpoint, etc.)\nassume vision-capable because they can serve multimodal models. Set\n`vision = false` for a text-only model served by such a family (e.g. a\ntext LLM behind llama.cpp) so image messages are routed to a configured\n`[multimodal] vision_model_provider` instead of being sent to a model\nthat rejects them. `Some(true)` forces vision on.",
     "wire_api": "Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination."
-  },
-  "GitConfig": {
-    "access_token": "Personal access token for Gitea/Forgejo API requests. The token needs\nrepository read access plus issue/PR comment write access for replies\nand reactions. Gitea/Forgejo provider only.",
-    "api_base_url": "Gitea/Forgejo API base URL, including `/api/v1`, for example\n`https://git.example.org/api/v1` (for the public Gitea service:\n`https://gitea.com/api/v1`). Required when `provider` is `\"gitea\"`\nor `\"forgejo\"` - there is no default host, because every API\nrequest carries `access_token`; the channel fails closed at\nstartup rather than send the token to an endpoint the operator\nnever named. Gitea/Forgejo provider only.",
-    "app_id": "GitHub App ID (shown on the app's settings page). GitHub provider only.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "events": "Per-event routing table, keyed by normalized event type\n(`\"issue_comment.created\"`, `\"pull_request.opened\"`,\n`\"workflow_run.failed\"`, …). Event types absent from the table fall\nback to the conversational default: `issue_comment.created`,\n`issues.opened`, and `pull_request.opened` are delivered as\nmessages (mention-gated); everything else is ignored. Which API\nendpoints are polled is derived from this table; routing an event\ntype is also subscribing to it.",
-    "events_backbone": "Also poll the repository Events API (`/repos/{owner}/{repo}/events`)\nas a broad backbone transport: one conditional (ETag) request per\nrepository per tick, so an idle repo costs almost nothing. Caveats:\nevents arrive with a delay of up to ~5 minutes and the feed carries\nno Actions/check events (workflow runs always use their dedicated\nendpoint). Items also surfaced by a targeted endpoint are\nde-duplicated. Default: `false`.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "installation_id": "Installation ID to act as. When unset, the app's installations are\nlisted on first use and a sole installation is auto-selected;\nstartup fails if the app has zero or multiple installations.",
-    "listen_to_bots": "Process comments authored by other bot accounts. The app's own\ncomments are always ignored. Default: `false`.",
-    "mention_only": "Only respond to comments that @-mention the app's bot login.\nDefault: `true`.",
-    "poll_interval_secs": "Poll interval in seconds for new issues and comments. Values below\n15 are clamped to 15. Default: `30`.",
-    "private_key": "RS256 private key PEM, the contents of the `.pem` file GitHub\ngenerates on the app's settings page, inline and encrypted at rest.\nInclude the BEGIN/END lines. GitHub provider only.",
-    "private_key_path": "Filesystem path to the RS256 private key `.pem` file, read at startup\nwhen `private_key` (inline PEM) is unset. Backward-compatible fallback\nfor configs that predate the inline-PEM field. GitHub provider only.",
-    "provider": "Git forge provider. Supported: `\"github\"`, `\"gitea\"`, and\n`\"forgejo\"` (Forgejo uses the Gitea-compatible REST provider).\nDefault: `\"github\"`.",
-    "proxy_url": "Per-channel proxy override for GitHub API requests.",
-    "repos": "Repositories to poll, as `owner/repo`. Empty = every repository\nvisible to the installation."
-  },
-  "GitEventRoute": {
-    "message": "Deliver the event into the agent loop as a normal channel message.",
-    "sop": "Route the event to the named SOP through channel-sourced SOP ingress."
   },
   "GithubModelsModelProviderConfig": {
     "api_key": "Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly.",
@@ -2213,12 +2166,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "max_nodes": "Maximum number of concurrent node connections.",
     "mdns": "LAN-local mDNS peer discovery."
   },
-  "NostrConfig": {
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "private_key": "Private key in hex or nsec bech32 format",
-    "relays": "Relay URLs (wss://). Defaults to popular public relays if omitted."
-  },
   "NovitaModelProviderConfig": {
     "api_key": "Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly.",
     "chat_template_kwargs": "Arbitrary key/value pairs forwarded verbatim as a top-level\n`chat_template_kwargs` object in the request body of OpenAI-compatible\nproviders. Consumed by chat-template-aware backends such as vLLM,\nSGLang, and llama.cpp to pass model-family template variables that\ncontrol behaviour not exposed by other fields. Must be a JSON object\n(TOML inline table); non-object values are ignored with a warning.\nExample (Qwen3 thinking suppression):\n  `chat_template_kwargs = { enable_thinking = false }`",
@@ -2725,15 +2672,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "uri": "Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field.",
     "vision": "Override the provider's vision (image input) capability.\n`None` (default) uses the provider family's built-in default. Several\nfamilies (llama.cpp, the generic OpenAI-compatible endpoint, etc.)\nassume vision-capable because they can serve multimodal models. Set\n`vision = false` for a text-only model served by such a family (e.g. a\ntext LLM behind llama.cpp) so image messages are routed to a configured\n`[multimodal] vision_model_provider` instead of being sent to a model\nthat rejects them. `Some(true)` forces vision on.",
     "wire_api": "Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination."
-  },
-  "RedditConfig": {
-    "client_id": "Reddit OAuth2 client ID.",
-    "client_secret": "Reddit OAuth2 client secret.",
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "refresh_token": "Reddit OAuth2 refresh token for persistent access.",
-    "subreddits": "Subreddits to filter messages (without `r/` prefix). Empty = accept\nfrom any subreddit the bot has access to. Migrated from the legacy\n`subreddit` singular field.",
-    "username": "Reddit bot username (without `u/` prefix)."
   },
   "RekaModelProviderConfig": {
     "api_key": "Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly.",
@@ -3321,21 +3259,9 @@ export const fieldDescriptions: FieldDescriptions = {
     "vision": "Override the provider's vision (image input) capability.\n`None` (default) uses the provider family's built-in default. Several\nfamilies (llama.cpp, the generic OpenAI-compatible endpoint, etc.)\nassume vision-capable because they can serve multimodal models. Set\n`vision = false` for a text-only model served by such a family (e.g. a\ntext LLM behind llama.cpp) so image messages are routed to a configured\n`[multimodal] vision_model_provider` instead of being sent to a model\nthat rejects them. `Some(true)` forces vision on.",
     "wire_api": "Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination."
   },
-  "VoiceCallConfig": {
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel."
-  },
   "VoiceDuplexConfig": {
     "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
     "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel."
-  },
-  "VoiceWakeConfig": {
-    "enabled": "Whether this channel is active. The runtime only loads channels whose\n`enabled = true`. Default: `false` so an operator who pastes a partial\n`[channels.<type>.<alias>]` block doesn't accidentally bring a channel\nlive before the rest of its config is filled in.",
-    "energy_threshold": "RMS energy threshold for voice activity detection. Samples below\nthis level are treated as silence. Default: `0.01`.",
-    "excluded_tools": "Tools excluded from this channel's tool spec. When set, these tools\nare not exposed to the model when responding via this channel.",
-    "max_capture_secs": "Maximum capture duration in seconds before forcing transcription.\nDefault: `30`.",
-    "silence_timeout_ms": "Silence timeout in milliseconds: how long to wait after the last\nenergy spike before finalizing a capture window. Default: `2000`.",
-    "wake_word": "Wake word phrase to listen for (case-insensitive substring match).\nDefault: `\"hey zeroclaw\"`."
   },
   "WatiConfig": {
     "api_token": "WATI API token (Bearer auth).",

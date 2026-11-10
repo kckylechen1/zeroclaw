@@ -2435,15 +2435,27 @@ pub(crate) mod tests {
         // The gateway listing marks every channel not compiled (no
         // in-process listeners since the channels retirement); a live
         // surface (webhook) still lists, while a configured retired
-        // transport (mochat) must not appear at all (#584).
+        // transport (WhatsApp Web) must not appear at all (#584).
         let mut config = zeroclaw_config::schema::Config::default();
         config.channels.webhook.insert(
             "default".to_string(),
             zeroclaw_config::schema::WebhookConfig::default(),
         );
-        config.channels.nostr.insert(
+        // This is the last configurable retired schema after batches B/C.
+        // Its retirement removes this sample and exclusion assertion together;
+        // the live Webhook availability assertions below must remain.
+        config.channels.whatsapp.insert(
             "default".to_string(),
-            zeroclaw_config::schema::NostrConfig::default(),
+            zeroclaw_config::schema::WhatsAppConfig {
+                session_path: Some("synthetic-retired-session.db".into()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            config.channels.channels().iter().any(|channel| {
+                channel.kind == "whatsapp-web" && channel.configured && channel.retired
+            }),
+            "the exclusion guard requires a configured retired sample"
         );
 
         let response = handle_api_channels(State(test_state(config)), HeaderMap::new())
@@ -2461,9 +2473,10 @@ pub(crate) mod tests {
         assert_eq!(webhook["status"], "not_compiled");
         assert_eq!(webhook["health"], "unavailable");
         assert!(
-            channels
-                .iter()
-                .all(|channel| channel["type"].as_str() != Some("nostr")),
+            channels.iter().all(|channel| !matches!(
+                channel["type"].as_str(),
+                Some("whatsapp" | "whatsapp-web" | "whatsapp_web")
+            )),
             "retired transports must not appear in the channel listing"
         );
     }

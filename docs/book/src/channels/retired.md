@@ -15,7 +15,7 @@ channel. The [channels overview](./overview.md) lists the live surfaces.
 - [WhatsApp](./whatsapp.md)
 - [Other chat platforms](./chat-others.md): chat transports whose schemas are removed (iMessage, WeChat, DingTalk, Lark/Feishu, QQ, IRC, Mochat, Twitch); Notion is a retired SaaS integration
 - [Social](./social.md): Bluesky, Nostr, Twitter/X, Reddit
-- [Git](./git.md)
+- Git: schema removed (#584 Slice 3); leftover `[channels.git]` sections tombstone at load
 - [Voice](./voice.md): ClawdTalk, Voice Call, Voice Wake
-- [AMQP](./amqp.md)
+- AMQP: schema removed (#584 Slice 3); leftover `[channels.amqp]` sections tombstone at load
 - [MQTT](./mqtt.md) and [Filesystem](./filesystem.md): already rejected at config parse

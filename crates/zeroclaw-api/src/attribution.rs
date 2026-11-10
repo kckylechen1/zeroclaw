@@ -57,22 +57,12 @@ pub enum Role {
 pub enum ChannelKind {
     #[strum(serialize = "acp")]
     AcpChannel,
-    #[strum(serialize = "amqp")]
-    Amqp,
-    Bluesky,
-    #[strum(serialize = "clawdtalk")]
-    ClawdTalk,
     Cli,
     Discord,
     Email,
     Filesystem,
-    Git,
-    Nostr,
     Notion,
-    Reddit,
     Telegram,
-    VoiceCall,
-    VoiceWake,
     Webhook,
     WhatsappWeb,
     Plugin,
@@ -412,25 +402,17 @@ mod tests {
             channel_kind: Option<ChannelKind>,
         }
 
-        // This is the external wire contract, including explicit spellings
-        // such as acp/clawdtalk. A retired variant's attribute must never
+        // This is the external wire contract, including the explicit acp
+        // spelling. A retired variant's attribute must never
         // become an alias or canonical token of its next retained neighbour.
         for (kind, wire) in [
             (ChannelKind::AcpChannel, "acp"),
-            (ChannelKind::Amqp, "amqp"),
-            (ChannelKind::Bluesky, "bluesky"),
-            (ChannelKind::ClawdTalk, "clawdtalk"),
             (ChannelKind::Cli, "cli"),
             (ChannelKind::Discord, "discord"),
             (ChannelKind::Email, "email"),
             (ChannelKind::Filesystem, "filesystem"),
-            (ChannelKind::Git, "git"),
-            (ChannelKind::Nostr, "nostr"),
             (ChannelKind::Notion, "notion"),
-            (ChannelKind::Reddit, "reddit"),
             (ChannelKind::Telegram, "telegram"),
-            (ChannelKind::VoiceCall, "voice_call"),
-            (ChannelKind::VoiceWake, "voice_wake"),
             (ChannelKind::Webhook, "webhook"),
             (ChannelKind::WhatsappWeb, "whatsapp_web"),
             (ChannelKind::Plugin, "plugin"),
@@ -448,8 +430,23 @@ mod tests {
             );
         }
         for retired in [
-            "line", "dingtalk", "wecom", "wecom_ws", "wechat", "qq", "twitter", "mochat",
+            "line",
+            "dingtalk",
+            "wecom",
+            "wecom_ws",
+            "wechat",
+            "qq",
+            "twitter",
+            "mochat",
             "imessage",
+            "nostr",
+            "clawdtalk",
+            "reddit",
+            "bluesky",
+            "git",
+            "voice_call",
+            "voice_wake",
+            "amqp",
         ] {
             assert!(
                 retired.parse::<ChannelKind>().is_err(),

@@ -201,28 +201,10 @@ fn cost_category_resolves_only_rate_bearing_sections() {
     assert_eq!(super::cost_category_for_provider_section("models"), None);
 }
 
-/// The retired run-side config keys must FAIL config parse
-/// with an actionable message, never silently no-op.
+/// Retired MQTT/filesystem listener sections must fail config parsing with
+/// an actionable message, including an explicitly empty section header.
 #[test]
 async fn retired_sop_run_config_keys_fail_parse_loudly() {
-    let amqp: Result<AmqpConfig, _> = ::toml::from_str(
-        r#"enabled = true
-        amqp_url = "amqp://localhost:5672"
-        dispatch = "sop"
-        "#,
-    );
-    let err = amqp.unwrap_err().to_string();
-    assert!(err.contains("retired SOP run-side config key"), "{err}");
-
-    let git: Result<GitConfig, _> = ::toml::from_str(
-        r#"enabled = true
-        [events]
-        "pull_request.opened" = { sop = "pr-triage" }
-        "#,
-    );
-    let err = git.unwrap_err().to_string();
-    assert!(err.contains("retired SOP run-side config key"), "{err}");
-
     let fs: Result<ChannelsConfig, _> = ::toml::from_str(
         r#"[filesystem.watch]
         enabled = true
@@ -250,116 +232,8 @@ async fn retired_sop_run_config_keys_fail_parse_loudly() {
     }
 }
 
-#[test]
-async fn git_events_routing_table_parses_dotted_keys_and_defaults() {
-    let cfg: GitConfig = ::toml::from_str(
-        r#"
-        enabled = true
-        app_id = 12345
-        events_backbone = true
-
-        [events]
-        "pull_request.opened" = { message = false }
-        "issues.opened" = { message = true }
-        "issue_comment.created" = { message = true }
-        "workflow_run.failed" = { message = true }
-        "#,
-    )
-    .unwrap();
-    // Provider defaults to github when the field is omitted.
-    assert_eq!(cfg.provider, "github");
-    assert!(cfg.events_backbone);
-    assert_eq!(cfg.events.len(), 4);
-    let pr = &cfg.events["pull_request.opened"];
-    assert!(!pr.message);
-    assert!(cfg.events["issue_comment.created"].message);
-    assert!(cfg.events["issues.opened"].message);
-
-    // An explicit provider round-trips.
-    let gitlab: GitConfig = ::toml::from_str("enabled = true\nprovider = \"gitlab\"").unwrap();
-    assert_eq!(gitlab.provider, "gitlab");
-
-    // Absent table: empty map, backbone off — the conversational
-    // defaults live in the channel's router, not here.
-    let bare: GitConfig = ::toml::from_str("enabled = true").unwrap();
-    assert!(bare.events.is_empty());
-    assert!(!bare.events_backbone);
-}
-
-#[test]
-async fn git_gitea_provider_fields_parse() {
-    let cfg: GitConfig = ::toml::from_str(
-        r#"
-        enabled = true
-        provider = "forgejo"
-        api_base_url = "https://git.example.org/api/v1"
-        access_token = "token-value"
-        repos = ["team/project"]
-        "#,
-    )
-    .unwrap();
-    assert_eq!(cfg.provider, "forgejo");
-    assert_eq!(
-        cfg.api_base_url.as_deref(),
-        Some("https://git.example.org/api/v1")
-    );
-    assert_eq!(cfg.access_token, "token-value");
-    assert_eq!(cfg.repos, vec!["team/project"]);
-}
-
-#[test]
-async fn git_gitea_access_token_is_secret() {
-    assert!(GitConfig::prop_is_secret("channels.git.access_token"));
-
-    let cfg = GitConfig {
-        access_token: "token-value".to_string(),
-        ..Default::default()
-    };
-    let fields = cfg.secret_fields();
-    assert!(
-        fields
-            .iter()
-            .any(|field| field.name == "channels.git.access_token" && field.is_set),
-        "Gitea/Forgejo access_token must be secret-classified and set"
-    );
-}
-
-#[test]
-async fn amqp_validate_requires_paired_client_cert_and_key() {
-    let base = AmqpConfig {
-        enabled: true,
-        amqp_url: "amqps://broker.example.org:5671/%2Fpublic".into(),
-        exchange: "amq.topic".into(),
-        routing_keys: vec!["org.example.release".into()],
-        ca_cert: Some(std::path::PathBuf::from("/etc/ssl/ca.pem")),
-        ..AmqpConfig::default()
-    };
-
-    // Both absent: server-auth only, valid.
-    assert!(base.validate().is_ok());
-
-    // Cert without key: invalid.
-    let cert_only = AmqpConfig {
-        client_cert: Some(std::path::PathBuf::from("/etc/ssl/client.pem")),
-        ..base.clone()
-    };
-    assert!(cert_only.validate().is_err());
-
-    // Key without cert: invalid.
-    let key_only = AmqpConfig {
-        client_key: Some(std::path::PathBuf::from("/etc/ssl/client.key")),
-        ..base.clone()
-    };
-    assert!(key_only.validate().is_err());
-
-    // Both present: valid.
-    let both = AmqpConfig {
-        client_cert: Some(std::path::PathBuf::from("/etc/ssl/client.pem")),
-        client_key: Some(std::path::PathBuf::from("/etc/ssl/client.key")),
-        ..base
-    };
-    assert!(both.validate().is_ok());
-}
+/// The retired run-side config keys must FAIL config parse
+/// with an actionable message, never silently no-op.
 use super::*;
 use std::ffi::OsString;
 #[cfg(unix)]
@@ -1456,94 +1330,9 @@ async fn validate_rejects_disabled_discord_with_unset_display_token() {
 // Forgejo alias with an access token but no api_base_url must be rejected
 // at config-validation time. The old behavior silently defaulted to
 // https://gitea.com/api/v1 and sent the configured token there.
-#[test]
-async fn validate_rejects_gitea_forgejo_without_api_base_url() {
-    for provider in ["gitea", "forgejo"] {
-        let mut config = Config::default();
-        config.channels.git.insert(
-            "default".to_string(),
-            GitConfig {
-                enabled: true,
-                provider: provider.to_string(),
-                access_token: "tok".into(),
-                ..Default::default()
-            },
-        );
-
-        let err = config
-            .validate()
-            .expect_err("a PAT-backed forge provider without api_base_url must be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("channels.git.default.api_base_url"), "{msg}");
-        assert!(msg.contains(provider), "{msg}");
-    }
-}
-
-#[test]
-async fn validate_rejects_blank_or_malformed_gitea_api_base_url() {
-    for bad in ["   ", "not a url", "ftp://git.example.org/api/v1"] {
-        let mut config = Config::default();
-        config.channels.git.insert(
-            "default".to_string(),
-            GitConfig {
-                enabled: true,
-                provider: "gitea".to_string(),
-                access_token: "tok".into(),
-                api_base_url: Some(bad.to_string()),
-                ..Default::default()
-            },
-        );
-
-        let err = config
-            .validate()
-            .expect_err("blank or malformed Gitea API base URL must be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("channels.git.default.api_base_url"), "{msg}");
-    }
-}
-
 // The requirement is scoped to enabled PAT-backed providers: the GitHub
 // provider has no api_base_url, and a disabled half-filled Gitea block
 // must not fail the whole config.
-#[test]
-async fn validate_git_api_base_url_scope() {
-    let mut config = Config::default();
-    config.channels.git.insert(
-        "default".to_string(),
-        GitConfig {
-            enabled: true,
-            ..Default::default()
-        },
-    );
-    config.channels.git.insert(
-        "disabled_gitea".to_string(),
-        GitConfig {
-            enabled: false,
-            provider: "gitea".to_string(),
-            access_token: "tok".into(),
-            ..Default::default()
-        },
-    );
-    config
-        .validate()
-        .expect("github provider and disabled gitea alias must validate");
-
-    let mut config = Config::default();
-    config.channels.git.insert(
-        "default".to_string(),
-        GitConfig {
-            enabled: true,
-            provider: "forgejo".to_string(),
-            access_token: "tok".into(),
-            api_base_url: Some("https://git.example.org/api/v1".to_string()),
-            ..Default::default()
-        },
-    );
-    config
-        .validate()
-        .expect("forgejo with an explicit api_base_url must validate");
-}
-
 #[test]
 async fn observability_enums_deserialize_legacy_string_values() {
     // Backward compat: TOML configs written before the enum conversion
@@ -2009,16 +1798,8 @@ async fn config_toml_roundtrip() {
             webhook: HashMap::new(),
             whatsapp: HashMap::new(),
             email: HashMap::new(),
-            nostr: HashMap::new(),
-            clawdtalk: HashMap::new(),
-            reddit: HashMap::new(),
-            bluesky: HashMap::new(),
-            git: HashMap::new(),
-            voice_call: HashMap::new(),
             voice_duplex: HashMap::new(),
-            voice_wake: HashMap::new(),
             mqtt: HashMap::new(),
-            amqp: HashMap::new(),
             filesystem: HashMap::new(),
             message_timeout_secs: 300,
             max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
@@ -3544,16 +3325,8 @@ async fn channels_with_whatsapp() {
             },
         )]),
         email: HashMap::new(),
-        nostr: HashMap::new(),
-        clawdtalk: HashMap::new(),
-        reddit: HashMap::new(),
-        bluesky: HashMap::new(),
-        git: HashMap::new(),
-        voice_call: HashMap::new(),
         voice_duplex: HashMap::new(),
-        voice_wake: HashMap::new(),
         mqtt: HashMap::new(),
-        amqp: HashMap::new(),
         filesystem: HashMap::new(),
         message_timeout_secs: 300,
         max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
@@ -4700,6 +4473,20 @@ async fn load_or_init_warns_about_retired_batch_b_channel_settings() {
         ("qq", "app_id = 'synthetic-app'\napp_secret = 'synthetic-retired-credential'"),
         ("twitter", "bearer_token = 'synthetic-retired-credential'"),
         ("mochat", "api_url = 'https://example.test'\napi_token = 'synthetic-retired-credential'"),
+    ]).await;
+}
+
+#[test]
+async fn load_or_init_warns_about_retired_batch_c_channel_settings() {
+    assert_retired_channel_settings_load_with_warning(&[
+        ("nostr", "private_key = 'synthetic-retired-credential'\nallowed_pubkeys = ['retired-pubkey']"),
+        ("clawdtalk", "api_key = 'synthetic-retired-credential'\nconnection_id = 'synthetic-connection'\nfrom_number = '+15555550110'"),
+        ("reddit", "client_id = 'synthetic-client'\nclient_secret = 'synthetic-retired-credential'\nrefresh_token = 'synthetic-retired-credential'\nusername = 'synthetic-user'\nsubreddit = 'synthetic-community'"),
+        ("bluesky", "handle = 'synthetic.example.test'\napp_password = 'synthetic-retired-credential'"),
+        ("git", "provider = 'gitea'\napi_base_url = 'https://example.test'\naccess_token = 'synthetic-retired-credential'\nrepos = ['synthetic/repository']"),
+        ("voice_call", "account_id = 'synthetic-account'\nauth_token = 'synthetic-retired-credential'\nfrom_number = '+15555550111'"),
+        ("voice_wake", "wake_word = 'synthetic-retired-credential'"),
+        ("amqp", "amqp_url = 'amqp://synthetic:synthetic-retired-credential@example.test'\nexchange = 'synthetic-exchange'\nrouting_keys = ['synthetic-key']"),
     ]).await;
 }
 
@@ -7722,30 +7509,6 @@ async fn nevis_config_debug_redacts_client_secret() {
     assert!(
         debug_output.contains("[REDACTED]"),
         "Debug output must show [REDACTED] for client_secret"
-    );
-}
-
-#[test]
-async fn git_config_debug_redacts_private_key_and_access_token() {
-    let cfg = GitConfig {
-        private_key: Some(
-            "-----BEGIN RSA PRIVATE KEY-----\nSUPERSECRETPEM\n-----END RSA PRIVATE KEY-----".into(),
-        ),
-        access_token: "ghp_supersecrettoken".into(),
-        ..GitConfig::default()
-    };
-    let debug_output = format!("{cfg:?}");
-    assert!(
-        !debug_output.contains("SUPERSECRETPEM"),
-        "Debug output must not contain the raw private_key PEM"
-    );
-    assert!(
-        !debug_output.contains("ghp_supersecrettoken"),
-        "Debug output must not contain the raw access_token"
-    );
-    assert!(
-        debug_output.contains("***"),
-        "Debug output must mask the private_key and access_token"
     );
 }
 
@@ -12717,6 +12480,14 @@ const SCHEMA_DELETED: &[&str] = &[
     "qq",
     "twitter",
     "mochat",
+    "nostr",
+    "clawdtalk",
+    "reddit",
+    "bluesky",
+    "git",
+    "voice_call",
+    "voice_wake",
+    "amqp",
     "feishu",
 ];
 

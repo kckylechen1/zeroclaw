@@ -10675,35 +10675,6 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub email: HashMap<String, crate::scattered_types::EmailConfig>,
-    /// Nostr channel instances (`[channels.nostr.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub nostr: HashMap<String, NostrConfig>,
-    /// ClawdTalk voice channel instances (`[channels.clawdtalk.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub clawdtalk: HashMap<String, crate::scattered_types::ClawdTalkConfig>,
-    /// Reddit channel instances (`[channels.reddit.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub reddit: HashMap<String, RedditConfig>,
-    /// Bluesky channel instances (`[channels.bluesky.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub bluesky: HashMap<String, BlueskyConfig>,
-    /// Git-forge channel instances (`[channels.git.<alias>]`). GitHub is
-    /// the first provider; the `provider` field selects the forge.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub git: HashMap<String, GitConfig>,
-    /// Voice call channel instances (`[channels.voice_call.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub voice_call: HashMap<String, crate::scattered_types::VoiceCallConfig>,
-    /// Voice wake word detection channel instances (`[channels.voice_wake.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub voice_wake: HashMap<String, VoiceWakeConfig>,
     /// Voice duplex instances (`[channels.voice_duplex.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -10718,10 +10689,6 @@ pub struct ChannelsConfig {
     )]
     #[cfg_attr(feature = "schema-export", schemars(skip))]
     pub mqtt: HashMap<String, ()>,
-    /// AMQP channel instances (`[channels.amqp.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub amqp: HashMap<String, AmqpConfig>,
     /// Filesystem SOP listener instances — RETIRED. The section
     /// now fails config parse with the migration message instead of silently
     /// no-op'ing. Field removed with the run-side config sweep.
@@ -10776,23 +10743,6 @@ pub struct ChannelsConfig {
 // These deserializers keep the retired keys PARSEABLE only long enough to
 // reject them with an actionable message: silently ignoring them would
 // reinterpret a run-side config (a SOP dispatch mode, a filesystem/mqtt SOP
-// trigger channel, a git sop route) as "do nothing", which is not a safe
-// reading of the operator's intent. Run truth is Tachi-side since the V4
-// procedure_v1 seam.
-
-fn reject_retired_sop_key<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<String>::deserialize(deserializer)?;
-    match value {
-        Some(v) => Err(serde::de::Error::custom(format!(
-            "retired SOP run-side config key (value `{v}`): SOP runs are Tachi-side \
-             ProcedureRuns since #243 (#197 wall 5) — remove this key; see              docs/book/src/sop/ for the definition-only surface"
-        ))),
-        None => Ok(None),
-    }
-}
 
 fn reject_retired_sop_channel<'de, D, V>(deserializer: D) -> Result<HashMap<String, V>, D::Error>
 where
@@ -10851,62 +10801,6 @@ impl ChannelsConfig {
                 retired: false,
             },
             ChannelInfo {
-                kind: "nostr",
-                name: "Nostr",
-                desc: "Nostr DMs",
-                configured: !self.nostr.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "clawdtalk",
-                name: "ClawdTalk",
-                desc: "ClawdTalk Channel",
-                configured: !self.clawdtalk.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "reddit",
-                name: "Reddit",
-                desc: "Reddit bot (OAuth2)",
-                configured: !self.reddit.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "bluesky",
-                name: "Bluesky",
-                desc: "AT Protocol",
-                configured: !self.bluesky.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "git",
-                name: "Git",
-                desc: "Git forge (GitHub, Gitea, Forgejo): issues, PRs & events",
-                configured: !self.git.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "voice-call",
-                name: "Voice Call",
-                desc: "outbound voice call channel",
-                configured: !self.voice_call.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "voice-wake",
-                name: "VoiceWake",
-                desc: "voice wake word detection",
-                configured: !self.voice_wake.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
-                kind: "amqp",
-                name: "AMQP",
-                desc: "AMQP topic consumer",
-                configured: !self.amqp.is_empty(),
-                retired: false,
-            },
-            ChannelInfo {
                 kind: "webhook",
                 name: "Webhook",
                 desc: "HTTP endpoint",
@@ -10933,15 +10827,7 @@ impl ChannelsConfig {
             || self.webhook.values().any(|c| c.enabled)
             || self.whatsapp.values().any(|c| c.enabled)
             || self.email.values().any(|c| c.enabled)
-            || self.nostr.values().any(|c| c.enabled)
-            || self.clawdtalk.values().any(|c| c.enabled)
-            || self.reddit.values().any(|c| c.enabled)
-            || self.bluesky.values().any(|c| c.enabled)
-            || self.voice_call.values().any(|c| c.enabled)
-            || self.voice_wake.values().any(|c| c.enabled)
             || self.voice_duplex.values().any(|c| c.enabled)
-            || self.amqp.values().any(|c| c.enabled)
-            || self.git.values().any(|c| c.enabled)
     }
 
     /// One `(canonical_name, configured, deliverable, retired)` row per
@@ -10952,22 +10838,14 @@ impl ChannelsConfig {
     /// retired transports (`retired`), so a name-addressed outbound surface
     /// such as `heartbeat.target` refuses them at validation instead of
     /// accepting a target the delivery layer silently drops.
-    pub fn channel_presence(&self) -> [(&'static str, bool, bool, bool); 14] {
+    pub fn channel_presence(&self) -> [(&'static str, bool, bool, bool); 6] {
         [
             ("telegram", !self.telegram.is_empty(), true, false),
             ("discord", !self.discord.is_empty(), true, false),
             ("webhook", !self.webhook.is_empty(), true, false),
             ("whatsapp", !self.whatsapp.is_empty(), false, true),
             ("email", !self.email.is_empty(), true, false),
-            ("nostr", !self.nostr.is_empty(), false, true),
-            ("clawdtalk", !self.clawdtalk.is_empty(), false, true),
-            ("reddit", !self.reddit.is_empty(), false, true),
-            ("bluesky", !self.bluesky.is_empty(), false, true),
-            ("git", !self.git.is_empty(), false, true),
-            ("voice_call", !self.voice_call.is_empty(), false, true),
-            ("voice_wake", !self.voice_wake.is_empty(), false, true),
             ("voice_duplex", !self.voice_duplex.is_empty(), false, false),
-            ("amqp", !self.amqp.is_empty(), false, true),
         ]
     }
 
@@ -11035,16 +10913,8 @@ impl Default for ChannelsConfig {
             webhook: HashMap::new(),
             whatsapp: HashMap::new(),
             email: HashMap::new(),
-            nostr: HashMap::new(),
-            clawdtalk: HashMap::new(),
-            reddit: HashMap::new(),
-            bluesky: HashMap::new(),
-            git: HashMap::new(),
-            voice_call: HashMap::new(),
-            voice_wake: HashMap::new(),
             voice_duplex: HashMap::new(),
             mqtt: HashMap::new(),
-            amqp: HashMap::new(),
             filesystem: HashMap::new(),
             message_timeout_secs: default_channel_message_timeout_secs(),
             max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
@@ -11744,173 +11614,6 @@ impl WhatsAppConfig {
     }
 }
 
-/// Generic AMQP 0-9-1 channel configuration (RabbitMQ, Fedora Messaging, etc.).
-///
-/// Subscribes to an exchange via routing keys and lifts each delivery into an
-/// inbound `ChannelMessage`. The mapping from a JSON delivery body to message
-/// fields is config-driven (`content_template`, `thread_id_field`) so a new
-/// source — Anitya, an internal bus, anything publishing JSON — is onboarded by
-/// configuration rather than code.
-/// RETIRED dispatch routing for AMQP fan-in: this field formerly chose between
-/// the agent loop, the SOP engine, or both. Removed with the run side; any
-/// value now fails config parse with the migration message and deliveries
-/// always drive the agent loop.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.amqp"]
-pub struct AmqpConfig {
-    /// RETIRED dispatch mode (`sop` / `sop_and_agent_loop` / `agent_loop`).
-    /// Kept as a parse-time tombstone so a legacy value is rejected with the
-    /// migration message instead of silently reinterpreted as agent-loop
-    /// delivery. Removed with the run-side config sweep.
-    #[serde(
-        default,
-        deserialize_with = "reject_retired_sop_key",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[cfg_attr(feature = "schema-export", schemars(skip))]
-    pub dispatch: Option<String>,
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// AMQP broker URL. Use `amqp://` for plain or `amqps://` for TLS
-    /// (e.g. `amqps://fedora:@rabbitmq.fedoraproject.org/%2Fpublic_pubsub`).
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub amqp_url: String,
-    /// Exchange to bind the consumer queue to (e.g. `amq.topic`).
-    #[tab(Advanced)]
-    pub exchange: String,
-    /// Routing keys to bind. Scope these to the topics of interest; binding
-    /// `#` consumes the entire exchange and is almost never what you want.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub routing_keys: Vec<String>,
-    /// Queue name. Leave unset for a server-generated, transient,
-    /// auto-deleted, exclusive queue. Set a stable name (UUID recommended)
-    /// only when durable delivery across reconnects is required.
-    #[tab(Advanced)]
-    pub queue: Option<String>,
-    /// Path to the CA certificate bundle for `amqps://` connections.
-    #[tab(Connection)]
-    pub ca_cert: Option<PathBuf>,
-    /// Path to the client certificate for broker mutual-TLS auth
-    /// (Fedora Messaging requires a client cert).
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub client_cert: Option<PathBuf>,
-    /// Path to the client private key matching `client_cert`.
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub client_key: Option<PathBuf>,
-    /// Value placed in `ChannelMessage.sender` for every delivery from this
-    /// source (e.g. `anitya`). Lets the orchestrator's self-loop guard and
-    /// per-channel routing identify the origin.
-    #[tab(Behavior)]
-    #[serde(default = "default_amqp_sender_label")]
-    pub sender_label: String,
-    /// Template for the inbound message content. `{field}` placeholders are
-    /// interpolated from the JSON delivery body's top-level keys. When empty,
-    /// the raw delivery body is used verbatim.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub content_template: String,
-    /// Dotted path into the JSON delivery body whose value becomes the
-    /// message `thread_ts`, correlating replies to the originating event
-    /// (e.g. `message.project.name`). Empty disables threading.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub thread_id_field: String,
-    /// Acknowledgement mode. When `true` (default), deliveries are acked only
-    /// after the message is durably handed to the agent loop, giving
-    /// at-least-once semantics: a crash before hand-off redelivers the event.
-    /// Set `false` for at-most-once (broker acks on dispatch), which silently
-    /// drops in-flight events on crash and is only appropriate for
-    /// non-side-effecting, drop-on-overload consumers.
-    #[tab(Behavior)]
-    #[serde(default = "default_amqp_durable_ack")]
-    pub durable_ack: bool,
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl AmqpConfig {
-    /// Validate the AMQP configuration.
-    ///
-    /// Checks:
-    /// - `amqp_url` uses a valid scheme (`amqp://` or `amqps://`)
-    /// - `amqps://` connections carry a CA certificate
-    /// - `client_cert` and `client_key` are supplied together (mutual TLS)
-    /// - the exchange is non-empty
-    /// - at least one routing key is bound
-    pub fn validate(&self) -> anyhow::Result<()> {
-        let is_tls = self.amqp_url.starts_with("amqps://");
-        let is_plain = self.amqp_url.starts_with("amqp://");
-
-        if !is_tls && !is_plain {
-            anyhow::bail!(
-                "amqp_url must start with 'amqp://' or 'amqps://', got: {}",
-                self.amqp_url
-            );
-        }
-
-        if is_tls && self.ca_cert.is_none() {
-            anyhow::bail!("amqps:// requires ca_cert to verify the broker");
-        }
-
-        match (self.client_cert.is_some(), self.client_key.is_some()) {
-            (true, false) => {
-                anyhow::bail!(
-                    "client_cert is set but client_key is missing (both are required for mutual TLS)"
-                )
-            }
-            (false, true) => {
-                anyhow::bail!(
-                    "client_key is set but client_cert is missing (both are required for mutual TLS)"
-                )
-            }
-            _ => {}
-        }
-
-        if self.exchange.is_empty() {
-            validation_bail!(RequiredFieldEmpty, "exchange", "exchange must not be empty");
-        }
-
-        if self.routing_keys.is_empty() {
-            anyhow::bail!("at least one routing key must be configured");
-        }
-
-        Ok(())
-    }
-}
-
-impl ChannelConfig for AmqpConfig {
-    fn name() -> &'static str {
-        "AMQP"
-    }
-    fn desc() -> &'static str {
-        "AMQP topic consumer"
-    }
-}
-
-fn default_amqp_sender_label() -> String {
-    "amqp".to_string()
-}
-
-fn default_amqp_durable_ack() -> bool {
-    true
-}
-
 // ── Security Config ─────────────────────────────────────────────────
 
 /// Security configuration for audit logging, OTP, e-stop, IAM/SSO, and WebAuthn.
@@ -12445,314 +12148,6 @@ impl Default for AuditConfig {
     }
 }
 
-/// Reddit channel configuration (OAuth2 bot).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.reddit"]
-pub struct RedditConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Reddit OAuth2 client ID.
-    #[tab(Connection)]
-    pub client_id: String,
-    /// Reddit OAuth2 client secret.
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub client_secret: String,
-    /// Reddit OAuth2 refresh token for persistent access.
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub refresh_token: String,
-    /// Reddit bot username (without `u/` prefix).
-    #[tab(Advanced)]
-    pub username: String,
-    /// Subreddits to filter messages (without `r/` prefix). Empty = accept
-    /// from any subreddit the bot has access to. Migrated from the legacy
-    /// `subreddit` singular field.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub subreddits: Vec<String>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for RedditConfig {
-    fn name() -> &'static str {
-        "Reddit"
-    }
-    fn desc() -> &'static str {
-        "Reddit bot (OAuth2)"
-    }
-}
-
-/// Bluesky channel configuration (AT Protocol).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.bluesky"]
-pub struct BlueskyConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Bluesky handle (e.g. `"mybot.bsky.social"`).
-    #[tab(Connection)]
-    pub handle: String,
-    /// App-specific password (from Bluesky settings).
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub app_password: String,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for BlueskyConfig {
-    fn name() -> &'static str {
-        "Bluesky"
-    }
-    fn desc() -> &'static str {
-        "AT Protocol"
-    }
-}
-
-/// Git-forge channel configuration (polling-based; no webhook required).
-///
-/// A `provider` selects the forge. GitHub authenticates as a GitHub App:
-/// a short-lived RS256 JWT signed with the app's private key is exchanged
-/// for per-installation access tokens. Gitea and Forgejo use a personal
-/// access token against the instance's `/api/v1` endpoint, named by the
-/// required `api_base_url`. Inbound issue/PR comments are polled from the
-/// forge REST API, so the daemon needs no inbound network exposure.
-#[derive(Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.git"]
-pub struct GitConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Git forge provider. Supported: `"github"`, `"gitea"`, and
-    /// `"forgejo"` (Forgejo uses the Gitea-compatible REST provider).
-    /// Default: `"github"`.
-    #[tab(Connection)]
-    #[serde(default = "default_git_provider")]
-    pub provider: String,
-    /// GitHub App ID (shown on the app's settings page). GitHub provider only.
-    #[tab(Connection)]
-    #[serde(default)]
-    pub app_id: u64,
-    /// RS256 private key PEM, the contents of the `.pem` file GitHub
-    /// generates on the app's settings page, inline and encrypted at rest.
-    /// Include the BEGIN/END lines. GitHub provider only.
-    #[secret]
-    #[multiline]
-    #[credential_class = "encrypted_secret"]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private_key: Option<String>,
-    /// Filesystem path to the RS256 private key `.pem` file, read at startup
-    /// when `private_key` (inline PEM) is unset. Backward-compatible fallback
-    /// for configs that predate the inline-PEM field. GitHub provider only.
-    #[tab(Connection)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private_key_path: Option<String>,
-    /// Installation ID to act as. When unset, the app's installations are
-    /// listed on first use and a sole installation is auto-selected;
-    /// startup fails if the app has zero or multiple installations.
-    #[tab(Connection)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installation_id: Option<u64>,
-    /// Gitea/Forgejo API base URL, including `/api/v1`, for example
-    /// `https://git.example.org/api/v1` (for the public Gitea service:
-    /// `https://gitea.com/api/v1`). Required when `provider` is `"gitea"`
-    /// or `"forgejo"` - there is no default host, because every API
-    /// request carries `access_token`; the channel fails closed at
-    /// startup rather than send the token to an endpoint the operator
-    /// never named. Gitea/Forgejo provider only.
-    #[tab(Connection)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_base_url: Option<String>,
-    /// Personal access token for Gitea/Forgejo API requests. The token needs
-    /// repository read access plus issue/PR comment write access for replies
-    /// and reactions. Gitea/Forgejo provider only.
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    #[serde(default)]
-    pub access_token: String,
-    /// Repositories to poll, as `owner/repo`. Empty = every repository
-    /// visible to the installation.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub repos: Vec<String>,
-    /// Poll interval in seconds for new issues and comments. Values below
-    /// 15 are clamped to 15. Default: `30`.
-    #[tab(Advanced)]
-    #[serde(default = "default_github_poll_interval_secs")]
-    pub poll_interval_secs: u64,
-    /// Only respond to comments that @-mention the app's bot login.
-    /// Default: `true`.
-    #[tab(Behavior)]
-    #[serde(default = "default_true")]
-    pub mention_only: bool,
-    /// Process comments authored by other bot accounts. The app's own
-    /// comments are always ignored. Default: `false`.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub listen_to_bots: bool,
-    /// Per-channel proxy override for GitHub API requests.
-    #[tab(Advanced)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_url: Option<String>,
-    /// Per-event routing table, keyed by normalized event type
-    /// (`"issue_comment.created"`, `"pull_request.opened"`,
-    /// `"workflow_run.failed"`, …). Event types absent from the table fall
-    /// back to the conversational default: `issue_comment.created`,
-    /// `issues.opened`, and `pull_request.opened` are delivered as
-    /// messages (mention-gated); everything else is ignored. Which API
-    /// endpoints are polled is derived from this table; routing an event
-    /// type is also subscribing to it.
-    #[tab(Behavior)]
-    #[serde(default)]
-    #[nested]
-    pub events: HashMap<String, GitEventRoute>,
-    /// Also poll the repository Events API (`/repos/{owner}/{repo}/events`)
-    /// as a broad backbone transport: one conditional (ETag) request per
-    /// repository per tick, so an idle repo costs almost nothing. Caveats:
-    /// events arrive with a delay of up to ~5 minutes and the feed carries
-    /// no Actions/check events (workflow runs always use their dedicated
-    /// endpoint). Items also surfaced by a targeted endpoint are
-    /// de-duplicated. Default: `false`.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub events_backbone: bool,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl std::fmt::Debug for GitConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GitConfig")
-            .field("enabled", &self.enabled)
-            .field("provider", &self.provider)
-            .field("app_id", &self.app_id)
-            .field("private_key", &self.private_key.as_ref().map(|_| "***"))
-            .field("private_key_path", &self.private_key_path)
-            .field("installation_id", &self.installation_id)
-            .field("api_base_url", &self.api_base_url)
-            .field(
-                "access_token",
-                &if self.access_token.is_empty() {
-                    ""
-                } else {
-                    "***"
-                },
-            )
-            .field("repos", &self.repos)
-            .field("poll_interval_secs", &self.poll_interval_secs)
-            .field("mention_only", &self.mention_only)
-            .field("listen_to_bots", &self.listen_to_bots)
-            .field("proxy_url", &self.proxy_url)
-            .field("events", &self.events)
-            .field("events_backbone", &self.events_backbone)
-            .field("excluded_tools", &self.excluded_tools)
-            .finish()
-    }
-}
-
-fn default_github_poll_interval_secs() -> u64 {
-    30
-}
-
-fn default_git_provider() -> String {
-    "github".to_string()
-}
-
-impl Default for GitConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            provider: default_git_provider(),
-            app_id: 0,
-            private_key: None,
-            private_key_path: None,
-            installation_id: None,
-            api_base_url: None,
-            access_token: String::new(),
-            repos: Vec::new(),
-            poll_interval_secs: default_github_poll_interval_secs(),
-            mention_only: true,
-            listen_to_bots: false,
-            proxy_url: None,
-            events: HashMap::new(),
-            events_backbone: false,
-            excluded_tools: Vec::new(),
-        }
-    }
-}
-
-impl ChannelConfig for GitConfig {
-    fn name() -> &'static str {
-        "Git"
-    }
-    fn desc() -> &'static str {
-        "Git forge (GitHub, Gitea, Forgejo): issues, PRs & events"
-    }
-}
-
-/// Routing for one normalized git-forge event type, keyed in
-/// `[channels.git.<alias>.events]` by the event type string
-/// (`"pull_request.opened" = { sop = "pr-triage" }`).
-///
-/// An entry with neither `message = true` nor a `sop` explicitly ignores the
-/// event type (overriding the conversational default).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.git.events"]
-pub struct GitEventRoute {
-    /// Deliver the event into the agent loop as a normal channel message.
-    #[serde(default)]
-    pub message: bool,
-    /// RETIRED SOP route target. Parse-time tombstone: a legacy `sop = "..."`
-    /// value is rejected with the migration message instead of silently
-    /// degrading the route to `Ignore`. Removed with the run-side config
-    /// sweep.
-    #[serde(
-        default,
-        deserialize_with = "reject_retired_sop_key",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[cfg_attr(feature = "schema-export", schemars(skip))]
-    pub sop: Option<String>,
-}
-
 /// Voice duplex configuration (`[channels.voice_duplex]`).
 ///
 /// Enables full-duplex voice event handling over WebSocket.
@@ -12770,129 +12165,6 @@ pub struct VoiceDuplexConfig {
     /// are not exposed to the model when responding via this channel.
     #[serde(default)]
     pub excluded_tools: Vec<String>,
-}
-
-/// Voice wake word detection channel configuration.
-///
-/// Listens on the default microphone for a configurable wake word,
-/// then captures the following utterance and transcribes it via the
-/// existing transcription API.
-#[derive(Debug, Clone, Serialize, Deserialize, zeroclaw_macros::Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "voice_wake"]
-pub struct VoiceWakeConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Wake word phrase to listen for (case-insensitive substring match).
-    /// Default: `"hey zeroclaw"`.
-    #[serde(default = "default_voice_wake_word")]
-    pub wake_word: String,
-    /// Silence timeout in milliseconds: how long to wait after the last
-    /// energy spike before finalizing a capture window. Default: `2000`.
-    #[serde(default = "default_voice_wake_silence_timeout_ms")]
-    pub silence_timeout_ms: u32,
-    /// RMS energy threshold for voice activity detection. Samples below
-    /// this level are treated as silence. Default: `0.01`.
-    #[serde(default = "default_voice_wake_energy_threshold")]
-    pub energy_threshold: f32,
-    /// Maximum capture duration in seconds before forcing transcription.
-    /// Default: `30`.
-    #[serde(default = "default_voice_wake_max_capture_secs")]
-    pub max_capture_secs: u32,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-fn default_voice_wake_word() -> String {
-    "hey zeroclaw".into()
-}
-
-fn default_voice_wake_silence_timeout_ms() -> u32 {
-    2000
-}
-
-fn default_voice_wake_energy_threshold() -> f32 {
-    0.01
-}
-
-fn default_voice_wake_max_capture_secs() -> u32 {
-    30
-}
-
-impl Default for VoiceWakeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            wake_word: default_voice_wake_word(),
-            silence_timeout_ms: default_voice_wake_silence_timeout_ms(),
-            energy_threshold: default_voice_wake_energy_threshold(),
-            max_capture_secs: default_voice_wake_max_capture_secs(),
-            excluded_tools: Vec::new(),
-        }
-    }
-}
-
-impl ChannelConfig for VoiceWakeConfig {
-    fn name() -> &'static str {
-        "VoiceWake"
-    }
-    fn desc() -> &'static str {
-        "voice wake word detection"
-    }
-}
-
-/// Nostr channel configuration (NIP-04 + NIP-17 private messages)
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.nostr"]
-pub struct NostrConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Private key in hex or nsec bech32 format
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub private_key: String,
-    /// Relay URLs (wss://). Defaults to popular public relays if omitted.
-    #[tab(Advanced)]
-    #[serde(default = "default_nostr_relays")]
-    pub relays: Vec<String>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for NostrConfig {
-    fn name() -> &'static str {
-        "Nostr"
-    }
-    fn desc() -> &'static str {
-        "Nostr DMs"
-    }
-}
-
-pub fn default_nostr_relays() -> Vec<String> {
-    vec![
-        "wss://relay.damus.io".to_string(),
-        "wss://nos.lol".to_string(),
-        "wss://relay.primal.net".to_string(),
-        "wss://relay.snort.social".to_string(),
-    ]
 }
 
 // ── Security ops config ─────────────────────────────────────────
@@ -15003,30 +14275,6 @@ impl Config {
 
         for (alias, dc) in &self.channels.discord {
             dc.validate_bot_token(alias)?;
-        }
-
-        // Git forge channel: a PAT-backed provider must name its API origin
-        // explicitly. There is deliberately no default host - every request
-        // carries `access_token` as a bearer credential, so guessing an
-        // endpoint (e.g. gitea.com) would disclose the token to a host the
-        // operator never configured. Only enabled aliases are checked so a
-        // half-filled disabled block doesn't fail the whole config.
-        for (alias, git) in &self.channels.git {
-            let provider = git.provider.trim().to_ascii_lowercase();
-            if git.enabled && matches!(provider.as_str(), "gitea" | "forgejo") {
-                let path = format!("channels.git.{alias}.api_base_url");
-                match git.api_base_url.as_deref() {
-                    None => validation_bail!(
-                        RequiredFieldEmpty,
-                        path,
-                        "{path} is required when provider = \"{provider}\": set the \
-                         instance's API base URL including /api/v1 (e.g. \
-                         https://git.example.org/api/v1); no default host is assumed \
-                         because API requests carry the access token"
-                    ),
-                    Some(url) => validate_http_base_url(&path, url)?,
-                }
-            }
         }
 
         for name in self.http_request.secrets.keys() {

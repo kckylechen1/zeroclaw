@@ -268,11 +268,6 @@ export const enumValues: EnumValues = {
     "restarting",
     "failed"
   ],
-  "VoiceProvider": [
-    "twilio",
-    "telnyx",
-    "plivo"
-  ],
   "WhatsAppChatPolicy": [
     "allowlist",
     "ignore",

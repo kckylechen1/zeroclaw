@@ -41,7 +41,7 @@ evidence-gated step tracked in [#584](https://github.com/kckylechen1/zeroclaw/is
 slices; the other retired transport schemas are already removed and
 tombstone at load).
 
-Per-family retirement pages (they keep their old links): [WhatsApp](./whatsapp.md) · [Other chat platforms](./chat-others.md) (Notion) · [Social](./social.md) (Bluesky, Nostr, Twitter/X, Reddit) · [Git](./git.md) · [Voice](./voice.md) (ClawdTalk, Voice Call, Voice Wake) · [AMQP](./amqp.md).
+Per-family retirement pages (they keep their old links): [WhatsApp](./whatsapp.md) · [Other chat platforms](./chat-others.md) (Notion) · [Social](./social.md) (retired social transports) · [Voice](./voice.md) (voice duplex Node path).
 
 > **Also retired earlier:** the MQTT and filesystem SOP-trigger channels were retired when the SOP run side was removed; their sections are **rejected at config parse** with the migration message ([MQTT](./mqtt.md), [Filesystem](./filesystem.md)). The retired transports above still parse by contrast; that difference is exactly what #584's per-schema evidence step resolves.
 
