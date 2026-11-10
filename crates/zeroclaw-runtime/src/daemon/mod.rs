@@ -6,6 +6,7 @@ use tokio::time::Duration;
 use tokio_util::task::TaskTracker;
 use zeroclaw_config::schema::Config;
 
+use crate::i18n::get_required_cli_string_with_args;
 use crate::tools::task_context::TaskIdentity;
 
 mod registry;
@@ -1121,6 +1122,8 @@ async fn run_heartbeat_worker(config: Config, task_identities: TaskIdentity) -> 
 
     let (agent_alias, heartbeat_workspace_dir) = resolve_heartbeat_workspace_dir(&config)?;
     let task_identity = task_identities.for_alias(&agent_alias);
+    let delivery = resolve_heartbeat_delivery(&config)?;
+    let deadman_delivery = resolve_heartbeat_deadman_delivery(&config, delivery.as_ref())?;
 
     // Build the daemon-level MCP registry ONCE per worker. With this
     // owner in place, every `agent::run` tick below reuses the same
@@ -1140,17 +1143,15 @@ async fn run_heartbeat_worker(config: Config, task_identities: TaskIdentity) -> 
         std::sync::Arc::from(crate::observability::create_observer(&config.observability));
     let engine = HeartbeatEngine::new(config.heartbeat.clone(), heartbeat_workspace_dir, observer);
     let metrics = engine.metrics();
-    let delivery = resolve_heartbeat_delivery(&config)?;
     let two_phase = config.heartbeat.two_phase;
     let adaptive = config.heartbeat.adaptive;
     let start_time = std::time::Instant::now();
 
     // ── Deadman watcher ──────────────────────────────────────────
     let deadman_timeout = config.heartbeat.deadman_timeout_minutes;
-    if deadman_timeout > 0 {
+    if let Some((channel, target)) = deadman_delivery {
         let dm_metrics = Arc::clone(&metrics);
         let dm_config = config.clone();
-        let dm_delivery = delivery.clone();
         zeroclaw_spawn::spawn!(async move {
             let check_interval = Duration::from_secs(60);
             let timeout = chrono::Duration::minutes(i64::from(deadman_timeout));
@@ -1163,19 +1164,6 @@ async fn run_heartbeat_worker(config: Config, task_identities: TaskIdentity) -> 
                     let alert = format!(
                         "⚠️ Heartbeat dead-man's switch: no tick in {deadman_timeout} minutes"
                     );
-                    let (channel, target) = if let Some(ch) = &dm_config.heartbeat.deadman_channel {
-                        let to = dm_config
-                            .heartbeat
-                            .deadman_to
-                            .as_deref()
-                            .or(dm_config.heartbeat.to.as_deref())
-                            .unwrap_or_default();
-                        (ch.clone(), to.to_string())
-                    } else if let Some((ch, to)) = &dm_delivery {
-                        (ch.clone(), to.clone())
-                    } else {
-                        continue;
-                    };
                     let delivery_fut = crate::cron::scheduler::deliver_announcement(
                         &dm_config, &channel, &target, None, &alert,
                     );
@@ -1600,7 +1588,8 @@ async fn run_heartbeat_worker(config: Config, task_identities: TaskIdentity) -> 
     }
 }
 
-/// Resolve delivery target: explicit config > auto-detect first configured channel.
+/// Resolve an explicit bridge destination. Without one, heartbeat tasks still
+/// run but their output is not sent to an external recipient.
 fn resolve_heartbeat_delivery(config: &Config) -> Result<Option<(String, String)>> {
     let channel = config
         .heartbeat
@@ -1618,14 +1607,71 @@ fn resolve_heartbeat_delivery(config: &Config) -> Result<Option<(String, String)
     match (channel, target) {
         // Both explicitly set — validate and use.
         (Some(channel), Some(target)) => {
-            validate_heartbeat_channel_config(config, channel)?;
+            validate_heartbeat_bridge(config, channel, "heartbeat.target")?;
             Ok(Some((channel.to_string(), target.to_string())))
         }
         // Only one set — error.
-        (Some(_), None) => anyhow::bail!("heartbeat.to is required when heartbeat.target is set"),
-        (None, Some(_)) => anyhow::bail!("heartbeat.target is required when heartbeat.to is set"),
-        // Neither set — try auto-detect the first configured channel.
-        (None, None) => Ok(auto_detect_heartbeat_channel(config)),
+        (Some(_), None) => anyhow::bail!(get_required_cli_string_with_args(
+            "heartbeat-delivery-missing-field",
+            &[
+                ("required", "heartbeat.to"),
+                ("configured", "heartbeat.target")
+            ],
+        )),
+        (None, Some(_)) => anyhow::bail!(get_required_cli_string_with_args(
+            "heartbeat-delivery-missing-field",
+            &[
+                ("required", "heartbeat.target"),
+                ("configured", "heartbeat.to")
+            ],
+        )),
+        // Native channel entries and inbound peers do not identify a bridge's
+        // outbound recipient; never infer delivery from them.
+        (None, None) => Ok(None),
+    }
+}
+
+fn resolve_heartbeat_deadman_delivery(
+    config: &Config,
+    delivery: Option<&(String, String)>,
+) -> Result<Option<(String, String)>> {
+    if config.heartbeat.deadman_timeout_minutes == 0 {
+        return Ok(None);
+    }
+    let channel = config
+        .heartbeat
+        .deadman_channel
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| delivery.map(|(channel, _)| channel.as_str()));
+    let target = config
+        .heartbeat
+        .deadman_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| delivery.map(|(_, target)| target.as_str()));
+    match (channel, target) {
+        (Some(channel), Some(target)) => {
+            validate_heartbeat_bridge(config, channel, "heartbeat.deadman_channel")?;
+            Ok(Some((channel.to_string(), target.to_string())))
+        }
+        (Some(_), None) => anyhow::bail!(get_required_cli_string_with_args(
+            "heartbeat-delivery-missing-field",
+            &[
+                ("required", "heartbeat.deadman_to"),
+                ("configured", "heartbeat.deadman_channel"),
+            ],
+        )),
+        (None, Some(_)) => anyhow::bail!(get_required_cli_string_with_args(
+            "heartbeat-delivery-missing-field",
+            &[
+                ("required", "heartbeat.deadman_channel"),
+                ("configured", "heartbeat.deadman_to"),
+            ],
+        )),
+        (None, None) => Ok(None),
     }
 }
 
@@ -1816,52 +1862,20 @@ fn load_jsonl_messages(path: &std::path::Path) -> Vec<zeroclaw_providers::traits
     window.into_iter().collect()
 }
 
-/// Auto-detect the best channel for heartbeat delivery by checking which
-/// channels are configured. Returns the first match in priority order.
-fn auto_detect_heartbeat_channel(config: &Config) -> Option<(String, String)> {
-    // Priority order: telegram > discord. Retired transports are never
-    // auto-detected: no delivery path exists for them. Find the first
-    // external peer authorized on a telegram channel (peer authorization
-    // lives in peer_groups in V3, not on the channel block).
-    if !config.channels.telegram.is_empty() {
-        for alias in config.channels.telegram.keys() {
-            let peers = config.channel_external_peers("telegram", alias);
-            if let Some(target) = peers.into_iter().next() {
-                return Some(("telegram".to_string(), target));
-            }
-        }
-    }
-    if !config.channels.discord.is_empty() {
-        // Discord requires explicit target — can't auto-detect
-        return None;
-    }
-    None
-}
-
-fn validate_heartbeat_channel_config(config: &Config, channel: &str) -> Result<()> {
-    // A bridge name is delivered through the bridge outbox.
-    if config.gateway.bridges.contains_key(channel) {
-        return Ok(());
-    }
-    if config.channels.is_retired_channel(channel) {
-        anyhow::bail!(
-            "heartbeat.target is set to {channel} but its transport runner is retired \
-             (#584) — no delivery path exists; target the Telegram bridge, webhook \
-             ingress, or another bridge name instead"
-        );
-    }
-    if !config.channels.is_known_channel(channel) {
-        anyhow::bail!("unsupported heartbeat.target channel: {channel}");
-    }
-    if !config.channels.is_channel_configured(channel) {
-        anyhow::bail!(
-            "heartbeat.target is set to {channel} but channels.{channel} is not configured"
-        );
-    }
-    if !config.channels.is_channel_deliverable(channel) {
-        anyhow::bail!(
-            "heartbeat.target is set to {channel} but {channel} is an input-only channel that cannot deliver outbound messages"
-        );
+fn validate_heartbeat_bridge(config: &Config, channel: &str, field: &str) -> Result<()> {
+    let Some(bridge) = config.gateway.bridges.get(channel) else {
+        anyhow::bail!(get_required_cli_string_with_args(
+            "heartbeat-delivery-bridge-required",
+            &[("field", field), ("bridge", channel)],
+        ));
+    };
+    // Device and owner credentials can use scoped chat, but /ws/bridge
+    // rejects them. Enqueuing to one would leave the message undrainable.
+    if bridge.scoped() {
+        anyhow::bail!(get_required_cli_string_with_args(
+            "heartbeat-delivery-scoped-bridge",
+            &[("field", field), ("bridge", channel)],
+        ));
     }
     Ok(())
 }
