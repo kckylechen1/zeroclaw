@@ -113,9 +113,13 @@ pub(crate) struct FrameSink {
 
 impl FrameSink {
     pub(crate) fn publish(&self, frame: &serde_json::Value) {
+        self.publish_at_revision(frame, self.reset_revision.load(Ordering::Acquire));
+    }
+
+    fn publish_at_revision(&self, frame: &serde_json::Value, reset_revision: u64) {
         let _ = self.frames.send(Frame {
             text: Arc::from(frame.to_string()),
-            reset_revision: self.reset_revision.load(Ordering::Acquire),
+            reset_revision,
         });
     }
 
@@ -187,6 +191,8 @@ pub(crate) struct Conversation<A> {
     pub(crate) agent: tokio::sync::Mutex<A>,
     /// Lock-free read-only snapshot handle for one-shot `/btw` side queries.
     pub(crate) side_query: Option<zeroclaw_runtime::agent::SideQueryHandle>,
+    side_query_cancel: parking_lot::Mutex<CancellationToken>,
+    active_side_queries: AtomicUsize,
     frames: FrameSink,
     control_frames: broadcast::Sender<Frame>,
     pub(crate) pending_approvals: PendingApprovals,
@@ -209,6 +215,8 @@ impl<A: ConversationAgent> Conversation<A> {
             key,
             agent: tokio::sync::Mutex::new(agent),
             side_query,
+            side_query_cancel: parking_lot::Mutex::new(CancellationToken::new()),
+            active_side_queries: AtomicUsize::new(0),
             frames,
             control_frames: broadcast::channel(64).0,
             pending_approvals,
@@ -234,6 +242,11 @@ impl<A> Conversation<A> {
         self.frames.reset_revision.load(Ordering::Acquire)
     }
 
+    pub(crate) fn side_query_generation(&self) -> (u64, CancellationToken) {
+        let cancel = self.side_query_cancel.lock();
+        (self.reset_revision(), cancel.clone())
+    }
+
     /// Called with the session lifecycle and execution guards held, after
     /// clearing the Agent. Old ACK writers/queued claims cannot revive a turn.
     pub(crate) fn reset(&self) {
@@ -247,7 +260,12 @@ impl<A> Conversation<A> {
         // cannot stamp a revoked prompt with the new history revision.
         self.drain_approvals();
         self.questions.drain();
-        self.frames.reset_revision.fetch_add(1, Ordering::AcqRel);
+        {
+            let mut cancel = self.side_query_cancel.lock();
+            cancel.cancel();
+            self.frames.reset_revision.fetch_add(1, Ordering::AcqRel);
+            *cancel = CancellationToken::new();
+        }
         self.publish_turn_state(&turn);
     }
 
@@ -259,6 +277,12 @@ impl<A> Conversation<A> {
     /// Send a frame to every current subscriber.
     pub(crate) fn publish(&self, frame: &serde_json::Value) {
         self.frames.publish(frame);
+    }
+
+    pub(crate) fn publish_side_query(&self, frame: &serde_json::Value, reset_revision: u64) {
+        // Even when completion races cancellation, subscribers see the
+        // revision at admission and discard a result from deleted history.
+        self.frames.publish_at_revision(frame, reset_revision);
     }
 
     /// Extension traffic has a separate bounded ring, so opting in cannot
@@ -639,10 +663,28 @@ impl<A> ConversationHub<A> {
         }
     }
 
-    /// Forget `conversation` once no socket is attached and no turn runs.
+    /// Keep a running side query visible to session deletion even if its last
+    /// socket disconnects. The caller still holds its subscription here.
+    pub(crate) fn retain_for_side_query(
+        self: &Arc<Self>,
+        conversation: &Arc<Conversation<A>>,
+    ) -> SideQueryRetention<A> {
+        conversation
+            .active_side_queries
+            .fetch_add(1, Ordering::AcqRel);
+        SideQueryRetention {
+            hub: Arc::clone(self),
+            conversation: Arc::clone(conversation),
+        }
+    }
+
+    /// Forget `conversation` once no socket or running task needs it.
     pub(crate) fn release_if_unused(&self, conversation: &Arc<Conversation<A>>) {
         let mut slots = self.slots.lock();
-        if conversation.subscriber_count() > 0 || conversation.is_running() {
+        if conversation.subscriber_count() > 0
+            || conversation.is_running()
+            || conversation.active_side_queries.load(Ordering::Acquire) > 0
+        {
             return;
         }
         let same = slots
@@ -666,6 +708,20 @@ impl<A> ConversationHub<A> {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.slots.lock().len()
+    }
+}
+
+pub(crate) struct SideQueryRetention<A> {
+    hub: Arc<ConversationHub<A>>,
+    conversation: Arc<Conversation<A>>,
+}
+
+impl<A> Drop for SideQueryRetention<A> {
+    fn drop(&mut self) {
+        self.conversation
+            .active_side_queries
+            .fetch_sub(1, Ordering::AcqRel);
+        self.hub.release_if_unused(&self.conversation);
     }
 }
 
@@ -761,6 +817,96 @@ mod tests {
                 .unwrap()
                 .is_current(other.conversation.reset_revision())
         );
+    }
+
+    #[tokio::test]
+    async fn reset_on_retained_conversation_rejects_late_side_query_but_accepts_new_generation() {
+        let hub = Arc::new(ConversationHub::<()>::default());
+        let key = "gw_retained\u{1f}web";
+        let (mut sub, _) = attach(&hub, key).await;
+        let conversation = Arc::clone(&sub.conversation);
+        let (old_revision, old_cancel) = conversation.side_query_generation();
+        let retention = hub.retain_for_side_query(&conversation);
+        let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+        let (publish_tx, publish_rx) = tokio::sync::oneshot::channel();
+        let publisher = Arc::clone(&conversation);
+        let publisher_cancel = old_cancel.clone();
+        let old_query = zeroclaw_spawn::spawn!(async move {
+            let _retention = retention;
+            // Model a provider result that already passed its cancellation check.
+            // Hold publication until after reset: cancellation alone cannot
+            // retract this result, so its admission revision must protect it.
+            assert!(!publisher_cancel.is_cancelled());
+            completed_tx.send(()).unwrap();
+            publish_rx.await.unwrap();
+            publisher.publish_side_query(
+                &serde_json::json!({"type": "btw_response", "id": "old", "content": "deleted history"}),
+                old_revision,
+            );
+        });
+        let limit = std::time::Duration::from_secs(5);
+        tokio::time::timeout(limit, completed_rx)
+            .await
+            .expect("old query must finish before reset")
+            .unwrap();
+
+        // Keep the original subscriber and Conversation alive through reset.
+        // The real DELETE path is covered by the SQLite-backed test in ws.rs;
+        // this test pins its completion-versus-publication interleaving.
+        let lifecycle = hub.session_lifecycle("gw_retained");
+        {
+            let _lifecycle = lifecycle.lock().await;
+            let _agent = conversation.agent.lock().await;
+            conversation.reset();
+        }
+        assert!(
+            old_cancel.is_cancelled(),
+            "reset must cancel the old generation"
+        );
+        let (new_revision, new_cancel) = conversation.side_query_generation();
+        assert_ne!(new_revision, old_revision);
+        assert!(
+            !new_cancel.is_cancelled(),
+            "the retained conversation must admit new queries"
+        );
+        let (reattached, created) = attach(&hub, key).await;
+        assert!(
+            !created,
+            "a fresh query must not depend on rebuilding the conversation"
+        );
+        assert!(Arc::ptr_eq(&conversation, &reattached.conversation));
+
+        publish_tx.send(()).unwrap();
+        tokio::time::timeout(limit, old_query)
+            .await
+            .expect("old result must reach publication after reset")
+            .unwrap();
+        conversation.publish_side_query(
+            &serde_json::json!({"type": "btw_response", "id": "fresh", "content": "new answer"}),
+            new_revision,
+        );
+
+        // Consume actual broadcast Frames through the same revision predicate
+        // used by the socket reader. This does not model already-sent bytes.
+        let stale = tokio::time::timeout(limit, sub.frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stale.is_current(conversation.reset_revision()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stale).unwrap()["id"],
+            "old"
+        );
+        let fresh = tokio::time::timeout(limit, sub.frames.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(fresh.is_current(conversation.reset_revision()));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fresh).unwrap()["id"],
+            "fresh"
+        );
+        assert!(!new_cancel.is_cancelled());
     }
 
     #[tokio::test]

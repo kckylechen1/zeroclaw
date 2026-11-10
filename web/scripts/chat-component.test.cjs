@@ -17,6 +17,9 @@ const jiti = createJiti(__filename, {
   jsx: { runtime: 'automatic' }, alias: { '@': path.resolve(__dirname, '../src') },
 });
 const { AgentProvider, useAgent } = jiti('../src/contexts/AgentContext.tsx');
+const { AgentChatInner } = jiti('../src/pages/AgentChat.tsx');
+const { MemoryRouter } = require('react-router-dom');
+dom.window.HTMLElement.prototype.scrollIntoView = () => {};
 
 const sockets = [];
 class Socket {
@@ -24,7 +27,15 @@ class Socket {
   readyState = 0;
   sent = [];
   constructor(url) { this.url = url; sockets.push(this); }
-  send(raw) { assert.equal(this.readyState, Socket.OPEN); this.sent.push(JSON.parse(raw)); }
+  send(raw) {
+    assert.equal(this.readyState, Socket.OPEN);
+    const frame = JSON.parse(raw);
+    // The real S2 gateway validates request UUIDs before dispatching /btw.
+    if (frame.type === 'turn_control' && frame.op !== 'negotiate') {
+      assert.match(frame.request_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    }
+    this.sent.push(frame);
+  }
   open() { this.readyState = Socket.OPEN; this.onopen?.(); }
   receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
   close(code = 1000) { this.readyState = 3; this.onclose?.({ code }); }
@@ -58,6 +69,7 @@ globalThis.fetch = async (raw, options = {}) => {
   else if (url.pathname === '/api/status') data = { model: configuredModel };
   else if (url.pathname === '/api/config/catalog') data = { providers: [] };
   else if (url.pathname === '/api/config/list') data = { entries: [] };
+  else if (url.pathname === '/api/attachments' && method === 'POST') data = { id: 'synthetic-file', file_name: 'note.txt' };
   else if (url.pathname === '/api/config/prop') {
     if (method === 'PUT') configuredModel = JSON.parse(options.body).value;
     data = { value: configuredModel };
@@ -67,7 +79,7 @@ globalThis.fetch = async (raw, options = {}) => {
 async function update(action) {
   await act(async () => { await action(); await new Promise(resolve => setImmediate(resolve)); });
 }
-async function withAgent(token, run) {
+async function withAgent(token, run, renderChat = false) {
   localStorage.clear();
   if (token) localStorage.setItem('zeroclaw_token', 'synthetic-owner');
   sockets.length = 0;
@@ -84,9 +96,12 @@ async function withAgent(token, run) {
     }));
   }
   try {
-    await update(() => root.render(React.createElement(AgentProvider, { agentAlias: 'test-agent' }, React.createElement(Probe))));
+    await update(() => root.render(React.createElement(AgentProvider, { agentAlias: 'test-agent' },
+      React.createElement(MemoryRouter, null,
+        React.createElement(Probe),
+        renderChat && React.createElement(AgentChatInner, { agentAlias: 'test-agent' })))));
     await update(() => sockets[0].open());
-    await run({ get value() { return value; }, wire: sockets[0] });
+    await run({ get value() { return value; }, wire: sockets[0], container });
   } finally {
     await update(() => root.unmount());
     container.remove();
@@ -99,6 +114,256 @@ const ready = (epoch = 'epoch-1') => ({ type: 'turn_ready', epoch, limits: { rep
 const event = (request, seq, inner, turn = turnId) => ({ type: 'turn_event', request_id: request, turn_id: turn, seq, event: inner });
 const sentMessages = () => sockets.flatMap(socket => socket.sent).filter(frame => frame.op === 'message' || frame.type === 'message');
 const restAborts = () => requests.filter(request => request.path.endsWith('/abort'));
+const sideRequests = () => sockets.flatMap(socket => socket.sent).filter(frame =>
+  frame.type === 'btw' || (frame.op === 'message' && frame.content.startsWith('/btw ')));
+const sideAnswers = ctx => ctx.value.messages.filter(message => message.sideQuery && message.role === 'agent');
+const persistedMessages = () => JSON.parse(localStorage.getItem(
+  `zeroclaw_chat_history_v1:${localStorage.getItem('zeroclaw_session_id.test-agent')}`)).messages;
+async function typeChat(ctx, text) {
+  const input = ctx.container.querySelector('textarea');
+  assert.equal(input.disabled, false, 'the composer stays available for side queries');
+  await update(() => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value').set.call(input, text);
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  });
+  return input;
+}
+
+test('idle /btw uses the side-query contract and renders a temporary answer without a main turn', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive(ready()));
+  await update(() => ctx.value.sendMessage('/btw summarize the context'));
+  const query = sideRequests()[0];
+  assert.ok(query.id.startsWith('btw-'));
+  assert.equal(query.type, 'btw');
+  assert.equal(query.request_id, undefined);
+  assert.equal(query.epoch, undefined, 'the dedicated read-only frame is accepted after S2 negotiation');
+  assert.equal(ctx.value.typing, false);
+  await update(() => ctx.wire.receive({ type: 'ack', id: query.id, status: 'accepted', turn: 'btw', durable: false }));
+  await update(() => ctx.wire.receive({ type: 'btw_response', id: query.id, content: 'Synthetic side answer.' }));
+  assert.deepEqual(sideAnswers(ctx).map(message => message.content), ['Synthetic side answer.']);
+  assert.ok(ctx.value.messages.every(message => message.ephemeral));
+  assert.deepEqual(persistedMessages(), []);
+  assert.equal(ctx.value.typing, false);
+  assert.equal(ctx.value.error, null);
+  await update(() => ctx.value.sendMessage('next ordinary task'));
+  assert.equal(ctx.value.typing, true, 'a side query never occupies main-turn admission');
+}));
+
+test('busy /btw receipts, results and failures preserve streaming, approval and Stop correlation', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive({ ...ready(), capabilities: ['steer'] }));
+  await update(() => ctx.value.sendMessage('main task'));
+  const parent = sentMessages()[0].request_id;
+  await update(() => ctx.wire.receive({ type: 'turn_ack', request_id: parent, turn_id: turnId, status: 'accepted' }));
+  await update(() => ctx.wire.receive(event(parent, 1, { type: 'chunk', content: 'main output' })));
+  await update(() => ctx.wire.receive(event(parent, 2, { type: 'approval_request', request_id: 'synthetic-approval', tool: 'shell', timeout_secs: 60 })));
+  await update(() => assert.equal(ctx.value.steerMessage('/btw side question'), true));
+  const query = sideRequests()[0];
+  assert.equal(ctx.wire.sent.some(frame => frame.op === 'steer'), false, '/btw cannot become a correction');
+  await update(() => ctx.wire.receive({ type: 'ack', id: query.id, status: 'accepted', turn: 'btw', durable: false }));
+  assert.equal(ctx.value.pendingApproval.requestId, 'synthetic-approval');
+  assert.equal(ctx.value.canSteer, true);
+  await update(() => ctx.value.abortSession());
+  assert.deepEqual(ctx.wire.sent.at(-1), {
+    type: 'turn_control', version: 1, op: 'cancel', epoch: 'epoch-1', request_id: parent, turn_id: turnId,
+  });
+  for (const receipt of [
+    { type: 'btw_error', id: query.id, message: 'synthetic provider failure' },
+    { type: 'error', id: query.id, code: 'BTW_BUSY' },
+    { type: 'btw_response', id: query.id, content: 'late duplicate answer' },
+  ]) await update(() => ctx.wire.receive(receipt));
+  assert.ok(sideAnswers(ctx)[0].content.includes('synthetic provider failure'));
+  assert.equal(ctx.value.typing, true);
+  assert.equal(ctx.value.stopRequested, true);
+  assert.equal(ctx.value.streamingContent, 'main output');
+  assert.deepEqual(persistedMessages().map(message => message.content), ['main task']);
+  await update(() => ctx.wire.receive(event(parent, 3, { type: 'turn_terminal', outcome: 'aborted' })));
+  assert.equal(ctx.value.typing, false);
+  assert.equal(ctx.value.stopRequested, false);
+}));
+
+test('side queries correlate out of order, bound concurrency and ignore duplicates or other clients', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive(ready()));
+  for (let i = 0; i < 4; i++) await update(() => assert.equal(ctx.value.sendSideQuery(`question ${i}`), true));
+  await update(() => assert.equal(ctx.value.sendSideQuery('over capacity'), false));
+  assert.equal(sideRequests().length, 4);
+  const queries = sideRequests();
+  const ids = sideAnswers(ctx).map(message => message.id);
+  await update(() => ctx.wire.receive({ type: 'btw_response', id: queries[3].id, full_response: 'answer 3' }));
+  await update(() => ctx.wire.receive({ type: 'error', id: queries[1].id, code: 'BTW_BUSY' }));
+  await update(() => ctx.wire.receive({ type: 'btw_response', id: queries[0].id, content: 'answer 0' }));
+  await update(() => ctx.wire.receive({ type: 'btw_response', id: queries[3].id, content: 'duplicate answer' }));
+  await update(() => ctx.wire.receive({ type: 'btw_response', id: 'btw-other-client', content: 'unrelated answer' }));
+  assert.deepEqual(sideAnswers(ctx).map(message => message.id), ids, 'results replace their own pending bubble');
+  assert.equal(sideAnswers(ctx)[0].content, 'answer 0');
+  assert.ok(sideAnswers(ctx)[1].content.includes('BTW_BUSY'));
+  assert.equal(sideAnswers(ctx)[3].content, 'answer 3');
+  assert.equal(ctx.value.messages.some(message => message.content === 'unrelated answer'), false);
+  await update(() => assert.equal(ctx.value.sendSideQuery('a freed slot'), true));
+  assert.equal(ctx.value.typing, false);
+}));
+
+test('side-query request ids cannot hide ordinary tool events with the same id prefix', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive(ready()));
+  await update(() => ctx.value.sendMessage('main task with a tool'));
+  const parent = sentMessages()[0].request_id;
+  await update(() => ctx.wire.receive({ type: 'turn_ack', request_id: parent, turn_id: turnId, status: 'accepted' }));
+  await update(() => ctx.value.sendSideQuery('concurrent side question'));
+  await update(() => ctx.wire.receive(event(parent, 1, { type: 'tool_call', id: 'btw-synthetic-tool-call', name: 'lookup', args: {} })));
+  await update(() => ctx.wire.receive(event(parent, 2, { type: 'tool_result', id: 'btw-synthetic-tool-call', name: 'lookup', output: 'ordinary tool result' })));
+  assert.equal(ctx.value.messages.find(message => message.toolCall)?.toolCall.output, 'ordinary tool result');
+  assert.equal(ctx.value.typing, true);
+  assert.equal(ctx.value.error, null);
+}));
+
+test('side-query validation rejects attachments and invalid UTF-8 byte lengths without losing main state', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive(ready()));
+  await update(() => assert.equal(ctx.value.sendSideQuery('with a file', ['synthetic-handle']), false));
+  await update(() => assert.equal(ctx.value.sendSideQuery('  '), false));
+  await update(() => assert.equal(ctx.value.sendSideQuery('界'.repeat(5462)), false));
+  assert.equal(sideRequests().length, 0);
+  assert.ok(ctx.value.messages.some(message => message.content.includes('attachments')));
+  assert.equal(ctx.value.typing, false);
+  await update(() => assert.equal(ctx.value.sendSideQuery('x'.repeat(16 * 1024)), true));
+  assert.equal(sideRequests().length, 1, 'the exact byte limit remains usable');
+}));
+
+test('side queries never queue before ready or replay after disconnect while the main turn resumes', async () => withAgent(true, async ctx => {
+  await update(() => assert.equal(ctx.value.sendSideQuery('before ready'), false));
+  await update(() => ctx.wire.receive(ready()));
+  assert.equal(sideRequests().length, 0);
+  await update(() => ctx.value.sendMessage('main task'));
+  const parent = sentMessages()[0].request_id;
+  await update(() => ctx.wire.receive({ type: 'turn_ack', request_id: parent, turn_id: turnId, status: 'accepted' }));
+  await update(() => ctx.value.sendSideQuery('lost on disconnect'));
+  const query = sideRequests()[0];
+  await update(() => ctx.wire.close(1006));
+  assert.ok(sideAnswers(ctx)[0].content.includes('unknown'));
+  await update(() => assert.equal(ctx.value.sendSideQuery('while disconnected'), false));
+  await update(() => tick(1000));
+  const replacement = sockets.at(-1);
+  await update(() => replacement.open());
+  await update(() => replacement.receive(ready()));
+  assert.equal(sideRequests().length, 1);
+  assert.deepEqual(replacement.sent.filter(frame => frame.op === 'resume').map(frame => frame.request_id), [parent]);
+  await update(() => replacement.receive({ type: 'btw_response', id: query.id, content: 'late answer' }));
+  await update(() => replacement.receive({ type: 'error', id: query.id, code: 'BTW_UNAVAILABLE' }));
+  assert.equal(ctx.value.typing, true);
+  assert.ok(sideAnswers(ctx)[0].content.includes('unknown'));
+}));
+
+test('a timed-out side query stays retired and its late error cannot stop a new main turn', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive(ready()));
+  await update(() => ctx.value.sendSideQuery('timeout question'));
+  const query = sideRequests()[0];
+  await update(() => tick(65_000));
+  assert.ok(sideAnswers(ctx)[0].content.includes('unknown'));
+  await update(() => ctx.value.sendMessage('successor main task'));
+  await update(() => ctx.wire.receive({ type: 'error', id: query.id, code: 'BTW_FAILED', message: 'late error' }));
+  await update(() => ctx.wire.receive({ type: 'btw_response', id: query.id, content: 'late answer' }));
+  assert.equal(ctx.value.typing, true);
+  assert.ok(sideAnswers(ctx)[0].content.includes('unknown'));
+  assert.equal(sideRequests().length, 1);
+}));
+
+for (const retirement of ['clear', 'model switch']) {
+  test(`${retirement} retires side queries before replacing the attachment`, async () => withAgent(true, async ctx => {
+    await update(() => ctx.wire.receive(ready()));
+    await update(() => ctx.value.sendSideQuery('old attachment question'));
+    const query = sideRequests()[0];
+    await update(() => retirement === 'clear' ? ctx.value.clearAllMessages() : ctx.value.switchModel('synthetic.next-model'));
+    const replacement = sockets.at(-1);
+    assert.notEqual(replacement, ctx.wire);
+    await update(() => replacement.open());
+    await update(() => replacement.receive(ready()));
+    await update(() => ctx.wire.receive({ type: 'btw_response', id: query.id, content: 'old socket answer' }));
+    await update(() => replacement.receive({ type: 'btw_response', id: query.id, content: 'old broadcast answer' }));
+    assert.equal(sideRequests().length, 1);
+    assert.equal(sideAnswers(ctx).some(message => message.content.endsWith('answer')), false);
+    if (retirement === 'clear') assert.equal(ctx.value.messages.length, 0);
+    else assert.ok(sideAnswers(ctx)[0].content.includes('unknown'));
+    await update(() => assert.equal(ctx.value.sendSideQuery('new attachment question'), true));
+  }));
+}
+
+test('legacy side queries use id and keep both answers and admission errors out of the main stream', async () => withAgent(false, async ctx => {
+  await update(() => ctx.value.sendMessage('legacy main task'));
+  await update(() => ctx.wire.receive({ type: 'chunk', content: 'legacy output' }));
+  await update(() => ctx.value.sendSideQuery('legacy side question'));
+  const query = sideRequests()[0];
+  assert.equal(query.type, 'btw');
+  assert.ok(query.id);
+  assert.equal(query.request_id, undefined);
+  assert.equal(query.content, '/btw legacy side question');
+  await update(() => ctx.wire.receive({ type: 'ack', id: query.id, status: 'accepted', turn: 'btw', durable: false }));
+  await update(() => ctx.wire.receive({ type: 'btw_response', id: query.id, content: 'legacy side answer' }));
+  await update(() => ctx.value.sendSideQuery('legacy refused question'));
+  await update(() => ctx.wire.receive({ type: 'error', id: sideRequests()[1].id, code: 'BTW_UNAVAILABLE', message: 'unavailable' }));
+  assert.equal(sideAnswers(ctx)[0].content, 'legacy side answer');
+  assert.ok(sideAnswers(ctx)[1].content.includes('unavailable'));
+  assert.equal(ctx.value.streamingContent, 'legacy output');
+  assert.equal(ctx.value.typing, true);
+  await update(() => ctx.value.abortSession());
+  assert.equal(restAborts().length, 1, 'side requests cannot change legacy Stop routing');
+}));
+
+test('chat composer recognizes idle /btw and its slash escape, and renders the temporary answer', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive(ready()));
+  const input = await typeChat(ctx, '/btw idle question');
+  await update(() => input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+  assert.equal(sideRequests().length, 1, '/btw reaches the gateway instead of an unknown-command notice');
+  assert.equal(input.value, '');
+  await update(() => ctx.wire.receive({ type: 'btw_response', id: sideRequests()[0].id, content: 'Visible side answer' }));
+  assert.ok([...ctx.container.querySelectorAll('.chat-markdown')].some(node => node.textContent === 'Visible side answer'));
+  assert.ok(ctx.container.textContent.includes('Side query · not saved in chat history'));
+  await typeChat(ctx, '//btw escaped question');
+  await update(() => ctx.container.querySelector('button[aria-label="Ask aside"]').click());
+  assert.equal(sideRequests()[1].content, '/btw escaped question');
+  assert.equal(ctx.value.typing, false);
+}, true));
+
+for (const steering of [false, true]) {
+  test(`chat composer keeps busy /btw separate from steering (capability=${steering})`, async () => withAgent(true, async ctx => {
+    await update(() => ctx.wire.receive({ ...ready(), capabilities: steering ? ['steer'] : [] }));
+    await update(() => ctx.value.sendMessage('main task'));
+    const parent = sentMessages().at(-1).request_id;
+    await update(() => ctx.wire.receive({ type: 'turn_ack', request_id: parent, turn_id: turnId, status: 'accepted' }));
+    if (steering) await update(() => assert.equal(ctx.value.steerMessage('pending correction'), true));
+    const input = await typeChat(ctx, '/btw busy question');
+    await update(() => input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    assert.equal(sideRequests().length, 1);
+    const query = sideRequests()[0];
+    await update(() => ctx.wire.receive({ type: 'ack', id: query.id, status: 'accepted', turn: 'btw', durable: false }));
+    await update(() => ctx.wire.receive({ type: 'btw_response', id: query.id, content: 'Busy side answer' }));
+    assert.ok([...ctx.container.querySelectorAll('.chat-markdown')].some(node => node.textContent === 'Busy side answer'));
+    assert.equal(ctx.value.steeringPending, steering, 'side-query completion cannot settle a pending correction');
+    assert.equal(ctx.value.typing, true);
+    assert.ok(ctx.container.querySelector('button[aria-label="Stop"]'));
+    assert.equal(ctx.wire.sent.filter(frame => frame.op === 'steer').length, steering ? 1 : 0);
+    await update(() => ctx.container.querySelector('button[aria-label="Stop"]').click());
+    assert.equal(ctx.wire.sent.at(-1).request_id, parent);
+    assert.equal(ctx.wire.sent.at(-1).op, 'cancel');
+  }, true));
+}
+
+test('chat composer keeps attachments and text when /btw rejects them, then sends after removal', async () => withAgent(true, async ctx => {
+  await update(() => ctx.wire.receive(ready()));
+  const fileInput = ctx.container.querySelector('input[type="file"]');
+  await update(() => {
+    Object.defineProperty(fileInput, 'files', { configurable: true, value: [new File(['synthetic'], 'note.txt', { type: 'text/plain' })] });
+    fileInput.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+  });
+  assert.ok(ctx.container.textContent.includes('note.txt'));
+  await typeChat(ctx, '/btw with attachment');
+  await update(() => ctx.container.querySelector('button[aria-label="Ask aside"]').click());
+  assert.equal(sideRequests().length, 0);
+  assert.equal(ctx.container.querySelector('textarea').value, '/btw with attachment');
+  assert.ok(ctx.container.textContent.includes('Side queries do not accept attachments'));
+  assert.ok(ctx.container.textContent.includes('note.txt'));
+  await update(() => ctx.container.querySelector('button[aria-label="Remove attachment"]').click());
+  await update(() => ctx.container.querySelector('button[aria-label="Ask aside"]').click());
+  assert.equal(sideRequests().length, 1);
+  assert.equal(sideRequests()[0].attachments, undefined);
+}, true));
 
 test('explicit steering is negotiated, scoped and never replaces ordinary turn correlation', async () => withAgent(true, async ctx => {
   await update(() => ctx.wire.receive({ ...ready(), capabilities: ['steer'] }));

@@ -88,6 +88,7 @@ pub fn render_file(root: &Path, current: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{self as ts, Cause};
     use std::path::PathBuf;
 
     fn root() -> PathBuf {
@@ -117,8 +118,27 @@ mod tests {
     #[test]
     fn zone_default_is_lean_dist() {
         let z = render_zone(&root()).unwrap();
+        // #584: sampled from the live registry and the Cargo.toml
+        // distribution-extra registry, so neither a retirement batch nor a
+        // silently emptied registry can make these walks pass vacuously.
+        let protected = ts::protected_retained_channel_features();
+        ts::require_non_empty("protected sample", Cause::Protected, protected.len());
+        for feature in protected {
+            assert!(
+                z.contains(&format!("\"{feature}\"")),
+                "flake default must ship the protected channel feature {feature}"
+            );
+        }
+        let extras = ts::registry_string_list("dist_extra_features");
+        ts::require_non_empty("dist extras", Cause::Retired, extras.len());
+        for feature in extras {
+            assert!(
+                z.contains(&format!("\"{feature}\"")),
+                "flake default must ship the registered distribution extra {feature}"
+            );
+        }
+        // Removed channels stay absent forever.
         assert!(!z.contains("\"channel-matrix\""));
-        assert!(z.contains("\"whatsapp-web\""));
         assert!(!z.contains("\"channel-slack\""));
     }
 
