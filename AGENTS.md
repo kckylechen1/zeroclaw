@@ -35,6 +35,7 @@ Fork-specific facts (type placement, upstream divergences, known gaps) are in [`
 2. **Upstream first.** Before writing a capability, check upstream `zeroclaw-labs/zeroclaw`. When a PR ports, adapts, or skips an upstream change, name the source PR or commit, the equivalent code already here, and the real gap. Port bounded changes; never merge upstream wholesale.
 3. **Replace, then delete.** Delete code only when it has no retained consumer, its behavior is explicitly retired, or a replacement works on the production path. Name them in the PR. Line and crate counts are budgets, not goals.
 4. **Delete, don't feature-gate.** Removed code takes its exclusive tests, docs, config keys, features, and dependencies with it. Tests of shared guarantees stay.
+   - When a deletion breaks a test, first decide which kind it is. A test of a shared guarantee keeps its assertion and takes its sample from something the campaign retains, or derives it from the live registry or manifest. Never re-pin it to another sample that a later slice removes. Lowering a count or threshold needs its reason in the PR.
 5. **No new durable store without naming its owner** in the PR and the issue.
 6. **One source of truth.** Before adding a field, cache, or table, name where the fact already lives and resolve it from there.
 7. **Safety.**
@@ -43,7 +44,7 @@ Fork-specific facts (type placement, upstream divergences, known gaps) are in [`
    - Production paths propagate errors instead of `unwrap()`/`expect()`.
    - Remove unused code rather than silencing it.
 8. **User-facing text** uses Fluent `fl!()` keys; logs stay English.
-9. **Git.** Work on a non-`master` branch. Independent PRs target `master`; a dependent PR may temporarily target its parent branch with an explicit `Depends on #N`. After the parent is squash-merged, replay only the child's increment onto current `master`, retarget, and inspect the final diff before landing. See the [stack procedure](docs/book/src/maintainers/pr-workflow.md#stacked-prs).
+9. **Git.** Work on a non-`master` branch. Independent PRs target `master`; a dependent PR may temporarily target its parent branch with an explicit `Depends on #N`. Slices of one campaign that edit the same tests, registries or manifests are dependent: stack them, never open them in parallel from `master`. After the parent is squash-merged, replay only the child's increment onto current `master`, retarget, and inspect the final diff before landing. See the [stack procedure](docs/book/src/maintainers/pr-workflow.md#stacked-prs).
    - PR titles are conventional commits with a scope, `type(scope): summary`; CI rejects others.
    - Use the PR template.
    - Do not add bot or AI attribution footers.
@@ -79,7 +80,7 @@ scripts/dev/cargo-local.sh test -p <crate> [--lib <filter> | --test <name>]
 
 ```bash
 scripts/dev/cargo-local.sh fmt --all -- --check
-scripts/dev/leg.sh <leg>                # ONLY each leg that owns a crate you touched — never all legs by default
+scripts/dev/leg.sh <leg>                # each leg that owns a crate you touched or tests what you changed — never all legs by default
 bash scripts/ci/provider_dispatch_gate.sh   # model calls go through ProviderDispatch
 BASE_SHA="${PR_BASE_SHA:?resolve the actual PR base SHA}" bash scripts/ci/docs_quality_gate.sh
 BASE_SHA="${PR_BASE_SHA:?resolve the actual PR base SHA}" bash scripts/ci/docs_links_gate.sh
@@ -94,6 +95,8 @@ scripts/dev/cargo-local.sh lint-ci      # workspace clippy with ci-all features
 
 All other slices rely on hosted CI for workspace clippy: a red CI round costs ~20 min and no local attention, while a local lint-ci costs the same 10–20 min serialized on the shared machine. When CI fails on clippy for a non-protected slice, fix and rerun — do not treat it as a process violation.
 
+- A leg also "tests what you changed" when its tests read it: root `Cargo.toml` features, `[package.metadata.zeroclaw]`, the channel registry and dist/listing metadata are read by `xtask` tests in the `tail` leg, so changing them runs `tail` even if no `xtask` file changed.
+- In a multi-slice campaign, do not open the next slice while the previous slice's PR is red. Not blocking on CI is fine; stacking more slices on a red one is not.
 - `scripts/dev/leg.sh` runs a leg from `dev/ci/test-partition.json` with the same packages and features as CI (`--list` shows the legs, `--dry-run` prints the commands). Do not run a full-workspace `cargo test`; CI runs every leg in parallel.
 - One cargo process per worktree at a time, and only one agent runs the before-push tier at a time on a shared machine.
 - When disk is tight, run `scripts/dev/target_sweep.sh` (it removes only workspace-owned artifacts and refuses while a build is running). Never `cargo clean`, and never delete third-party artifacts from `target/`: they are the expensive part to rebuild.
