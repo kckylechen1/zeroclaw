@@ -1,0 +1,101 @@
+name: Review Eight Acceptance
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-eight-acceptance-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    name: Combined source Gateway and migrations
+    if: >-
+      github.repository == 'kckylechen1/zeroclaw' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'verify/review-eight-acceptance-20261110'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      REVIEW_SOURCE_COMMIT: ff9233ed4d34913dd516de83ca5d3eeb047d1e98
+      REVIEW_SOURCE_TREE: d95dad3aba0b62ecbf3fc039f2587d0afc8e4ba6
+      REVIEW_VALIDATION_HEAD: ${{ github.event.pull_request.head.sha }}
+      CARGO_BUILD_JOBS: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check out the exact validation head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare the pinned production source and synthetic fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REVIEW_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$REVIEW_VALIDATION_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$REVIEW_VALIDATION_HEAD"
+          test "$(git rev-parse "${REVIEW_SOURCE_COMMIT}^{tree}")" = "$REVIEW_SOURCE_TREE"
+          git merge-base --is-ancestor "$REVIEW_SOURCE_COMMIT" "$REVIEW_VALIDATION_HEAD"
+
+          review_workspace="$RUNNER_TEMP/review-eight"
+          test ! -e "$review_workspace"
+          mkdir -p "$review_workspace/evidence"
+          git worktree add --detach "$review_workspace/zeroclaw-integration-eight" "$REVIEW_SOURCE_COMMIT"
+          test -z "$(git -C "$review_workspace/zeroclaw-integration-eight" status --porcelain --untracked-files=all)"
+
+          for payload_file in gateway_e2e.py run_migration_e2e.py validate-kernel-cli-e2e.py build_and_run.py composition.json; do
+            cp -- ".ci-review-eight/$payload_file" "$review_workspace/evidence/$payload_file"
+          done
+          python3 .ci-review-eight/prepare_fixtures.py \
+            --destination "$review_workspace/legacy-fixtures" \
+            > "$review_workspace/evidence/fixture-extraction.json"
+
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: 1.96.1
+
+      - name: Restore Cargo downloads only
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-targets: "false"
+          cache-workspace-crates: "false"
+          save-if: "false"
+
+      - name: Install the pinned Gateway harness dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/review-eight-venv"
+          "$RUNNER_TEMP/review-eight-venv/bin/python" -m pip install \
+            --disable-pip-version-check --no-input "aiohttp==3.14.4"
+
+      - name: Build the fixed source and run the bounded acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/review-eight-venv/bin/python" \
+            "$RUNNER_TEMP/review-eight/evidence/build_and_run.py" \
+            --workspace "$RUNNER_TEMP/review-eight"
+
+      - name: Retain acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: review-eight-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/review-eight/evidence/evidence.zip
+            ${{ runner.temp }}/review-eight/evidence/status.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

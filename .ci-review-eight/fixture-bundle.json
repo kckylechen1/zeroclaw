@@ -1,0 +1,164 @@
+{
+  "format": "zeroclaw.synthetic-legacy-fixture-bundle/v1",
+  "status": "PINNED_ORIGINAL_BYTES_PACKAGED_NOT_REGENERATED",
+  "bundle_file": "legacy-fixtures.tar.gz.b64",
+  "encoded": {
+    "encoding": "base64-single-line-with-final-newline",
+    "size_bytes": 194633,
+    "sha256": "829c59bcaba41d52777f171746ecb46c73ceb8335114543bcfbe0e8e683b0302"
+  },
+  "compressed": {
+    "format": "gzip",
+    "size_bytes": 145972,
+    "sha256": "28878881f7574aef41e15b0ca91d17fb3076e37b77655b1779ae9b6da2d61299"
+  },
+  "uncompressed_archive": {
+    "format": "ustar",
+    "size_bytes": 6891520,
+    "sha256": "37ccabaf5a824cc96788bb0620c01def29e3fc12e8d1105e91ce469f2109226e"
+  },
+  "payload_size_bytes": 6873675,
+  "file_count": 9,
+  "fixture_file_count": 8,
+  "files": [
+    {
+      "archive_path": "fixtures/companion-schema-v38.json",
+      "size_bytes": 134385,
+      "sha256": "21b7b8f272646df8a617bfeeda0de8d920217586056007ba32a1b4a1d89b1dc8"
+    },
+    {
+      "archive_path": "fixtures/companion-v38.db",
+      "size_bytes": 593920,
+      "sha256": "877e701e0dc29bb77c5191ad1eac92c171dc4933083e58826c0d17af747988e3"
+    },
+    {
+      "archive_path": "fixtures/companion-v38.db.migration-marker",
+      "size_bytes": 9,
+      "sha256": "6f5608d24eac64803b8b8e58235fdb13a83ee6923412a298429cf3dbe34658e8"
+    },
+    {
+      "archive_path": "fixtures/companion-v38.json",
+      "size_bytes": 75277,
+      "sha256": "d05327f635980562e4c04333d075d2c4be10141beb895c135984d2dd32052d2d"
+    },
+    {
+      "archive_path": "fixtures/memory-schema-v38.json",
+      "size_bytes": 316517,
+      "sha256": "be0ab6750fdbc6806b90b08ec363abd5ab75b062c93cc55cee3f634c6003f32a"
+    },
+    {
+      "archive_path": "fixtures/memory-v38.db",
+      "size_bytes": 5595136,
+      "sha256": "28b0695a660e35e5f81a520c9e0f124ef1c38888b580ede22edab3835effa369"
+    },
+    {
+      "archive_path": "fixtures/memory-v38.db.migration-marker",
+      "size_bytes": 9,
+      "sha256": "52d89f309ee99866836b42f92433959edab4ac05f86f803a4c7b8fd410e75cec"
+    },
+    {
+      "archive_path": "fixtures/memory-v38.json",
+      "size_bytes": 156236,
+      "sha256": "dc60017f3137046c0454e5782937613f1cd0fa6b69870f7c8ad004357fb3ae77"
+    },
+    {
+      "archive_path": "result.json",
+      "size_bytes": 2186,
+      "sha256": "6ad5165a7e3095e95cf4404c88b0ef936b26d2c4dad2648f037018c86a6f69b9"
+    }
+  ],
+  "original_generator_receipt": {
+    "source_head": "3b3fe8247e00406e518e638004aac4c2999042a1",
+    "generator_revision": "eba0c48617e8820831bfd22f91d269c6d70f409f",
+    "build_command": [
+      "scripts/dev/cargo-local.sh",
+      "build",
+      "--locked",
+      "--manifest-path",
+      "crates/zeroclaw-memory/tests/fixtures/legacy-kernel/Cargo.toml",
+      "--bin",
+      "generate-legacy-kernel-fixture",
+      "--config",
+      "profile.dev.debug=\"line-tables-only\"",
+      "--config",
+      "profile.dev.package.\"*\".opt-level=3",
+      "--config",
+      "profile.dev.package.\"*\".debug=false"
+    ],
+    "toolchain": "1.96.1",
+    "result": "PASS",
+    "tree": "00e99e84d820f553369b5abb8375344d1ccd5693",
+    "started_at": "2026-11-10T04:33:18.236980+00:00",
+    "build_exit_code": 0,
+    "build_seconds": 229.076,
+    "binary_sha256": "44ae7ee95a611c0e08ccb09d17afad6f1f060e5c98a8af11bab6a1fc74b241e8",
+    "generator_exit_code": 0,
+    "files": [
+      {
+        "name": "companion-schema-v38.json",
+        "sha256": "21b7b8f272646df8a617bfeeda0de8d920217586056007ba32a1b4a1d89b1dc8",
+        "size": 134385
+      },
+      {
+        "name": "companion-v38.db",
+        "sha256": "877e701e0dc29bb77c5191ad1eac92c171dc4933083e58826c0d17af747988e3",
+        "size": 593920
+      },
+      {
+        "name": "companion-v38.db.migration-marker",
+        "sha256": "6f5608d24eac64803b8b8e58235fdb13a83ee6923412a298429cf3dbe34658e8",
+        "size": 9
+      },
+      {
+        "name": "companion-v38.json",
+        "sha256": "d05327f635980562e4c04333d075d2c4be10141beb895c135984d2dd32052d2d",
+        "size": 75277
+      },
+      {
+        "name": "memory-schema-v38.json",
+        "sha256": "be0ab6750fdbc6806b90b08ec363abd5ab75b062c93cc55cee3f634c6003f32a",
+        "size": 316517
+      },
+      {
+        "name": "memory-v38.db",
+        "sha256": "28b0695a660e35e5f81a520c9e0f124ef1c38888b580ede22edab3835effa369",
+        "size": 5595136
+      },
+      {
+        "name": "memory-v38.db.migration-marker",
+        "sha256": "52d89f309ee99866836b42f92433959edab4ac05f86f803a4c7b8fd410e75cec",
+        "size": 9
+      },
+      {
+        "name": "memory-v38.json",
+        "sha256": "dc60017f3137046c0454e5782937613f1cd0fa6b69870f7c8ad004357fb3ae77",
+        "size": 156236
+      }
+    ],
+    "finished_at": "2026-11-10T04:37:07.626486+00:00"
+  },
+  "original_generator_receipt_sha256": "6ad5165a7e3095e95cf4404c88b0ef936b26d2c4dad2648f037018c86a6f69b9",
+  "original_generator_binary_verification": {
+    "performed_locally_before_and_after_packaging": true,
+    "sha256": "44ae7ee95a611c0e08ccb09d17afad6f1f060e5c98a8af11bab6a1fc74b241e8",
+    "size_bytes": 13473120,
+    "unchanged": true,
+    "included_in_archive": false,
+    "scope": "Authenticates the retained original generator file locally; CI receives only its exact existing fixtures and receipt, and does not rerun or possess this executable."
+  },
+  "original_inputs_verified_unchanged_before_after": true,
+  "deterministic_archive": {
+    "verified_by_two_independent_serializations": true,
+    "entry_order": "lexicographic",
+    "mtime": 0,
+    "uid": 0,
+    "gid": 0,
+    "uname": "",
+    "gname": "",
+    "mode": "0600",
+    "gzip_mtime": 0,
+    "gzip_filename": "",
+    "gzip_level": 9
+  },
+  "scope": "Synthetic legacy inputs only. No generator binary, source repository, build cache, current candidate executable, or migration execution result is included."
+}
