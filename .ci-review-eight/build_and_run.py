@@ -192,16 +192,15 @@ def main():
         environment.pop("CARGO_NET_OFFLINE", None)
         rustc = subprocess.check_output(["rustc", "--version"], cwd=repo, env=environment, text=True).strip()
         require(rustc.startswith("rustc 1.96.1 "), "Rust toolchain differs")
-        # Matches the existing CI placeholder; does not fabricate a web bundle.
-        placeholder = repo / "web/dist/.gitkeep"
-        placeholder.parent.mkdir(parents=True, exist_ok=True)
-        placeholder.touch(exist_ok=True)
+        # The pinned source already contains web/dist/logo.png. A .gitkeep
+        # would be an untracked file because the repository explicitly unignores it.
+        require((repo / "web/dist").is_dir(), "tracked web/dist directory is missing")
         source_identity(repo)
         binding = dict(identity, rustc_version=rustc, recorded_at=now(),
                        validation_head=os.environ.get("REVIEW_VALIDATION_HEAD"),
                        github_run_id=os.environ.get("GITHUB_RUN_ID"),
                        github_run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT"),
-                       build_target_was_empty=True, web_placeholder="web/dist/.gitkeep only; no browser bundle",
+                       build_target_was_empty=True, web_placeholder="existing tracked web/dist assets; no generated browser bundle",
                        scripts={name: digest(out / name) for name in
                                 ("gateway_e2e.py", "run_migration_e2e.py", "validate-kernel-cli-e2e.py", "build_and_run.py")})
         write_json(out / "source-binding.json", binding)
