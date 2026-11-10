@@ -2608,8 +2608,9 @@ async fn process_chat_message(
                 "output_tokens": total_output_tokens,
                 "tokens_used": total_tokens,
                 "cost_usd": cost_usd,
-                "model": turn_model,
+                "model": outcome.model,
                 "provider": provider_label,
+                "provider_ref": outcome.provider_name,
                 "max_context_tokens": max_context_tokens,
                 "last_input_tokens": last_input_tokens,
             });
@@ -2626,7 +2627,8 @@ async fn process_chat_message(
             let _ = state.event_tx.send(serde_json::json!({
                 "type": "agent_end",
                 "model_provider": provider_label,
-                "model": turn_model,
+                "model": outcome.model,
+                "provider_ref": outcome.provider_name,
             }));
 
             // Append a runtime-trace.jsonl record so a `zeroclaw doctor`
@@ -2638,7 +2640,8 @@ async fn process_chat_message(
                     .with_outcome(::zeroclaw_log::EventOutcome::Success)
                     .with_attrs(::serde_json::json!({
                         "model_provider": provider_label,
-                        "model": turn_model,
+                        "model": outcome.model,
+                        "provider_ref": outcome.provider_name,
                         "session_key": session_key,
                         "input_tokens": total_input_tokens,
                         "output_tokens": total_output_tokens,
@@ -3447,6 +3450,10 @@ mod tests {
         include!("ws/device_tests.rs");
     }
 
+    mod completion_tests {
+        include!("ws/completion_tests.rs");
+    }
+
     struct SideQueryTestGate {
         entered: tokio::sync::Notify,
         release: tokio::sync::Semaphore,
@@ -3539,6 +3546,7 @@ mod tests {
                             .agent_alias("web".into());
                         if let Some(config) = owner_config {
                             builder = builder
+                                .multimodal_config(config.multimodal.clone())
                                 .provider_switch_config(
                                     zeroclaw_runtime::agent::agent::ProviderSwitchConfig {
                                         config: Some(config),
