@@ -283,7 +283,10 @@ pub(crate) async fn run_tool_call_loop_with_guard(
     p: ToolLoop<'_>,
     repetition_guard: Option<&std::sync::Mutex<repetition::RepetitionGuard>>,
     yield_to_steering: bool,
-    side_query: Option<&crate::agent::side_query::SideQueryHandle>,
+    side_query: Option<(
+        &crate::agent::side_query::SideQueryHandle,
+        &Arc<dyn ModelProvider>,
+    )>,
     dispatched_route: Option<&DispatchedModelRouteSink>,
 ) -> Result<String> {
     // One loop invocation is one agent turn: advisor consultations made by
@@ -325,7 +328,10 @@ async fn run_tool_call_loop_turn(
     mut p: ToolLoop<'_>,
     repetition_guard: Option<&std::sync::Mutex<repetition::RepetitionGuard>>,
     yield_to_steering: bool,
-    side_query: Option<&crate::agent::side_query::SideQueryHandle>,
+    side_query: Option<(
+        &crate::agent::side_query::SideQueryHandle,
+        &Arc<dyn ModelProvider>,
+    )>,
     dispatched_route: Option<&DispatchedModelRouteSink>,
 ) -> Result<String> {
     let model_switch_state = p
@@ -737,8 +743,13 @@ async fn run_tool_call_loop_turn(
         // Explicit execution context prevents a nested peer turn inheriting
         // the parent's task owner. Every production entry point uses this seam.
         refresh_task_context(turn_state.history, task_owner);
-        if let Some(sq) = side_query {
+        if let Some((sq, base_provider)) = side_query {
+            let effective_provider = vision_model_provider_box.as_ref().map_or_else(
+                || Arc::clone(base_provider),
+                |resolved| Arc::clone(&resolved.provider),
+            );
             sq.update_live_messages(
+                effective_provider,
                 active_model_provider_name,
                 active_model,
                 turn_state.history,
@@ -1313,8 +1324,13 @@ async fn run_tool_call_loop_turn(
             &tool_results,
             use_native_tools,
         );
-        if let Some(sq) = side_query {
+        if let Some((sq, base_provider)) = side_query {
+            let effective_provider = vision_model_provider_box.as_ref().map_or_else(
+                || Arc::clone(base_provider),
+                |resolved| Arc::clone(&resolved.provider),
+            );
             sq.update_live_messages(
+                effective_provider,
                 active_model_provider_name,
                 active_model,
                 turn_state.history,
