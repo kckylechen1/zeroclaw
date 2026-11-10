@@ -482,25 +482,49 @@ fn resolve_delivery_rejects_unsupported_channel() {
 }
 
 #[test]
-fn resolve_delivery_rejects_retired_matrix_target() {
-    // matrix's in-process runner is retired (#579/#581): a configured
-    // [channels.matrix] section feeds nothing, and outbound delivery runs
-    // through gateway bridges only — so the target must be refused at
-    // validation with the retired diagnostic instead of being accepted and
-    // later dropped by the delivery layer.
-    let mut config = Config::default();
-    config.heartbeat.target = Some("whatsapp".into());
-    config.heartbeat.to = Some("+15550001111".into());
-    config
-        .channels
-        .whatsapp
-        .insert("default".to_string(), Default::default());
-
-    let err = resolve_heartbeat_delivery(&config).unwrap_err();
-    assert!(
-        err.to_string().contains("transport runner is retired"),
-        "expected retired rejection, got: {err}"
-    );
+fn resolve_delivery_rejects_retired_transport_targets() {
+    // Historical names remain an admission boundary after the last retired
+    // schema is deleted; no configured alias is needed to reject a dead path.
+    for retired in [
+        "slack",
+        "mattermost",
+        "imessage",
+        "matrix",
+        "signal",
+        "irc",
+        "twitch",
+        "lark",
+        "feishu",
+        "line",
+        "dingtalk",
+        "wecom",
+        "wecom_ws",
+        "wechat",
+        "qq",
+        "twitter",
+        "mochat",
+        "nostr",
+        "clawdtalk",
+        "reddit",
+        "bluesky",
+        "git",
+        "voice_call",
+        "voice_wake",
+        "amqp",
+        "whatsapp",
+        "whatsapp-web",
+        "whatsapp_web",
+        "WhatsApp",
+    ] {
+        let mut config = Config::default();
+        config.heartbeat.target = Some(retired.into());
+        config.heartbeat.to = Some("synthetic-recipient".into());
+        let err = resolve_heartbeat_delivery(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("transport runner is retired"),
+            "expected retired rejection for {retired}, got: {err}"
+        );
+    }
 }
 
 #[test]

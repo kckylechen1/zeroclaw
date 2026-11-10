@@ -66,14 +66,7 @@ fn default_v2_schema_version() -> u32 {
     2
 }
 
-pub const V3_CHANNEL_TYPES: &[&str] = &[
-    "telegram",
-    "discord",
-    "webhook",
-    "whatsapp",
-    "email",
-    "voice_duplex",
-];
+pub const V3_CHANNEL_TYPES: &[&str] = &["telegram", "discord", "webhook", "email", "voice_duplex"];
 
 impl V2Config {
     /// Returns a V3-shaped `toml::Value`. The caller deserializes it
@@ -1121,10 +1114,8 @@ fn fold_discord_history(channels: &mut toml::Table) {
     }
 }
 
-/// Apply V2→V3 singular→plural folds:
-/// `discord.guild_id` → `guild_ids[]`, `mattermost.channel_id` → `channel_ids[]`,
-/// `reddit.subreddit` → `subreddits[]`, and `signal.group_id` → `group_ids[]`
-/// (with the `"dm"` sentinel mapped to `dm_only=true` instead).
+/// Apply the retained V2→V3 singular→plural fold:
+/// `discord.guild_id` → `guild_ids[]`.
 fn apply_v2_to_v3_channel_folds(channel_type: &str, instance: &mut toml::Table) {
     use crate::migration::fold_string_into_array;
     match channel_type {
@@ -1134,27 +1125,6 @@ fn apply_v2_to_v3_channel_folds(channel_type: &str, instance: &mut toml::Table) 
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
                 "channels.discord.guild_id folded into channels.discord.guild_ids[]"
             );
-        }
-        "whatsapp" => {
-            // The WhatsApp Cloud API backend was deleted (its gateway webhook
-            // route was removed). Drop its fields loudly instead of porting
-            // them into V3, where they would only surface as retired-field
-            // tombstones. The field set is the single retired-field table.
-            let dropped: Vec<&str> = crate::validation_warnings::RETIRED_CONFIG_FIELDS
-                .iter()
-                .filter_map(|(path, _)| path.strip_prefix("channels.whatsapp.*."))
-                .filter(|field| instance.remove(*field).is_some())
-                .collect();
-            if !dropped.is_empty() {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Skip)
-                        .with_attrs(::serde_json::json!({"fields": dropped})),
-                    "channels.whatsapp Cloud API fields dropped during migration: the \
-                     WhatsApp Cloud API backend was removed; configure WhatsApp Web \
-                     (session_path, pair_phone, pair_code, ws_url or mode = \"personal\")"
-                );
-            }
         }
         _ => {}
     }
@@ -1167,7 +1137,6 @@ fn fold_channel_peer_auth_into_peer_groups(
 ) {
     let Some(field_name) = (match channel_type {
         "telegram" | "discord" => Some("allowed_users"),
-        "whatsapp" => Some("allowed_numbers"),
         "email" => Some("allowed_senders"),
         _ => None,
     }) else {

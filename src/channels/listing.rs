@@ -29,13 +29,6 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         compiled: cfg!(feature = "channel-discord"),
     },
     ChannelCompileSpec {
-        // `[channels.whatsapp.<alias>]` is served only by the WhatsApp Web
-        // backend, so the config type key shares its compile flag.
-        schema_name: Some("WhatsApp Web"),
-        type_keys: &["whatsapp", "whatsapp-web", "whatsapp_web"],
-        compiled: cfg!(feature = "whatsapp-web"),
-    },
-    ChannelCompileSpec {
         schema_name: Some("Email"),
         type_keys: &["email"],
         compiled: cfg!(feature = "channel-email"),
@@ -129,7 +122,15 @@ mod tests {
         assert!(is_channel_type_compiled("discord"));
         // Retired channel types (inbound webhook routes removed) resolve
         // as unknown, never as compiled.
-        for retired in ["linq", "wati", "nextcloud_talk", "gmail_push"] {
+        for retired in [
+            "linq",
+            "wati",
+            "nextcloud_talk",
+            "gmail_push",
+            "whatsapp",
+            "whatsapp-web",
+            "whatsapp_web",
+        ] {
             assert!(!is_channel_type_compiled(retired), "{retired}");
         }
     }
@@ -189,15 +190,8 @@ mod tests {
     }
 
     #[test]
-    fn retired_transports_are_never_compiled_or_uncompiled() {
-        let mut cfg = ChannelsConfig::default();
-        cfg.whatsapp.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                session_path: Some("wa.db".into()),
-                ..Default::default()
-            },
-        );
+    fn schema_deleted_transports_have_no_listing_entries() {
+        let cfg = ChannelsConfig::default();
 
         let compiled: BTreeSet<_> = compiled_channels(&cfg)
             .into_iter()
@@ -212,13 +206,6 @@ mod tests {
             .map(|info| info.name)
             .collect();
 
-        assert!(!compiled.contains("WhatsApp"));
-        // Rebuilding with the stub feature cannot restore the retired runner.
-        assert!(!uncompiled.contains("WhatsApp"));
-        assert!(
-            retired.iter().any(|n| n.contains("WhatsApp")),
-            "retired set must contain the WhatsApp entry: {retired:?}"
-        );
         for removed in [
             "Slack",
             "Mattermost",
@@ -229,6 +216,23 @@ mod tests {
             "Twitch",
             "Lark",
             "Feishu",
+            "WhatsApp",
+            "LINE",
+            "DingTalk",
+            "WeCom",
+            "WeCom WS",
+            "WeChat",
+            "QQ",
+            "Twitter",
+            "Mochat",
+            "Nostr",
+            "ClawdTalk",
+            "Reddit",
+            "Bluesky",
+            "Git",
+            "Voice Call",
+            "Voice Wake",
+            "AMQP",
         ] {
             assert!(!compiled.contains(removed));
             assert!(!uncompiled.contains(removed));

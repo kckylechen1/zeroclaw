@@ -40,13 +40,8 @@ use serde::{Deserialize, Serialize};
 ///   is ignored (see `RETIRED_CONFIG_SURFACES`).
 /// - `retired_channel_transport_removed`: a channel section for a transport
 ///   whose schema was deleted by #584 Slice 3, including its V1 spelling.
-/// - `whatsapp_cloud_backend_removed`: a `[channels.whatsapp.<alias>]` table
-///   still sets a field only the WhatsApp Cloud API backend read
-///   (`access_token`, `phone_number_id`, `verify_token`, `app_secret`,
-///   `proxy_url`). That backend received messages only through a gateway
-///   webhook route that was removed, so it was deleted; the key is ignored
-///   and the alias is served by WhatsApp Web only when it carries a Web
-///   selector (see `RETIRED_CONFIG_FIELDS`).
+/// - `whatsapp_audio_option_removed`: the WhatsApp-only forwarded audio
+///   selector has no consumer after the WhatsApp transport retired.
 /// - `wss_transport_removed`: a `[wss]` section is still present. It
 ///   configured the daemon's JSON-RPC-over-WSS listener for remote TUI
 ///   clients; that listener and the local `daemon.sock` RPC socket were
@@ -175,6 +170,7 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("channels.voice_call", "retired_channel_transport_removed"),
     ("channels.voice_wake", "retired_channel_transport_removed"),
     ("channels.amqp", "retired_channel_transport_removed"),
+    ("channels.whatsapp", "retired_channel_transport_removed"),
     ("channels.feishu", "retired_channel_transport_removed"),
     ("channels_config.slack", "retired_channel_transport_removed"),
     (
@@ -246,6 +242,10 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
         "retired_channel_transport_removed",
     ),
     (
+        "channels_config.whatsapp",
+        "retired_channel_transport_removed",
+    ),
+    (
         "channels_config.feishu",
         "retired_channel_transport_removed",
     ),
@@ -297,6 +297,10 @@ pub fn is_retired_channel_type(channel_type: &str) -> bool {
 /// deleted from its struct, serde silently drops the unknown key, and this
 /// checker makes the retirement visible instead of a silent no-op.
 pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
+    (
+        "transcription.transcribe_non_ptt_audio",
+        "whatsapp_audio_option_removed",
+    ),
     ("agents.*.delegates", "delegate_config_removed"),
     ("agents.*.a2a", "a2a_server_removed"),
     (
@@ -318,26 +322,6 @@ pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
     (
         "runtime_profiles.*.agentic_timeout_secs",
         "delegate_config_removed",
-    ),
-    (
-        "channels.whatsapp.*.access_token",
-        "whatsapp_cloud_backend_removed",
-    ),
-    (
-        "channels.whatsapp.*.phone_number_id",
-        "whatsapp_cloud_backend_removed",
-    ),
-    (
-        "channels.whatsapp.*.verify_token",
-        "whatsapp_cloud_backend_removed",
-    ),
-    (
-        "channels.whatsapp.*.app_secret",
-        "whatsapp_cloud_backend_removed",
-    ),
-    (
-        "channels.whatsapp.*.proxy_url",
-        "whatsapp_cloud_backend_removed",
     ),
     ("observability.otel_endpoint", "otel_observability_removed"),
     (
@@ -417,11 +401,8 @@ fn retired_field_reason(code: &str) -> &'static str {
             "the OpenTelemetry exporter was removed; the `log`, `verbose` and \
              `prometheus` sinks remain, and a retired backend value loads as `none`"
         }
-        "whatsapp_cloud_backend_removed" => {
-            "only the WhatsApp Cloud API backend read this key, and that backend \
-             was removed with its gateway webhook route. WhatsApp is served by the \
-             WhatsApp Web backend, which needs a Web selector (session_path, \
-             pair_phone, pair_code, ws_url or mode = \"personal\")"
+        "whatsapp_audio_option_removed" => {
+            "the WhatsApp-only forwarded audio selector has no runtime consumer after the transport retired"
         }
         "a2a_server_removed" => {
             "the A2A discovery server and agent cards were never consumers in \
@@ -697,48 +678,6 @@ delegation_policy = { mode = "allow" }
         );
         // Untouched fields never warn.
         assert_eq!(warnings.len(), 4, "{paths:?}");
-    }
-
-    #[test]
-    fn retired_field_tombstones_flag_whatsapp_cloud_fields_only() {
-        let contents = r#"
-[channels.whatsapp.cloud]
-enabled = true
-access_token = "tok"
-phone_number_id = "123"
-verify_token = "ver"
-app_secret = "sec"
-proxy_url = "socks5://127.0.0.1:1080"
-
-[channels.whatsapp.web]
-enabled = true
-session_path = "~/.zeroclaw/state/whatsapp-web/web.db"
-"#;
-        let warnings = retired_field_tombstones(contents);
-        let mut paths: Vec<_> = warnings.iter().map(|w| w.path.as_str()).collect();
-        paths.sort_unstable();
-        assert_eq!(
-            paths,
-            vec![
-                "channels.whatsapp.*.access_token",
-                "channels.whatsapp.*.app_secret",
-                "channels.whatsapp.*.phone_number_id",
-                "channels.whatsapp.*.proxy_url",
-                "channels.whatsapp.*.verify_token",
-            ]
-        );
-        assert!(
-            warnings
-                .iter()
-                .all(|w| w.code == "whatsapp_cloud_backend_removed"
-                    && w.message.contains("WhatsApp Cloud API backend")),
-            "{warnings:?}"
-        );
-        // A Web-only alias never warns.
-        assert!(
-            retired_field_tombstones("[channels.whatsapp.web]\nsession_path = \"/tmp/wa.db\"\n")
-                .is_empty()
-        );
     }
 
     #[test]

@@ -8,7 +8,6 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
-use zeroclaw_config::schema::{ChannelAliasInfo, Config};
 use zeroclaw_memory::MemoryEntry;
 
 const MEMORY_API_CONTENT_MAX_CHARS: usize = 4096;
@@ -1073,7 +1072,6 @@ pub async fn handle_api_channels(
         .into_iter()
         .map(|info| {
             let composite = format!("{}.{}", info.channel_type, info.alias);
-            let _compiled_key = compiled_readiness_key_for_alias(&config, &info);
             let compiled = false;
             let readiness = channel_readiness(&config, &info, &health, &state);
             let (status, health_status) = if compiled {
@@ -1131,7 +1129,6 @@ pub async fn handle_api_channel_relink(
             .into_response();
     };
 
-    let _compiled_key = compiled_readiness_key_for_alias(&config, &info);
     (
         StatusCode::CONFLICT,
         Json(serde_json::json!({
@@ -1145,20 +1142,6 @@ pub async fn handle_api_channel_relink(
         })),
     )
         .into_response()
-}
-
-fn compiled_readiness_key_for_alias<'a>(config: &'a Config, info: &'a ChannelAliasInfo) -> &'a str {
-    if info.channel_type == "whatsapp"
-        && config
-            .channels
-            .whatsapp
-            .get(&info.alias)
-            .is_some_and(|whatsapp| whatsapp.is_web_config())
-    {
-        "whatsapp-web"
-    } else {
-        info.channel_type.as_str()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -2378,86 +2361,16 @@ pub(crate) mod tests {
         assert_ne!(content, huge);
     }
 
-    #[test]
-    fn api_channels_readiness_key_tracks_whatsapp_web_selector() {
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.channels.whatsapp.insert(
-            "web".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
-                ..Default::default()
-            },
-        );
-        // No Web selector (e.g. a leftover Cloud API alias whose retired
-        // fields were dropped): the runtime skips it, and it keeps the bare
-        // config type key, which has no QR-pairing session.
-        config.channels.whatsapp.insert(
-            "bare".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                ..Default::default()
-            },
-        );
-
-        let web = zeroclaw_config::schema::ChannelAliasInfo {
-            channel_type: "whatsapp".to_string(),
-            alias: "web".to_string(),
-            owning_agent: None,
-            enabled: true,
-        };
-        let bare = zeroclaw_config::schema::ChannelAliasInfo {
-            channel_type: "whatsapp".to_string(),
-            alias: "bare".to_string(),
-            owning_agent: None,
-            enabled: true,
-        };
-        let discord = zeroclaw_config::schema::ChannelAliasInfo {
-            channel_type: "discord".to_string(),
-            alias: "default".to_string(),
-            owning_agent: None,
-            enabled: true,
-        };
-
-        assert_eq!(
-            compiled_readiness_key_for_alias(&config, &web),
-            "whatsapp-web"
-        );
-        assert_eq!(compiled_readiness_key_for_alias(&config, &bare), "whatsapp");
-        assert_eq!(
-            compiled_readiness_key_for_alias(&config, &discord),
-            "discord"
-        );
-    }
-
     #[tokio::test]
     async fn api_channels_marks_configured_uncompiled_channel_unavailable() {
         // The gateway listing marks every channel not compiled (no
-        // in-process listeners since the channels retirement); a live
-        // surface (webhook) still lists, while a configured retired
-        // transport (WhatsApp Web) must not appear at all (#584).
+        // in-process listeners since the channels retirement); the live
+        // Webhook surface must still list with its unavailable status.
         let mut config = zeroclaw_config::schema::Config::default();
         config.channels.webhook.insert(
             "default".to_string(),
             zeroclaw_config::schema::WebhookConfig::default(),
         );
-        // This is the last configurable retired schema after batches B/C.
-        // Its retirement removes this sample and exclusion assertion together;
-        // the live Webhook availability assertions below must remain.
-        config.channels.whatsapp.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                session_path: Some("synthetic-retired-session.db".into()),
-                ..Default::default()
-            },
-        );
-        assert!(
-            config.channels.channels().iter().any(|channel| {
-                channel.kind == "whatsapp-web" && channel.configured && channel.retired
-            }),
-            "the exclusion guard requires a configured retired sample"
-        );
-
         let response = handle_api_channels(State(test_state(config)), HeaderMap::new())
             .await
             .into_response();
@@ -2472,13 +2385,6 @@ pub(crate) mod tests {
         assert_eq!(webhook["compiled"], false);
         assert_eq!(webhook["status"], "not_compiled");
         assert_eq!(webhook["health"], "unavailable");
-        assert!(
-            channels.iter().all(|channel| !matches!(
-                channel["type"].as_str(),
-                Some("whatsapp" | "whatsapp-web" | "whatsapp_web")
-            )),
-            "retired transports must not appear in the channel listing"
-        );
     }
 
     /// Bind `channel_ref` (e.g. `"wechat.admin"`) to an enabled agent so

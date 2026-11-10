@@ -42,7 +42,6 @@ interface IdentityField {
 const CHANNEL_IDENTITY: Record<string, IdentityField> = {
   discord: { field: 'guild_ids', label: 'guilds' },
   telegram: { field: 'bot_token', label: '' }, // bot identity, no separate id
-  whatsapp: { field: 'user_id', label: 'user' },
   email: { field: 'address', label: '' },
 };
 

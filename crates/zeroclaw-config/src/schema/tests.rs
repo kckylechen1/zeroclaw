@@ -1796,7 +1796,6 @@ async fn config_toml_roundtrip() {
             )]),
             discord: HashMap::new(),
             webhook: HashMap::new(),
-            whatsapp: HashMap::new(),
             email: HashMap::new(),
             voice_duplex: HashMap::new(),
             mqtt: HashMap::new(),
@@ -3105,18 +3104,6 @@ async fn interrupt_on_new_message_defaults_off_and_parses_true() {
     assert!(mattermost(
         r#"{"url":"https://mm.example.com","bot_token":"tok","interrupt_on_new_message":true}"#
     ));
-
-    let whatsapp = |json: &str| {
-        serde_json::from_str::<WhatsAppConfig>(json)
-            .unwrap()
-            .interrupt_on_new_message
-    };
-    assert!(!whatsapp(
-        r#"{"session_path":"/tmp/zeroclaw-whatsapp-session.db"}"#
-    ));
-    assert!(whatsapp(
-        r#"{"session_path":"/tmp/zeroclaw-whatsapp-session.db","interrupt_on_new_message":true}"#
-    ));
 }
 
 #[test]
@@ -3181,170 +3168,6 @@ async fn webhook_replay_config_defaults_and_roundtrip() {
     assert!(restored.dangerously_disable_replay_protection);
     assert_eq!(restored.replay_window_secs, Some(60));
     assert_eq!(restored.replay_cache_capacity, Some(128));
-}
-
-// ── WhatsApp config ──────────────────────────────────────
-
-#[test]
-async fn whatsapp_config_ignores_retired_cloud_fields() {
-    // The Cloud API backend was deleted; its fields are no longer in the
-    // schema. A leftover Cloud-only alias must still deserialize (serde
-    // drops the unknown keys; the field tombstone reports them) and must
-    // not look like a Web config.
-    let parsed: WhatsAppConfig = toml::from_str(
-        r#"
-enabled = true
-access_token = "tok"
-phone_number_id = "123"
-verify_token = "ver"
-app_secret = "sec"
-proxy_url = "socks5://127.0.0.1:1080"
-"#,
-    )
-    .expect("retired Cloud fields must not fail deserialization");
-    assert!(parsed.enabled);
-    assert!(!parsed.is_web_config());
-    let reserialized = toml::to_string(&parsed).unwrap();
-    for field in [
-        "access_token",
-        "phone_number_id",
-        "verify_token",
-        "app_secret",
-        "proxy_url",
-    ] {
-        assert!(
-            !reserialized.contains(field),
-            "{field} must not be written back: {reserialized}"
-        );
-    }
-}
-
-#[test]
-async fn whatsapp_config_passive_group_context_defaults_off() {
-    let parsed: WhatsAppConfig = serde_json::from_str("{}").unwrap();
-    assert!(!parsed.passive_group_context);
-}
-
-#[test]
-async fn whatsapp_config_passive_group_context_deserializes_true() {
-    let parsed: WhatsAppConfig = serde_json::from_str(r#"{"passive_group_context":true}"#).unwrap();
-    assert!(parsed.passive_group_context);
-}
-
-#[test]
-async fn whatsapp_v2_allowed_numbers_fold_into_peer_groups() {
-    // V2 `allowed_numbers` on a WhatsApp channel migrates to a
-    // synthesized `peer_groups.whatsapp_default` group. The wildcard
-    // `*` is dropped at synthesis; concrete numbers round-trip.
-    let raw = r#"
-schema_version = 2
-
-[channels.whatsapp]
-enabled = true
-session_path = "~/.zeroclaw/state/whatsapp-web/session.db"
-allowed_numbers = ["+1", "+2"]
-"#;
-    let parsed = crate::migration::migrate_to_current(raw).expect("migration succeeds");
-    let group = parsed
-        .peer_groups
-        .get("whatsapp_default")
-        .expect("V2 whatsapp.allowed_numbers must fold into peer_groups.whatsapp_default");
-    assert_eq!(group.channel, "whatsapp");
-    let usernames: Vec<&str> = group.external_peers.iter().map(|p| p.as_str()).collect();
-    assert_eq!(usernames, vec!["+1", "+2"]);
-}
-
-#[test]
-async fn whatsapp_config_web_selectors() {
-    let session = WhatsAppConfig {
-        enabled: true,
-        session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
-        ..Default::default()
-    };
-    assert!(session.is_web_config());
-
-    let personal_pairing = WhatsAppConfig {
-        enabled: true,
-        mode: WhatsAppWebMode::Personal,
-        pair_phone: Some("+10000000000".into()),
-        ..Default::default()
-    };
-    assert!(personal_pairing.is_web_config());
-
-    let pair_only = WhatsAppConfig {
-        enabled: true,
-        pair_phone: Some("+10000000000".into()),
-        ..Default::default()
-    };
-    assert!(pair_only.is_web_config());
-
-    let personal_only = WhatsAppConfig {
-        enabled: true,
-        mode: WhatsAppWebMode::Personal,
-        ..Default::default()
-    };
-    assert!(personal_only.is_web_config());
-
-    // No Web selector (e.g. a leftover Cloud API alias): not started.
-    let empty = WhatsAppConfig {
-        enabled: true,
-        ..Default::default()
-    };
-    assert!(!empty.is_web_config());
-}
-
-#[test]
-async fn channels_with_whatsapp() {
-    let c = ChannelsConfig {
-        cli: true,
-        telegram: HashMap::new(),
-        discord: HashMap::new(),
-        webhook: HashMap::new(),
-        whatsapp: HashMap::from([(
-            "default".to_string(),
-            WhatsAppConfig {
-                enabled: true,
-                session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
-                pair_phone: None,
-                pair_code: None,
-                ws_url: None,
-                mention_only: false,
-                passive_group_context: false,
-                interrupt_on_new_message: false,
-                mode: WhatsAppWebMode::default(),
-                dm_policy: WhatsAppChatPolicy::default(),
-                group_policy: WhatsAppChatPolicy::default(),
-                self_chat_mode: false,
-                dm_mention_patterns: vec![],
-                group_mention_patterns: vec![],
-                allowed_groups: vec![],
-                approval_timeout_secs: 300,
-                excluded_tools: vec![],
-                reply_min_interval_secs: 0,
-                reply_queue_depth_max: 0,
-            },
-        )]),
-        email: HashMap::new(),
-        voice_duplex: HashMap::new(),
-        mqtt: HashMap::new(),
-        filesystem: HashMap::new(),
-        message_timeout_secs: 300,
-        max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
-        ack_reactions: true,
-        show_tool_calls: true,
-        session_persistence: true,
-        session_backend: default_session_backend(),
-        session_ttl_hours: 0,
-        debounce_ms: 0,
-    };
-    let toml_str = toml::to_string_pretty(&c).unwrap();
-    let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
-    assert!(!parsed.whatsapp.is_empty());
-    let wa = parsed.whatsapp.get("default").unwrap();
-    assert_eq!(
-        wa.session_path.as_deref(),
-        Some("~/.zeroclaw/state/whatsapp-web/session.db")
-    );
 }
 
 // ══════════════════════════════════════════════════════════
@@ -4491,6 +4314,99 @@ async fn load_or_init_warns_about_retired_batch_c_channel_settings() {
 }
 
 #[test]
+async fn load_or_init_warns_about_retired_whatsapp_security_settings() {
+    let _env_guard = env_override_lock().await;
+    let dir = TempDir::new().unwrap();
+    let _config_guard = EnvValueGuard::set("ZEROCLAW_CONFIG_DIR", dir.path());
+    let config_path = dir.path().join("config.toml");
+
+    for (version, channels, alias) in [
+        ("", "channels_config", ""),
+        ("schema_version = 2\n", "channels", ""),
+        ("schema_version = 3\n", "channels", ".personal"),
+    ] {
+        let retired_path = format!("{channels}.whatsapp");
+        let contents = format!(
+            r#"{version}[{retired_path}{alias}]
+enabled = true
+session_path = "/tmp/retired-whatsapp.db"
+access_token = "retired-token"
+app_secret = "retired-secret"
+verify_token = "retired-verify"
+allowed_numbers = ["+15555550102"]
+allowed_groups = ["group-id"]
+dm_policy = "allowlist"
+group_policy = "allowlist"
+approval_timeout_secs = 60
+excluded_tools = ["shell"]
+
+[transcription]
+max_duration_secs = 90
+transcribe_non_ptt_audio = true
+
+[{channels}.webhook{alias}]
+enabled = true
+port = 8080
+"#
+        );
+        fs::write(&config_path, contents).await.unwrap();
+
+        let config = Box::pin(Config::load_or_init()).await.unwrap();
+        let webhook_alias = if alias.is_empty() {
+            "default"
+        } else {
+            "personal"
+        };
+        assert_eq!(config.channels.webhook[webhook_alias].port, 8080);
+        assert_eq!(config.transcription.max_duration_secs, 90);
+        assert!(
+            config.peer_groups.is_empty(),
+            "retired restrictions must not authorize another transport"
+        );
+        assert!(
+            config.degraded_sections.is_empty(),
+            "{:?}",
+            config.degraded_sections
+        );
+        assert!(!config.channels.is_known_channel("whatsapp"));
+        assert!(
+            !toml::to_string(&config)
+                .unwrap()
+                .contains("[channels.whatsapp")
+        );
+        let warnings = config.collect_warnings();
+        assert!(warnings.iter().any(|warning| {
+            warning.path == "transcription.transcribe_non_ptt_audio"
+                && warning.code == "whatsapp_audio_option_removed"
+        }));
+        let retired: Vec<_> = warnings
+            .iter()
+            .filter(|warning| warning.path == retired_path)
+            .collect();
+        assert_eq!(retired.len(), 1, "{warnings:?}");
+        let warning = retired[0];
+        assert_eq!(warning.code, "retired_channel_transport_removed");
+        assert!(warning.message.contains(&retired_path));
+        assert!(warning.message.contains("no runtime consumer"));
+        assert!(warning.message.contains("Remove the section."));
+        for sensitive in [
+            "/tmp/retired-whatsapp.db",
+            "retired-token",
+            "retired-secret",
+            "retired-verify",
+            "+15555550102",
+            "group-id",
+        ] {
+            assert!(
+                warnings
+                    .iter()
+                    .all(|warning| !warning.message.contains(sensitive))
+            );
+        }
+    }
+}
+
+#[test]
 async fn load_or_init_retired_pairing_dashboard_section_parses_with_tombstone_warning() {
     // Section-parse finding: `[gateway.pairing_dashboard]` in a config
     // file is an unknown (silently ignored) nested section after schema
@@ -5030,115 +4946,6 @@ async fn load_or_init_marks_whole_config_degraded_for_unparseable_file() {
         unsafe { std::env::remove_var("HOME") };
     }
     let _ = fs::remove_dir_all(temp_home).await;
-}
-
-#[test]
-#[allow(clippy::large_futures)]
-async fn load_or_init_cloud_only_whatsapp_alias_loads_with_tombstone_warning() {
-    // The WhatsApp Cloud API backend was deleted. A V3 config whose
-    // `[channels.whatsapp.<alias>]` carries only Cloud fields must keep
-    // loading and validating: the fields are dropped and reported with
-    // `whatsapp_cloud_backend_removed`, while the alias itself (and the
-    // agent binding and peer group that reference it) stay valid.
-    let _env_guard = env_override_lock().await;
-    let temp_home =
-        std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
-    let workspace_dir = temp_home.join("profile-wa-cloud");
-    let config_path = workspace_dir.join("config.toml");
-
-    fs::create_dir_all(&workspace_dir).await.unwrap();
-    fs::write(
-        &config_path,
-        r#"schema_version = 3
-
-[providers.models.ollama.default]
-
-[risk_profiles.shared]
-
-[runtime_profiles.default]
-
-[agents.assistant]
-model_provider = "ollama.default"
-risk_profile = "shared"
-runtime_profile = "default"
-channels = ["whatsapp.business"]
-
-[channels.whatsapp.business]
-enabled = true
-access_token = "EAABx"
-phone_number_id = "123456789"
-verify_token = "verify-me"
-app_secret = "app-secret"
-
-[peer_groups.whatsapp_business]
-channel = "whatsapp.business"
-external_peers = ["+15551234567"]
-"#,
-    )
-    .await
-    .unwrap();
-
-    let original_home = std::env::var("HOME").ok();
-    // SAFETY: test-only, guarded by env_override_lock.
-    unsafe { std::env::set_var("HOME", &temp_home) };
-    // SAFETY: test-only, guarded by env_override_lock.
-    unsafe { std::env::set_var("ZEROCLAW_WORKSPACE", &workspace_dir) };
-
-    let loaded = Box::pin(Config::load_or_init()).await;
-
-    // SAFETY: test-only, guarded by env_override_lock.
-    unsafe { std::env::remove_var("ZEROCLAW_WORKSPACE") };
-    if let Some(home) = original_home {
-        // SAFETY: test-only, guarded by env_override_lock.
-        unsafe { std::env::set_var("HOME", home) };
-    } else {
-        // SAFETY: test-only, guarded by env_override_lock.
-        unsafe { std::env::remove_var("HOME") };
-    }
-    let _ = fs::remove_dir_all(temp_home).await;
-
-    let config = loaded.expect("a Cloud-only WhatsApp alias must load, not hard-fail");
-    config
-        .validate()
-        .expect("a Cloud-only WhatsApp alias must validate");
-
-    let mut paths: Vec<_> = config
-        .retired_surface_warnings
-        .iter()
-        .filter(|warning| warning.code == "whatsapp_cloud_backend_removed")
-        .map(|warning| warning.path.as_str())
-        .collect();
-    paths.sort_unstable();
-    assert_eq!(
-        paths,
-        vec![
-            "channels.whatsapp.*.access_token",
-            "channels.whatsapp.*.app_secret",
-            "channels.whatsapp.*.phone_number_id",
-            "channels.whatsapp.*.verify_token",
-        ]
-    );
-    assert!(
-        config
-            .collect_warnings()
-            .iter()
-            .any(|warning| warning.code == "whatsapp_cloud_backend_removed"),
-        "collect_warnings must replay the tombstone"
-    );
-    let alias = config
-        .channels
-        .whatsapp
-        .get("business")
-        .expect("the alias itself survives");
-    assert!(
-        !alias.is_web_config(),
-        "no Web selector: the runtime skips it"
-    );
-    assert!(
-        config.degraded_sections.is_empty(),
-        "{:?}",
-        config.degraded_sections
-    );
 }
 
 #[test]
@@ -10481,9 +10288,6 @@ async fn every_enum_variant_is_settable() {
 async fn channel_approval_timeout_secs_defaults_to_300() {
     let discord: DiscordConfig = serde_json::from_str(r#"{"bot_token":"tok"}"#).unwrap();
     assert_eq!(discord.approval_timeout_secs, 300);
-
-    let whatsapp: WhatsAppConfig = serde_json::from_str(r#"{}"#).unwrap();
-    assert_eq!(whatsapp.approval_timeout_secs, 300);
 }
 
 #[test]
@@ -10491,10 +10295,6 @@ async fn channel_approval_timeout_secs_explicit_override() {
     let discord: DiscordConfig =
         serde_json::from_str(r#"{"bot_token":"tok","approval_timeout_secs":60}"#).unwrap();
     assert_eq!(discord.approval_timeout_secs, 60);
-
-    let whatsapp: WhatsAppConfig =
-        serde_json::from_str(r#"{"approval_timeout_secs":180}"#).unwrap();
-    assert_eq!(whatsapp.approval_timeout_secs, 180);
 }
 
 // ── Multi-agent cross-reference validators ─────────────────────
@@ -12489,6 +12289,7 @@ const SCHEMA_DELETED: &[&str] = &[
     "voice_wake",
     "amqp",
     "feishu",
+    "whatsapp",
 ];
 
 #[test]

@@ -558,10 +558,8 @@ fn load_params() -> anyhow::Result<Vec<PeerParams>> {
 
 fn validate_keys(params: &[PeerParams]) -> anyhow::Result<()> {
     let inventory = zeroclaw_config::schema::ChannelsConfig::default();
-    // Inventory kinds plus the `[channels.<type>]` config section types: a
-    // peer-group key renders as `channel = "<key>.<alias>"`, and some config
-    // types (e.g. `whatsapp`, served by the `whatsapp-web` inventory row) have
-    // no inventory row of their own.
+    // Inventory kinds plus the `[channels.<type>]` config section types:
+    // a peer-group key renders as `channel = "<key>.<alias>"`.
     let mut known: Vec<&'static str> = inventory.channels().iter().map(|c| c.kind).collect();
     for ty in zeroclaw_config::schema::v2::V3_CHANNEL_TYPES {
         if !known.contains(ty) {

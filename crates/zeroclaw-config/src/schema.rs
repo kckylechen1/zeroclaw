@@ -45,9 +45,8 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "transcription.groq",
 ];
 
-/// Service keys of retired channels (inbound webhook routes removed), of
-/// the retired WhatsApp Cloud API backend (the WhatsApp Web client does not
-/// use the proxy client), and of retired tools. Still accepted by `ProxyConfig::validate` so a
+/// Service keys of retired channels and tools. Still accepted by
+/// `ProxyConfig::validate` so a
 /// leftover `proxy.services` entry does not fail config load, but no longer
 /// advertised: nothing consumes them.
 const RETIRED_PROXY_SERVICE_KEYS: &[&str] = &[
@@ -4568,10 +4567,6 @@ pub struct TranscriptionConfig {
     #[serde(default)]
     #[nested]
     pub local_whisper: Option<LocalWhisperConfig>,
-    /// Also transcribe non-PTT (forwarded/regular) audio messages on WhatsApp,
-    /// not just voice notes. Default: `false` (preserves legacy behavior).
-    #[serde(default)]
-    pub transcribe_non_ptt_audio: bool,
 }
 
 impl Default for TranscriptionConfig {
@@ -4590,7 +4585,6 @@ impl Default for TranscriptionConfig {
             assemblyai: None,
             google: None,
             local_whisper: None,
-            transcribe_non_ptt_audio: false,
         }
     }
 }
@@ -10589,10 +10583,10 @@ pub struct CustomTunnelConfig {
 // ── Channels ─────────────────────────────────────────────────────
 
 /// Channel kinds whose in-process transport runners were retired with the
-/// `zeroclaw-channels` crate (#579/#581). Their `[channels.<kind>]` sections
-/// still parse — schema retirement is a separate, evidence-gated slice
-/// (#584) — but no runtime, bridge, Node, or Tachi consumer reads them, so
-/// no surface may present them as available transports.
+/// `zeroclaw-channels` crate (#579/#581). Their schemas were removed by
+/// #584; leftover sections load with tombstone warnings and are discarded.
+/// Keep these historical names at admission boundaries so no surface
+/// presents them as available transports.
 ///
 /// The retained channel surfaces are exactly the complement:
 /// `telegram` (gateway bridge), `webhook` (gateway ingress), `email`
@@ -10634,7 +10628,7 @@ pub const RETIRED_TRANSPORT_KINDS: &[&str] = &[
 /// (`voice-wake`, `whatsapp-web`).
 pub fn is_retired_transport(kind: &str) -> bool {
     let normalized = kind.replace('-', "_");
-    // `channels()` renders the WhatsApp section key as `whatsapp-web`.
+    // Preserve legacy WhatsApp Web names at rejection boundaries.
     let canonical = match normalized.as_str() {
         "whatsapp_web" => "whatsapp",
         other => other,
@@ -10667,10 +10661,6 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub webhook: HashMap<String, WebhookConfig>,
-    /// WhatsApp channel instances (`[channels.whatsapp.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub whatsapp: HashMap<String, WhatsAppConfig>,
     /// Email channel instances (`[channels.email.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -10787,13 +10777,6 @@ impl ChannelsConfig {
                 retired: false,
             },
             ChannelInfo {
-                kind: "whatsapp-web",
-                name: "WhatsApp Web",
-                desc: "native WhatsApp Web (wa-rs)",
-                configured: self.whatsapp.values().any(|c| c.is_web_config()),
-                retired: false,
-            },
-            ChannelInfo {
                 kind: "email",
                 name: "Email",
                 desc: "email_search/email_read tool config",
@@ -10825,7 +10808,6 @@ impl ChannelsConfig {
         self.telegram.values().any(|c| c.enabled)
             || self.discord.values().any(|c| c.enabled)
             || self.webhook.values().any(|c| c.enabled)
-            || self.whatsapp.values().any(|c| c.enabled)
             || self.email.values().any(|c| c.enabled)
             || self.voice_duplex.values().any(|c| c.enabled)
     }
@@ -10838,12 +10820,11 @@ impl ChannelsConfig {
     /// retired transports (`retired`), so a name-addressed outbound surface
     /// such as `heartbeat.target` refuses them at validation instead of
     /// accepting a target the delivery layer silently drops.
-    pub fn channel_presence(&self) -> [(&'static str, bool, bool, bool); 6] {
+    pub fn channel_presence(&self) -> [(&'static str, bool, bool, bool); 5] {
         [
             ("telegram", !self.telegram.is_empty(), true, false),
             ("discord", !self.discord.is_empty(), true, false),
             ("webhook", !self.webhook.is_empty(), true, false),
-            ("whatsapp", !self.whatsapp.is_empty(), false, true),
             ("email", !self.email.is_empty(), true, false),
             ("voice_duplex", !self.voice_duplex.is_empty(), false, false),
         ]
@@ -10855,9 +10836,7 @@ impl ChannelsConfig {
     /// not-deliverable one.
     pub fn is_retired_channel(&self, name: &str) -> bool {
         let needle = name.to_ascii_lowercase();
-        self.channel_presence()
-            .iter()
-            .any(|(canonical, _, _, retired)| *retired && *canonical == needle)
+        is_retired_transport(&needle)
     }
 
     /// Whether a channel named `name` (case-insensitive) is a known channel
@@ -10911,7 +10890,6 @@ impl Default for ChannelsConfig {
             telegram: HashMap::new(),
             discord: HashMap::new(),
             webhook: HashMap::new(),
-            whatsapp: HashMap::new(),
             email: HashMap::new(),
             voice_duplex: HashMap::new(),
             mqtt: HashMap::new(),
@@ -11421,198 +11399,7 @@ impl ChannelConfig for WebhookConfig {
     }
 }
 
-/// WhatsApp Web usage mode.
-///
-/// `Personal` treats the account as a personal phone — the bot only responds to
-/// incoming messages that pass the DM/group/self-chat policy filters.
-/// `Business` (default) responds to all incoming messages, subject only to the
-/// `allowed_numbers` allowlist.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, zeroclaw_macros::ConfigEnum)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum WhatsAppWebMode {
-    /// Respond to all messages passing the allowlist (default).
-    #[default]
-    Business,
-    /// Apply per-chat-type policies (dm_policy, group_policy, self_chat_mode).
-    Personal,
-}
-
-/// Policy for a particular WhatsApp chat type (DMs or groups) when
-/// `mode = "personal"`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, zeroclaw_macros::ConfigEnum)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum WhatsAppChatPolicy {
-    /// Only respond to senders on the `allowed_numbers` list (default).
-    #[default]
-    Allowlist,
-    /// Ignore all messages in this chat type.
-    Ignore,
-    /// Respond to every message regardless of allowlist.
-    All,
-}
-
-/// WhatsApp channel configuration, served by the WhatsApp Web backend.
-///
-/// An alias starts only when it carries a Web selector (`session_path`,
-/// `pair_phone`, `pair_code`, `ws_url` or `mode = "personal"`). The former
-/// Cloud API fields (`access_token`, `phone_number_id`, `verify_token`,
-/// `app_secret`, `proxy_url`) were retired with that backend; a leftover one
-/// is ignored with a `whatsapp_cloud_backend_removed` warning.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.whatsapp"]
-pub struct WhatsAppConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Session database path for the WhatsApp Web client.
-    /// When set, enables native WhatsApp Web mode with wa-rs
-    #[tab(Connection)]
-    #[serde(default)]
-    pub session_path: Option<String>,
-    /// Phone number for pair code linking (Web mode, optional)
-    /// Format: country code + number (e.g., "15551234567")
-    /// If not set, QR code pairing will be used
-    #[tab(Connection)]
-    #[serde(default)]
-    pub pair_phone: Option<String>,
-    /// Custom pair code for linking (Web mode, optional)
-    /// Leave empty to let WhatsApp generate one
-    #[tab(Connection)]
-    #[serde(default)]
-    pub pair_code: Option<String>,
-    /// Override the WhatsApp Web WebSocket URL (Web mode, optional). Used
-    /// by integration tests and proxy setups; leave unset to use the
-    /// default endpoint that ships with `wa-rs`.
-    #[tab(Connection)]
-    #[serde(default)]
-    pub ws_url: Option<String>,
-    /// When true, only respond to messages that @-mention the bot in groups (Web mode only).
-    /// Direct messages are always processed.
-    /// Bot identity is resolved from the wa-rs device at runtime; `pair_phone` seeds it on first connect.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub mention_only: bool,
-    /// When true in WhatsApp Web group chats, unaddressed messages that pass
-    /// sender/chat authorization are recorded as passive conversation context
-    /// without starting an agent turn. Default: `false`.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub passive_group_context: bool,
-    /// Cancel an in-flight response from this channel sender when a newer
-    /// WhatsApp message arrives. Default: `false`.
-    #[serde(default)]
-    pub interrupt_on_new_message: bool,
-    /// Usage mode for WhatsApp Web: "business" (default) or "personal".
-    /// In personal mode the bot applies dm_policy, group_policy, and
-    /// self_chat_mode to decide which chats to respond in.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub mode: WhatsAppWebMode,
-    /// Policy for direct messages when mode = "personal".
-    /// "allowlist" (default) | "ignore" | "all".
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub dm_policy: WhatsAppChatPolicy,
-    /// Policy for group chats when mode = "personal".
-    /// "allowlist" (default) | "ignore" | "all".
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub group_policy: WhatsAppChatPolicy,
-    /// When true and mode = "personal", always respond to messages in the
-    /// user's own self-chat (Notes to Self). Defaults to false.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub self_chat_mode: bool,
-    /// Regex patterns for DM mention gating (case-insensitive).
-    /// When non-empty, only direct messages matching at least one pattern are
-    /// processed; matched fragments are stripped from the forwarded content.
-    /// Example: `["@?ZeroClaw", "\\+?15555550123"]`
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub dm_mention_patterns: Vec<String>,
-    /// Regex patterns for group-chat mention gating (case-insensitive).
-    /// When non-empty, only group messages matching at least one pattern are
-    /// processed; matched fragments are stripped from the forwarded content.
-    /// Example: `["@?ZeroClaw", "\\+?15555550123"]`
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub group_mention_patterns: Vec<String>,
-    /// Allowed group chats by JID (Web mode). An empty list (the default)
-    /// permits all groups; a non-empty list drops every group message whose
-    /// chat JID matches no entry. Each entry matches either the full group
-    /// JID (`123456789012345@g.us`) or the JID user part - the segment before
-    /// `@` (`123456789012345`) - compared exactly, not as a string prefix.
-    /// Direct messages bypass this filter regardless of list contents.
-    /// Modeled on the Matrix channel's `allowed_rooms`; it gates group
-    /// identity, which `dm_policy`/`group_policy` (chat type) and the
-    /// sender allowlist (sender) do not.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub allowed_groups: Vec<String>,
-    /// Seconds to wait for operator approval on `always_ask` tools before auto-denying.
-    /// Currently inert: the WhatsApp Web backend has no interactive approval
-    /// prompt, so `always_ask` tools fall back to the default policy.
-    #[tab(Behavior)]
-    #[serde(default = "default_channel_approval_timeout_secs")]
-    pub approval_timeout_secs: u64,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-    /// Per-(channel, recipient) outbound pacing floor in seconds.
-    /// Range: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).
-    #[serde(default)]
-    pub reply_min_interval_secs: u64,
-    /// Per-(channel, recipient) outbound pacing queue depth.
-    /// Range: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`
-    /// and this value is `0`, the pacing wrapper substitutes
-    /// `DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the
-    /// newest send is dropped and a `WARN` is logged.
-    #[serde(default)]
-    pub reply_queue_depth_max: u16,
-}
-
-impl ChannelConfig for WhatsAppConfig {
-    fn name() -> &'static str {
-        "WhatsApp"
-    }
-    fn desc() -> &'static str {
-        "native WhatsApp Web (wa-rs)"
-    }
-}
-
-impl_reply_pacing!(TelegramConfig, DiscordConfig, WebhookConfig, WhatsAppConfig,);
-
-impl WhatsAppConfig {
-    /// Any Web-only selector that signals WhatsApp Web intent. `mode`
-    /// defaults to `Business` on every config, so only a non-default
-    /// `Personal` mode counts; the rest are `Option` fields absent by
-    /// default.
-    pub fn has_web_selector(&self) -> bool {
-        self.session_path.is_some()
-            || self.pair_phone.is_some()
-            || self.pair_code.is_some()
-            || self.ws_url.is_some()
-            || self.mode == WhatsAppWebMode::Personal
-    }
-
-    /// Check if this is a valid Web config. The Web client defaults a
-    /// missing `session_path`, so any Web selector is sufficient. An alias
-    /// without one (for example a leftover Cloud API alias whose retired
-    /// fields were dropped at load) is not started.
-    pub fn is_web_config(&self) -> bool {
-        self.has_web_selector()
-    }
-}
+impl_reply_pacing!(TelegramConfig, DiscordConfig, WebhookConfig);
 
 // ── Security Config ─────────────────────────────────────────────────
 
@@ -14133,7 +13920,6 @@ impl Config {
         rows("telegram", &c.telegram)
             .chain(rows("discord", &c.discord))
             .chain(rows("webhook", &c.webhook))
-            .chain(rows("whatsapp", &c.whatsapp))
             .collect()
     }
 

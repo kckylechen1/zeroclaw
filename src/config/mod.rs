@@ -30,8 +30,7 @@ pub use schema::{
     SkillsPromptInjectionMode, SopConfig, SqliteStorageConfig, StorageConfig, StreamMode,
     TelegramConfig, TextBrowserConfig, ToolFilterGroup, ToolFilterGroupMode, TranscriptionConfig,
     TtsConfig, TtsProviderConfig, TunnelConfig, VerifiableIntentConfig, WebFetchConfig,
-    WebSearchConfig, WebhookConfig, WhatsAppChatPolicy, WhatsAppWebMode,
-    read_persisted_proxy_for_boot,
+    WebSearchConfig, WebhookConfig, read_persisted_proxy_for_boot,
 };
 
 pub use schema::ModelProviderConfig;

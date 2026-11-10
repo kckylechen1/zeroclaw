@@ -30,24 +30,17 @@ const END_STATE_MARKER: &str = "#584-END-STATE";
 /// [`require_non_empty`].
 #[derive(Clone, Copy)]
 pub enum Cause {
-    /// The list came from retired registry rows, or from the Cargo.toml rows
-    /// (`dist_extra_features`, `dist_target_exclusions`) whose only entries the
-    /// last retired schema carries.
+    /// The list came from required distribution or target-policy rows.
+    /// Empty samples fail instead of silently passing a walk.
     Retired,
     /// The list came from the #584-protected channel surfaces.
     Protected,
 }
 
-/// Cause: the last retired schema is gone.
-const LAST_RETIRED_SCHEMA: &str = "the channel registry marks no transport retired any \
-     more, i.e. the #584 batch that removes the LAST retired schema ([channels.whatsapp] / \
-     registry row `whatsapp-web`, feature `whatsapp-web`) has landed. That batch must DELETE \
-     this consumer together with the rest of the retired-only paths — the doctor retired-warning \
-     tests and their sample, `retired_channel_features` here, the feature-matrix retired walk, \
-     `RETIRED_TRANSPORT_KINDS`/`is_retired_transport` in crates/zeroclaw-config/src/schema.rs, \
-     and `[package.metadata.zeroclaw] dist_extra_features` / `dist_target_exclusions` with their \
-     loops in xtask/src/generate/*.rs (AGENTS.md rule 4) — instead of leaving the walk to \
-     iterate nothing.";
+/// Cause: a required distribution or target-policy sample is gone.
+const LAST_RETIRED_SCHEMA: &str = "the sampled distribution rows or target policy no longer \
+     exist. Remove a consumer only when its behavior has no remaining owner. \
+     Do not turn an empty walk into a passing assertion.";
 
 /// Cause: no protected channel surface ships a row any more.
 const PROTECTED_SURFACE: &str = "no #584-protected channel surface (CLI, Telegram, \
@@ -163,7 +156,7 @@ fn canonical_kind(kind: &str) -> String {
 }
 
 /// The registry kind a feature stands for: `channel-voice-call` ->
-/// `voice_call`, `whatsapp-web` -> `whatsapp_web`.
+/// `voice_call`, `voice-wake` -> `voice_wake`.
 fn feature_kind(feature: &str) -> String {
     canonical_kind(feature.strip_prefix("channel-").unwrap_or(feature))
 }
@@ -187,7 +180,7 @@ fn registry_kind(kind: &str) -> Option<bool> {
 }
 
 /// Whether a live feature is a channel row: the `channel-*` convention plus the
-/// legacy unprefixed rows the registry knows (`whatsapp-web`, `voice-wake`).
+/// legacy unprefixed rows the registry knows (`voice-wake`).
 pub fn is_channel_feature(feature: &str) -> bool {
     let kind = feature_kind(feature);
     feature.starts_with("channel-") || registry_kind(&kind).is_some() || is_retired_transport(&kind)
@@ -213,7 +206,7 @@ pub fn channel_features() -> Vec<String> {
 }
 
 /// Feature names a protected kind may ship under: the `channel-<kind>`
-/// convention plus the legacy unprefixed spelling (`whatsapp-web`).
+/// convention plus the legacy unprefixed spelling (`voice-wake`).
 fn feature_candidates(kind: &str) -> [String; 2] {
     let kebab = kind.replace('_', "-");
     [format!("channel-{kebab}"), kebab]
@@ -249,18 +242,6 @@ pub fn protected_retained_channel_features() -> Vec<String> {
     let sampled = sampled.into_iter().collect::<Vec<_>>();
     require_non_empty("protected channel sample", Cause::Protected, sampled.len());
     sampled
-}
-
-/// Channel features whose kind the live registry currently marks retired.
-///
-/// Deliberately *not* asserted non-empty here: the caller decides whether an
-/// empty retired set is the #584 end state (delete the consumer) or a bug, so
-/// every consumer calls [`require_non_empty`] itself before looping.
-pub fn retired_channel_features() -> Vec<String> {
-    channel_features()
-        .into_iter()
-        .filter(|f| kind_is_retired(&feature_kind(f)))
-        .collect()
 }
 
 #[cfg(test)]
@@ -309,33 +290,6 @@ mod tests {
             assert!(
                 expected.iter().any(|s| s == feature),
                 "{feature} is a #584-protected surface and must still ship"
-            );
-        }
-    }
-
-    /// The retired side is drawn from the live registry, is disjoint from the
-    /// protected sample and is non-empty while the campaign is open: an empty
-    /// retired set would make every retired-side walk vacuous, so the batch that
-    /// empties it deletes those consumers (see the cause text).
-    #[test]
-    fn retired_sample_is_registry_drawn_and_disjoint_from_protected() {
-        assert!(
-            registry_channels().iter().any(|(_, retired)| *retired),
-            "{END_STATE_MARKER} the registry's retired-transport list is empty here; {}",
-            LAST_RETIRED_SCHEMA,
-        );
-
-        let retired = retired_channel_features();
-        require_non_empty("retired sample", Cause::Retired, retired.len());
-        let protected = protected_retained_channel_features();
-        for feature in retired {
-            assert!(
-                kind_is_retired(&feature_kind(&feature)),
-                "{feature} is sampled as retired but the registry disagrees"
-            );
-            assert!(
-                !protected.contains(&feature),
-                "{feature} is sampled as both retained and retired"
             );
         }
     }

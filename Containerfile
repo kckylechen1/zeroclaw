@@ -178,7 +178,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
     # Release build — zeroclawlabs (daemon)
     # >>> generated:container-standard by `cargo generate installers` - do not edit <<<
-    ZEROCLAW_FEATURES="agent-runtime,channel-acp-server,channel-discord,channel-email,channel-telegram,channel-webhook,gateway,integrations-saas,observability-prometheus,schema-export,whatsapp-web"
+    ZEROCLAW_FEATURES="agent-runtime,channel-acp-server,channel-discord,channel-email,channel-telegram,channel-webhook,gateway,integrations-saas,observability-prometheus,schema-export"
 # >>> end generated:container-standard <<<
     CARGO_TARGET_DIR=/target \
     cargo build \
@@ -255,7 +255,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
     # Release build — zeroclawlabs (all channels)
     # >>> generated:container-fat by `cargo generate installers` - do not edit <<<
-    ZEROCLAW_FEATURES="agent-runtime,channel-acp-server,channel-discord,channel-email,channel-notion,channel-telegram,channel-webhook,gateway,integrations-saas,memory-tachi,nodes,observability-prometheus,provider-gitea,provider-github,sandbox-bubblewrap,sandbox-landlock,schema-export,whatsapp-web"
+    ZEROCLAW_FEATURES="agent-runtime,channel-acp-server,channel-discord,channel-email,channel-notion,channel-telegram,channel-webhook,gateway,integrations-saas,memory-tachi,nodes,observability-prometheus,provider-gitea,provider-github,sandbox-bubblewrap,sandbox-landlock,schema-export"
 # >>> end generated:container-fat <<<
     CARGO_TARGET_DIR=/target \
     cargo build \

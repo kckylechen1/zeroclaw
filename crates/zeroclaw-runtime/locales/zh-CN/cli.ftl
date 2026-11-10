@@ -263,10 +263,6 @@ cli-desktop-long-about =
     zeroclaw desktop              # 启动配套应用
     zeroclaw desktop --install    # 下载并安装
 channel-needs-quickstart-reply = 此代理尚未完全设置。操作员需要先运行 Quickstart，然后我才能回复。
-channel-whatsapp-web-feature-missing-warning = ⚠ WhatsApp Web 已配置，但未编译 'whatsapp-web' 功能。
-channel-whatsapp-web-feature-missing-build = 使用以下命令构建/运行：cargo build --features whatsapp-web
-channel-whatsapp-web-feature-missing-install = 如果已安装到 PATH，请使用以下命令重新安装：cargo install --path . --force --locked --features whatsapp-web
-channel-whatsapp-web-feature-missing-error = WhatsApp Web 通道需要 'whatsapp-web' 功能。使用以下命令启用：cargo build --features whatsapp-web（或者，如果已安装到 PATH：cargo install --path . --force --locked --features whatsapp-web）
 channel-discord-interaction-unauthorized = 你没有权限在此处使用该命令。
 channel-discord-interaction-malformed = 未知或格式错误的命令。
 channel-discord-interaction-unavailable = 该命令已不可用，或其输入为空。
@@ -274,8 +270,6 @@ channel-discord-component-expired = 此按钮或菜单已过期或已被使用�
 channel-discord-approval-recorded = 您的决定已记录。
 channel-discord-delivery-failure-note-one = （注意：我无法传送 {$count} 个文件。）
 channel-discord-delivery-failure-note-many = （注意：我无法传送 {$count} 个文件。）
-channel-whatsapp-web-delivery-failure-note-one = （注意：我无法传送 {$count} 个 WhatsApp 媒体附件。）
-channel-whatsapp-web-delivery-failure-note-many = （注意：我无法传送 {$count} 个 WhatsApp 媒体附件。）
 channel-line-bind-success = ✅ 已配对！现在可以聊天了。
 channel-line-bind-invalid-code = ❌ 代码无效。请重试。
 channel-line-bind-rate-limited = ⏳ 尝试次数过多。请在 { $secs }s 后重试。

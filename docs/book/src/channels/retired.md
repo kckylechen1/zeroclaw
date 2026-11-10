@@ -12,7 +12,7 @@ channel. The [channels overview](./overview.md) lists the live surfaces.
 - Mattermost: schema removed (#584 Slice 3); leftover `[channels.mattermost]` sections tombstone at load
 - LINE: schema removed (#584 Slice 3); leftover `[channels.line]` sections tombstone at load
 - Signal: schema removed (#584 Slice 3); leftover `[channels.signal]` sections tombstone at load
-- [WhatsApp](./whatsapp.md)
+- WhatsApp: schema removed (#584 Slice 3); leftover `[channels.whatsapp]` and V1 `[channels_config.whatsapp]` sections warn at load. Authentication, allowlist, policy and session fields have no active consumer; remove the section. No WhatsApp bridge or replacement transport is enabled.
 - [Other chat platforms](./chat-others.md): chat transports whose schemas are removed (iMessage, WeChat, DingTalk, Lark/Feishu, QQ, IRC, Mochat, Twitch); Notion is a retired SaaS integration
 - [Social](./social.md): Bluesky, Nostr, Twitter/X, Reddit
 - Git: schema removed (#584 Slice 3); leftover `[channels.git]` sections tombstone at load

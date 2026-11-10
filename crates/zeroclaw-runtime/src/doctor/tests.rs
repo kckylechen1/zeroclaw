@@ -664,66 +664,9 @@ fn config_validation_surfaces_dangling_fallback_ref() {
     assert_eq!(fallback_item.unwrap().severity, Severity::Warn);
 }
 
-/// The one transport the live channel registry still marks retired (#584).
-const RETIRED_SAMPLE_KIND: &str = "whatsapp-web";
-
-/// A config whose only configured channel is that retired row, populated
-/// through its **real** section.
-///
-/// `[channels.whatsapp]` with a Web selector is what `ChannelsConfig::channels()`
-/// renders as the retired `whatsapp-web` row: `is_web_config` needs one of
-/// `session_path` / `pair_phone` / `pair_code` / `ws_url` / personal mode, and
-/// `session_path` is the documented Web-intent selector. Earlier revisions
-/// pinned `config.channels.wechat`, which went red in the batch that retired
-/// WeChat rather than in one that changed doctor.
-///
-/// The registry is the accept gate below: if that section or selector stops
-/// making the row `configured`, or a live row sneaks in, both retired tests
-/// fail loudly instead of degrading into a "nothing configured" config that
-/// would make the retired-only one vacuous. The batch that removes
-/// `[channels.whatsapp]` deletes these tests together with the retired-transport
-/// warning path they guard — `RETIRED_TRANSPORT_KINDS` / `is_retired_transport`
-/// in crates/zeroclaw-config/src/schema.rs and the warning in `doctor/mod.rs`
-/// (AGENTS.md rule 4) — rather than leaving them to assert an empty retired set.
-fn config_with_one_retired_transport() -> Config {
-    let mut config = Config::default();
-    config.channels.whatsapp.insert(
-        "default".to_string(),
-        zeroclaw_config::schema::WhatsAppConfig {
-            session_path: Some("/tmp/zeroclaw-doctor-retired-session.db".to_string()),
-            ..Default::default()
-        },
-    );
-
-    let channels = config.channels.channels();
-    let configured = |retired: bool| -> Vec<&str> {
-        channels
-            .iter()
-            .filter(move |info| info.configured && info.retired == retired)
-            .map(|info| info.kind)
-            .collect()
-    };
-    assert_eq!(
-        configured(true).as_slice(),
-        [RETIRED_SAMPLE_KIND],
-        "#584-END-STATE the sample must configure exactly the retired row \
-         {RETIRED_SAMPLE_KIND}: when the batch removes the last retired schema it deletes these \
-         tests with the retired-transport warning path, it never leaves them to pass vacuously."
-    );
-    assert!(
-        configured(false).is_empty(),
-        "the retired-only test needs a config with no live channel configured, got {:?}",
-        configured(false)
-    );
-    config
-}
-
 #[test]
-fn doctor_flags_retired_transports_alongside_live_channels() {
-    // A configured retired section is named even when a live surface is
-    // also configured (#584): it is dead weight the operator should
-    // remove, not a pass condition.
-    let mut config = config_with_one_retired_transport();
+fn doctor_reports_configured_live_channels() {
+    let mut config = Config::default();
     config.channels.telegram.insert(
         "default".to_string(),
         zeroclaw_config::schema::TelegramConfig {
@@ -739,38 +682,18 @@ fn doctor_flags_retired_transports_alongside_live_channels() {
         .find(|i| i.message.contains("at least one live channel surface"))
         .expect("live surface should pass");
     assert_eq!(live.severity, Severity::Ok);
-    let retired_item = items
-        .iter()
-        .find(|i| i.message.contains("retired transports configured"))
-        .expect("retired section should be named");
-    assert!(
-        retired_item.message.contains(&format!(
-            "retired transports configured ({RETIRED_SAMPLE_KIND})"
-        )),
-        "the warning must name the populated retired transport {RETIRED_SAMPLE_KIND}, got {}",
-        retired_item.message
-    );
-    assert_eq!(retired_item.severity, Severity::Warn);
 }
 
 #[test]
-fn doctor_warns_when_only_retired_transports_are_configured() {
-    let config = config_with_one_retired_transport();
-
+fn doctor_warns_when_no_live_channel_is_configured() {
+    let config = Config::default();
     let mut items = Vec::new();
     check_config_semantics(&config, &mut items);
-    assert!(
-        items
-            .iter()
-            .any(|i| i.message.contains("no live channel configured")),
-        "retired-only config must not pass the live-channel check"
-    );
-    let named = format!("retired transports configured ({RETIRED_SAMPLE_KIND})");
-    assert!(
-        items.iter().any(|i| i.message.contains(&named)),
-        "the retired transport {RETIRED_SAMPLE_KIND} must be named, got {:?}",
-        items.iter().map(|i| &i.message).collect::<Vec<_>>()
-    );
+    let item = items
+        .iter()
+        .find(|i| i.message.contains("no live channel configured"))
+        .expect("a config without a live channel must warn");
+    assert_eq!(item.severity, Severity::Warn);
 }
 
 #[test]

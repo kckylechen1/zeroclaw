@@ -268,15 +268,6 @@ export const enumValues: EnumValues = {
     "restarting",
     "failed"
   ],
-  "WhatsAppChatPolicy": [
-    "allowlist",
-    "ignore",
-    "all"
-  ],
-  "WhatsAppWebMode": [
-    "business",
-    "personal"
-  ],
   "WireApi": [
     "responses",
     "chat_completions"

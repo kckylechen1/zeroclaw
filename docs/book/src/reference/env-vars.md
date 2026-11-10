@@ -103,4 +103,3 @@ A handful of fields live as schema fields, reachable via the standard mapping:
 3. **Gemini OAuth**: `[providers.models.gemini.<alias>] oauth_client_id` and `oauth_client_secret`; optional `oauth_project` pins a Code Assist GCP project ID.
 4. **KiloCLI / Gemini CLI paths**: `[providers.models.kilocli.<alias>] binary_path` and `[providers.models.gemini_cli.<alias>] binary_path`.
 5. **Transcription / TTS keys**: `[transcription].api_key`, `[providers.tts.openai.<alias>].api_key`, `[providers.tts.elevenlabs.<alias>].api_key`, `[providers.tts.google.<alias>].api_key`.
-6. **Notion / WhatsApp**: `[notion].api_key`, `[channels.whatsapp.<alias>].ws_url` (test/proxy WebSocket override).

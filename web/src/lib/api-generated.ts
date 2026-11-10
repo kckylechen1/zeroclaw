@@ -3770,10 +3770,6 @@ export interface components {
             /** @description WeCom AI Bot WebSocket channel instances (`[channels.wecom_ws.<alias>]`). */
             wecom_ws?: {
             };
-            /** @description WhatsApp channel instances (`[channels.whatsapp.<alias>]`). */
-            whatsapp?: {
-                [key: string]: components["schemas"]["WhatsAppConfig"];
-            };
         };
         /** @description A single classification rule mapping message patterns to a model hint. */
         ClassificationRule: {
@@ -5517,8 +5513,7 @@ export interface components {
              *       "max_audio_bytes": null,
              *       "max_duration_secs": 120,
              *       "model": "whisper-large-v3-turbo",
-             *       "openai": null,
-             *       "transcribe_non_ptt_audio": false
+             *       "openai": null
              *     }
              */
             transcription: components["schemas"]["TranscriptionConfig"];
@@ -21274,12 +21269,6 @@ export interface components {
              * @default null
              */
             openai: components["schemas"]["OpenAiSttConfig"] | null;
-            /**
-             * @description Also transcribe non-PTT (forwarded/regular) audio messages on WhatsApp,
-             *     not just voice notes. Default: `false` (preserves legacy behavior).
-             * @default false
-             */
-            transcribe_non_ptt_audio: boolean;
         };
         /** @description Rates for a transcription model, in USD per minute of audio. */
         TranscriptionCostRates: {
@@ -22637,193 +22626,6 @@ export interface components {
              */
             send_url: string | null;
         };
-        /**
-         * @description Policy for a particular WhatsApp chat type (DMs or groups) when
-         *     `mode = "personal"`.
-         */
-        WhatsAppChatPolicy: "allowlist" | "ignore" | "all";
-        /**
-         * @description WhatsApp channel configuration (Cloud API or Web mode).
-         *
-         *     Set `phone_number_id` for Cloud API mode, or `session_path` for Web mode.
-         */
-        WhatsAppConfig: {
-            /**
-             * @description Access token from Meta Business Suite (Cloud API mode)
-             * @default null
-             */
-            access_token: string | null;
-            /**
-             * @description Allowed group chats by JID (Web mode). An empty list (the default)
-             *     permits all groups; a non-empty list drops every group message whose
-             *     chat JID matches no entry. Each entry matches either the full group
-             *     JID (`123456789012345@g.us`) or the JID user part - the segment before
-             *     `@` (`123456789012345`) - compared exactly, not as a string prefix.
-             *     Direct messages bypass this filter regardless of list contents.
-             *     Modeled on the Matrix channel's `allowed_rooms`; it gates group
-             *     identity, which `dm_policy`/`group_policy` (chat type) and the
-             *     sender allowlist (sender) do not.
-             * @default []
-             */
-            allowed_groups: string[];
-            /**
-             * @description App secret from Meta Business Suite (for webhook signature verification)
-             *     Can also be set via `ZEROCLAW_WHATSAPP_APP_SECRET` environment variable
-             *     Only used in Cloud API mode
-             * @default null
-             */
-            app_secret: string | null;
-            /**
-             * Format: uint64
-             * @description Seconds to wait for operator approval on `always_ask` tools before auto-denying.
-             * @default 300
-             */
-            approval_timeout_secs: number;
-            /**
-             * @description Regex patterns for DM mention gating (case-insensitive).
-             *     When non-empty, only direct messages matching at least one pattern are
-             *     processed; matched fragments are stripped from the forwarded content.
-             *     Example: `["@?ZeroClaw", "\\+?15555550123"]`
-             * @default []
-             */
-            dm_mention_patterns: string[];
-            /**
-             * @description Policy for direct messages when mode = "personal".
-             *     "allowlist" (default) | "ignore" | "all".
-             * @default allowlist
-             */
-            dm_policy: components["schemas"]["WhatsAppChatPolicy"];
-            /**
-             * @description Whether this channel is active. The runtime only loads channels whose
-             *     `enabled = true`. Default: `false` so an operator who pastes a partial
-             *     `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-             *     live before the rest of its config is filled in.
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Tools excluded from this channel's tool spec. When set, these tools
-             *     are not exposed to the model when responding via this channel.
-             * @default []
-             */
-            excluded_tools: string[];
-            /**
-             * @description Regex patterns for group-chat mention gating (case-insensitive).
-             *     When non-empty, only group messages matching at least one pattern are
-             *     processed; matched fragments are stripped from the forwarded content.
-             *     Example: `["@?ZeroClaw", "\\+?15555550123"]`
-             * @default []
-             */
-            group_mention_patterns: string[];
-            /**
-             * @description Policy for group chats when mode = "personal".
-             *     "allowlist" (default) | "ignore" | "all".
-             * @default allowlist
-             */
-            group_policy: components["schemas"]["WhatsAppChatPolicy"];
-            /**
-             * @description Cancel an in-flight response from this channel sender when a newer
-             *     WhatsApp message arrives. Default: `false`.
-             * @default false
-             */
-            interrupt_on_new_message: boolean;
-            /**
-             * @description When true, only respond to messages that @-mention the bot in groups (Web mode only).
-             *     Direct messages are always processed.
-             *     Bot identity is resolved from the wa-rs device at runtime; `pair_phone` seeds it on first connect.
-             * @default false
-             */
-            mention_only: boolean;
-            /**
-             * @description Usage mode for WhatsApp Web: "business" (default) or "personal".
-             *     In personal mode the bot applies dm_policy, group_policy, and
-             *     self_chat_mode to decide which chats to respond in.
-             * @default business
-             */
-            mode: components["schemas"]["WhatsAppWebMode"];
-            /**
-             * @description Custom pair code for linking (Web mode, optional)
-             *     Leave empty to let WhatsApp generate one
-             * @default null
-             */
-            pair_code: string | null;
-            /**
-             * @description Phone number for pair code linking (Web mode, optional)
-             *     Format: country code + number (e.g., "15551234567")
-             *     If not set, QR code pairing will be used
-             * @default null
-             */
-            pair_phone: string | null;
-            /**
-             * @description When true in WhatsApp Web group chats, unaddressed messages that pass
-             *     sender/chat authorization are recorded as passive conversation context
-             *     without starting an agent turn. Default: `false`.
-             * @default false
-             */
-            passive_group_context: boolean;
-            /**
-             * @description Phone number ID from Meta Business API (Cloud API mode)
-             * @default null
-             */
-            phone_number_id: string | null;
-            /**
-             * @description Per-channel proxy URL (http, https, socks5, socks5h).
-             *     Overrides the global `[proxy]` setting for this channel only.
-             * @default null
-             */
-            proxy_url: string | null;
-            /**
-             * Format: uint64
-             * @description Per-(channel, recipient) outbound pacing floor in seconds.
-             *     Range: `0..=REPLY_MIN_INTERVAL_MAX_SECS` (0 disables).
-             * @default 0
-             */
-            reply_min_interval_secs: number;
-            /**
-             * Format: uint16
-             * @description Per-(channel, recipient) outbound pacing queue depth.
-             *     Range: `0..=REPLY_QUEUE_DEPTH_CEILING`. When `reply_min_interval_secs > 0`
-             *     and this value is `0`, the pacing wrapper substitutes
-             *     `DEFAULT_REPLY_QUEUE_DEPTH` (16). When the queue is full, the
-             *     newest send is dropped and a `WARN` is logged.
-             * @default 0
-             */
-            reply_queue_depth_max: number;
-            /**
-             * @description When true and mode = "personal", always respond to messages in the
-             *     user's own self-chat (Notes to Self). Defaults to false.
-             * @default false
-             */
-            self_chat_mode: boolean;
-            /**
-             * @description Session database path for WhatsApp Web client (Web mode)
-             *     When set, enables native WhatsApp Web mode with wa-rs
-             * @default null
-             */
-            session_path: string | null;
-            /**
-             * @description Webhook verify token (you define this, Meta sends it back for verification)
-             *     Only used in Cloud API mode
-             * @default null
-             */
-            verify_token: string | null;
-            /**
-             * @description Override the WhatsApp Web WebSocket URL (Web mode, optional). Used
-             *     by integration tests and proxy setups; leave unset to use the
-             *     default endpoint that ships with `wa-rs`.
-             * @default null
-             */
-            ws_url: string | null;
-        };
-        /**
-         * @description WhatsApp Web usage mode.
-         *
-         *     `Personal` treats the account as a personal phone — the bot only responds to
-         *     incoming messages that pass the DM/group/self-chat policy filters.
-         *     `Business` (default) responds to all incoming messages, subject only to the
-         *     `allowed_numbers` allowlist.
-         */
-        WhatsAppWebMode: "business" | "personal";
         /**
          * @description Wire protocol flavor for the model_provider client. `responses` routes
          *     through OpenAI's Responses API (`POST /v1/responses`);

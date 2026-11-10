@@ -378,22 +378,18 @@ allowed_users = ["@user:example.com"]
 
 #[test]
 fn config_toplevel_cli_section_with_whatsapp_parses() {
-    // Exact config from
+    // The WhatsApp schema retired (#584): the section tombstones at load
+    // instead of failing the parse, and the top-level [cli] section still
+    // applies.
     let toml_str = r#"
 [cli]
 
 [channels.whatsapp.default]
 session_path = "~/.zeroclaw/state/whatsapp-web/session.db"
-allowed_numbers = ["*"]
 "#;
     let parsed: Config = toml::from_str(toml_str)
-        .expect("top-level [cli] section with [channels.whatsapp] should parse");
-    assert!(!parsed.channels.whatsapp.is_empty());
-    let wa = parsed.channels.whatsapp.get("default").unwrap();
-    assert_eq!(
-        wa.session_path.as_deref(),
-        Some("~/.zeroclaw/state/whatsapp-web/session.db")
-    );
+        .expect("top-level [cli] section with a retired [channels.whatsapp] should parse");
+    assert!(parsed.channels.cli);
 }
 
 #[test]
@@ -409,14 +405,12 @@ allowed_numbers = ["*"]
     let parsed: Config =
         toml::from_str(toml_str).expect("explicit channels.cli=true with whatsapp should parse");
     assert!(parsed.channels.cli);
-    assert!(!parsed.channels.whatsapp.is_empty());
 }
 
 #[test]
 fn config_empty_parses_with_all_defaults() {
     let config = migrate("");
     assert!(config.channels.cli);
-    assert!(config.channels.whatsapp.is_empty());
     assert!(
         (config
             .providers
