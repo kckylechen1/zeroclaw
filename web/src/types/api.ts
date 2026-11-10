@@ -274,6 +274,11 @@ export interface WsMessage {
   input_tokens?: number;
   output_tokens?: number;
   last_input_tokens?: number;
+  // Completion attribution: provider keeps the configured turn-start identity;
+  // provider_ref/model identify the final successful runtime request route.
+  provider?: string;
+  provider_ref?: string;
+  model?: string;
   // Turn-control state (present on "turn_state" frames; see #457). `turn_id`
   // is null when no turn is active; `revision` orders buffered reconnect events.
   control_version?: number;

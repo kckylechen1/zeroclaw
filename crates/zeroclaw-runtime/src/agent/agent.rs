@@ -181,6 +181,11 @@ impl Drop for Agent {
 pub struct StreamedTurnSuccess {
     pub response: String,
     pub new_messages: Vec<ConversationMessage>,
+    /// Runtime route of the last successful model call, or the selected route
+    /// when no call ran (for example, a response-cache hit). Provider-internal
+    /// retries/fallbacks are not inferred from this completion metadata.
+    pub provider_name: String,
+    pub model: String,
 }
 
 #[derive(Debug)]

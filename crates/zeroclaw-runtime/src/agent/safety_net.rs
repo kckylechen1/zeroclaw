@@ -14,6 +14,9 @@ use zeroclaw_providers::{ChatResponse, ToolCall};
 #[path = "safety_net_loop_recovery.rs"]
 mod loop_recovery;
 
+#[path = "safety_net_completion.rs"]
+mod completion;
+
 // ── shared fixtures ─────────────────────────────────────────────────────
 
 struct TestAgent {

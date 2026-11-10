@@ -247,6 +247,7 @@ impl Agent {
                     Some(&repetition_guard),
                     false,
                     Some(&self.side_query),
+                    None,
                 ),
             )
             .await;
@@ -465,9 +466,17 @@ impl Agent {
                 forward_history_trim_notice(&event_tx, notice).await;
                 self.observer.record_event(&ObserverEvent::TurnComplete);
                 committed_response.push_str(&cached);
+                let route = crate::agent::turn::DispatchedModelRoute::selected(
+                    self.full_config(),
+                    &self.model_provider_name,
+                    &effective_model,
+                );
+                guard.set_model_route(route.provider_name.clone(), route.model.clone());
                 return Ok(StreamedTurnSuccess {
                     response: committed_response,
                     new_messages: new_msgs,
+                    provider_name: route.provider_name,
+                    model: route.model,
                 });
             }
             self.observer.record_event(&ObserverEvent::CacheMiss {
@@ -513,6 +522,9 @@ impl Agent {
         );
 
         // ── Round loop: one tool-call-loop run per steering round ──────────
+        // Local to this API turn: trimming or resetting /btw state cannot erase
+        // the completed request route, and a later turn cannot inherit it.
+        let dispatched_route = crate::agent::turn::DispatchedModelRouteSink::default();
         for round in 0..self.config.resolved.max_tool_iterations {
             // Early exit if the caller cancelled this turn (e.g. user abort)
             if cancel_token
@@ -663,6 +675,7 @@ impl Agent {
                     Some(&repetition_guard),
                     true,
                     Some(&self.side_query),
+                    Some(&dispatched_route),
                 ),
             );
             // Scope the provider-fallback task-local around the round so the
@@ -762,9 +775,19 @@ impl Agent {
                         &event_tx,
                     )
                     .await;
+                    let route = dispatched_route.lock().clone().unwrap_or_else(|| {
+                        crate::agent::turn::DispatchedModelRoute::selected(
+                            self.full_config(),
+                            &self.model_provider_name,
+                            &effective_model,
+                        )
+                    });
+                    guard.set_model_route(route.provider_name.clone(), route.model.clone());
                     return Ok(StreamedTurnSuccess {
                         response: committed_response,
                         new_messages: new_msgs,
+                        provider_name: route.provider_name,
+                        model: route.model,
                     });
                 }
                 Err(error) => {

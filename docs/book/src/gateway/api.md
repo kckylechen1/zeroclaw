@@ -305,6 +305,19 @@ response, even when every event was delivered.
 Consumers must use it as the final response, replacing any accumulated chunk
 preview when `done` arrives.
 
+Successful `done` frames retain `provider` as the configured turn-start identity.
+The additive `provider_ref` and `model` identify the last successful runtime
+request route, including vision routing and a mid-turn model switch. A turn
+that makes no model call, such as a response-cache hit, reports its selected
+route. These fields do not identify retries or fallbacks hidden inside a
+provider wrapper. Completion `agent_end` events and gateway traces use the same
+`provider_ref` and `model`, while retaining configured `model_provider`.
+
+This completion-only adaptation follows
+[`zeroclaw-labs/zeroclaw@4b11ce6d`](https://github.com/zeroclaw-labs/zeroclaw/blob/4b11ce6d239fdcfcd2bb5d561b0bffe92d809962/crates/zeroclaw-runtime/src/agent/agent.rs)
+and its terminal route snapshot. It does not change usage accounting, context
+limits, persistent history, or the configured route for subsequent turns.
+
 For negotiated turn controls, `stream_complete` describes only whether the
 event journal is contiguous and has no gaps. It makes no promise about chunk
 content completeness, and `true` still requires client-side sequence verification.
