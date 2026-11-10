@@ -484,10 +484,8 @@ fn resolve_delivery_requires_to_field() {
     let mut config = Config::default();
     config.heartbeat.target = Some("telegram".into());
     let err = resolve_heartbeat_delivery(&config).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("heartbeat.to is required when heartbeat.target is set")
-    );
+    assert!(err.to_string().contains("heartbeat.to"));
+    assert!(err.to_string().contains("heartbeat.target"));
 }
 
 #[test]
@@ -495,150 +493,134 @@ fn resolve_delivery_requires_target_field() {
     let mut config = Config::default();
     config.heartbeat.to = Some("123456".into());
     let err = resolve_heartbeat_delivery(&config).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("heartbeat.target is required when heartbeat.to is set")
-    );
+    assert!(err.to_string().contains("heartbeat.target"));
+    assert!(err.to_string().contains("heartbeat.to"));
 }
 
 #[test]
-fn resolve_delivery_rejects_unsupported_channel() {
+fn resolve_delivery_rejects_unregistered_bridge() {
     let mut config = Config::default();
     config.heartbeat.target = Some("carrier_pigeon".into());
     config.heartbeat.to = Some("ops@example.com".into());
     let err = resolve_heartbeat_delivery(&config).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("unsupported heartbeat.target channel")
-    );
+    assert!(err.to_string().contains("[gateway.bridges.carrier_pigeon]"));
 }
 
 #[test]
-fn resolve_delivery_rejects_retired_matrix_target() {
-    // matrix's in-process runner is retired (#579/#581): a configured
-    // [channels.matrix] section feeds nothing, and outbound delivery runs
-    // through gateway bridges only — so the target must be refused at
-    // validation with the retired diagnostic instead of being accepted and
-    // later dropped by the delivery layer.
+fn resolve_delivery_rejects_native_channels_without_a_delivery_bridge() {
     let mut config = Config::default();
-    config.heartbeat.target = Some("wechat".into());
-    config.heartbeat.to = Some("wxid_example".into());
+    config.heartbeat.to = Some("123456".into());
+    config
+        .channels
+        .telegram
+        .insert("default".into(), Default::default());
+    config
+        .channels
+        .discord
+        .insert("default".into(), Default::default());
+    config
+        .channels
+        .email
+        .insert("default".into(), Default::default());
+    config
+        .channels
+        .webhook
+        .insert("default".into(), Default::default());
     config
         .channels
         .wechat
-        .insert("default".to_string(), Default::default());
-
-    let err = resolve_heartbeat_delivery(&config).unwrap_err();
-    assert!(
-        err.to_string().contains("transport runner is retired"),
-        "expected retired rejection, got: {err}"
-    );
-}
-
-#[test]
-fn resolve_delivery_rejects_voice_duplex_target() {
-    // review: voice_duplex has a configured table and a WebSocket
-    // event protocol but no Channel::send outbound path, so a heartbeat
-    // target pointing at it must be rejected like the other input-only
-    // transports rather than falling through to the dotted-ref error.
-    let mut config = Config::default();
-    config.heartbeat.target = Some("voice_duplex".into());
-    config.heartbeat.to = Some("ops".into());
+        .insert("default".into(), Default::default());
     config
         .channels
         .voice_duplex
-        .insert("default".to_string(), Default::default());
+        .insert("default".into(), Default::default());
 
-    let err = resolve_heartbeat_delivery(&config).unwrap_err();
-    assert!(
-        err.to_string().contains("input-only channel"),
-        "expected input-only rejection, got: {err}"
-    );
+    for channel in [
+        "telegram",
+        "discord",
+        "email",
+        "webhook",
+        "wechat",
+        "voice_duplex",
+    ] {
+        config.heartbeat.target = Some(channel.into());
+        let err = resolve_heartbeat_delivery(&config).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("[gateway.bridges.{channel}]")),
+            "{channel} must require its bridge, got: {err}"
+        );
+    }
 }
 
 #[test]
-fn resolve_delivery_requires_channel_configuration() {
+fn resolve_delivery_rejects_scoped_chat_credentials() {
     let mut config = Config::default();
-    config.heartbeat.target = Some("telegram".into());
+    config.heartbeat.target = Some("restricted".into());
     config.heartbeat.to = Some("123456".into());
-    let err = resolve_heartbeat_delivery(&config).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("channels.telegram is not configured")
-    );
+    for bridge in [
+        zeroclaw_config::schema::GatewayBridgeConfig {
+            device: Some(Default::default()),
+            ..Default::default()
+        },
+        zeroclaw_config::schema::GatewayBridgeConfig {
+            owner: Some(Default::default()),
+            ..Default::default()
+        },
+    ] {
+        config.gateway.bridges.insert("restricted".into(), bridge);
+        let err = resolve_heartbeat_delivery(&config).unwrap_err();
+        assert!(err.to_string().contains("/ws/bridge"), "{err}");
+    }
 }
 
-#[test]
-fn resolve_delivery_accepts_a_configured_bridge() {
-    let mut config = Config::default();
-    config.heartbeat.target = Some("telegram".into());
-    config.heartbeat.to = Some("123456".into());
-    config
-        .gateway
-        .bridges
-        .insert("telegram".into(), Default::default());
-    let target = resolve_heartbeat_delivery(&config).unwrap();
-    assert_eq!(target, Some(("telegram".into(), "123456".into())));
-}
-
-#[test]
-fn resolve_delivery_accepts_telegram_configuration() {
-    let mut config = Config::default();
-    config.heartbeat.target = Some("telegram".into());
-    config.heartbeat.to = Some("123456".into());
-    config.channels.telegram.insert(
-        "default".to_string(),
-        zeroclaw_config::schema::TelegramConfig {
-            enabled: true,
-            bot_token: "bot-token".into(),
-            api_base_url: zeroclaw_config::schema::TELEGRAM_OFFICIAL_API_BASE_URL.to_string(),
-            stream_mode: zeroclaw_config::schema::StreamMode::default(),
-            draft_update_interval_ms: 1000,
-            interrupt_on_new_message: false,
-            mention_only: false,
-            ack_reactions: None,
-            proxy_url: None,
-            approval_timeout_secs: 120,
-            excluded_tools: vec![],
-            reply_min_interval_secs: 0,
-            reply_queue_depth_max: 0,
-            debounce_ms: None,
+#[tokio::test]
+async fn resolve_delivery_reaches_the_selected_bridge_outbox() {
+    let tmp = TempDir::new().unwrap();
+    let mut config = test_config(&tmp);
+    config.heartbeat.target = Some(" ops_bridge ".into());
+    config.heartbeat.to = Some(" 123456 ".into());
+    config.gateway.bridges.insert(
+        "ops_bridge".into(),
+        zeroclaw_config::schema::GatewayBridgeConfig {
+            token_hash: zeroclaw_config::tokens::hash_token("heartbeat-bridge-fixture"),
+            ..Default::default()
         },
     );
-
-    let target = resolve_heartbeat_delivery(&config).unwrap();
-    assert_eq!(target, Some(("telegram".to_string(), "123456".to_string())));
+    let (channel, recipient) = resolve_heartbeat_delivery(&config).unwrap().unwrap();
+    crate::cron::scheduler::deliver_announcement(
+        &config,
+        &channel,
+        &recipient,
+        None,
+        "Heartbeat fixture completed",
+    )
+    .await
+    .unwrap();
+    let outbox = zeroclaw_infra::bridge_outbox::BridgeOutbox::shared(&config.data_dir).unwrap();
+    let pending = outbox.pending("ops_bridge", 0, 10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].bridge, "ops_bridge");
+    assert_eq!(pending[0].to, "123456");
+    assert_eq!(pending[0].content, "Heartbeat fixture completed");
+    assert!(outbox.pending("telegram", 0, 10).unwrap().is_empty());
 }
 
 #[test]
-fn auto_detect_telegram_when_configured() {
+fn resolve_delivery_unset_never_infers_a_recipient_from_native_peers() {
     use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
 
     let mut config = Config::default();
     config.channels.telegram.insert(
-        "default".to_string(),
+        "default".into(),
         zeroclaw_config::schema::TelegramConfig {
             enabled: true,
             bot_token: "bot-token".into(),
-            api_base_url: zeroclaw_config::schema::TELEGRAM_OFFICIAL_API_BASE_URL.to_string(),
-            stream_mode: zeroclaw_config::schema::StreamMode::default(),
-            draft_update_interval_ms: 1000,
-            interrupt_on_new_message: false,
-            mention_only: false,
-            ack_reactions: None,
-            proxy_url: None,
-            approval_timeout_secs: 120,
-            excluded_tools: vec![],
-            reply_min_interval_secs: 0,
-            reply_queue_depth_max: 0,
-            debounce_ms: None,
+            ..Default::default()
         },
     );
-    // Inbound peer authorization lives in peer_groups in V3.
-    // Auto-detect picks the first external peer of the synthesized
-    // `telegram_default` group as the heartbeat target.
     config.peer_groups.insert(
-        "telegram_default".to_string(),
+        "telegram_default".into(),
         PeerGroupConfig {
             channel: "telegram".into(),
             external_peers: vec![PeerUsername::new("user123")],
@@ -646,18 +628,114 @@ fn auto_detect_telegram_when_configured() {
         },
     );
 
-    let target = resolve_heartbeat_delivery(&config).unwrap();
-    assert_eq!(
-        target,
-        Some(("telegram".to_string(), "user123".to_string()))
+    config
+        .gateway
+        .bridges
+        .insert("telegram".into(), Default::default());
+    config.heartbeat.deadman_timeout_minutes = 10;
+    let delivery = resolve_heartbeat_delivery(&config).unwrap();
+    assert!(delivery.is_none());
+    assert!(
+        resolve_heartbeat_deadman_delivery(&config, delivery.as_ref())
+            .unwrap()
+            .is_none()
     );
 }
 
 #[test]
-fn auto_detect_none_when_no_channels() {
-    let config = Config::default();
-    let target = auto_detect_heartbeat_channel(&config);
-    assert!(target.is_none());
+fn resolve_deadman_delivery_validates_overrides_and_fallbacks() {
+    let mut config = Config::default();
+    config.heartbeat.target = Some("ops_bridge".into());
+    config.heartbeat.to = Some("123456".into());
+    config.heartbeat.deadman_timeout_minutes = 10;
+    config
+        .gateway
+        .bridges
+        .insert("ops_bridge".into(), Default::default());
+    let delivery = resolve_heartbeat_delivery(&config).unwrap();
+    assert_eq!(
+        resolve_heartbeat_deadman_delivery(&config, delivery.as_ref()).unwrap(),
+        delivery
+    );
+
+    config.heartbeat.deadman_to = Some("654321".into());
+    assert_eq!(
+        resolve_heartbeat_deadman_delivery(&config, delivery.as_ref()).unwrap(),
+        Some(("ops_bridge".into(), "654321".into()))
+    );
+    config.heartbeat.deadman_channel = Some("telegram".into());
+    let err = resolve_heartbeat_deadman_delivery(&config, delivery.as_ref()).unwrap_err();
+    assert!(err.to_string().contains("heartbeat.deadman_channel"));
+    assert!(err.to_string().contains("[gateway.bridges.telegram]"));
+
+    config.gateway.bridges.insert(
+        "telegram".into(),
+        zeroclaw_config::schema::GatewayBridgeConfig {
+            owner: Some(Default::default()),
+            ..Default::default()
+        },
+    );
+    let err = resolve_heartbeat_deadman_delivery(&config, delivery.as_ref()).unwrap_err();
+    assert!(err.to_string().contains("/ws/bridge"));
+
+    config
+        .gateway
+        .bridges
+        .insert("telegram".into(), Default::default());
+    assert_eq!(
+        resolve_heartbeat_deadman_delivery(&config, None).unwrap(),
+        Some(("telegram".into(), "654321".into()))
+    );
+    config.heartbeat.deadman_to = None;
+    assert!(
+        resolve_heartbeat_deadman_delivery(&config, None)
+            .unwrap_err()
+            .to_string()
+            .contains("heartbeat.deadman_to")
+    );
+    config.heartbeat.deadman_to = Some("654321".into());
+    config.heartbeat.deadman_channel = None;
+    assert!(
+        resolve_heartbeat_deadman_delivery(&config, None)
+            .unwrap_err()
+            .to_string()
+            .contains("heartbeat.deadman_channel")
+    );
+    config.heartbeat.deadman_timeout_minutes = 0;
+    assert!(
+        resolve_heartbeat_deadman_delivery(&config, None)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn heartbeat_worker_rejects_legacy_delivery_before_starting_work() {
+    let tmp = TempDir::new().unwrap();
+    let mut config = test_config(&tmp);
+    let workspace = tmp.path().join("heartbeat-workspace");
+    add_agent_with_workspace(&mut config, "ops", workspace.clone());
+    config.heartbeat.agent = "ops".into();
+    config.heartbeat.target = Some("telegram".into());
+    config.heartbeat.to = Some("123456".into());
+    config
+        .channels
+        .telegram
+        .insert("default".into(), Default::default());
+    let identities = TaskIdentity::capture_all(&config);
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        run_heartbeat_worker(config.clone(), identities),
+    )
+    .await
+    .expect("invalid delivery must fail before the worker waits for a tick")
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("[gateway.bridges.telegram]"),
+        "{error}"
+    );
+    assert!(!workspace.join("HEARTBEAT.md").exists());
+    assert!(!config.data_dir.join("sessions/bridge_outbox.db").exists());
 }
 
 #[cfg(unix)]

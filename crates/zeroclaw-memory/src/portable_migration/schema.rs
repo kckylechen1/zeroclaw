@@ -38,23 +38,12 @@ fn vector_object(object: &SchemaObject) -> bool {
     object.table == "memories_vec" || object.table.starts_with("memories_vec_")
 }
 
-pub(super) fn inspect(conn: &Connection, kind: KernelStoreKind) -> Result<Inventory> {
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    ensure!(
-        version == 38,
-        "kernel migration accepts only the recognized legacy schema38, found schema{version}"
-    );
-    let mut expected = manifest(kind)?;
-    let actual_objects = format::objects(conn)?;
-    let has_vectors = actual_objects
-        .iter()
-        .any(|object| object.object_type == "table" && object.name == "memories_vec");
-    if !has_vectors {
-        expected.objects.retain(|object| !vector_object(object));
-        expected
-            .tables
-            .retain(|name, _| name != "memories_vec" && !name.starts_with("memories_vec_"));
-    }
+/// Check the closed DDL inventory before asking SQLite to connect virtual tables.
+pub(super) fn verify_legacy_schema(
+    conn: &Connection,
+    actual_objects: &[SchemaObject],
+    expected: &Manifest,
+) -> Result<()> {
     if actual_objects != expected.objects {
         let actual: BTreeMap<_, _> = actual_objects
             .iter()
@@ -77,9 +66,57 @@ pub(super) fn inspect(conn: &Connection, kind: KernelStoreKind) -> Result<Invent
     // Only inspect table schemas after sqlite_schema has passed the exact DDL
     // allowlist. No source view, trigger, or table definition is executed here.
     ensure!(
-        format::table_shapes(conn)? == expected.tables,
+        legacy_table_shapes_match(&format::table_shapes(conn)?, &expected.tables),
         "legacy table column/type/shape inventory differs"
     );
+    Ok(())
+}
+
+// SQLite 3.54 marks these sqlite-vec 0.1.9 backing tables on a fresh reader.
+// Only the PRAGMA kind changes; exact DDL admission precedes this comparison.
+pub(super) fn legacy_table_shapes_match(
+    actual: &BTreeMap<String, TableShape>,
+    expected: &BTreeMap<String, TableShape>,
+) -> bool {
+    let authentic_vec_parent = expected.get("memories_vec").is_some_and(|parent| {
+        parent.kind == "virtual" && actual.get("memories_vec") == Some(parent)
+    });
+    actual.len() == expected.len()
+        && expected.iter().all(|(name, wanted)| {
+            actual.get(name).is_some_and(|found| {
+                found == wanted
+                    || (authentic_vec_parent
+                        && matches!(
+                            name.as_str(),
+                            "memories_vec_chunks" | "memories_vec_info" | "memories_vec_rowids"
+                        )
+                        && wanted.kind == "table"
+                        && found.kind == "shadow"
+                        && found.without_rowid == wanted.without_rowid
+                        && found.strict == wanted.strict
+                        && found.columns == wanted.columns)
+            })
+        })
+}
+
+pub(super) fn inspect(conn: &Connection, kind: KernelStoreKind) -> Result<Inventory> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    ensure!(
+        version == 38,
+        "kernel migration accepts only the recognized legacy schema38, found schema{version}"
+    );
+    let mut expected = manifest(kind)?;
+    let actual_objects = format::objects(conn)?;
+    let has_vectors = actual_objects
+        .iter()
+        .any(|object| object.object_type == "table" && object.name == "memories_vec");
+    if !has_vectors {
+        expected.objects.retain(|object| !vector_object(object));
+        expected
+            .tables
+            .retain(|name, _| name != "memories_vec" && !name.starts_with("memories_vec_"));
+    }
+    verify_legacy_schema(conn, &actual_objects, &expected)?;
     verify_no_internal_rowid_references(conn, &expected)?;
     verify_identity(conn, kind, &expected)?;
     refuse_authority_history(conn)?;

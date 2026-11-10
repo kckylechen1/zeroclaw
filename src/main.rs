@@ -362,27 +362,23 @@ impl LogLevel {
 #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
 #[derive(Subcommand, Debug)]
 enum TelegramCommands {
-    /// Record an operator skip marker for a poisoned Telegram update
+    /// Explain migration of the retired Telegram skip command
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Record an operator skip marker for a poisoned Telegram update (a \
-permanently-failing update that blocks its bot head-of-line). The running \
-daemon consumes the marker on its next retry (within a few seconds), \
-archives the raw payload as a dead letter under its data directory, and \
-advances its offset past the update. Nothing is ever dropped automatically.
-
-Examples:
-  zeroclaw telegram skip-update --alias work --update-id 12345 --reason 'corrupted voice blob'")]
+The in-process Telegram listener and its skip markers are retired. \
+This compatibility command returns a migration error without writing a marker. \
+Telegram intake and cursor recovery belong to zeroclaw-bridge-telegram; \
+this command cannot skip a bridge update.")]
     SkipUpdate {
-        /// Bot alias under `[channels.telegram.<alias>]`
+        /// Legacy bot alias (accepted for compatibility)
         #[arg(long)]
         alias: String,
 
-        /// The `update_id` shown in the escalation log
+        /// Legacy update ID (accepted for compatibility)
         #[arg(long)]
         update_id: i64,
 
-        /// Why the update is being skipped (archived with the dead letter)
+        /// Legacy skip reason (accepted for compatibility)
         #[arg(long)]
         reason: Option<String>,
     },
@@ -964,19 +960,14 @@ Examples:
     },
 
     #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
-    /// Telegram channel operator tooling
+    /// Compatibility diagnostics for retired Telegram operator tooling
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Operator tooling for the Telegram channel.
+The in-process Telegram listener is retired. Telegram intake and cursor \
+recovery belong to zeroclaw-bridge-telegram.
 
-skip-update records an explicit skip marker for a poisoned Telegram update \
-(a permanently-failing update that blocks the bot head-of-line). The running \
-daemon consumes the marker on its next retry, archives the raw payload as a \
-dead letter under its data directory, and advances past the update. Nothing \
-is ever dropped automatically.
-
-Examples:
-  zeroclaw telegram skip-update --alias work --update-id 12345 --reason 'corrupted voice blob'")]
+skip-update remains parseable for compatibility and returns a migration \
+error. It does not write a skip marker or advance the bridge cursor.")]
     Telegram {
         #[command(subcommand)]
         telegram_command: TelegramCommands,
@@ -1018,14 +1009,14 @@ Examples (Windows PowerShell):
         props_command: DeprecatedPropsCommands,
     },
 
-    /// Fetch translated locale files (FTL) from upstream
+    /// Restore the translated locale files (FTL) shipped with this build
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Fetch translated Fluent (.ftl) catalogues for a locale from the upstream \
-repository and install them under `<config-dir>/data/ftl/<locale>/`, where the \
-runtime loader reads them.
+Restore this build's translated Fluent (.ftl) catalogues under \
+`<config-dir>/data/ftl/<locale>/`, where the runtime loader reads them. \
+The compatibility command name is fetch; no network access is needed.
 
-Pass a single locale. By default every catalogue is fetched; restrict with \
+Pass en or zh-CN. By default every catalogue is restored; restrict with \
 --catalog (comma-separated): cli, tools.
 
 Examples:
@@ -1040,12 +1031,12 @@ Examples:
 #[derive(Subcommand, Debug)]
 enum LocalesCommands {
     // i18n-exempt: clap derive help — framework requires a compile-time literal
-    /// Download translated FTL files for a locale from upstream
+    /// Restore this build's translated FTL files without network access
     Fetch {
-        /// Locale code to fetch (e.g. `ja`, `fr`, `zh-CN`).
+        /// Locale code to restore: en or zh-CN.
         locale: String,
-        /// Comma-separated catalogues to fetch: cli, tools.
-        /// Omit to fetch all of them.
+        /// Comma-separated catalogues to restore: cli, tools.
+        /// Omit to restore all of them.
         #[arg(long)]
         catalog: Option<String>,
     },
@@ -1541,10 +1532,10 @@ fn validated_locale(locale: &str) -> Result<String> {
 }
 
 #[cfg(feature = "agent-runtime")]
-async fn fetch_locales(locale: &str, catalog: Option<&str>) -> Result<()> {
+fn fetch_locales(locale: &str, catalog: Option<&str>) -> Result<()> {
     let locale = validated_locale(locale)?;
 
-    let selected: Vec<&(&str, &str, &str)> = match catalog {
+    let selected: Vec<&(&str, &str)> = match catalog {
         None => zeroclaw_config::schema::FTL_CATALOGS.iter().collect(),
         Some(list) => {
             let names: Vec<&str> = list
@@ -1556,13 +1547,13 @@ async fn fetch_locales(locale: &str, catalog: Option<&str>) -> Result<()> {
             for name in &names {
                 match zeroclaw_config::schema::FTL_CATALOGS
                     .iter()
-                    .find(|(n, _, _)| n == name)
+                    .find(|(n, _)| n == name)
                 {
                     Some(entry) => out.push(entry),
                     None => {
                         let valid = zeroclaw_config::schema::FTL_CATALOGS
                             .iter()
-                            .map(|(n, _, _)| *n)
+                            .map(|(n, _)| *n)
                             .collect::<Vec<_>>()
                             .join(", ");
                         bail!("unknown catalog '{name}'; valid: {valid}");
@@ -1586,66 +1577,42 @@ async fn fetch_locales(locale: &str, catalog: Option<&str>) -> Result<()> {
         bail!("refusing to write outside the FTL data directory");
     }
 
-    // Prefer the tag matching this binary; fall back to master.
-    let version = env!("CARGO_PKG_VERSION");
-    let refs = [format!("v{version}"), "master".to_string()];
-    let client = reqwest::Client::new();
-    let mut fetched = 0u32;
+    let mut restored = 0u32;
 
-    for (name, path_tmpl, out_name) in selected {
-        let repo_path = path_tmpl.replace("{locale}", &locale);
-        let mut body: Option<String> = None;
-        for git_ref in &refs {
-            let url = format!(
-                "https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/{git_ref}/{repo_path}"
-            );
-            let resp = client.get(&url).send().await?;
-            if resp.status().is_success() {
-                body = Some(resp.text().await?);
-                break;
-            }
-        }
-        match body {
-            Some(content) => {
-                let out_path = dest.join(out_name);
-                std::fs::write(&out_path, content)
-                    .with_context(|| format!("writing {}", out_path.display()))?;
-                println!(
-                    "{}",
-                    ta(
-                        "cli-locales-fetched",
-                        &[("name", name), ("path", &out_path.display().to_string())],
-                        "fetched catalogue",
-                    )
-                );
-                fetched += 1;
-            }
-            None => {
-                eprintln!(
-                    "{}",
-                    ta(
-                        "cli-locales-skipped",
-                        &[
-                            ("name", name),
-                            ("path", &repo_path),
-                            ("refs", &refs.join(", "))
-                        ],
-                        "skipped: not on upstream",
-                    )
-                );
-            }
-        }
+    for (name, out_name) in selected {
+        let content =
+            zeroclaw_runtime::i18n::builtin_catalog(&locale, name).with_context(|| {
+                ta(
+                    "cli-locales-missing-builtin",
+                    &[("name", name), ("locale", &locale)],
+                    "catalogue is not included in this build",
+                )
+            })?;
+        let out_path = dest.join(out_name);
+        std::fs::write(&out_path, content)
+            .with_context(|| format!("writing {}", out_path.display()))?;
+        println!(
+            "{}",
+            ta(
+                "cli-locales-restored",
+                &[("name", name), ("path", &out_path.display().to_string())],
+                "restored bundled catalogue",
+            )
+        );
+        restored += 1;
     }
 
-    if fetched == 0 {
-        bail!("no catalogues fetched for locale '{locale}'");
+    if restored == 0 {
+        bail!(crate::i18n::get_required_cli_string(
+            "cli-locales-none-selected"
+        ));
     }
     println!(
         "{}",
         ta(
             "cli-locales-installed",
             &[
-                ("count", &fetched.to_string()),
+                ("count", &restored.to_string()),
                 ("locale", &locale),
                 ("dir", &dest.display().to_string())
             ],
@@ -2638,7 +2605,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 alias,
                 update_id,
                 reason,
-            } => commands::telegram::run_skip_update(&config, &alias, update_id, reason),
+            } => commands::telegram::run_skip_update(&alias, update_id, reason),
         },
 
         #[cfg(feature = "agent-runtime")]
@@ -2809,7 +2776,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
 
         Commands::Locales { locales_command } => {
             let LocalesCommands::Fetch { locale, catalog } = locales_command;
-            fetch_locales(&locale, catalog.as_deref()).await?;
+            fetch_locales(&locale, catalog.as_deref())?;
             Ok(())
         }
 

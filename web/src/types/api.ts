@@ -224,6 +224,9 @@ export interface WsMessage {
     | "tool_result"
     | "done"
     | "error"
+    | "ack"
+    | "btw_response"
+    | "btw_error"
     | "session_start"
     | "connected"
     | "approval_request"
@@ -271,6 +274,11 @@ export interface WsMessage {
   input_tokens?: number;
   output_tokens?: number;
   last_input_tokens?: number;
+  // Completion attribution: provider keeps the configured turn-start identity;
+  // provider_ref/model identify the final successful runtime request route.
+  provider?: string;
+  provider_ref?: string;
+  model?: string;
   // Turn-control state (present on "turn_state" frames; see #457). `turn_id`
   // is null when no turn is active; `revision` orders buffered reconnect events.
   control_version?: number;
@@ -294,7 +302,7 @@ export interface WsMessage {
     write_timeout_ms?: number;
   };
   /** `turn_ack` / `turn_cancel_ack` outcome: accepted | duplicate | conflict |
-   * busy | unknown | requested | stale | no_active. */
+   * busy | btw | unknown | requested | stale | no_active. */
   status?: string;
   /** Monotonic per-request event order (`turn_event` / `turn_replay`). */
   seq?: number;

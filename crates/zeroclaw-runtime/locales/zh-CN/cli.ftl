@@ -591,6 +591,9 @@ cli-status-agents = 🛡️  Agents:        {$v}
 cli-status-runtime = ⚙️  运行时：       {$v}
 cli-status-heartbeat = 💓 心跳：      {$v}
 cli-status-heartbeat-every-minutes = 每 {$minutes} 分钟
+heartbeat-delivery-missing-field = 设置 {$configured} 时，必须同时设置 {$required}。
+heartbeat-delivery-bridge-required = {$field} 指向 '{$bridge}'，但尚未配置 [gateway.bridges.{$bridge}]。心跳投递需要明确的网关桥接器和接收目标；旧 [channels.*] 配置已不再提供出站投递。请用 zeroclaw gateway bridge add 注册投递桥接器，然后在 [heartbeat] 中设置桥接器名称和接收目标。
+heartbeat-delivery-scoped-bridge = {$field} 指向带权限范围的桥接器 '{$bridge}'，它无法连接 /ws/bridge 或接收发件箱投递。请选择没有 device 或 owner 范围的投递桥接器，并保留原有限定凭据的权限。
 cli-status-memory = 🧠 内存：         {$backend}（自动保存：{$auto_save}）
 cli-status-companion-outbox-not-configured = Companion 发件箱：未配置
 cli-status-companion-outbox-pending = Companion 发件箱：待处理（{$pending} 条事件）
@@ -660,8 +663,20 @@ cli-auth-callback-capture-failed = 回调捕获失败：{$error}
 cli-auth-run-paste-redirect = 运行 `zeroclaw auth paste-redirect --model-provider {$provider} --profile {$profile}`
 cli-auth-xai-no-pending-login = 未找到待处理的 xAI 登录。请先运行 `zeroclaw auth login --model-provider xai`。
 cli-auth-paste-redirect-requires-input = paste-redirect 需要重定向 URL 或 OAuth 代码
-cli-locales-fetched = {"  "}已获取 {$name} -> {$path}
-cli-locales-skipped = {"  "}已跳过 {$name}：不在上游（{$path}；已尝试 {$refs}）
+cli-locales-about = 恢复当前构建自带的语言文件
+cli-locales-long-about =
+    将当前构建自带的 Fluent (.ftl) 翻译目录恢复到 <config-dir>/data/ftl/<locale>/。
+    为兼容旧用法，命令仍叫 fetch；无需联网，也不会下载上游翻译目录。
+
+    语言可选 en 或 zh-CN。默认恢复全部目录，也可用 --catalog 选择 cli,tools。
+
+    示例：
+      zeroclaw locales fetch zh-CN
+      zeroclaw locales fetch zh-CN --catalog tools
+cli-locales-fetch-about = 离线恢复当前构建自带的 FTL 语言文件
+cli-locales-restored = {"  "}已恢复内嵌 {$name} -> {$path}
+cli-locales-missing-builtin = 当前构建未包含 {$locale} 的 {$name} 翻译目录
+cli-locales-none-selected = 请至少选择一个翻译目录：cli、tools
 cli-locales-installed = 已为“{$locale}”在 {$dir} 下安装 {$count} 个目录
 cli-browse-header = {$path}（{$count} 个条目）
 cli-browse-empty = （空）
@@ -864,9 +879,15 @@ cli-skills-install-skill-not-in-catalog =
     可用技能：{$available}
 cli-skills-install-skill-not-in-catalog-empty = 在 {$url} 中未找到技能 '{$skill}'：没有 skills/ 目录或其为空
 cli-skills-install-skill-requires-git = --skill <名称> 需要一个 git 仓库 URL 作为来源（收到的是 '{$source}'）
-telegram-skip-update-failed = 记录机器人 '{$alias}' 更新 {$update_id} 的跳过标记失败：{$error}
-telegram-skip-update-pending = 机器人 '{$alias}' 更新 {$update_id} 的跳过标记已在等待中。
-telegram-skip-update-written = 已记录机器人 '{$alias}' 更新 {$update_id} 的跳过标记。运行中的守护进程会在下次重试（几秒内）时应用它，并将载荷作为死信归档到其数据目录下。
+cli-telegram-about = 已退役 Telegram 运维命令的兼容性提示
+cli-telegram-long-about =
+    进程内 Telegram 监听器已退役。Telegram 消息接入和游标恢复由 zeroclaw-bridge-telegram 负责。
+
+    skip-update 保留参数解析以兼容旧调用，并返回迁移错误。它不会写入跳过标记，也不会推进桥接器游标。
+cli-telegram-skip-update-about = 查看已退役 Telegram 跳过命令的迁移说明
+cli-telegram-skip-update-long-about =
+    进程内 Telegram 监听器及其跳过标记已退役。这个兼容命令会返回迁移错误，不会写入标记。Telegram 消息接入和游标恢复由 zeroclaw-bridge-telegram 负责；本命令无法跳过桥接器的更新。
+telegram-skip-update-retired = 进程内 Telegram 监听器和 telegram skip-update 命令已退役，未写入跳过标记。Telegram 消息接入和游标恢复由 zeroclaw-bridge-telegram 负责；本命令无法跳过桥接器的更新。
 tool-runtime-command-build-failed = 构建运行时命令失败：{$error}
 tool-runtime-command-docker-allowed-root = 构建运行时命令失败：无法规范化 Docker 工作区根 {$path}：{$cause}
 tool-runtime-command-docker-workspace-path = 构建运行时命令失败：无法规范化 Docker 工作区路径 {$path}：{$cause}

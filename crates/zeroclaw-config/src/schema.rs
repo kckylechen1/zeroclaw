@@ -10134,8 +10134,9 @@ pub struct HeartbeatConfig {
     /// Optional fallback task text when `HEARTBEAT.md` has no task entries.
     #[serde(default)]
     pub message: Option<String>,
-    /// Optional delivery channel for heartbeat output (for example: `telegram`).
-    /// When omitted, auto-selects the first configured channel.
+    /// Optional `[gateway.bridges.<name>]` destination for heartbeat output.
+    /// Must allow `/ws/bridge` delivery (no `device` or `owner` scope).
+    /// When omitted together with `to`, tasks run without external delivery.
     #[serde(default, alias = "channel")]
     pub target: Option<String>,
     /// Optional delivery recipient/chat identifier (required when `target` is
@@ -10156,8 +10157,8 @@ pub struct HeartbeatConfig {
     /// within this window, an alert is sent. `0` disables. Default: `0`.
     #[serde(default)]
     pub deadman_timeout_minutes: u32,
-    /// Channel for dead-man's switch alerts (e.g. `telegram`). Falls back to
-    /// the heartbeat delivery channel.
+    /// Delivery-capable `[gateway.bridges.<name>]` for dead-man's switch
+    /// alerts. Falls back to the heartbeat delivery bridge.
     #[serde(default)]
     pub deadman_channel: Option<String>,
     /// Recipient for dead-man's switch alerts. Falls back to `to`.
@@ -13638,30 +13639,18 @@ fn default_config_dir() -> Result<PathBuf> {
 
 /// Canonical on-disk directory for a locale's runtime FTL catalogues:
 /// `<config_dir>/data/ftl/<locale>/`. This is where `zeroclaw locales fetch`
-/// writes downloaded translations and where the runtime i18n loader reads them.
+/// restores bundled translations and where the runtime i18n loader reads them.
 /// `<config_dir>` honors `ZEROCLAW_CONFIG_DIR` and otherwise defaults to
 /// `~/.zeroclaw`.
 pub fn ftl_locale_dir(locale: &str) -> Result<PathBuf> {
     Ok(default_config_dir()?.join("data").join("ftl").join(locale))
 }
 
-/// The FTL catalogues that `zeroclaw locales fetch` can download, as
-/// `(name, upstream-path-template, output-filename)`. `{locale}` is
-/// substituted per request. This is the single
+/// The FTL catalogues that `zeroclaw locales fetch` can restore from the
+/// current build, as `(name, output-filename)`. This is the single
 /// source of truth — a caller supplies only a catalog *name* matched against
 /// this table, never a path.
-pub const FTL_CATALOGS: &[(&str, &str, &str)] = &[
-    (
-        "cli",
-        "crates/zeroclaw-runtime/locales/{locale}/cli.ftl",
-        "cli.ftl",
-    ),
-    (
-        "tools",
-        "crates/zeroclaw-runtime/locales/{locale}/tools.ftl",
-        "tools.ftl",
-    ),
-];
+pub const FTL_CATALOGS: &[(&str, &str)] = &[("cli", "cli.ftl"), ("tools", "tools.ftl")];
 
 /// Build a default path string by joining `relative` onto the resolved
 /// platform config dir. The form sees the resolved absolute path

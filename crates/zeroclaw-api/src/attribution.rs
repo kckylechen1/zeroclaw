@@ -69,7 +69,6 @@ pub enum ChannelKind {
     Email,
     Filesystem,
     Git,
-    #[strum(serialize = "imessage")]
     Line,
     #[strum(serialize = "mochat")]
     MoChat,
@@ -424,6 +423,9 @@ mod tests {
             <&'static str>::from(ChannelKind::WhatsappWeb),
             "whatsapp_web"
         );
+        assert_eq!(ChannelKind::Line.as_wire(), "line");
+        assert_eq!("line".parse::<ChannelKind>(), Ok(ChannelKind::Line));
+        assert!("imessage".parse::<ChannelKind>().is_err());
     }
 
     #[test]

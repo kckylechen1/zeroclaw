@@ -28,6 +28,13 @@ export interface WebSocketClientOptions {
 const DEFAULT_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
 
+// Keep even late side-query errors out of the ordinary turn lifecycle without
+// retaining an unbounded list of completed request ids.
+const SIDE_QUERY_ID_PREFIX = 'btw-';
+export function isSideQueryRequestId(id: string | undefined): id is string {
+  return id?.startsWith(SIDE_QUERY_ID_PREFIX) === true;
+}
+
 const SESSION_ID_KEY_PREFIX = 'zeroclaw_session_id';
 
 /** Return a stable session ID for the given agent alias, persisted in
@@ -192,6 +199,17 @@ export class WebSocketClient {
         this.sendRaw({ ...turnFrame, epoch: this.turnEpoch });
       }
     }
+    return requestId;
+  }
+
+  /** A read-only side query has no turn admission, replay or reconnect queue.
+   * The gateway explicitly accepts `btw` on negotiated S2 attachments too.
+   * Its dedicated `id` is echoed on admission errors as well as results;
+   * S2 `op: message` requires a UUID and does not correlate its refusals. */
+  sendSideQuery(question: string): string | null {
+    if (!this.connected || (this.protocol !== 'legacy' && (this.protocol !== 's2' || !this.turnEpoch))) return null;
+    const requestId = `${SIDE_QUERY_ID_PREFIX}${generateUUID()}`;
+    this.sendRaw({ type: 'btw', id: requestId, content: `/btw ${question}` });
     return requestId;
   }
 

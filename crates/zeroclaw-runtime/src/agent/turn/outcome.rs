@@ -2,6 +2,41 @@
 
 use std::sync::{Arc, Mutex};
 
+/// Runtime request route of a successful model call. This does not inspect
+/// retries or fallback providers hidden inside the selected provider wrapper.
+#[derive(Clone, Debug)]
+pub(crate) struct DispatchedModelRoute {
+    pub(crate) provider_name: String,
+    pub(crate) model: String,
+}
+
+impl DispatchedModelRoute {
+    pub(crate) fn selected(
+        config: Option<&zeroclaw_config::schema::Config>,
+        provider_name: &str,
+        model: &str,
+    ) -> Self {
+        // Config owns the same hint table used to construct RouterModelProvider.
+        // Duplicate hints use their last entry, matching its HashMap collection.
+        let route = model.strip_prefix("hint:").and_then(|hint| {
+            config?
+                .model_routes
+                .iter()
+                .rev()
+                .find(|route| route.hint == hint)
+        });
+        Self {
+            provider_name: route
+                .map_or(provider_name, |route| &route.model_provider)
+                .to_string(),
+            model: route.map_or(model, |route| &route.model).to_string(),
+        }
+    }
+}
+
+/// Owned by one streamed API turn, across its steering/model-switch rounds.
+pub(crate) type DispatchedModelRouteSink = parking_lot::Mutex<Option<DispatchedModelRoute>>;
+
 /// Callback type for checking if model has been switched during tool execution.
 /// Returns Some((model_provider, model)) if a switch was requested, None otherwise.
 pub type ModelSwitchCallback = Arc<Mutex<Option<(String, String)>>>;

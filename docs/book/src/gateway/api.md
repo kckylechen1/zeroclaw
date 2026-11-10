@@ -305,6 +305,19 @@ response, even when every event was delivered.
 Consumers must use it as the final response, replacing any accumulated chunk
 preview when `done` arrives.
 
+Successful `done` frames retain `provider` as the configured turn-start identity.
+The additive `provider_ref` and `model` identify the last successful runtime
+request route, including vision routing and a mid-turn model switch. A turn
+that makes no model call, such as a response-cache hit, reports its selected
+route. These fields do not identify retries or fallbacks hidden inside a
+provider wrapper. Completion `agent_end` events and gateway traces use the same
+`provider_ref` and `model`, while retaining configured `model_provider`.
+
+This completion-only adaptation follows
+[`zeroclaw-labs/zeroclaw@4b11ce6d`](https://github.com/zeroclaw-labs/zeroclaw/blob/4b11ce6d239fdcfcd2bb5d561b0bffe92d809962/crates/zeroclaw-runtime/src/agent/agent.rs)
+and its terminal route snapshot. It does not change usage accounting, context
+limits, persistent history, or the configured route for subsequent turns.
+
 For negotiated turn controls, `stream_complete` describes only whether the
 event journal is contiguous and has no gaps. It makes no promise about chunk
 content completeness, and `true` still requires client-side sequence verification.
@@ -785,7 +798,25 @@ Three producers write to the outbox:
   A bridge name takes precedence over an in-core channel of the same name.
   Delivery reports `accepted` once queued. Candidates bind the canonical job ID
   and run start timestamp; repeated observations of that run reuse its receipt.
-- **Heartbeat.** `heartbeat.target` may name a bridge too.
+- **Heartbeat.** Set both `heartbeat.target` to an exact
+  `[gateway.bridges.<name>]` name and `heartbeat.to` to the platform recipient:
+
+  ```toml
+  [heartbeat]
+  target = "telegram"  # a configured delivery bridge
+  to = "4242"          # Telegram chat id
+  ```
+
+  The bridge must support the `/ws/bridge` control socket; credentials with
+  `device` or `owner` scope cannot receive outbox deliveries. Legacy
+  `[channels.telegram]`, `[channels.discord]`, `[channels.email]` and webhook
+  entries do not provide outbound heartbeat delivery. Migrate an old target by
+  registering its delivery bridge with `zeroclaw gateway bridge add <name>` and
+  setting the explicit bridge name and recipient. Leaving both fields unset
+  keeps heartbeat tasks running without external delivery; there is no
+  auto-detection from native channels or inbound peer groups. When the
+  dead-man's switch is enabled, `deadman_channel` and `deadman_to` follow the
+  same bridge validation and default to the heartbeat destination.
 - **`notify {bridge, to, text}`.** The model's tool for proactive messages,
   offered only when at least one bridge is configured. It is an ordinary
   side-effecting tool: it needs approval unless listed in `auto_approve`,

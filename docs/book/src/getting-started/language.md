@@ -1,13 +1,16 @@
 # Language & translations
 
 ZeroClaw's interface strings (CLI messages and command help) can be shown in
-Simplified Chinese. English is always built in; Simplified Chinese CLI strings
-are also embedded, and translated tool descriptions are downloaded on demand.
+Simplified Chinese. English and Simplified Chinese catalogues ship with the
+binary. CLI strings are available immediately; translated tool descriptions
+can be installed from the bundled catalogues.
 
 > Retired locales: `es`, `fr`, and `ja` were removed from the selectable
 > registry. If your config still selects one, ZeroClaw logs a fallback notice
 > and renders in English, except for catalogues you fetched before retirement:
-> those on-disk files keep overriding as before. See
+> those on-disk files keep overriding ordinary messages. Fork-specific updater,
+> locale-installation, and Telegram command guidance always uses the current
+> build's catalogues. See
 > [Troubleshooting](#troubleshooting) below.
 
 ## Set your language
@@ -16,10 +19,9 @@ ZeroClaw reads a top-level `locale` key from your config. Set it to `en` or
 `zh-CN`. If `locale` is unset, ZeroClaw uses your operating system's language
 and falls back to English when no translation is available.
 
-## Fetch your language files
+## Install your language files
 
-English ships inside the binary. For Simplified Chinese tool descriptions you
-fetch the translated files once:
+For Simplified Chinese tool descriptions, install the bundled files once:
 
 <div class="os-tabs-src">
 
@@ -31,13 +33,15 @@ zeroclaw locales fetch zh-CN
 
 </div>
 
-This downloads the Simplified Chinese translation files from the ZeroClaw
-project and installs them under `~/.zeroclaw/data/ftl/zh-CN/`, where ZeroClaw
-looks for them at startup. Restart ZeroClaw afterward to pick them up.
+The command retains the name `fetch` for compatibility, but restores the exact
+catalogues shipped with the running binary without network access. It installs
+them under `~/.zeroclaw/data/ftl/zh-CN/`, where ZeroClaw looks for them at startup.
+Restart ZeroClaw afterward to pick them up. Run it again after a source upgrade
+to replace older files with that build's catalogues.
 
-### Fetching only part of a language
+### Installing only part of a language
 
-By default `fetch` downloads every catalogue for the locale. To download only
+By default `fetch` restores every catalogue for the locale. To restore only
 some, pass `--catalog` with a comma-separated list:
 
 | Catalog | Covers |
@@ -55,8 +59,8 @@ zeroclaw locales fetch zh-CN --catalog tools   # just tool descriptions
 
 </div>
 
-If a catalogue has not been translated for your language yet, `fetch` skips it
-and tells you: the catalogues that do exist are still installed.
+Both supported locales (`en` and `zh-CN`) include every selectable catalogue.
+Unknown locale or catalogue names are rejected.
 
 ## Where the files live
 
@@ -78,9 +82,12 @@ instead.
   registry: `zeroclaw locales fetch` rejects them, and without on-disk
   catalogues every string renders in English with a fallback notice in the
   log. Catalogues fetched before retirement under `data/ftl/<locale>/` keep
-  working unchanged.
-- **`fetch` reports a catalogue was skipped.** That catalogue has not been
-  translated for your locale yet. The available catalogues are still installed;
-  untranslated strings fall back to English.
+  translating ordinary messages. Fork-specific updater, locale-installation,
+  and Telegram command guidance falls back to the current embedded English
+  text so an old catalogue cannot advertise a retired operation.
+- **Update help still describes upstream releases in an old installation.**
+  Upgrade the fork from source, then run `zeroclaw locales fetch zh-CN` to
+  restore its matching catalogues. The current binary keeps its source-only
+  update guidance even when an older disk catalogue is present.
 - **A specific string is in English even though the rest is translated.** That
   individual string has no translation yet and falls back to English by design.

@@ -39,13 +39,6 @@ ignore = [
     # Direct deps and ratatui-core upgraded to 0.18.2; remaining 0.16.4 pinned by
     # nostr-sdk 0.44 (nostr-database / nostr-relay-pool) behind channel-nostr.
     { id = "RUSTSEC-2026-0253", reason = "lru unsound LruCache::pop panic-safety; direct+ratatui upgraded to >=0.18.2; remaining 0.16.4 pinned transitively by nostr-sdk 0.44; upstream fix pending" },
-    # libsqlite3-sys -- bundled SQLite CVE-2026-119375 (RUSTSEC-2026-0459);
-    # patched in libsqlite3-sys 0.39.1 / rusqlite 0.41. The workspace bump to
-    # rusqlite 0.41 is blocked by the pinned Tachi portable-kernel rev
-    # (b0c754a), which requires rusqlite ^0.40 and whose sqlite3 native link
-    # cannot coexist with a second copy. Coordinated Tachi rev bump is the
-    # real fix; this ignore is the interim gate with that tracking.
-    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite CVE; fix = rusqlite 0.41, blocked by pinned Tachi portable-kernel rev requiring rusqlite ^0.40 (native link conflict); coordinated Tachi rev bump tracked" },
 ]
 
 [licenses]

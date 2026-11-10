@@ -118,8 +118,11 @@ own ZeroClaw's Soul, User Model, personality policy or Tachi delegation bridge.
 ### Portable kernel adoption (#560)
 
 `memory-tachi` pins `portable-kernel` 1.9.0 at Tachi revision
-`b0c754a0cd3e4e7ffd0199691e08954942b492bd`, without default/admin features.
-This includes the snapshot-reopen fix in
+`c35ace357375f0e3a9db32d7a3bb529507a72291`, without default/admin features.
+This is a bounded SQLite 3.54.1 security backport onto the previous
+`b0c754a0cd3e4e7ffd0199691e08954942b492bd` baseline, adapting the native dependency
+and connection APIs from [Tachi #2284](https://github.com/kckylechen1/Tachi/pull/2284).
+It retains the snapshot-reopen fix in
 [Tachi #2205](https://github.com/kckylechen1/Tachi/pull/2205), on top of the shared
 kernel contracts in [Tachi #2198](https://github.com/kckylechen1/Tachi/pull/2198).
 Generic memory requires `PortableKernel` / `zeroclaw-memory`; companion requires

@@ -172,16 +172,20 @@ impl SideQueryHandle {
         };
     }
 
-    /// Update the live transcript, effective model/provider name, and active turn ID
-    /// during an in-flight turn without replacing the `Arc<dyn ModelProvider>` or tool set.
+    /// Publish the effective provider, model, transcript, and turn ID together.
+    /// A vision override owns a different provider instance from the Agent's
+    /// default, so its handle must travel with its name and model. Cloned
+    /// snapshots keep that instance alive without borrowing the running Agent.
     pub(crate) fn update_live_messages(
         &self,
+        model_provider: Arc<dyn ModelProvider>,
         provider_name: &str,
         model: &str,
         messages: &[ChatMessage],
         active_turn_id: Option<&str>,
     ) {
         let mut guard = self.inner.write();
+        guard.model_provider = model_provider;
         guard.provider_name = provider_name.to_string();
         guard.model = model.to_string();
         guard.messages = messages.to_vec();
@@ -560,6 +564,201 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn btw_uses_the_live_vision_endpoint_and_restores_the_default_binding() {
+        use axum::{Json, Router, extract::State, routing::post};
+        use serde_json::{Value, json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::mpsc;
+
+        #[derive(Clone)]
+        struct Endpoint {
+            name: &'static str,
+            requests: mpsc::UnboundedSender<(&'static str, Value)>,
+            main_calls: Arc<AtomicUsize>,
+            main_gate: Arc<Semaphore>,
+        }
+
+        async fn capture(State(endpoint): State<Endpoint>, Json(body): Json<Value>) -> Json<Value> {
+            let side_query = body["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .is_some_and(|message| match &message["content"] {
+                    Value::String(content) => content.contains(BTW_SIDE_QUERY_INSTRUCTION),
+                    Value::Array(parts) => parts.iter().any(|part| {
+                        part["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains(BTW_SIDE_QUERY_INSTRUCTION))
+                    }),
+                    _ => false,
+                });
+            endpoint.requests.send((endpoint.name, body)).unwrap();
+            if endpoint.name == "vision" && !side_query {
+                if endpoint.main_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Json(json!({
+                        "choices": [{"message": {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "vision-echo",
+                                "type": "function",
+                                "function": {
+                                    "name": "echo_tool",
+                                    "arguments": "{\"value\":\"vision-context\"}"
+                                }
+                            }]
+                        }}]
+                    }));
+                }
+                endpoint.main_gate.acquire().await.unwrap().forget();
+            }
+            Json(json!({
+                "choices": [{"message": {
+                    "role": "assistant",
+                    "content": format!("answer from {}", endpoint.name)
+                }}]
+            }))
+        }
+
+        async fn serve(endpoint: Endpoint) -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = Router::new()
+                .route("/v1/chat/completions", post(capture))
+                .with_state(endpoint);
+            let server = ::zeroclaw_spawn::spawn!(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            (format!("http://{address}/v1"), server)
+        }
+
+        let (requests, mut received) = mpsc::unbounded_channel();
+        let main_gate = Arc::new(Semaphore::new(0));
+        let (text_url, text_server) = serve(Endpoint {
+            name: "text",
+            requests: requests.clone(),
+            main_calls: Arc::new(AtomicUsize::new(0)),
+            main_gate: Arc::clone(&main_gate),
+        })
+        .await;
+        let (vision_url, vision_server) = serve(Endpoint {
+            name: "vision",
+            requests,
+            main_calls: Arc::new(AtomicUsize::new(0)),
+            main_gate: Arc::clone(&main_gate),
+        })
+        .await;
+        let config: zeroclaw_config::schema::Config = toml::from_str(&format!(
+            r#"
+schema_version = 3
+[providers.models.custom.text]
+uri = "{text_url}"
+model = "text-model"
+vision = false
+native_tools = true
+[providers.models.custom.vision]
+uri = "{vision_url}"
+model = "vision-model"
+vision = true
+native_tools = true
+[multimodal]
+vision_model_provider = "custom.vision"
+"#
+        ))
+        .unwrap();
+        let primary = zeroclaw_providers::create_routed_model_provider_with_options(
+            &config,
+            "custom.text",
+            None,
+            None,
+            &config.reliability,
+            &[],
+            "text-model",
+            &zeroclaw_providers::provider_runtime_options_for_alias(&config, "custom", "text"),
+        )
+        .unwrap();
+        let mut agent = Agent::builder()
+            .model_provider(primary)
+            .model_provider_name("custom.text".into())
+            .model_name("text-model".into())
+            .multimodal_config(config.multimodal.clone())
+            .provider_switch_config(crate::agent::agent::ProviderSwitchConfig {
+                config: Some(Arc::new(config)),
+            })
+            .tools(vec![Box::new(EchoTool)])
+            .memory(Arc::new(NoneMemory::new("none")))
+            .observer(Arc::new(crate::observability::NoopObserver))
+            .tool_dispatcher(Box::new(NativeToolDispatcher))
+            .build()
+            .unwrap();
+        let side_query = agent.side_query_handle();
+        let temp = tempfile::tempdir().unwrap();
+        let image_path = temp.path().join("fixture.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]))
+            .save(&image_path)
+            .unwrap();
+        let prompt = format!("inspect [IMAGE:{}]", image_path.display());
+        let main_turn = ::zeroclaw_spawn::spawn!(async move {
+            let answer = agent.turn(&prompt).await?;
+            Ok::<_, anyhow::Error>((agent, answer))
+        });
+
+        // The first vision call executes echo_tool; the second holds the
+        // main Agent borrow while /btw reads the completed tool context.
+        for _ in 0..2 {
+            let (endpoint, body) = tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(endpoint, "vision");
+            assert_eq!(body["model"], "vision-model");
+        }
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            side_query.ask("what did the tool find?", None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.answer, "answer from vision");
+        assert_eq!(response.provider_name, "custom.vision");
+        assert_eq!(response.model, "vision-model");
+        assert!(response.active_turn_id.is_some());
+        let (endpoint, body) = received.try_recv().unwrap();
+        assert_eq!(
+            endpoint, "vision",
+            "the actual HTTP destination must match the snapshot"
+        );
+        assert_eq!(body["model"], "vision-model");
+        assert!(body.get("tools").is_none_or(Value::is_null));
+        assert!(
+            body["messages"]
+                .to_string()
+                .contains("tool-output:vision-context")
+        );
+
+        main_gate.add_permits(1);
+        let (mut agent, answer) = tokio::time::timeout(Duration::from_secs(5), main_turn)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer, "answer from vision");
+        agent.clear_history();
+        let response = side_query.ask("a new text question", None).await.unwrap();
+        assert_eq!(response.answer, "answer from text");
+        assert_eq!(response.provider_name, "custom.text");
+        assert_eq!(response.model, "text-model");
+        let (endpoint, body) = received.try_recv().unwrap();
+        assert_eq!(endpoint, "text");
+        assert_eq!(body["model"], "text-model");
+        assert!(
+            agent.history().is_empty(),
+            "side queries must not persist their exchange"
+        );
+        text_server.abort();
+        vision_server.abort();
     }
 
     #[tokio::test]

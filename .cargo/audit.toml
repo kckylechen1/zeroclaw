@@ -31,5 +31,4 @@ ignore = [
     # ── Sync 2026-11-09: mirror deny.toml entries audit was missing ────────
     "RUSTSEC-2026-0441",  # pin-utils unmaintained (archived upstream); transitive via async-imap 0.11; no safe upgrade; replacement is upstream's to adopt
     "RUSTSEC-2026-0253",  # lru unsound LruCache::pop panic-safety; direct+ratatui upgraded to >=0.18.2; remaining 0.16.4 pinned transitively by nostr-sdk 0.44; upstream fix pending
-    "RUSTSEC-2026-0459",  # bundled SQLite CVE-2026-119375; fix = rusqlite 0.41, blocked by pinned Tachi portable-kernel rev requiring rusqlite ^0.40 (native link conflict); coordinated Tachi rev bump tracked
 ]

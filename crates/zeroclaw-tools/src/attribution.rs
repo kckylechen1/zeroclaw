@@ -36,7 +36,6 @@ use crate::memory_store::MemoryStoreTool;
 use crate::pipeline::PipelineTool;
 use crate::propose_soul_change::ProposeSoulChangeTool;
 use crate::screenshot::ScreenshotTool;
-use crate::send_via::SendViaTool;
 use crate::sessions::{
     SessionsCurrentTool, SessionsHistoryTool, SessionsListTool, SessionsSendTool,
 };
@@ -80,7 +79,6 @@ tool_attribution!(MemoryRecallTool, ToolKind::Memory);
 tool_attribution!(MemoryStoreTool, ToolKind::Memory);
 tool_attribution!(PipelineTool, ToolKind::Plugin);
 tool_attribution!(ScreenshotTool, ToolKind::Plugin);
-tool_attribution!(SendViaTool, ToolKind::Plugin);
 tool_attribution!(SessionsCurrentTool, ToolKind::Plugin);
 tool_attribution!(SessionsHistoryTool, ToolKind::Plugin);
 tool_attribution!(SessionsListTool, ToolKind::Plugin);
