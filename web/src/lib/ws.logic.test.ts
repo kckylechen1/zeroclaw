@@ -61,6 +61,7 @@ assert.deepEqual(sent[0], { type: 'turn_control', version: 1, op: 'negotiate', c
 const queuedId = s2.sendTurnMessage('queued hello');
 assert.equal(s2.epoch, null);
 assert.equal(sent.length, 1, 'only negotiate is on the wire pre-ready');
+assert.equal(s2.sendSideQuery('not negotiated yet'), null, 'side queries never bypass S2 readiness');
 // turn_ready flushes the queue with the negotiated epoch.
 wire.onmessage?.({ data: JSON.stringify({ type: 'turn_ready', version: 1, epoch: 'epoch-1' }) });
 assert.equal(s2.epoch, 'epoch-1');
@@ -98,3 +99,16 @@ assert.deepEqual(
   { type: 'turn_control', version: 1, op: 'resume', epoch: 'epoch-1', request_id: '', after_seq: 7 },
 );
 console.log('s2 transport negotiates, queues until ready, and frames scoped controls');
+
+// Dedicated read-only frames remain valid after S2 negotiation. Using an S2
+// message with the side-query id would fail the gateway's UUID check, and its
+// message-admission errors do not echo request_id for safe UI correlation.
+const sideId = s2.sendSideQuery('question while a main turn is active');
+assert.ok(sideId);
+assert.ok(sideId.startsWith('btw-'));
+assert.deepEqual(sent[sent.length - 1], {
+  type: 'btw', id: sideId, content: '/btw question while a main turn is active',
+});
+assert.equal(s2.isMessageQueued(sideId), false, 'side queries have no admission or replay queue');
+assert.equal(s2.epoch, 'epoch-1', 'the main turn keeps its negotiated S2 contract');
+console.log('s2 attachments use the dedicated correlated side-query frame');
