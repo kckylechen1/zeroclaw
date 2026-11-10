@@ -92,6 +92,7 @@ fn splice(current: &str, zone: &str, body: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{self as ts, Cause};
     use std::path::PathBuf;
 
     fn root() -> PathBuf {
@@ -118,8 +119,27 @@ mod tests {
         let presets = render_presets(&root()).unwrap();
         let (_, dist_and_rest) = presets.split_once(":build_dist").unwrap();
         let (dist, _) = dist_and_rest.split_once("goto :do_build").unwrap();
+        // #584: sampled from the live registry and the Cargo.toml
+        // distribution-extra registry, so neither a retirement batch nor a
+        // silently emptied registry can make these walks pass vacuously.
+        let protected = ts::protected_retained_channel_features();
+        ts::require_non_empty("protected sample", Cause::Protected, protected.len());
+        for feature in protected {
+            assert!(
+                dist.contains(&feature),
+                "dist preset must ship the protected channel feature {feature}"
+            );
+        }
+        let extras = ts::registry_string_list("dist_extra_features");
+        ts::require_non_empty("dist extras", Cause::Retired, extras.len());
+        for feature in extras {
+            assert!(
+                dist.contains(&feature),
+                "dist preset must ship the registered distribution extra {feature}"
+            );
+        }
+        // Removed channels stay absent forever.
         assert!(!dist.contains("channel-matrix"));
-        assert!(dist.contains("whatsapp-web"));
         assert!(!dist.contains("channel-slack"));
     }
 
