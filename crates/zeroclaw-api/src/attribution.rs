@@ -63,21 +63,16 @@ pub enum ChannelKind {
     #[strum(serialize = "clawdtalk")]
     ClawdTalk,
     Cli,
-    #[strum(serialize = "dingtalk")]
     Discord,
     Email,
     Filesystem,
     Git,
-    #[strum(serialize = "imessage")]
-    #[strum(serialize = "mochat")]
     Nostr,
     Notion,
     Reddit,
     Telegram,
     VoiceCall,
     VoiceWake,
-    #[strum(serialize = "wecom")]
-    #[strum(serialize = "wecom_ws")]
     Webhook,
     WhatsappWeb,
     Plugin,
@@ -411,11 +406,67 @@ mod tests {
 
     #[test]
     fn channel_kind_snake_case() {
-        assert_eq!(<&'static str>::from(ChannelKind::Telegram), "telegram");
-        assert_eq!(
-            <&'static str>::from(ChannelKind::WhatsappWeb),
-            "whatsapp_web"
-        );
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct Attribution {
+            #[serde(with = "channel_kind_opt_serde")]
+            channel_kind: Option<ChannelKind>,
+        }
+
+        // This is the external wire contract, including explicit spellings
+        // such as acp/clawdtalk. A retired variant's attribute must never
+        // become an alias or canonical token of its next retained neighbour.
+        for (kind, wire) in [
+            (ChannelKind::AcpChannel, "acp"),
+            (ChannelKind::Amqp, "amqp"),
+            (ChannelKind::Bluesky, "bluesky"),
+            (ChannelKind::ClawdTalk, "clawdtalk"),
+            (ChannelKind::Cli, "cli"),
+            (ChannelKind::Discord, "discord"),
+            (ChannelKind::Email, "email"),
+            (ChannelKind::Filesystem, "filesystem"),
+            (ChannelKind::Git, "git"),
+            (ChannelKind::Nostr, "nostr"),
+            (ChannelKind::Notion, "notion"),
+            (ChannelKind::Reddit, "reddit"),
+            (ChannelKind::Telegram, "telegram"),
+            (ChannelKind::VoiceCall, "voice_call"),
+            (ChannelKind::VoiceWake, "voice_wake"),
+            (ChannelKind::Webhook, "webhook"),
+            (ChannelKind::WhatsappWeb, "whatsapp_web"),
+            (ChannelKind::Plugin, "plugin"),
+        ] {
+            assert_eq!(kind.as_wire(), wire);
+            assert_eq!(wire.parse::<ChannelKind>().unwrap(), kind);
+            let attribution = Attribution {
+                channel_kind: Some(kind),
+            };
+            let expected = serde_json::json!({ "channel_kind": wire });
+            assert_eq!(serde_json::to_value(&attribution).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_value::<Attribution>(expected).unwrap(),
+                attribution
+            );
+        }
+        for retired in [
+            "line", "dingtalk", "wecom", "wecom_ws", "wechat", "qq", "twitter", "mochat",
+            "imessage",
+        ] {
+            assert!(
+                retired.parse::<ChannelKind>().is_err(),
+                "retired token {retired} must not alias a retained kind"
+            );
+            assert!(
+                serde_json::from_value::<Attribution>(
+                    serde_json::json!({ "channel_kind": retired })
+                )
+                .is_err(),
+                "retired token {retired} must fail at the serde boundary"
+            );
+        }
+        let absent = Attribution { channel_kind: None };
+        let null = serde_json::json!({ "channel_kind": null });
+        assert_eq!(serde_json::to_value(&absent).unwrap(), null);
+        assert_eq!(serde_json::from_value::<Attribution>(null).unwrap(), absent);
     }
 
     #[test]

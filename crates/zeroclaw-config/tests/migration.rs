@@ -2094,6 +2094,32 @@ fn generate_never_emits_retired_config_surfaces() {
 }
 
 #[test]
+fn generate_never_emits_retired_batch_b_channel_settings() {
+    // Literal expectations also catch a missing tombstone registration; the
+    // general detector-derived test cannot discriminate that omission.
+    for target in 1..=CURRENT_SCHEMA_VERSION {
+        let raw = generate(target, &GenerateOptions::default()).unwrap();
+        let value: toml::Value = toml::from_str(&raw).unwrap();
+        let root = if target == 1 {
+            "channels_config"
+        } else {
+            "channels"
+        };
+        let channels = value[root].as_table().unwrap();
+        for kind in [
+            "line", "dingtalk", "wecom", "wecom_ws", "wechat", "qq", "twitter", "mochat",
+        ] {
+            assert!(
+                !channels.contains_key(kind),
+                "generate({target}) must omit {kind}"
+            );
+        }
+        assert!(channels.contains_key("discord"));
+        assert!(channels.contains_key("email"));
+    }
+}
+
+#[test]
 fn generate_current_emits_at_current_schema_version() {
     let raw = generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
         .expect("generate current succeeds");
@@ -2223,37 +2249,186 @@ fn generate_v3_covers_every_v3_top_level_section() {
 }
 
 #[test]
-fn generate_v3_channel_breadth_lower_bound() {
-    // The V1 fixture covers a wide channel surface. Lower-bound count
-    // catches accidental loss of a whole channel during migration.
-    // Raise the bound only when adding more channels to the fixture. The
-    // fixture's Linq, WATI, Nextcloud Talk and Gmail Push blocks are dropped
-    // by design (retired channel types), so they do not count.
-    const MIN_CHANNEL_ALIASES: usize = 8;
-
-    let cfg = migrate_to_current(
-        &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
-            .expect("generate current succeeds"),
-    )
-    .expect("generated V3 migrates");
-
-    let alias_count = cfg.channels.telegram.len()
-        + cfg.channels.discord.len()
-        + cfg.channels.webhook.len()
-        + cfg.channels.whatsapp.len()
-        + cfg.channels.mqtt.len()
-        + cfg.channels.reddit.len()
-        + cfg.channels.bluesky.len()
-        + cfg.channels.email.len()
-        + cfg.channels.clawdtalk.len()
-        + cfg.channels.voice_call.len();
-
-    assert!(
-        alias_count >= MIN_CHANNEL_ALIASES,
-        "generate(V3) channel breadth dropped: expected ≥ {MIN_CHANNEL_ALIASES} \
-         channel aliases across all types, got {alias_count}. Most likely \
-         cause: a V1 channel block got silently dropped during migration."
+fn generate_v3_preserves_retained_channels_and_retires_batch_b() {
+    // Pin the fixture's retained aliases and meaningful fields, rather than a
+    // count another alias could accidentally satisfy after losing a channel.
+    let generated = generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
+        .expect("generate current succeeds");
+    let cfg = migrate_to_current(&generated).expect("generated V3 migrates");
+    let channels = serde_json::to_value(&cfg.channels).expect("serialize channel configuration");
+    let expected_fields = serde_json::json!({
+        "telegram": {
+            "enabled": true,
+            "bot_token": "telegram-v1-bot-token",
+            "stream_mode": "partial",
+            "draft_update_interval_ms": 1000,
+            "interrupt_on_new_message": false,
+            "mention_only": false,
+            "ack_reactions": false
+        },
+        "discord": {
+            "enabled": true,
+            "bot_token": "discord-v1-bot-token",
+            "guild_ids": ["111122223333"],
+            "channel_ids": ["555566667777"],
+            "archive": true,
+            "listen_to_bots": false,
+            "mention_only": true,
+            "stream_mode": "off",
+            "draft_update_interval_ms": 1000,
+            "multi_message_delay_ms": 500,
+            "stall_timeout_secs": 0
+        },
+        "webhook": {
+            "enabled": true,
+            "port": 8080,
+            "listen_path": "/webhook",
+            "send_url": "https://hooks.example.com/inbound",
+            "send_method": "POST"
+        },
+        "email": {
+            "enabled": false,
+            "imap_host": "imap.example.com",
+            "smtp_host": "smtp.example.com",
+            "username": "zeroclaw@example.com",
+            "password": "email-password",
+            "from_address": "zeroclaw@example.com"
+        },
+        "whatsapp": {
+            "enabled": false,
+            "mention_only": false,
+            "mode": "business",
+            "dm_policy": "allowlist",
+            "group_policy": "allowlist",
+            "self_chat_mode": false
+        },
+        "clawdtalk": {
+            "enabled": false,
+            "api_key": "clawdtalk-api-key",
+            "connection_id": "clawdtalk-connection-id",
+            "from_number": "+15555550110"
+        },
+        "reddit": {
+            "enabled": false,
+            "client_id": "reddit-client-id",
+            "client_secret": "reddit-client-secret",
+            "refresh_token": "reddit-refresh-token",
+            "username": "zeroclawbot",
+            "subreddits": ["zeroclaw"]
+        },
+        "bluesky": {
+            "enabled": false,
+            "handle": "zeroclaw.bsky.social",
+            "app_password": "bluesky-app-password"
+        },
+        "voice_call": {
+            "enabled": false,
+            "account_id": "voice-call-account-id",
+            "auth_token": "voice-call-auth-token",
+            "from_number": "+15555550111"
+        }
+    });
+    let expected_fields = expected_fields.as_object().unwrap();
+    let expected_aliases: std::collections::BTreeSet<_> = expected_fields
+        .keys()
+        .map(|kind| format!("{kind}.default"))
+        .collect();
+    let mut actual_aliases = std::collections::BTreeSet::new();
+    for (kind, value) in channels.as_object().unwrap() {
+        if let Some(aliases) = value.as_object() {
+            for alias in aliases.keys() {
+                actual_aliases.insert(format!("{kind}.{alias}"));
+            }
+        }
+    }
+    assert_eq!(
+        actual_aliases, expected_aliases,
+        "retained channel aliases must migrate exactly"
     );
+    for (kind, fields) in expected_fields {
+        for (field, expected) in fields.as_object().unwrap() {
+            assert_eq!(
+                channels[kind]["default"][field], *expected,
+                "channels.{kind}.default.{field} must preserve the fixture's configuration"
+            );
+        }
+    }
+
+    // These are every retained allowlist in the V1 fixture. Check the whole
+    // peer set and its scope, so dropping or widening a restriction fails.
+    // The fixture has simple_agent/complex_agent, but no agents.default.
+    // rewrite_dangling_peer_group_agents assigns each synthesized group to
+    // the first agent key, complex_agent, and binds its channel aliases there.
+    let expected_peers = serde_json::json!({
+        "telegram": {
+            "agents": ["complex_agent"],
+            "external_peers": ["@v1_admin", "12345678"]
+        },
+        "discord": {
+            "agents": ["complex_agent"],
+            "external_peers": ["222233334444"]
+        },
+        "whatsapp": {
+            "agents": ["complex_agent"],
+            "external_peers": ["+15555550102"]
+        }
+    });
+    let expected_peers = expected_peers.as_object().unwrap();
+    let expected_groups: std::collections::BTreeSet<_> = expected_peers
+        .keys()
+        .map(|kind| format!("{kind}_default"))
+        .collect();
+    assert_eq!(
+        cfg.peer_groups
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_groups,
+        "only retained allowlists may synthesize peer groups"
+    );
+    let expected_agent_channels: std::collections::BTreeSet<_> = expected_peers
+        .keys()
+        .map(|kind| format!("{kind}.default"))
+        .collect();
+    assert_eq!(
+        cfg.agents["complex_agent"]
+            .channels
+            .iter()
+            .map(ToString::to_string)
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_agent_channels,
+        "the migrated owner must bind exactly the peer groups' retained aliases"
+    );
+    assert!(cfg.agents["simple_agent"].channels.is_empty());
+    for (kind, expected) in expected_peers {
+        let name = format!("{kind}_default");
+        let group = serde_json::to_value(&cfg.peer_groups[&name]).unwrap();
+        assert_eq!(
+            group["channel"],
+            serde_json::json!(kind),
+            "{name} channel scope"
+        );
+        assert_eq!(group["agents"], expected["agents"], "{name} agent scope");
+        assert_eq!(
+            group["external_peers"], expected["external_peers"],
+            "{name} complete allowlist"
+        );
+        assert_eq!(group["ignore"], serde_json::json!([]), "{name} blocklist");
+        assert_eq!(
+            group["admin_for_agent_scope"], false,
+            "{name} must not grant admin"
+        );
+    }
+
+    for kind in [
+        "line", "dingtalk", "wecom", "wecom_ws", "wechat", "qq", "twitter", "mochat",
+    ] {
+        assert!(
+            channels.get(kind).is_none(),
+            "retired {kind} must have no alias"
+        );
+        assert!(!cfg.peer_groups.contains_key(&format!("{kind}_default")));
+    }
 }
 
 #[test]

@@ -191,6 +191,29 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
         "retired_channel_transport_removed",
     ),
     ("channels_config.lark", "retired_channel_transport_removed"),
+    ("channels_config.line", "retired_channel_transport_removed"),
+    (
+        "channels_config.dingtalk",
+        "retired_channel_transport_removed",
+    ),
+    ("channels_config.wecom", "retired_channel_transport_removed"),
+    (
+        "channels_config.wecom_ws",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.wechat",
+        "retired_channel_transport_removed",
+    ),
+    ("channels_config.qq", "retired_channel_transport_removed"),
+    (
+        "channels_config.twitter",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.mochat",
+        "retired_channel_transport_removed",
+    ),
     (
         "channels_config.feishu",
         "retired_channel_transport_removed",
