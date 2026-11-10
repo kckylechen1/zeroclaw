@@ -224,6 +224,9 @@ export interface WsMessage {
     | "tool_result"
     | "done"
     | "error"
+    | "ack"
+    | "btw_response"
+    | "btw_error"
     | "session_start"
     | "connected"
     | "approval_request"
@@ -294,7 +297,7 @@ export interface WsMessage {
     write_timeout_ms?: number;
   };
   /** `turn_ack` / `turn_cancel_ack` outcome: accepted | duplicate | conflict |
-   * busy | unknown | requested | stale | no_active. */
+   * busy | btw | unknown | requested | stale | no_active. */
   status?: string;
   /** Monotonic per-request event order (`turn_event` / `turn_replay`). */
   seq?: number;

@@ -5,7 +5,7 @@ import { t } from '@/lib/i18n';
  *
  * The gateway web chat input treats a leading `/` as a command rather than a
  * raw prompt. Commands drive existing frontend/session primitives (clear/reset,
- * model switch) instead of being sent to the model as text.
+ * model switch) or the gateway's read-only side-query route.
  *
  * This module is the single source of truth for the command list. The
  * autocomplete hint popover and the `/help` output are both derived from
@@ -13,7 +13,7 @@ import { t } from '@/lib/i18n';
  */
 
 /** Canonical command name (without the leading slash). */
-export type CommandName = 'help' | 'clear' | 'new' | 'model';
+export type CommandName = 'help' | 'clear' | 'new' | 'model' | 'btw';
 
 export interface CommandSpec {
   /** Command name without the leading slash, e.g. `help`. */
@@ -33,6 +33,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: 'clear', usage: '/clear', descriptionKey: 'agent.cmd_help_clear' },
   { name: 'new', usage: '/new', descriptionKey: 'agent.cmd_help_new' },
   { name: 'model', usage: '/model [name]', descriptionKey: 'agent.cmd_help_model' },
+  { name: 'btw', usage: '/btw [question]', descriptionKey: 'agent.cmd_help_btw' },
 ] as const;
 
 export interface ParsedCommand {
@@ -66,6 +67,13 @@ export function parseCommand(input: string): ParsedCommand {
     command: trimmed.slice(0, firstSpace).toLowerCase(),
     args: trimmed.slice(firstSpace + 1).trim(),
   };
+}
+
+/** null means ordinary input; an empty string is an incomplete /btw command. */
+export function sideQueryQuestion(input: string): string | null {
+  if (!isSlashCommand(input)) return null;
+  const { command, args } = parseCommand(input);
+  return command === 'btw' ? args : null;
 }
 
 /**

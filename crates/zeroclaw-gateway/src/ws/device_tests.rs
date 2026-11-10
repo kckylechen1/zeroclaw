@@ -965,3 +965,128 @@ async fn paired_session_cwd_accepts_workspace_descendant() {
     client.connected(json!({"type":"connect"})).await;
     fixture.send_turn(&mut client, "cwd-child", "hello").await;
 }
+
+#[tokio::test]
+async fn btw_wire_revoked_owner_is_refused_before_provider_or_slot_use() {
+    for negotiated in [false, true] {
+        let fixture = DeviceFixture::new(&["chat"]).await;
+        let mut client = fixture.socket(OWNER_TOKEN).await;
+        if negotiated {
+            client
+                .send(json!({"type":"turn_control","version":1,"op":"negotiate"}))
+                .await;
+            client.until("turn_ready").await;
+        }
+        let accepted_id = format!("btw-{}", uuid::Uuid::new_v4());
+        client
+            .send(json!({"type":"btw","id":accepted_id,"content":"/btw before revocation"}))
+            .await;
+        let ack = client.until("ack").await;
+        assert_eq!(ack["id"], accepted_id);
+        assert_eq!(ack["status"], "accepted");
+        assert_eq!(ack["turn"], "btw");
+        assert_eq!(ack["durable"], false);
+        let answer = client.until("btw_response").await;
+        assert_eq!(answer["id"], accepted_id);
+        assert_eq!(answer["content"], "device response");
+        assert_eq!(fixture.seen.lock().len(), 1);
+
+        let conversations = fixture
+            .state
+            .ws_conversations
+            .session_conversations("gw_device-session");
+        assert_eq!(conversations.len(), 1);
+        let conversation = &conversations[0];
+        let side_query = conversation.side_query.as_ref().unwrap();
+        let revision = side_query.snapshot().revision;
+        assert!(conversation.agent.lock().await.agent.history().is_empty());
+        assert!(fixture.state.pairing.revoke_token(OWNER_TOKEN));
+
+        let refused_id = format!("btw-{}", uuid::Uuid::new_v4());
+        client
+            .send(json!({"type":"btw","id":refused_id,"content":"/btw after revocation"}))
+            .await;
+        let refused = client.next().await.expect("correlated revocation refusal");
+        assert_eq!(refused["type"], "error");
+        assert_eq!(refused["id"], refused_id);
+        assert_eq!(refused["code"], "BRIDGE_OPERATION_DENIED");
+        assert_eq!(fixture.seen.lock().len(), 1);
+        let permits: Vec<_> = (0..zeroclaw_runtime::agent::side_query::MAX_CONCURRENT_SIDE_QUERIES)
+            .map(|_| {
+                side_query
+                    .try_acquire_slot()
+                    .expect("refusal consumes no slot")
+            })
+            .collect();
+        assert!(side_query.try_acquire_slot().is_none());
+        drop(permits);
+        assert_eq!(side_query.snapshot().revision, revision);
+        assert!(!conversation.is_running());
+        assert!(conversation.agent.lock().await.agent.history().is_empty());
+        assert!(
+            fixture
+                .state
+                .session_backend
+                .as_ref()
+                .unwrap()
+                .load("gw_device-session")
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn btw_wire_bridge_requires_its_live_chat_grant() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    assert!(fixture.state.pairing.revoke_token(DEVICE_TOKEN));
+    let mut client = fixture.socket(DEVICE_TOKEN).await;
+    client
+        .send(json!({"type":"turn_control","version":1,"op":"negotiate"}))
+        .await;
+    client.until("turn_ready").await;
+    client
+        .send(json!({"type":"btw","id":"btw-bridge-allowed","content":"/btw bridge question"}))
+        .await;
+    assert_eq!(client.until("ack").await["id"], "btw-bridge-allowed");
+    assert_eq!(
+        client.until("btw_response").await["content"],
+        "device response"
+    );
+    assert_eq!(fixture.seen.lock().len(), 1);
+    fixture
+        .state
+        .config
+        .write()
+        .gateway
+        .bridges
+        .get_mut("device")
+        .unwrap()
+        .device
+        .as_mut()
+        .unwrap()
+        .operations
+        .clear();
+    client
+        .send(json!({"type":"btw","id":"btw-bridge-refused","content":"/btw must not run"}))
+        .await;
+    client.denied().await;
+    assert_eq!(fixture.seen.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn btw_wire_anonymous_legacy_chat_retains_pairing_off_policy() {
+    let fixture = DeviceFixture::with_pairing(&["chat"], false).await;
+    fixture.state.config.write().gateway.bridges.clear();
+    let mut client = fixture.socket("").await;
+    client
+        .send(json!({"type":"btw","id":"btw-anonymous","content":"/btw anonymous question"}))
+        .await;
+    let ack = client.until("ack").await;
+    assert_eq!(ack["id"], "btw-anonymous");
+    assert_eq!(ack["status"], "accepted");
+    assert_eq!(
+        client.until("btw_response").await["content"],
+        "device response"
+    );
+    assert_eq!(fixture.seen.lock().len(), 1);
+}
