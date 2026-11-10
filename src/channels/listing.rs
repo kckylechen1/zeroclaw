@@ -41,46 +41,6 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         compiled: cfg!(feature = "channel-email"),
     },
     ChannelCompileSpec {
-        schema_name: Some("Nostr"),
-        type_keys: &["nostr"],
-        compiled: cfg!(feature = "channel-nostr"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("ClawdTalk"),
-        type_keys: &["clawdtalk"],
-        compiled: cfg!(feature = "channel-clawdtalk"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Reddit"),
-        type_keys: &["reddit"],
-        compiled: cfg!(feature = "channel-reddit"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Bluesky"),
-        type_keys: &["bluesky"],
-        compiled: cfg!(feature = "channel-bluesky"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Git"),
-        type_keys: &["git"],
-        compiled: cfg!(feature = "channel-git"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Voice Call"),
-        type_keys: &["voice-call", "voice_call"],
-        compiled: cfg!(feature = "channel-voice-call"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("VoiceWake"),
-        type_keys: &["voice-wake", "voice_wake"],
-        compiled: cfg!(feature = "voice-wake"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("AMQP"),
-        type_keys: &["amqp"],
-        compiled: cfg!(feature = "channel-amqp"),
-    },
-    ChannelCompileSpec {
         schema_name: Some("Webhook"),
         type_keys: &["webhook"],
         compiled: cfg!(feature = "channel-webhook"),

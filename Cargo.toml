@@ -178,8 +178,7 @@ dist_extra_features = [
 # builds; still available via source --features or a nix override. Not derivable
 # from the feature graph, so it lives in the canonical registry.
 container_excluded_features = [
-    "voice-wake",
-]
+    ]
 
 # Compatibility exclusions for standard distribution artifacts. Release
 # workflows pass only their target triple; feature policy stays here.
@@ -241,8 +240,7 @@ default-channels = [
 
 # Historical broad channel bundle. Preserves the older default channel surface.
 channels-full = [
-    "default-channels", "channel-bluesky", "channel-git", "channel-reddit", "channel-notion", "channel-amqp", "channel-clawdtalk",
-    "channel-voice-call",
+    "default-channels", "channel-notion",
 ]
 
 # Major subsystems — each forwards to exactly ONE crate
@@ -255,16 +253,10 @@ schema-export = ["dep:zeroclaw-schema-markdown", "zeroclaw-config/schema-export"
 # Channel feature flags retained for CLI/installer preset compatibility.
 channel-email = ["zeroclaw-runtime?/email-tools"]
 channel-telegram = []
-channel-nostr = []
 channel-discord = []
-channel-bluesky = []
-channel-git = []
 provider-github = []
 provider-gitea = []
-channel-reddit = []
 channel-notion = []
-channel-amqp = []
-channel-clawdtalk = []
 channel-webhook = []
 channel-acp-server = []
 
@@ -273,9 +265,7 @@ channel-acp-server = []
 # package needs this forward so targets that construct `gateway::AppState`
 # (e.g. the `component` test) can cfg-gate the node-only fields.
 nodes = ["zeroclaw-gateway?/nodes"]
-channel-voice-call = []
 whatsapp-web = []
-voice-wake = []
 memory-tachi = ["zeroclaw-memory/tachi"]
 
 # Backends and platform flags — each forwards to ONE crate
@@ -298,8 +288,7 @@ ci-all = [
     "nodes",
     "voice-surface",
     "agent-runtime",
-    "channels-full",
-    "channel-nostr", "whatsapp-web",
+    "channels-full", "whatsapp-web",
     "observability-prometheus",
     "sandbox-landlock", "sandbox-bubblewrap",
     "zeroclaw-runtime/heavy-tests",

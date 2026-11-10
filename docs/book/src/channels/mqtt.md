@@ -16,5 +16,5 @@ retired wiring only.
 ## See also
 
 - [SOP Fan-In: MQTT](../sop/fan-in/mqtt.md): historical trigger syntax and topic matching
-- [AMQP](./amqp.md)
+- AMQP: schema removed (#584 Slice 3); leftover `[channels.amqp]` sections tombstone at load
 - [Channels overview](./overview.md)

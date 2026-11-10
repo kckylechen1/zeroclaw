@@ -211,38 +211,6 @@ guild_id = "FOLDGUILD"
 }
 
 #[test]
-fn t5_reddit_subreddit_folds_into_subreddits() {
-    let v3 = migrate_v2(
-        r#"
-schema_version = 2
-
-[channels.reddit]
-enabled = true
-client_id = "rid"
-client_secret = "rsec"
-refresh_token = "rrt"
-username = "bot"
-subreddit = "fold-test"
-"#,
-    );
-    let subreddits = v3
-        .get("channels")
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("reddit"))
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("default"))
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("subreddits"))
-        .and_then(toml::Value::as_array)
-        .expect("channels.reddit.default.subreddits array");
-    assert!(
-        subreddits.iter().any(|v| v.as_str() == Some("fold-test")),
-        "V2 reddit.subreddit was not folded into V3 subreddits[]; got {:?}",
-        subreddits
-    );
-}
-
-#[test]
 fn t7_enabled_false_channel_preserved() {
     let v3 = migrate_v2(
         r#"
@@ -2120,6 +2088,37 @@ fn generate_never_emits_retired_batch_b_channel_settings() {
 }
 
 #[test]
+fn generate_never_emits_retired_batch_c_channel_settings() {
+    for target in 1..=CURRENT_SCHEMA_VERSION {
+        let raw = generate(target, &GenerateOptions::default()).unwrap();
+        let value: toml::Value = toml::from_str(&raw).unwrap();
+        let root = if target == 1 {
+            "channels_config"
+        } else {
+            "channels"
+        };
+        let channels = value[root].as_table().unwrap();
+        for kind in [
+            "nostr",
+            "clawdtalk",
+            "reddit",
+            "bluesky",
+            "git",
+            "voice_call",
+            "voice_wake",
+            "amqp",
+        ] {
+            assert!(
+                !channels.contains_key(kind),
+                "generate({target}) must omit {kind}"
+            );
+        }
+        assert!(channels.contains_key("discord"));
+        assert!(channels.contains_key("email"));
+    }
+}
+
+#[test]
 fn generate_current_emits_at_current_schema_version() {
     let raw = generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
         .expect("generate current succeeds");
@@ -2249,7 +2248,7 @@ fn generate_v3_covers_every_v3_top_level_section() {
 }
 
 #[test]
-fn generate_v3_preserves_retained_channels_and_retires_batch_b() {
+fn generate_v3_preserves_retained_channels_and_retires_batches_b_and_c() {
     // Pin the fixture's retained aliases and meaningful fields, rather than a
     // count another alias could accidentally satisfy after losing a channel.
     let generated = generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
@@ -2301,31 +2300,6 @@ fn generate_v3_preserves_retained_channels_and_retires_batch_b() {
             "dm_policy": "allowlist",
             "group_policy": "allowlist",
             "self_chat_mode": false
-        },
-        "clawdtalk": {
-            "enabled": false,
-            "api_key": "clawdtalk-api-key",
-            "connection_id": "clawdtalk-connection-id",
-            "from_number": "+15555550110"
-        },
-        "reddit": {
-            "enabled": false,
-            "client_id": "reddit-client-id",
-            "client_secret": "reddit-client-secret",
-            "refresh_token": "reddit-refresh-token",
-            "username": "zeroclawbot",
-            "subreddits": ["zeroclaw"]
-        },
-        "bluesky": {
-            "enabled": false,
-            "handle": "zeroclaw.bsky.social",
-            "app_password": "bluesky-app-password"
-        },
-        "voice_call": {
-            "enabled": false,
-            "account_id": "voice-call-account-id",
-            "auth_token": "voice-call-auth-token",
-            "from_number": "+15555550111"
         }
     });
     let expected_fields = expected_fields.as_object().unwrap();
@@ -2421,7 +2395,22 @@ fn generate_v3_preserves_retained_channels_and_retires_batch_b() {
     }
 
     for kind in [
-        "line", "dingtalk", "wecom", "wecom_ws", "wechat", "qq", "twitter", "mochat",
+        "line",
+        "dingtalk",
+        "wecom",
+        "wecom_ws",
+        "wechat",
+        "qq",
+        "twitter",
+        "mochat",
+        "nostr",
+        "clawdtalk",
+        "reddit",
+        "bluesky",
+        "git",
+        "voice_call",
+        "voice_wake",
+        "amqp",
     ] {
         assert!(
             channels.get(kind).is_none(),

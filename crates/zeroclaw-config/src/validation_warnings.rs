@@ -167,6 +167,14 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("channels.qq", "retired_channel_transport_removed"),
     ("channels.twitter", "retired_channel_transport_removed"),
     ("channels.mochat", "retired_channel_transport_removed"),
+    ("channels.nostr", "retired_channel_transport_removed"),
+    ("channels.clawdtalk", "retired_channel_transport_removed"),
+    ("channels.reddit", "retired_channel_transport_removed"),
+    ("channels.bluesky", "retired_channel_transport_removed"),
+    ("channels.git", "retired_channel_transport_removed"),
+    ("channels.voice_call", "retired_channel_transport_removed"),
+    ("channels.voice_wake", "retired_channel_transport_removed"),
+    ("channels.amqp", "retired_channel_transport_removed"),
     ("channels.feishu", "retired_channel_transport_removed"),
     ("channels_config.slack", "retired_channel_transport_removed"),
     (
@@ -191,6 +199,29 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
         "retired_channel_transport_removed",
     ),
     ("channels_config.lark", "retired_channel_transport_removed"),
+    ("channels_config.nostr", "retired_channel_transport_removed"),
+    (
+        "channels_config.clawdtalk",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.reddit",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.bluesky",
+        "retired_channel_transport_removed",
+    ),
+    ("channels_config.git", "retired_channel_transport_removed"),
+    (
+        "channels_config.voice_call",
+        "retired_channel_transport_removed",
+    ),
+    (
+        "channels_config.voice_wake",
+        "retired_channel_transport_removed",
+    ),
+    ("channels_config.amqp", "retired_channel_transport_removed"),
     ("channels_config.line", "retired_channel_transport_removed"),
     (
         "channels_config.dingtalk",

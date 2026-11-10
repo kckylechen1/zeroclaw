@@ -50,33 +50,6 @@ hermes = "supported"
 openclaw = "none"
 hermes = "supported"
 
-[channels.nostr]
-openclaw = "supported"
-hermes = "none"
-
-[channels.clawdtalk]
-openclaw = "none"
-hermes = "none"
-
-[channels.reddit]
-openclaw = "none"
-hermes = "none"
-
-[channels.bluesky]
-openclaw = "none"
-hermes = "none"
-
-[channels.voice-call]
-openclaw = "supported"
-hermes = "none"
-
-[channels.voice-wake]
-openclaw = "none"
-hermes = "none"
-
-[channels.amqp]
-openclaw = "none"
-hermes = "none"
 
 [channels.webhook]
 openclaw = "supported"
