@@ -18,6 +18,8 @@ relates-to:
 
 Proposed on 2026-10-30. Not accepted until the owner approves it. Merging this document neither accepts the architecture nor activates a device, route, or capability. [#374](https://github.com/kckylechen1/zeroclaw/issues/374) remains the execution index; the slices below are candidates for that queue.
 
+Amended on 2026-11-10 to match the contract design in #630: capability definitions belong to the kernel's catalog, not to a manifest shipped with the device (§3), and a bounded behavior model may run in an owner-host adapter without becoming a second agent (§1, §8).
+
 This record keeps ADR-017, ADR-019, ADR-020, and ADR-021 unchanged. It restores the device direction of #55 (one controller, many Clients and Nodes) for devices beyond the Yonbo X1, and proposes how speakers, screens, and off-the-shelf voice satellites attach to the body.
 
 ## Context
@@ -40,7 +42,9 @@ This record keeps ADR-017, ADR-019, ADR-020, and ADR-021 unchanged. It restores 
 
 ### 1. Devices are thin; conversational authority stays in the body
 
-No device runs a conversational agent, owns a separate persona or personal memory, or holds model-service credentials. Bounded local wake-word, VAD, and audio-processing models are allowed; they do not decide intent, identity, or permission. Devices never call conversational or speech model-service endpoints directly. Speech goes through the voice adapter (ADR-021), and thinking goes through the body. The body owns the same Soul, memory, and rules, but each device receives only the conversation and projections its source is authorized to access.
+No device runs a conversational agent, owns a separate persona or personal memory, or holds model-service credentials. Bounded local wake-word, VAD, and audio-processing models are allowed; they do not decide intent, identity, or permission. Devices never call conversational or speech model-service endpoints directly. Speech goes through the voice adapter (ADR-021), and thinking goes through the body.
+
+An owner-host adapter may run a small behavior model for its device (ADR-019 §4, §6). That model chooses among the device's vetted presentation behaviors, such as a face or a light pattern, from conversation and attention state. It is not a conversational agent: it answers nothing, holds no Soul, memory or model-service credential of the body, calls no body tool, and can select nothing outside the device allowlist. It lives in the adapter, not on the device, and the device keeps working in its idle behavior without it. The body owns the same Soul, memory, and rules, but each device receives only the conversation and projections its source is authorized to access.
 
 One inventory identity may associate several links with a physical device. This is an administrative grouping, not a new identity store or authorization source; existing gateway and adapter credential owners remain authoritative for their links. It does not make credentials interchangeable: v2 Node authentication, voice access, ESPHome API encryption, and legacy N3B1 authentication have separate audiences, scopes, and revocation procedures. Each process holds only the credentials for the links it needs.
 
@@ -59,7 +63,7 @@ No device class gets its own protocol into the body. ESPHome satellites never ta
 | Module | Does | Used by |
 | --- | --- | --- |
 | Identity and pairing | v2 identity and connection generation at the gateway-facing host; distinct credentials for audio and any device-side protocol | our Node hosts and their attached devices |
-| Capability manifest | declares each capability with its schema, replay class (ADR-020 §3), risk class, and the local permission that must also allow it | our Node hosts |
+| Capability advertisement | advertises the names of the capabilities and events it implements, and holds the local permission that must also allow each one. The schema, risk class and replay class (ADR-020 §3) are defined in the kernel's capability catalog (#630), never supplied by the device: a device that described its own capability could authorize it | our Node hosts |
 | Audio | capture, echo cancellation, voice detection, wake trigger, playback, the local interruption fast path, the mic-open indicator (ADR-021 §2 device duties) | devices with a microphone and speaker |
 | Screen | an authorized, read-only attention or conversation projection; no automatic access to another source's history | devices with a screen |
 | Device-specific | for example the robot's faces, actions, and light (ADR-019 §6) | each device |
@@ -109,7 +113,7 @@ Proposed order: robot first; then a pinned ESPHome trial; then an owner-built sp
 ### 8. Not adopted
 
 - **A conversational model or a full agent on the device.** #55 rules out a separate full agent per device. Bounded wake, VAD, and audio-processing models remain allowed under §1.
-- **Devices calling model endpoints directly**, even "just for speed". Speed comes from the voice adapter and its front harness.
+- **Devices calling model endpoints directly**, even "just for speed". Speed comes from the voice adapter and its front harness, and from the adapter-side behavior model of §1 for presentation.
 - **A persona per device.** One agent everywhere.
 - **Home Assistant as a required dependency.** It can coexist, but a satellite has one voice-assistant subscriber at a time.
 - **Wyoming as the protocol for this device trial.** The proposed trial uses the ESPHome native API; this does not retire existing speech-service protocols.
@@ -134,7 +138,7 @@ Negative:
 
 ## Implementation slices
 
-These are proposed slices for #374, each bounded to a reviewable PR:
+These are proposed slices for #374, each bounded to a reviewable PR: The kernel capability catalog and device events are tracked separately in #630 (S1, S2); the slices below register their capabilities and events there.
 
 1. **Shared v2 host with a real second implementation.** Write the owner-host Yonbo v2-to-N3B1 adapter, then extract shared host code from it and #514 without a gateway dependency, as ADR-019 §8 requires. If reviews need separate extraction and adapter PRs, write the adapter first on a branch to shape the boundary; do not create a speculative crate.
 2. **Physical Yonbo integration.** Under #535, verify the adapter against the retained N3B1 process, including per-hop authentication, local refusals, and separate revocation. Follow ADR-019's physical safety gates; a successful protocol exchange alone never enables motion.

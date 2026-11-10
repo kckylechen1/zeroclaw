@@ -25,11 +25,22 @@ Amended on 2026-09-24 to follow the direction baseline in #388: upstream reuse c
 
 Amended on 2026-09-26 for #381: §8 records how ZeroClaw maps onto Tachi's `tachi_staff` tool, and the Context now describes the launch path Tachi's Staff route really takes (CLI and opencode processes, not `acpx` or native ACP).
 
+Amended on 2026-11-10, after the owner confirmed the positioning in review: the product is a framework for agents whose actions have real consequences, and the personal body is its first deployment, not its whole scope (Context, §2). The decisions in §1 to §8 are unchanged. #388 still words the direction as "not a general agent framework"; until the owner reconciles that issue, this record states the confirmed positioning and #388 keeps governing reuse, module boundaries and replace-before-delete. The contract work that follows from it is tracked in #630.
+
 ## Context
 
-This fork cuts upstream ZeroClaw down to a small personal agent. The owner chose ZeroClaw over heavier agents such as OpenClaw because it is Rust and small.
+This fork cuts upstream ZeroClaw down to a small kernel. The owner chose ZeroClaw over heavier agents such as OpenClaw because it is Rust and small: one static binary can run always-on and its device-side hosts can run on constrained hardware.
 
-The owner wants three things from the product:
+The kernel is meant to carry more than one deployment. The owner names three: a robot, a trading system, and an always-on desktop agent. They share one shape, which is what this record and its successors protect:
+
+- the kernel sends slow intents and holds identity, memory, approvals and policy;
+- any loop faster than a turn runs inside the edge, not through the kernel;
+- the deterministic safety floor sits at the edge and holds without the kernel;
+- a model is never in the hot path of a motor or an order.
+
+The differentiator is this handling of consequential actions (approval, grants, unknown outcomes never replayed, edge safety floors), not breadth of channels or providers. The personal body below is the first deployment of that kernel.
+
+The owner wants three things from that first deployment:
 
 1. **A companion that grows** (ADR-015, ADR-016).
 2. **A body that can reach devices.** It first runs on a computer. A smart speaker, a phone, or a watch then connects to it as an edge device.
@@ -69,6 +80,8 @@ A speaker, a phone, a watch, or another computer connects to the body **through 
 - **Node:** a device that offers bounded, typed capabilities, such as "play audio", "turn on the light", or "read a sensor".
 
 A Node capability call is an ordinary tool call inside a turn. It is not delegation. The Node enforces its own local permissions, and high-risk capabilities go through the approval chain.
+
+The Node path carries intents, their results, and (once #630 adds them) device events. It is not a control loop. Anything that must react faster than a turn, such as a robot's moment-to-moment expression or an order's execution and risk checks, runs inside the edge process, bounded by that edge's own allowlist and limits (ADR-019 §4).
 
 A small robot is a Node too. It runs a Node host on board (for example a Raspberry Pi, or a microcontroller behind a bridge) and advertises capabilities such as `drive`, `look`, `sense`, `speak`, and `emote`. Safety stays on the robot: emergency stop, speed limits, and collision checks run locally and still hold when the link to the body drops. The body never drives serial ports or GPIO in its own process. The in-process hardware crates leave the body (#382 S2). Before they are removed, the slice records their Node-side home or a pinned source reference (`robot-kit` at `e42142161`) with its tests, and it keeps the capability schemas, the admission rules, and the `node_capabilities.rs` approval table. The `robot-kit` capability set and `safety.rs` are the reference for the future robot Node.
 
