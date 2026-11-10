@@ -202,6 +202,7 @@ fn assert_no_stale(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{self as ts, Cause};
 
     fn root() -> std::path::PathBuf {
         crate::util::repo_root()
@@ -219,15 +220,26 @@ mod tests {
     fn channel_column_matches_retirement_from_walk() {
         let parity = load_parity(&root()).unwrap();
         let cfg = ChannelsConfig::default();
-        let retired: Vec<&str> = cfg
+        let registry: Vec<(&str, bool)> = cfg
             .channels()
             .into_iter()
-            .filter(|info| info.retired)
-            .map(|info| info.name)
+            .map(|info| (info.name, info.retired))
             .collect();
+        let rows_of = |retired: bool| -> Vec<&str> {
+            registry
+                .iter()
+                .filter(move |(_, r)| *r == retired)
+                .map(|(n, _)| *n)
+                .collect()
+        };
+        let (retired, retained) = (rows_of(true), rows_of(false));
         let rows = channels_rows(&parity).unwrap();
         for r in &rows {
-            let is_retired = retired.contains(&r.label.trim_end_matches(" (retired)"));
+            let name = r.label.trim_end_matches(" (retired)");
+            // The expectation comes from the live registry, never from the
+            // row's own suffix: deriving it from the label made this loop
+            // vacuous whenever the suffix itself went missing.
+            let is_retired = registry.iter().any(|(n, ret)| *n == name && *ret);
             assert_eq!(
                 r.zeroclaw,
                 if is_retired {
@@ -235,7 +247,7 @@ mod tests {
                 } else {
                     Status::Supported
                 },
-                "row {} status must follow the retired flag",
+                "row {} status must follow the registry retired flag",
                 r.label
             );
             assert_eq!(
@@ -245,8 +257,28 @@ mod tests {
                 r.label
             );
         }
-        // Spot-check one retired and one retained row, and channels whose schema was removed.
-        assert!(retired.contains(&"WeChat"));
+        // #584: both sides of the matrix are sampled from the live registry, so
+        // retiring a schema moves the sample instead of re-pinning a name (this
+        // row used to assert `retired.contains(&"WeChat")`). Non-empty asserted
+        // first so the walks above cannot pass vacuously, and every registry row
+        // must render with the status its flag implies.
+        ts::require_non_empty("matrix rows", Cause::Protected, rows.len());
+        ts::require_non_empty("retired rows", Cause::Retired, retired.len());
+        ts::require_non_empty("retained rows", Cause::Protected, retained.len());
+        for name in &retired {
+            assert!(
+                rows.iter()
+                    .any(|r| r.label == format!("{name} (retired)") && r.zeroclaw == Status::None),
+                "retired transport {name} must render as a retired, unsupported row"
+            );
+        }
+        for name in &retained {
+            assert!(
+                rows.iter()
+                    .any(|r| r.label == *name && r.zeroclaw == Status::Supported),
+                "retained surface {name} must render as a supported row"
+            );
+        }
         assert!(!retired.contains(&"Telegram"));
         for removed in ["Slack", "Feishu", "Lark"] {
             assert!(

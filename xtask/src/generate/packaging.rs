@@ -126,6 +126,7 @@ fn rewrite_json_string_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{self as ts, Cause};
     use std::path::PathBuf;
 
     fn root() -> PathBuf {
@@ -198,8 +199,26 @@ mod tests {
         let f = spec::resolve_feature_list(&root(), &Selection::Dist)
             .unwrap()
             .join(",");
-        assert!(f.contains("channel-telegram"));
-        assert!(f.contains("whatsapp-web"));
+        // #584: sampled from the live registry and the Cargo.toml
+        // distribution-extra registry, so neither a retirement batch nor a
+        // silently emptied registry can make these walks pass vacuously.
+        let protected = ts::protected_retained_channel_features();
+        ts::require_non_empty("protected sample", Cause::Protected, protected.len());
+        for feature in protected {
+            assert!(
+                f.contains(&feature),
+                "pkgbuild dist must ship the protected channel feature {feature}"
+            );
+        }
+        let extras = ts::registry_string_list("dist_extra_features");
+        ts::require_non_empty("dist extras", Cause::Retired, extras.len());
+        for feature in extras {
+            assert!(
+                f.contains(&feature),
+                "pkgbuild dist must ship the registered distribution extra {feature}"
+            );
+        }
+        // Removed channels stay absent forever.
         assert!(!f.contains("channel-matrix"));
         assert!(!f.contains("channel-slack"));
     }

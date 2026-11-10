@@ -726,6 +726,7 @@ pub fn web_data_dir_expr(platform: Platform) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{self as ts, Cause};
     use std::path::PathBuf;
 
     fn root() -> PathBuf {
@@ -792,11 +793,26 @@ mod tests {
     #[test]
     fn dist_matches_lean_release_contract() {
         let features = resolve_feature_list(&root(), &Selection::Dist).unwrap();
+        // #584: the beyond-default half of the lean release is whatever
+        // `[package.metadata.zeroclaw] dist_extra_features` declares, read
+        // straight out of Cargo.toml instead of a channel name a batch retires.
+        let extras = ts::registry_string_list("dist_extra_features");
+        ts::require_non_empty("dist extras", Cause::Retired, extras.len());
         let mut expected = resolve_feature_list(&root(), &Selection::Full).unwrap();
-        expected.extend(["whatsapp-web"].map(str::to_owned));
+        expected.extend(extras);
         expected.sort();
         expected.dedup();
         assert_eq!(features, expected);
+        // Positive control: the lean release still ships every channel surface
+        // #584 protects, sampled from the live registry rather than named.
+        let protected = ts::protected_retained_channel_features();
+        ts::require_non_empty("protected sample", Cause::Protected, protected.len());
+        for feature in protected {
+            assert!(
+                features.contains(&feature),
+                "dist must ship the protected channel feature {feature}"
+            );
+        }
     }
 
     #[test]
@@ -827,9 +843,47 @@ mod tests {
 
         let broad = resolve_feature_list(&root(), &Selection::DistBroad).unwrap();
         assert_eq!(broad, expected);
-        assert!(broad.contains(&"channel-git".to_string()));
-        assert!(broad.contains(&"channel-line".to_string()));
-        assert!(!dist.contains(&"channel-line".to_string()));
+        // #584: the broad-only rows are sampled from the live `channels-full`
+        // aggregate instead of naming channels (this used to pin `channel-git`
+        // and `channel-line`). The lean-dist check is taken against the
+        // resolved default set — not against `dist` itself, which would make it
+        // vacuous.
+        let default_rows = resolve_feature_list(&root(), &Selection::Full).unwrap();
+        let mut full_rows: Vec<String> = ctx
+            .expand("channels-full")
+            .into_iter()
+            .filter(|f| ts::is_channel_feature(f))
+            .collect();
+        full_rows.sort();
+        let broad_only: Vec<String> = full_rows
+            .iter()
+            .filter(|f| !default_rows.contains(f))
+            .cloned()
+            .collect();
+        ts::require_non_empty("channels-full rows", Cause::Protected, full_rows.len());
+        ts::require_non_empty("broad-only rows", Cause::Retired, broad_only.len());
+        for feature in &full_rows {
+            assert!(
+                broad.contains(feature),
+                "dist-broad must include the channels-full row {feature}"
+            );
+        }
+        for feature in &broad_only {
+            // Against the resolved default set, not `dist` itself.
+            assert!(
+                !dist.contains(feature),
+                "channels-full row {feature} must stay out of the lean dist"
+            );
+        }
+        let protected = ts::protected_retained_channel_features();
+        ts::require_non_empty("protected sample", Cause::Protected, protected.len());
+        for feature in protected {
+            assert!(
+                broad.contains(&feature),
+                "dist-broad must keep the protected channel feature {feature}"
+            );
+        }
+        // Removed channels stay absent forever.
         assert!(!broad.contains(&"channel-slack".to_string()));
         assert!(!broad.contains(&"sandbox-bubblewrap".to_string()));
     }
@@ -874,10 +928,10 @@ mod tests {
             .or_else(|| meta.workspace_packages().into_iter().next().cloned())
             .unwrap();
         let extras = dist_extra_features(&pkg).unwrap();
-        assert!(
-            extras.contains(&"whatsapp-web".to_string()),
-            "distribution extras come from Cargo.toml registry"
-        );
+        // #584: compared against Cargo.toml itself (independent text parse).
+        let declared = ts::registry_string_list("dist_extra_features");
+        ts::require_non_empty("dist extras", Cause::Retired, declared.len());
+        assert_eq!(extras, declared, "extras come from the Cargo.toml registry");
         assert!(!extras.contains(&"channel-matrix".to_string()));
         assert!(!extras.contains(&"channel-lark".to_string()));
     }
@@ -959,7 +1013,36 @@ mod tests {
             .unwrap();
         let exclusions = dist_target_exclusions(workspace_root_package(&meta).unwrap()).unwrap();
 
-        assert_eq!(exclusions["aarch64-linux-android"], vec!["whatsapp-web"]);
+        // #584: the concrete rows follow Cargo.toml (parsed independently), so
+        // a batch that retires a channel does not re-pin a name here. What stays
+        // pinned is the shape of the policy: every row is non-empty and names a
+        // feature the distribution actually selects, so a stale row fails closed.
+        assert_eq!(
+            exclusions,
+            ts::registry_target_exclusions(),
+            "target exclusions come from Cargo.toml"
+        );
+        let declared_features = ts::live_feature_names();
+        let dist = resolve_feature_list(&root(), &Selection::Dist).unwrap();
+        ts::require_non_empty("target exclusions", Cause::Retired, exclusions.len());
+        ts::require_non_empty("[features] rows", Cause::Protected, declared_features.len());
+        for (target, excluded) in &exclusions {
+            ts::require_non_empty(
+                &format!("`dist_target_exclusions.{target}`"),
+                Cause::Retired,
+                excluded.len(),
+            );
+            for feature in excluded {
+                assert!(
+                    declared_features.contains(feature),
+                    "dist_target_exclusions.{target} names `{feature}`, which is not a [features] entry"
+                );
+                assert!(
+                    dist.contains(feature),
+                    "dist_target_exclusions.{target} names `{feature}`, which the dist build does not select"
+                );
+            }
+        }
         assert_eq!(
             exclusions["arm-unknown-linux-gnueabihf"],
             vec!["observability-prometheus"]
