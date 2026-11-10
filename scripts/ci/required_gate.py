@@ -10,8 +10,8 @@ import sys
 
 FULL_JOBS = {
     "fmt", "repo-structure", "lint", "windows-clippy-tools-changes", "build",
-    "check", "check-32bit", "test", "security", "nix-eval", "nix-hash-drift",
-    "installer-drift", "web-permission-tests",
+    "build-macos", "check", "check-32bit", "test", "security", "nix-eval",
+    "nix-hash-drift", "installer-drift", "web-permission-tests",
 }
 PR_ONLY_JOBS = {"repo-structure", "nix-eval", "nix-hash-drift"}
 ALL_JOBS = FULL_JOBS | {"changes", "docs-style", "docs-build", "windows-clippy-tools"}
@@ -35,6 +35,7 @@ def validate(needs: dict, event_name: str) -> list[str]:
         full = boolean_output(needs["changes"], "full")
         docs_build = boolean_output(needs["changes"], "docs_build")
         windows = full and boolean_output(needs["windows-clippy-tools-changes"], "run")
+        selfhosted_ok = boolean_output(needs["changes"], "selfhosted_ok")
     except (TypeError, ValueError) as error:
         return [str(error)]
     expected = {job: "skipped" for job in ALL_JOBS}
@@ -45,6 +46,11 @@ def validate(needs: dict, event_name: str) -> list[str]:
         if event_name == "push":
             for job in PR_ONLY_JOBS:
                 expected[job] = "skipped"
+        # The self-hosted lane may be skipped only for fork PR heads; on push
+        # and merge_group events the classifier output cannot legitimately be
+        # false, so a skipped lane there is a workflow inconsistency.
+        if event_name == "pull_request" and not selfhosted_ok:
+            expected["build-macos"] = "skipped"
     if docs_build:
         expected["docs-build"] = "success"
     if windows:
