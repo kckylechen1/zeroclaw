@@ -8,6 +8,7 @@
 # from the fixture pin file (no duplicated version constant).
 
 set -euo pipefail
+unset CDPATH
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 gate="${script_dir}/toolchain_gate.sh"

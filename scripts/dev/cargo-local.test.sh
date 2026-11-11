@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Exercise the actual launcher in real main/linked Git worktrees; no compilation.
 set -euo pipefail
+unset CDPATH
 source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/cargo-local-test.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
 main="$fixture/main checkout"
 linked="$fixture/linked checkout"
 mkdir -p "$main/scripts/dev" "$main/scripts/ci" "$main/dev/ci" "$fixture/bin"
-cp "$source_root/scripts/dev/cargo-local.sh" "$source_root/scripts/dev/leg.sh" "$main/scripts/dev/"
+cp "$source_root/scripts/dev/cargo-local.sh" "$source_root/scripts/dev/leg.sh" "$source_root/scripts/dev/target_sweep.sh" "$main/scripts/dev/"
 printf '%s\n' '{"legs":{"demo":["example"]},"excluded":[],"extra_runs":{"demo":[{"name":"extra","features":["extra"],"filter":"boundary"}]}}' > "$main/dev/ci/test-partition.json"
 printf '[workspace]\nmembers = []\n' > "$main/Cargo.toml"
 cat > "$main/scripts/ci/toolchain_gate.sh" <<'GATE'
@@ -21,7 +22,7 @@ printf '%s\n' "${CARGO_PROFILE_DEV_DEBUG:-unset}" "${CARGO_PROFILE_TEST_DEBUG:-u
 if [[ -n "${TEST_CARGO_TRACE:-}" ]]; then
   printf '%s|%s|%s|%s\n' "$CARGO_TARGET_DIR" "$CARGO_INCREMENTAL" "$PWD" "$*" >> "$TEST_CARGO_TRACE"
 fi
-if [[ "${1:-}" == metadata ]]; then printf '%s\n' '{"packages":[{"name":"example"}]}'; fi
+if [[ "${1:-}" == metadata ]]; then printf '%s\n' '{"workspace_members":["example 0.1.0"],"packages":[{"id":"example 0.1.0","name":"example","targets":[{"name":"example"}]}]}'; fi
 CARGO
 chmod +x "$fixture/bin/cargo"
 git init -q "$main"
@@ -66,6 +67,17 @@ diff -u "$fixture/expected" "$TEST_CARGO_TRACE"
 bash "$linked/scripts/dev/leg.sh" --check
 printf '%s|0|%s|%s\n' "$main/target" "$linked" 'metadata --no-deps --format-version 1 --locked' > "$fixture/expected"
 diff -u "$fixture/expected" "$TEST_CARGO_TRACE"
+: > "$TEST_CARGO_TRACE"
+mkdir -p "$main/target/debug"
+(
+  cd "$linked"
+  export CDPATH=".:$fixture"
+  bash scripts/dev/leg.sh --list >/dev/null
+  CARGO_TARGET_DIR="$main/target" bash scripts/dev/target_sweep.sh --dry-run >/dev/null
+  bash scripts/dev/cargo-local.sh check
+)
+printf '%s\n' "$main/target" 0 "$linked" check > "$fixture/expected"
+diff -u "$fixture/expected" "$TEST_CARGO_LOG"
 unset TEST_CARGO_TRACE
 rm "$TEST_CARGO_LOG"
 if TEST_GATE_EXIT=9 bash "$linked/scripts/dev/cargo-local.sh" check; then

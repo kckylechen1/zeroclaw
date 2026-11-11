@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+unset CDPATH
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
