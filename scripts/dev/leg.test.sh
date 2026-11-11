@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exercise the real partition, runner and CI shell with a fake Cargo launcher.
 set -euo pipefail
+unset CDPATH
 source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/leg-test.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
