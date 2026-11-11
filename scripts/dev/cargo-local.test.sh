@@ -8,7 +8,7 @@ trap 'rm -rf -- "$fixture"' EXIT
 main="$fixture/main checkout"
 linked="$fixture/linked checkout"
 mkdir -p "$main/scripts/dev" "$main/scripts/ci" "$main/dev/ci" "$fixture/bin"
-cp "$source_root/scripts/dev/cargo-local.sh" "$source_root/scripts/dev/leg.sh" "$source_root/scripts/dev/target_sweep.sh" "$main/scripts/dev/"
+cp "$source_root/scripts/dev/cargo-local.sh" "$source_root/scripts/dev/shared_target.py" "$source_root/scripts/dev/leg.sh" "$source_root/scripts/dev/target_sweep.sh" "$main/scripts/dev/"
 printf '%s\n' '{"legs":{"demo":["example"]},"excluded":[],"extra_runs":{"demo":[{"name":"extra","features":["extra"],"filter":"boundary"}]}}' > "$main/dev/ci/test-partition.json"
 printf '[workspace]\nmembers = []\n' > "$main/Cargo.toml"
 cat > "$main/scripts/ci/toolchain_gate.sh" <<'GATE'
@@ -106,11 +106,13 @@ diff -u "$fixture/expected" "$TEST_CARGO_LOG"
 rm "$TEST_CARGO_LOG"
 separate="$fixture/separate"
 git init -q --separate-git-dir="$fixture/git-storage" "$separate"
-mkdir -p "$separate/scripts/dev"
-cp "$source_root/scripts/dev/cargo-local.sh" "$separate/scripts/dev/"
+mkdir -p "$separate/scripts/dev" "$separate/scripts/ci"
+cp "$source_root/scripts/dev/cargo-local.sh" "$source_root/scripts/dev/shared_target.py" "$separate/scripts/dev/"
+cp "$main/scripts/ci/toolchain_gate.sh" "$separate/scripts/ci/"
 if bash "$separate/scripts/dev/cargo-local.sh" check 2> "$fixture/error"; then
   echo 'launcher guessed a separate Git directory target' >&2; exit 1
 fi
 grep -q 'Set CARGO_TARGET_DIR explicitly' "$fixture/error"
 test ! -e "$TEST_CARGO_LOG"
 printf 'PASS: main/linked worktrees share target; overrides and arguments preserved; test legs/metadata/nextest use the same target; failed guard and unsupported layout stop before Cargo\n'
+python3 "$source_root/scripts/dev/shared_target.test.py" "$BASH"

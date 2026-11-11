@@ -27,29 +27,41 @@ Plus two non-test directories:
 #### sh
 
 ```sh
-cargo test                                  # unit + component + integration + system
-cargo test --lib                            # unit only
-cargo test -p zeroclaw-channels --lib --features heavy-tests  # full channels unit suite
-cargo test -p zeroclaw-runtime --lib --features heavy-tests   # full runtime unit suite
-cargo test --test component                 # component only
-cargo test --test integration               # integration only
-cargo test --test system                    # system only
-cargo test --test integration agent         # filter within a level
-cargo nextest run --locked --workspace  # what CI runs
-./dev/ci.sh all                             # full CI battery (Docker)
-./dev/ci.sh test-component                  # level-specific CI commands (Docker)
+scripts/dev/cargo-local.sh test -p zeroclaw-runtime --lib
+scripts/dev/cargo-local.sh test -p zeroclaw-runtime --lib --features heavy-tests
+scripts/dev/cargo-local.sh test -p zeroclaw-gateway --lib --features nodes
+scripts/dev/cargo-local.sh test -p zeroclawlabs --test component
+scripts/dev/cargo-local.sh test -p zeroclawlabs --test integration agent
+scripts/dev/cargo-local.sh test -p zeroclawlabs --test system
+scripts/dev/leg.sh --list                   # CI's package/feature partitions
+scripts/dev/leg.sh app                      # before push: only affected legs
+./dev/ci.sh test-component                  # component tests in Docker
 ```
 
 </div>
+
+Use a package and `--lib` or `--test <target>` during iteration. A test-name
+filter alone does not narrow the binaries Cargo compiles. Before pushing, run
+the affected legs from `dev/ci/test-partition.json`; CI runs every leg. Do not
+substitute a full-workspace host build for that selection.
 
 ## Local build storage
 
 Use `scripts/dev/cargo-local.sh` instead of bare `cargo` for host-side checks
 across linked worktrees. The existing `scripts/dev/leg.sh` runner also uses this
-entrypoint for its metadata, runner detection, main test and extra runs. It uses the main checkout's `target` directory, checks
-the pinned toolchain, and defaults to non-incremental compilation. Explicit
-`CARGO_TARGET_DIR` and `CARGO_INCREMENTAL` overrides are respected. Checkouts with
-a separate Git directory must provide an explicit target path.
+entrypoint for its metadata, runner detection, main test and extra runs. Both
+the launcher and `scripts/dev/target_sweep.sh` use the main checkout's `target`
+directory by default. They resolve relative `CARGO_TARGET_DIR` paths from the
+checkout root and canonicalize symlink aliases. The launcher's `--target-dir`
+option takes precedence over the environment; arguments after `--` belong to
+the test or program and do not select a target. Checkouts with a separate Git
+directory must provide an explicit target path.
+
+The launcher checks the pinned toolchain, preserves managed host admission,
+and defaults to non-incremental compilation. `CARGO_INCREMENTAL` overrides are
+respected. These entrypoints require Python 3 with Unix file locking on macOS
+or Linux. The sweep also requires Bash 4 or newer; macOS's bundled Bash 3 is
+insufficient.
 
 ```sh
 scripts/dev/cargo-local.sh test -p zeroclaw-memory --lib
@@ -72,14 +84,48 @@ does not delete existing incremental artifacts. Keep feature/profile choices
 stable; different worktree paths and compilation modes can still leave multiple
 workspace artifacts in a shared target. Serialize checks sharing that target.
 
-After completing a delivery, inspect the target size and use
-`scripts/dev/target_sweep.sh --dry-run` with `CARGO_TARGET_DIR` set to the same
-shared path. When no build or executable is using it, run the sweep to remove
-workspace artifacts while retaining third-party dependencies. Do not invoke
-cleanup automatically from builds or use it on an active target. The sweep
-requires Bash 4 or newer (macOS's bundled Bash 3 is insufficient). Keep third-party dependencies even in retired targets until an explicit cache
-retirement policy permits their removal; do not use `cargo clean` or bypass
-Cargo cache-tag guards. Retain non-build receipts outside the target.
+The two entrypoints hold the same target-specific maintenance lock for the
+entire foreground command. A build waits if another wrapper command holds it;
+a sweep, including `--dry-run`, refuses immediately when it is busy. The parent
+retains the lock while `host-build -- cargo` runs, even if the host launcher
+closes inherited file descriptors. With a controlling terminal, commands keep
+the existing session and foreground group: terminal Ctrl-C already reaches
+them, while the supervisor forwards TERM/HUP to its direct command and waits.
+Without a terminal, it forwards INT/TERM/HUP to a separate command group.
+Keep `.zeroclaw-maintenance.lock` in place; deleting it can create two
+independent locks.
+
+This lock covers these entrypoints, not bare Cargo, direct test executables or
+background processes launched outside them. The sweep retains its process
+check as a best-effort guard, but that check alone cannot close a startup race.
+Killing only a supervisor or leaving detached descendants is outside this
+coordination guarantee; confirm remaining children have stopped before sweeping.
+Custom aliases that redirect build output and
+separate build-directory layouts are unsupported. Simple one-line overrides
+such as `--config net.offline=true` work; config files, quoted/escaped keys, and
+`build`/`alias` overrides are refused. Select output with `CARGO_TARGET_DIR` or
+`--target-dir` instead.
+
+At delivery-batch closeout or when disk pressure requires it, inspect the
+retained targets and preview a sweep. Keep the active batch's workspace cache
+between edit/test cycles; sweeping after every command forces it to rebuild.
+
+```sh
+scripts/dev/target_sweep.sh --dry-run
+scripts/dev/target_sweep.sh
+# For a target explicitly selected during the build, use that same path:
+CARGO_TARGET_DIR=../batch-target scripts/dev/target_sweep.sh --dry-run
+```
+
+Run the mutating sweep only when no build or executable uses the target. It
+removes workspace artifacts and retains third-party dependencies, including
+dependency names containing `zeroclaw` and names colliding with test targets.
+Cleanup stays an explicit maintenance operation, never a build exit hook.
+Inventory independent targets separately; do not assume the robot or another
+toolchain shares this cache. Keep third-party dependencies even in retired
+targets until an explicit cache retirement policy permits their removal; do
+not use `cargo clean` or bypass Cargo cache-tag guards. Retain non-build receipts
+outside the target.
 
 ## Picking a level for a new test
 
