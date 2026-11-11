@@ -255,6 +255,9 @@ class SharedTargetTests(unittest.TestCase):
         try:
             self.wait_file(ready)  # Cargo has successfully opened /dev/tty.
             self.assertEqual(self.run_entry("target_sweep.sh").returncode, 75)
+            # VINTR may flush unread output; observe readiness before Ctrl-C.
+            drain()
+            self.assertIn(b"fixture: controlling terminal opened", output)
             os.write(terminal, b"\x03")
             deadline = time.monotonic() + 5
             while True:
@@ -268,7 +271,6 @@ class SharedTargetTests(unittest.TestCase):
                                 f"Ctrl-C did not stop the command; stopped={stopped.exists()}; "
                                 f"PTY output={bytes(output)!r}")
                 time.sleep(0.01)
-            self.assertIn(b"fixture: controlling terminal opened", output)
             self.assertTrue(stopped.exists())
             self.assertEqual(self.run_entry("target_sweep.sh").returncode, 0)
         finally:
