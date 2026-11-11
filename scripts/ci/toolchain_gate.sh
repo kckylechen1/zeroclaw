@@ -18,6 +18,7 @@
 # The guard never installs, switches, or mutates toolchains.
 
 set -euo pipefail
+unset CDPATH
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../.." && pwd)"

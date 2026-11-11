@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+unset CDPATH
 
 # Provider dispatch architecture gate. Also invoked from
 # scripts/ci/rust_quality_gate.sh — the gate logic lives only here.

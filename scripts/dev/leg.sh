@@ -21,6 +21,7 @@
 # Prerequisites: cargo, jq
 
 set -euo pipefail
+unset CDPATH
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PARTITION="$REPO_ROOT/dev/ci/test-partition.json"

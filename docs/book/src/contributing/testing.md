@@ -57,6 +57,16 @@ scripts/dev/cargo-local.sh clippy -p zeroclaw-memory --all-targets -- -D warning
 ```
 
 Repository Cargo config also disables incremental compilation for bare Cargo.
+The local launcher defaults `CARGO_PROFILE_DEV_DEBUG` to `0`, retaining symbols
+but omitting debug information. The test profile inherits this setting unless
+overridden separately. Debug assertions, overflow checks, and release profiles
+are unchanged. Explicit dev/test environment overrides are preserved. Restore
+file/line backtraces for a diagnostic run with:
+
+```sh
+CARGO_PROFILE_DEV_DEBUG=line-tables-only scripts/dev/cargo-local.sh test -p zeroclaw-config --lib
+```
+
 Use `CARGO_INCREMENTAL=1` only for a deliberate short edit loop. Turning it off
 does not delete existing incremental artifacts. Keep feature/profile choices
 stable; different worktree paths and compilation modes can still leave multiple
