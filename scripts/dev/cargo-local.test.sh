@@ -17,6 +17,7 @@ GATE
 cat > "$fixture/bin/cargo" <<'CARGO'
 #!/usr/bin/env bash
 printf '%s\n' "$CARGO_TARGET_DIR" "$CARGO_INCREMENTAL" "$PWD" "$@" > "$TEST_CARGO_LOG"
+printf '%s\n' "${CARGO_PROFILE_DEV_DEBUG:-unset}" "${CARGO_PROFILE_TEST_DEBUG:-unset}" > "$TEST_PROFILE_LOG"
 if [[ -n "${TEST_CARGO_TRACE:-}" ]]; then
   printf '%s|%s|%s|%s\n' "$CARGO_TARGET_DIR" "$CARGO_INCREMENTAL" "$PWD" "$*" >> "$TEST_CARGO_TRACE"
 fi
@@ -29,16 +30,25 @@ git -C "$main" -c user.name=Fixture -c user.email=fixture@example.invalid commit
 git -C "$main" worktree add -q --detach "$linked"
 main="$(cd "$main" && pwd -P)"
 linked="$(cd "$linked" && pwd -P)"
-export PATH="$fixture/bin:$PATH" TEST_CARGO_LOG="$fixture/cargo.log"
+export PATH="$fixture/bin:$PATH" TEST_CARGO_LOG="$fixture/cargo.log" TEST_PROFILE_LOG="$fixture/profiles.log"
 # Isolate host admission from the developer's installed gate.
 export HOME="$fixture/home"
 mkdir -p "$HOME"
-unset CARGO_TARGET_DIR CARGO_INCREMENTAL
+unset CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG
 for checkout in "$main" "$linked"; do
   bash "$checkout/scripts/dev/cargo-local.sh" test -p example -- 'name with spaces'
   printf '%s\n' "$main/target" 0 "$checkout" test -p example -- 'name with spaces' > "$fixture/expected"
   diff -u "$fixture/expected" "$TEST_CARGO_LOG"
+  printf '%s\n' 0 unset > "$fixture/expected-profiles"
+  diff -u "$fixture/expected-profiles" "$TEST_PROFILE_LOG"
 done
+CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_TEST_DEBUG=full \
+  bash "$linked/scripts/dev/cargo-local.sh" test --lib
+printf '%s\n' line-tables-only full > "$fixture/expected-profiles"
+diff -u "$fixture/expected-profiles" "$TEST_PROFILE_LOG"
+CARGO_PROFILE_TEST_DEBUG=line-tables-only bash "$linked/scripts/dev/cargo-local.sh" test --lib
+printf '%s\n' 0 line-tables-only > "$fixture/expected-profiles"
+diff -u "$fixture/expected-profiles" "$TEST_PROFILE_LOG"
 CARGO_TARGET_DIR="$fixture/explicit target" CARGO_INCREMENTAL=1 \
   bash "$linked/scripts/dev/cargo-local.sh" check
 printf '%s\n' "$fixture/explicit target" 1 "$linked" check > "$fixture/expected"

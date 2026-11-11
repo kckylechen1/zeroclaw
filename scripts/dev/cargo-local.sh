@@ -13,6 +13,10 @@ if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
   export CARGO_TARGET_DIR="$main_root/target"
 fi
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+# Local edit/test loops keep symbols but omit debuginfo. The test profile
+# inherits dev unless explicitly overridden; restore line-tables-only when
+# investigating a backtrace. Release profiles keep their own settings.
+export CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
 bash scripts/ci/toolchain_gate.sh >&2
 # A managed machine has one host gate independent of this checkout or PATH.
 # Hosted CI and contributors without that installation keep normal Cargo.
