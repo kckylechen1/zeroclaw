@@ -16,7 +16,8 @@
 #   incremental/<own crate>-<hash>
 # "Own" names come from `cargo metadata --no-deps` (every workspace package
 # and target), plus anything matching *zeroclaw*. A name that is also a
-# third-party package name is skipped.
+# third-party package or cached external target name is skipped, including
+# standalone tools that are absent from the current dependency graph.
 #
 # Usage:
 #   scripts/dev/target_sweep.sh [--dry-run] [--profile <dir>]...
@@ -109,6 +110,37 @@ target_sweep_main() {
   declare -A own=() skip=()
   for n in "${own_names[@]}"; do own["$n"]=1; done
   for n in "${third_party[@]}"; do skip["$n"]=1; done
+
+  # The target can also contain cargo-install tools and older dependencies that
+  # are absent from metadata. Fingerprint directories identify their packages;
+  # marker filenames identify targets whose names differ from their package.
+  # Gather every selected profile before deleting anything: an external package
+  # found in release must also protect its colliding target name in debug.
+  declare -A own_packages=()
+  while IFS= read -r n; do own_packages["$n"]=1; done < <(
+    jq -r '.packages[].name' <<<"$metadata_own"
+  )
+  for profile in "${profiles[@]}"; do
+    for path in "$TARGET_DIR/$profile/.fingerprint/"*; do
+      [[ -d "$path" ]] || continue
+      base="${path##*/}"
+      [[ "$base" =~ ^(.+)-[0-9a-f]{16}$ ]] || continue
+      n="${BASH_REMATCH[1]}"
+      [[ -z "${own_packages[$n]:-}" ]] || continue
+      skip["$n"]=1
+      skip["${n//-/_}"]=1
+      for marker in "$path/"*; do
+        [[ -f "$marker" ]] || continue
+        base="${marker##*/}"
+        [[ "$base" != *.json ]] || continue
+        if [[ "$base" =~ ^(test-)?(bin|lib|example|integration-test|bench)-(.+)$ ]]; then
+          n="${BASH_REMATCH[3]}"
+          skip["$n"]=1
+          skip["${n//-/_}"]=1
+        fi
+      done
+    done
+  done
 
   is_own() {
     local base="$1" name

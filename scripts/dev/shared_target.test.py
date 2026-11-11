@@ -44,7 +44,8 @@ if metadata:
     if "--no-deps" not in sys.argv and os.environ.get("TEST_METADATA_INVALID"):
         print("{}"); sys.exit(0)
     own = {"id":"own", "name":"zeroclaw-fixture", "targets":[
-        {"name":"zeroclaw_fixture"}, {"name":"component"}]}
+        {"name":"zeroclaw_fixture"}, {"name":"component"},
+        {"name":"mdbook"}, {"name":"cached_tool"}]}
     packages = [own]
     if "--no-deps" not in sys.argv:
         packages += [{"id":"dep", "name":"zeroclaw-vendor", "targets":[{"name":"zeroclaw_vendor"}]},
@@ -149,6 +150,41 @@ class SharedTargetTests(unittest.TestCase):
         self.assertFalse(own.exists())
         self.assertTrue(all(path.read_text() == "dependency" for path in retained))
         self.assertTrue((self.target / ".zeroclaw-maintenance.lock").exists())
+
+    def test_cached_external_packages_and_targets_survive_without_graph_entries(self):
+        own, retained = self.artifacts()
+        # These packages are absent from the fake full graph. mdbook reproduces
+        # cargo-install sharing a target with the workspace's xtask binary.
+        for relative in (
+                "release/.fingerprint/mdbook-1111111111111111/bin-mdbook",
+                "release/deps/mdbook-1111111111111111",
+                "release/deps/mdbook-1111111111111111.d",
+                "release/.fingerprint/external-tools-2222222222222222/bin-cached_tool",
+                "debug/deps/cached_tool-3333333333333333",
+                "release/.fingerprint/zeroclaw-external-4444444444444444/lib-vendor_alias",
+                "release/deps/libzeroclaw_external-4444444444444444.rlib",
+                "release/build/zeroclaw-external-5555555555555555/output",
+                "release/deps/libvendor_alias-6666666666666666.rlib"):
+            path = self.target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("dependency")
+            retained.append(path)
+        own_marker = self.target / "debug/.fingerprint/zeroclaw-fixture-7777777777777777/lib-zeroclaw_fixture"
+        own_marker.parent.mkdir(parents=True)
+        own_marker.write_text("workspace")
+        for args in (("--dry-run",), ()):
+            result = self.run_entry("target_sweep.sh", *args,
+                                    "--profile", "debug", "--profile", "release")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(all(path.read_text() == "dependency" for path in retained))
+            if args:
+                self.assertTrue(own.exists())
+                self.assertTrue(own_marker.exists())
+                self.assertNotIn("mdbook-1111111111111111", result.stdout)
+                self.assertNotIn("cached_tool-3333333333333333", result.stdout)
+            else:
+                self.assertFalse(own.exists())
+                self.assertFalse(own_marker.exists())
 
     def test_relative_cli_and_symlink_paths_share_the_same_lock(self):
         alias = self.linked / "target alias"
