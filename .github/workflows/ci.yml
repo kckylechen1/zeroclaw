@@ -78,6 +78,7 @@ jobs:
         run: |
           bash scripts/ci/toolchain_gate.test.sh
           bash scripts/dev/cargo-local.test.sh
+          bash scripts/dev/leg.test.sh
           bash scripts/ci/toolchain_gate.sh
       - name: Rust quality gate orchestration self-test
         run: bash scripts/ci/rust_quality_gate.test.sh
@@ -533,41 +534,22 @@ jobs:
         shell: bash
         env:
           LEG: ${{ matrix.leg }}
+          LEG_RUNNER: nextest
+          # Keep hosted CI's existing profile when using the local entrypoint.
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         # Packages, per-leg features and extra filtered runs all come from
-        # dev/ci/test-partition.json; scripts/dev/leg.sh reads the same file so
-        # a local leg run matches this one. Landlock is an extra run on the
-        # runtime leg rather than a leg feature: with `sandbox-landlock` on,
+        # dev/ci/test-partition.json through the same runner used locally.
+        # Landlock is an extra run on the runtime leg rather than a leg
+        # feature: with `sandbox-landlock` on,
         # Auto sandbox detection prefers Landlock, which would silently change
         # every other runtime test. --no-fail-fast: one failing test must not
         # cancel the rest of the leg — a single flake otherwise hides real
         # failures in the same run (observed on master: one bridge e2e flake
         # cancelled ~8.6k queued tests).
         run: |
-          PKGS="$(jq -r --arg leg "$LEG" '.legs[$leg] // [] | map("-p " + .) | join(" ")' dev/ci/test-partition.json)"
-          if [ -z "$PKGS" ]; then
-            echo "::error::No packages defined for test leg '$LEG' in dev/ci/test-partition.json"
-            exit 1
-          fi
-          FEATURES="$(jq -r --arg leg "$LEG" '.features[$leg] // [] | join(",")' dev/ci/test-partition.json)"
-          FEATURE_ARGS=""
-          if [ -n "$FEATURES" ]; then
-            FEATURE_ARGS="--features $FEATURES"
-          fi
-          echo "==> leg $LEG: cargo nextest run --locked --no-fail-fast $PKGS $FEATURE_ARGS"
-          cargo nextest run --locked --no-fail-fast $PKGS $FEATURE_ARGS
-
-          jq -c --arg leg "$LEG" '.extra_runs[$leg] // [] | .[]' dev/ci/test-partition.json |
-            while IFS= read -r run; do
-              name="$(jq -r '.name' <<<"$run")"
-              extra="$(jq -r '.features | join(",")' <<<"$run")"
-              filter="$(jq -r '.filter' <<<"$run")"
-              all_features="${FEATURES:+$FEATURES,}$extra"
-              echo "==> leg $LEG ($name): cargo nextest run --locked --no-fail-fast $PKGS --features $all_features -- $filter"
-              # stdin from /dev/null: the loop reads its runs from the pipe.
-              cargo nextest run --locked --no-fail-fast $PKGS --features "$all_features" -- "$filter" </dev/null
-            done
+          bash scripts/dev/leg.sh --no-fail-fast "$LEG"
 
           # Fluent catalog syntax gate (xtask lives in this leg). Locales
           # drift silently otherwise — the runtime embeds en and falls back

@@ -52,6 +52,12 @@
     "app": [
       {
         "name": "memory-kernel-migration",
+        "packages": [
+          "zeroclawlabs"
+        ],
+        "test_targets": [
+          "component"
+        ],
         "features": [
           "zeroclawlabs/memory-tachi"
         ],
