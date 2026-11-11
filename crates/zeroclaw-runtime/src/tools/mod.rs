@@ -8,6 +8,7 @@ pub mod cron_remove;
 pub mod cron_run;
 pub mod cron_runs;
 pub mod cron_update;
+pub mod delegation;
 pub mod file_read;
 pub mod model_switch;
 pub mod notify;
@@ -745,33 +746,14 @@ pub fn all_tools_with_runtime(
             agent_alias,
             move |name, operation| {
                 let resolve = |current: &Config| {
-                    // The runtime-selected storage context also owns session and
-                    // approval stores. Live policy must not switch this registry
-                    // to an empty request ledger and lose an unresolved claim.
-                    if current.data_dir != delegation_config.data_dir {
-                        return Err(
-                            zeroclaw_tools::tachi_delegation::STORAGE_ROOT_CHANGED.to_string()
-                        );
-                    }
-                    if current.tachi.enabled {
-                        let mut policy = SecurityPolicy::for_agent(current, &delegation_agent)
-                            .map_err(|error| error.to_string())?;
-                        if !policy.is_tool_allowed(name)
-                            || (matches!(operation, zeroclaw_policy::ToolOperation::Act)
-                                && !policy.can_act())
-                        {
-                            return Err("delegation denied by current agent policy".to_string());
-                        }
-                        policy.tracker = delegation_security.tracker.clone();
-                        policy.enforce_tool_operation(operation, name)?;
-                        if current.channels.session_backend != "sqlite" {
-                            return Err(
-                                "durable delegation bindings require the SQLite session backend"
-                                    .to_string(),
-                            );
-                        }
-                    }
-                    Ok((current.tachi.clone(), delegation_config.data_dir.clone()))
+                    delegation::resolve(
+                        current,
+                        &delegation_config.data_dir,
+                        &delegation_agent,
+                        &delegation_security.tracker,
+                        name,
+                        operation,
+                    )
                 };
                 match &delegation_live {
                     Some(live) => resolve(&live.read()),

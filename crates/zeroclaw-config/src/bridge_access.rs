@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use zeroclaw_macros::Configurable;
 
-/// Restricted chat access; the existing bridge owns credentials and session scope.
+/// Restricted edge access; the existing bridge owns credentials and session scope.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
@@ -12,13 +12,23 @@ pub struct GatewayDeviceBridgeConfig {
 }
 
 impl GatewayDeviceBridgeConfig {
+    pub fn valid_operation(operation: &str) -> bool {
+        matches!(
+            operation,
+            "chat"
+                | "answer"
+                | "cancel"
+                | "tachi_start"
+                | "tachi_status"
+                | "tachi_result"
+                | "tachi_cancel"
+        )
+    }
+
     pub fn allows(&self, agent: &str, operation: &str) -> bool {
         !self.agent.is_empty()
             && self.agent == agent
-            && self
-                .operations
-                .iter()
-                .all(|op| matches!(op.as_str(), "chat" | "answer" | "cancel"))
+            && self.operations.iter().all(|op| Self::valid_operation(op))
             && self.operations.iter().any(|op| op == operation)
     }
 }
@@ -47,6 +57,30 @@ impl GatewayOwnerBridgeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegation_grants_are_explicit_and_do_not_add_chat_cancel_or_owner_authority() {
+        let mut access = GatewayDeviceBridgeConfig {
+            agent: "edge".into(),
+            operations: vec!["chat".into(), "cancel".into()],
+        };
+        for op in [
+            "tachi_start",
+            "tachi_status",
+            "tachi_result",
+            "tachi_cancel",
+        ] {
+            assert!(!access.allows("edge", op));
+        }
+        access.operations = vec!["tachi_status".into()];
+        assert!(access.allows("edge", "tachi_status"));
+        assert!(!access.allows("edge", "tachi_start"));
+        assert!(!access.allows("edge", "cancel"));
+        assert!(!access.allows("edge", "approval_response"));
+        assert!(!access.allows("other", "tachi_status"));
+        access.operations.push("tachi_shell".into());
+        assert!(!access.allows("edge", "tachi_status"));
+    }
 
     #[test]
     fn missing_permissions_and_unknown_permissions_fail_closed() {

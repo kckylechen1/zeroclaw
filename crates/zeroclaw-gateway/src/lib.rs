@@ -10,6 +10,7 @@ pub mod api_attachments;
 pub mod api_attention;
 pub mod api_backup_retention;
 pub mod api_config;
+mod api_delegation;
 pub mod api_logs;
 #[cfg(feature = "nodes")]
 pub mod api_node_identity;
@@ -1650,6 +1651,7 @@ pub async fn run_gateway(
         ));
 
     let inner = inner
+        .merge(api_delegation::routes(state.clone()))
         .merge(api_attachments::routes(
             state.clone(),
             gateway_request_timeout_secs(&config.gateway),

@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use zeroclaw_api::delegation_control::DelegationOperation;
 use zeroclaw_api::delegation_request::DelegationRequestClaim;
 use zeroclaw_api::tool::{Tool, ToolResult};
 use zeroclaw_config::tachi::TachiConfig;
@@ -23,6 +24,8 @@ use zeroclaw_policy::ToolOperation;
 /// Runtime refusal code for changing the process-selected request ledger.
 /// Live authorization/routing stays separate from this storage identity.
 pub const STORAGE_ROOT_CHANGED: &str = "delegation_storage_root_changed";
+/// Noninteractive callers must refuse a live policy requiring fresh approval.
+pub const APPROVAL_REQUIRED: &str = "delegation_approval_required";
 
 /// The runtime rechecks live agent/card policy and returns ephemeral config.
 type DelegationResolver =
@@ -37,10 +40,7 @@ pub fn tools(
     + Sync
     + 'static,
 ) -> Vec<Arc<dyn Tool>> {
-    let service = Arc::new(TachiDelegation {
-        agent_alias: agent_alias.to_string(),
-        resolve: Arc::new(resolve),
-    });
+    let service = TachiDelegation::new(agent_alias, resolve);
     DelegationAction::ALL
         .into_iter()
         .map(|action| {
@@ -55,9 +55,94 @@ pub fn tools(
 /// The service shared by the registered tools. It holds transport policy
 /// resolvers, not a second task registry. DB uniqueness also covers other
 /// tool registries/processes and a restart between admission and the response.
-struct TachiDelegation {
+pub struct TachiDelegation {
     agent_alias: String,
     resolve: DelegationResolver,
+}
+
+impl TachiDelegation {
+    pub fn new(
+        agent_alias: &str,
+        resolve: impl Fn(&str, ToolOperation) -> Result<(TachiConfig, PathBuf), String>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            agent_alias: agent_alias.to_string(),
+            resolve: Arc::new(resolve),
+        })
+    }
+
+    /// The edge facade enters the exact same implementation as model tools.
+    /// It cannot supply a dispatch ID, bypass claims, or choose process settings.
+    pub async fn control(
+        self: &Arc<Self>,
+        operation: DelegationOperation,
+        args: Value,
+    ) -> anyhow::Result<ToolResult> {
+        let action = match operation {
+            DelegationOperation::Start => DelegationAction::Start,
+            DelegationOperation::Status => DelegationAction::Status,
+            DelegationOperation::Result => DelegationAction::Result,
+            DelegationOperation::Cancel => DelegationAction::Cancel,
+            DelegationOperation::List => return self.recent(args).await,
+        };
+        TachiDelegationTool {
+            service: self.clone(),
+            action,
+        }
+        .execute(args)
+        .await
+    }
+
+    async fn recent(&self, args: Value) -> anyhow::Result<ToolResult> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            limit: u8,
+        }
+        let args: Args = match serde_json::from_value::<Args>(args) {
+            Ok(args)
+                if (1..=zeroclaw_api::delegation_control::MAX_RECENT).contains(&args.limit) =>
+            {
+                args
+            }
+            _ => return Ok(failure("invalid_arguments", &text("tool-tachi-invalid"))),
+        };
+        let (tachi, data_dir) = match (self.resolve)("tachi_status", ToolOperation::Read) {
+            Ok(value) => value,
+            Err(detail) => return Ok(resolver_failure(&detail)),
+        };
+        if let Err(error) = TachiStaffClient::from_config(&tachi, &self.agent_alias) {
+            return Ok(staff_failure(error));
+        }
+        let route = route_fingerprint(&tachi, &self.agent_alias);
+        let agent = self.agent_alias.clone();
+        let limit = usize::from(args.limit);
+        let rows = tokio::task::spawn_blocking(move || {
+            SqliteSessionBackend::new(&data_dir)?.recent_delegation_bindings(&agent, limit + 1)
+        })
+        .await?;
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) => return Ok(failure("storage_error", &error.to_string())),
+        };
+        let has_more = rows.len() > limit;
+        let items: Vec<_> = rows
+            .into_iter()
+            .take(limit)
+            .map(|row| {
+                json!({
+                    "request_id": row.request_id,
+                    "submission": if row.dispatch_id.is_some() { "bound" } else { "unresolved" },
+                    "dispatch_id": row.dispatch_id,
+                    "route_matches": row.route_digest.as_deref() == Some(route.as_str()),
+                })
+            })
+            .collect();
+        Ok(ToolResult::ok(json!({"items":items,"has_more":has_more})))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -120,6 +205,17 @@ fn failure(code: &str, detail: &str) -> ToolResult {
     let message =
         crate::i18n::get_required_tool_string_with_args("tool-tachi-error", &[("detail", &detail)]);
     ToolResult::partial(json!({"code": code}), message)
+}
+
+fn resolver_failure(detail: &str) -> ToolResult {
+    match detail {
+        STORAGE_ROOT_CHANGED => failure(
+            "storage_root_changed",
+            &text("tool-tachi-storage-root-changed"),
+        ),
+        APPROVAL_REQUIRED => failure("approval_required", &text("tool-tachi-denied")),
+        _ => failure("denied", detail),
+    }
 }
 
 fn staff_failure(error: TachiStaffError) -> ToolResult {
@@ -228,13 +324,7 @@ impl Tool for TachiDelegationTool {
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let (tachi, data_dir) = match (self.service.resolve)(self.name(), self.action.operation()) {
             Ok(value) => value,
-            Err(detail) if detail == STORAGE_ROOT_CHANGED => {
-                return Ok(failure(
-                    "storage_root_changed",
-                    &text("tool-tachi-storage-root-changed"),
-                ));
-            }
-            Err(detail) => return Ok(failure("denied", &detail)),
+            Err(detail) => return Ok(resolver_failure(&detail)),
         };
         let client = match TachiStaffClient::from_config(&tachi, &self.service.agent_alias) {
             Ok(client) => client,
