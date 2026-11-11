@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Real worktrees/processes, fake Cargo: exercise target ownership without builds."""
 
+import errno
 import json
 import os
 from pathlib import Path
 import pty
+import select
 import shutil
 import signal
 import subprocess
@@ -30,6 +32,7 @@ signal.signal(signal.SIGINT, stop)
 if os.environ.get("TEST_TTY"):
     terminal = os.open("/dev/tty", os.O_RDWR)
     os.close(terminal)
+    print("fixture: controlling terminal opened", flush=True)
 metadata = sys.argv[1:2] == ["metadata"]
 if os.environ.get("TEST_READY"):
     Path(os.environ["TEST_READY"]).touch()
@@ -230,26 +233,58 @@ class SharedTargetTests(unittest.TestCase):
             env = dict(self.env, TEST_TTY="1", TEST_READY=str(ready),
                        TEST_RELEASE=str(release), TEST_STOPPED=str(stopped))
             os.execve(BASH, self.command("cargo-local.sh", "check"), env)
+        os.set_blocking(terminal, False)
+        output = bytearray()
+
+        def drain():
+            # macOS can wait for unread PTY output during exit after /dev/tty
+            # was opened. Consume output while waiting, as a real terminal does.
+            while select.select([terminal], [], [], 0)[0]:
+                try:
+                    chunk = os.read(terminal, 4096)
+                except BlockingIOError:
+                    return
+                except OSError as error:
+                    if error.errno == errno.EIO:  # Linux PTY EOF.
+                        return
+                    raise
+                if not chunk:
+                    return
+                output.extend(chunk)
+
         try:
             self.wait_file(ready)  # Cargo has successfully opened /dev/tty.
             self.assertEqual(self.run_entry("target_sweep.sh").returncode, 75)
             os.write(terminal, b"\x03")
             deadline = time.monotonic() + 5
             while True:
+                drain()
                 exited, status = os.waitpid(pid, os.WNOHANG)
                 if exited:
                     pid = None
                     self.assertEqual(os.waitstatus_to_exitcode(status), 130)
                     break
-                self.assertLess(time.monotonic(), deadline, "Ctrl-C did not stop the command")
+                self.assertLess(time.monotonic(), deadline,
+                                f"Ctrl-C did not stop the command; stopped={stopped.exists()}; "
+                                f"PTY output={bytes(output)!r}")
                 time.sleep(0.01)
+            self.assertIn(b"fixture: controlling terminal opened", output)
             self.assertTrue(stopped.exists())
             self.assertEqual(self.run_entry("target_sweep.sh").returncode, 0)
         finally:
-            if pid is not None:
-                os.killpg(pid, signal.SIGTERM)
-                os.waitpid(pid, 0)
+            # Closing the master also releases a Darwin ttywait during failed
+            # assertions; signal errors from an exiting child must not mask them.
             os.close(terminal)
+            if pid is not None:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                cleanup_deadline = time.monotonic() + 5
+                while not os.waitpid(pid, os.WNOHANG)[0]:
+                    self.assertLess(time.monotonic(), cleanup_deadline,
+                                    f"PTY child did not exit during cleanup; output={bytes(output)!r}")
+                    time.sleep(0.01)
 
     def test_uncertain_output_overrides_and_missing_graph_refuse(self):
         for args in (["check", "--config", "build.target-dir='other'"],
