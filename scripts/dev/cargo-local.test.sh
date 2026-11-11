@@ -5,6 +5,8 @@ unset CDPATH
 source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/cargo-local-test.XXXXXX")"
 trap 'rm -rf -- "$fixture"' EXIT
+# macOS TMPDIR can be a symlink with a trailing slash; expected paths are physical.
+fixture="$(cd "$fixture" && pwd -P)"
 main="$fixture/main checkout"
 linked="$fixture/linked checkout"
 mkdir -p "$main/scripts/dev" "$main/scripts/ci" "$main/dev/ci" "$fixture/bin"
