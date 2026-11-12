@@ -101,9 +101,9 @@ RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/regist
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-target,target=/app/target,sharing=locked \
     if [ -n "$ZEROCLAW_CARGO_FLAGS" ]; then \
-      cargo build --release --locked -p zeroclawlabs $ZEROCLAW_CARGO_FLAGS; \
+      cargo build --release --locked -p zeroclawlabs --bin zeroclaw $ZEROCLAW_CARGO_FLAGS; \
     else \
-      cargo build --release --locked -p zeroclawlabs; \
+      cargo build --release --locked -p zeroclawlabs --bin zeroclaw; \
     fi
 RUN rm -rf src benches crates xtask tools/fill-translations bridges
 
@@ -133,9 +133,9 @@ RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/regist
            target/release/.fingerprint/fill-translations-* \
            target/release/deps/fill_translations-* && \
     if [ -n "$ZEROCLAW_CARGO_FLAGS" ]; then \
-      cargo build --release --locked -p zeroclawlabs $ZEROCLAW_CARGO_FLAGS; \
+      cargo build --release --locked -p zeroclawlabs --bin zeroclaw $ZEROCLAW_CARGO_FLAGS; \
     else \
-      cargo build --release --locked -p zeroclawlabs; \
+      cargo build --release --locked -p zeroclawlabs --bin zeroclaw; \
     fi && \
     cp target/release/zeroclaw /app/zeroclaw && \
     strip /app/zeroclaw
