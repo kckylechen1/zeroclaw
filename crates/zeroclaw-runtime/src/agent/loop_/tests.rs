@@ -11918,7 +11918,6 @@ async fn run_brackets_successful_turn_with_agent_start_and_agent_end() {
                 uri: Some(format!("http://{addr}")),
                 ..Default::default()
             },
-            ..Default::default()
         },
     );
     config.agents.insert(
@@ -12007,7 +12006,6 @@ async fn run_still_closes_the_bracket_when_the_model_call_fails() {
                 uri: Some(format!("http://{addr}")),
                 ..Default::default()
             },
-            ..Default::default()
         },
     );
     config.agents.insert(
@@ -12141,7 +12139,6 @@ async fn run_rejects_model_switch_tool_call_and_keeps_original_route() {
                     uri: Some(format!("http://{addr}")),
                     ..Default::default()
                 },
-                ..Default::default()
             },
         );
     }

@@ -388,12 +388,6 @@
           - "src/providers/kilocli.rs"
           - "crates/zeroclaw-providers/src/kilocli.rs"
 
-"provider:ollama":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/providers/ollama.rs"
-          - "crates/zeroclaw-providers/src/ollama.rs"
-
 "provider:openai":
   - changed-files:
       - any-glob-to-any-file:

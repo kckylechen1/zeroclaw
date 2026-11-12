@@ -1610,38 +1610,88 @@ async fn search_mode_serde_roundtrip() {
 }
 
 #[test]
-async fn ollama_alias_tuning_fields_roundtrip() {
-    // Ollama-specific tuning lives on `OllamaModelProviderConfig`,
-    // not on the generic `ModelProviderConfig` base. These knobs
-    // ride alongside the flattened `base` so a TOML alias like
-    // `[providers.models.ollama.local]` accepts them at the same
-    // level as `model`, `api_key`, etc.
-    let toml = r#"
-        num_ctx = 16384
-        num_predict = 4096
-        temperature_override = 0.5
-    "#;
-    let parsed: OllamaModelProviderConfig = toml::from_str(toml).unwrap();
-    assert_eq!(parsed.num_ctx, Some(16384));
-    assert_eq!(parsed.num_predict, Some(4096));
-    assert_eq!(parsed.temperature_override, Some(0.5));
+#[allow(clippy::large_futures)]
+async fn load_or_init_warns_on_retired_ollama_options_and_keeps_live_fields() {
+    let _env_guard = env_override_lock().await;
+    let home = TempDir::new().unwrap();
+    let workspace = home.path().join("profile-a");
+    fs::create_dir_all(&workspace).await.unwrap();
+    let config_path = workspace.join("config.toml");
+    let contents = r#"schema_version = 3
 
-    let serialized = toml::to_string(&parsed).unwrap();
-    let reparsed: OllamaModelProviderConfig = toml::from_str(&serialized).unwrap();
-    assert_eq!(reparsed.num_ctx, Some(16384));
-    assert_eq!(reparsed.num_predict, Some(4096));
-    assert_eq!(reparsed.temperature_override, Some(0.5));
+[providers.models.ollama.local]
+model = "qwen3"
+uri = "http://localhost:11434"
+api_key = "ollama-fixture-key"
+max_tokens = 2048
+temperature = 0.7
+num_ctx = 16384
+num_predict = 4096
+temperature_override = 0.5
+
+# A live alias may have the same spelling as a retired leaf.
+[providers.models.ollama.num_ctx]
+model = "llama3.1"
+
+[risk_profiles.shared]
+[runtime_profiles.default]
+[agents.assistant]
+model_provider = "ollama.local"
+risk_profile = "shared"
+runtime_profile = "default"
+"#;
+    fs::write(&config_path, contents).await.unwrap();
+    let _home = EnvValueGuard::set("HOME", home.path());
+    let _workspace = EnvValueGuard::set("ZEROCLAW_WORKSPACE", &workspace);
+    let _config_dir = EnvValueGuard::remove("ZEROCLAW_CONFIG_DIR");
+
+    let mut config = Box::pin(Config::load_or_init()).await.unwrap();
+    assert!(config.degraded_sections.is_empty());
+    assert!(config.degraded_security.is_empty());
+    let local = config.providers.models.find("ollama", "local").unwrap();
+    assert_eq!(local.model.as_deref(), Some("qwen3"));
+    assert_eq!(local.uri.as_deref(), Some("http://localhost:11434"));
+    assert_eq!(local.api_key.as_deref(), Some("ollama-fixture-key"));
+    assert_eq!(local.max_tokens, Some(2048));
+    assert_eq!(local.temperature, Some(0.7));
+    assert!(config.providers.models.find("ollama", "num_ctx").is_some());
+
+    let warnings = config.collect_warnings();
+    let retired: Vec<_> = warnings
+        .iter()
+        .filter(|warning| warning.code == "ollama_native_options_removed")
+        .collect();
+    assert_eq!(retired.len(), 3);
+    let fields = config.prop_fields();
+    let serialized = toml::to_string(&config.providers.models.ollama["local"]).unwrap();
+    let alias: toml::Value = toml::from_str(&serialized).unwrap();
+    for key in ["num_ctx", "num_predict", "temperature_override"] {
+        let path = format!("providers.models.ollama.local.{key}");
+        assert!(retired.iter().any(|warning| {
+            warning.path == format!("providers.models.ollama.*.{key}")
+                && warning.message.contains("No automatic mapping")
+        }));
+        assert!(!fields.iter().any(|field| field.name == path));
+        assert!(config.set_prop(&path, "1").is_err());
+        assert!(alias.get(key).is_none());
+    }
+    assert_eq!(fs::read_to_string(config_path).await.unwrap(), contents);
 }
 
+#[cfg(feature = "schema-export")]
 #[test]
-async fn ollama_alias_tuning_fields_default_to_none() {
-    let toml = r#"
-        api_key = "sk-test"
-    "#;
-    let parsed: OllamaModelProviderConfig = toml::from_str(toml).unwrap();
-    assert!(parsed.num_ctx.is_none());
-    assert!(parsed.num_predict.is_none());
-    assert!(parsed.temperature_override.is_none());
+async fn ollama_schema_exposes_live_options_without_native_tuning() {
+    let schema = serde_json::to_value(schemars::schema_for!(OllamaModelProviderConfig)).unwrap();
+    let properties = schema["properties"].as_object().unwrap();
+    for key in ["model", "uri", "api_key", "max_tokens", "temperature"] {
+        assert!(properties.contains_key(key), "missing live field {key}");
+    }
+    for key in ["num_ctx", "num_predict", "temperature_override"] {
+        assert!(
+            !properties.contains_key(key),
+            "retired field {key} advertised"
+        );
+    }
 }
 
 #[test]
@@ -3725,7 +3775,6 @@ async fn validate_ollama_cloud_model_requires_remote_api_url() {
                 api_key: Some("ollama-key".to_string()),
                 ..Default::default()
             },
-            ..OllamaModelProviderConfig::default()
         },
     );
 
@@ -3748,7 +3797,6 @@ async fn validate_ollama_cloud_model_accepts_private_remote_without_api_key() {
                 api_key: None,
                 ..Default::default()
             },
-            ..OllamaModelProviderConfig::default()
         },
     );
 
@@ -3769,7 +3817,6 @@ async fn validate_ollama_cloud_model_requires_api_key_for_official_endpoint() {
                 api_key: None,
                 ..Default::default()
             },
-            ..OllamaModelProviderConfig::default()
         },
     );
 
@@ -3794,7 +3841,6 @@ async fn validate_ollama_cloud_model_accepts_remote_endpoint_with_typed_api_key(
                 api_key: Some("ollama-typed-key".to_string()),
                 ..Default::default()
             },
-            ..OllamaModelProviderConfig::default()
         },
     );
 
@@ -3814,7 +3860,6 @@ async fn validate_ollama_cloud_model_checks_each_alias_for_official_key() {
                 uri: Some("http://192.168.1.100:11434".to_string()),
                 ..Default::default()
             },
-            ..OllamaModelProviderConfig::default()
         },
     );
     config.providers.models.ollama.insert(
@@ -3826,7 +3871,6 @@ async fn validate_ollama_cloud_model_checks_each_alias_for_official_key() {
                 api_key: None,
                 ..Default::default()
             },
-            ..OllamaModelProviderConfig::default()
         },
     );
 
@@ -9136,22 +9180,22 @@ pricing = { "gpt-4o.input" = 5.0, "gpt-4o.output" = 15.0 }
         "valid nested provider fields such as pricing must not be flagged"
     );
 
-    let family_specific = r#"
+    let typed_provider_fields = r#"
 schema_version = 3
 
 [providers.models.azure.default.default]
 api_version = "2024-10-21"
 
 [providers.models.ollama.local.default]
-num_ctx = 16384
+model = "llama3.1"
 "#;
     assert_eq!(
-        Config::extra_nested_model_provider_tables(family_specific),
+        Config::extra_nested_model_provider_tables(typed_provider_fields),
         vec![
             finding("azure", "default", "default"),
             finding("ollama", "local", "default")
         ],
-        "family-specific fields must still be flagged when extra-nested"
+        "typed provider fields must still be flagged when extra-nested"
     );
 
     let dotted_alias = r#"

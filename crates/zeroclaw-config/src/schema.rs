@@ -1235,23 +1235,6 @@ pub struct OllamaModelProviderConfig {
     #[nested]
     #[serde(flatten)]
     pub base: ModelProviderConfig,
-    /// Override the Ollama `num_ctx` (context window, in tokens) sent on
-    /// every `/api/chat` request. Defaults to the framework constant
-    /// (`OLLAMA_DEFAULT_NUM_CTX`) when unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub num_ctx: Option<u32>,
-    /// Override the Ollama `num_predict` (max output tokens) sent on every
-    /// `/api/chat` request. Defaults to the framework constant
-    /// (`OLLAMA_DEFAULT_NUM_PREDICT`) when unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub num_predict: Option<i32>,
-    /// Force every Ollama `/api/chat` request to use this temperature,
-    /// overriding the per-call value passed through
-    /// `ModelProvider::chat_with_system(.., temperature)`. When unset
-    /// (`None`, the default), the per-call temperature wins: full
-    /// backward compatibility.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature_override: Option<f64>,
 }
 
 // ── Together ──

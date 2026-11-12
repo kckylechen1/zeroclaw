@@ -16,7 +16,6 @@ pub mod kilocli;
 pub mod model_pin;
 pub mod models_dev;
 pub mod multimodal;
-pub mod ollama;
 pub mod openai;
 pub mod openai_codex;
 pub mod openrouter;
@@ -1818,12 +1817,13 @@ pub fn default_model_provider_url(name: &str) -> Option<&'static str> {
         UpstageModelProviderConfig, VercelModelProviderConfig, VllmModelProviderConfig,
         YiModelProviderConfig,
     };
+    use zeroclaw_config::schema::{ModelEndpoint, OllamaEndpoint};
 
     match name {
         "anthropic" => Some(anthropic::BASE_URL),
         "openai" => Some(openai::BASE_URL),
         "openrouter" => Some(openrouter::BASE_URL),
-        "ollama" => Some(ollama::BASE_URL),
+        "ollama" => Some(OllamaEndpoint::default().uri()),
         "telnyx" => Some(telnyx::BASE_URL),
         "gemini" => Some(gemini::BASE_URL),
         "vercel" => Some(<VercelModelProviderConfig as CompatFamilySpec>::DEFAULT_URL),

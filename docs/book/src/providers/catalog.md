@@ -22,10 +22,6 @@ GPT-4o, GPT-5, o-series reasoning models. When reasoning is streamed, it is carr
 
 OpenAI Codex subscription auth lives on the `openai` slot. Set `wire_api = "responses"` to route through `POST /v1/responses` and `requires_openai_auth = true` to use the Codex subscription login (from the Codex CLI's own `~/.codex/auth.json`) instead of an `api_key` field on the entry. The subscription path does not read `OPENAI_API_KEY`; that variable applies only to the metered `openai` API-key mode. See [Provider Configuration → OAuth and subscription auth](./configuration.md#oauth-and-subscription-auth) for the credential model.
 
-### Ollama: slot `ollama`
-
-Local inference via Ollama's native `/api/chat`. Schema-based structured output via `format`. No API key.
-
 ### Bedrock: slot `bedrock`
 
 ### Gemini: slot `gemini`
@@ -70,6 +66,14 @@ The `/models` endpoint is public (`PUBLIC_MODEL_LISTING`), so model listing work
 > `kilocli`.
 
 ---
+
+## OpenAI-compatible: Ollama
+
+Use slot `ollama` for local or remote inference through `/v1/chat/completions`.
+The local default is `http://localhost:11434/v1`. An explicit `api_key` is sent
+as a bearer token; without one, requests omit the authorization header.
+See [Ollama configuration](./configuration.md#ollama) for URL handling and
+the retired native `/api/chat` options.
 
 ## All slots
 

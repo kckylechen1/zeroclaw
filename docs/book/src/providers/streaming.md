@@ -88,7 +88,6 @@ When `supports_streaming()` is false, callers use the provider's non-streaming c
 ## Code references
 
 - `crates/zeroclaw-api/src/model_provider.rs`: `ModelProvider` trait, `StreamEvent` enum
-- `crates/zeroclaw-providers/src/compatible.rs`: OpenAI-compat SSE parser
+- `crates/zeroclaw-providers/src/compatible.rs`: OpenAI-compat SSE parser, including Ollama
 - `crates/zeroclaw-providers/src/anthropic.rs`: Anthropic streaming
-- `crates/zeroclaw-providers/src/ollama.rs`: Ollama streaming
 - `bridges/telegram/src/render.rs`: bridge-side stream consumption (draft edits)

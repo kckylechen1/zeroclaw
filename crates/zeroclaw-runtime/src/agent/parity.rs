@@ -343,7 +343,6 @@ async fn parity_l2_sop_live_step_agent_isolation() {
                 model: Some("test-model".to_string()),
                 ..ModelProviderConfig::default()
             },
-            ..OllamaModelProviderConfig::default()
         },
     );
     config.agents.insert(

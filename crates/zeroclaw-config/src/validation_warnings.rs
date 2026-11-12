@@ -94,6 +94,10 @@ use serde::{Deserialize, Serialize};
 ///   `browser.native_*` key is still set. Selecting it fails the browser tool
 ///   with an explicit error (see `RETIRED_CONFIG_VALUES` and
 ///   `RETIRED_CONFIG_FIELDS`).
+/// - `ollama_native_options_removed`: an Ollama alias still sets `num_ctx`,
+///   `num_predict` or `temperature_override`. These native `/api/chat` options
+///   were not consumed by the current OpenAI-compatible `/v1` provider and
+///   were removed from the schema (see `RETIRED_CONFIG_FIELDS`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
@@ -298,6 +302,18 @@ pub fn is_retired_channel_type(channel_type: &str) -> bool {
 /// checker makes the retirement visible instead of a silent no-op.
 pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
     (
+        "providers.models.ollama.*.num_ctx",
+        "ollama_native_options_removed",
+    ),
+    (
+        "providers.models.ollama.*.num_predict",
+        "ollama_native_options_removed",
+    ),
+    (
+        "providers.models.ollama.*.temperature_override",
+        "ollama_native_options_removed",
+    ),
+    (
         "transcription.transcribe_non_ptt_audio",
         "whatsapp_audio_option_removed",
     ),
@@ -388,6 +404,12 @@ pub const RETIRED_CONFIG_VALUES: &[(&str, &[&str], &str)] = &[
 /// the human-readable half of the field tombstone warning.
 fn retired_field_reason(code: &str) -> &'static str {
     match code {
+        "ollama_native_options_removed" => {
+            "native Ollama /api/chat options were removed; the current \
+             OpenAI-compatible /v1 provider did not consume them. No automatic \
+             mapping is applied; configure supported client or Ollama server \
+             options explicitly"
+        }
         "memory_backend_removed" => {
             "the postgres and qdrant memory backends were removed; selecting one \
              fails memory construction instead of falling back to another store. \

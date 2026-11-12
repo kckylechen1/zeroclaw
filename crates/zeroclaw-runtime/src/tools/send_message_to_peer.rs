@@ -817,7 +817,6 @@ mod tests {
                     timeout_secs: Some(5),
                     ..Default::default()
                 },
-                ..Default::default()
             },
         );
         config.providers.models.ollama.insert(
@@ -830,7 +829,6 @@ mod tests {
                     timeout_secs: Some(5),
                     ..Default::default()
                 },
-                ..Default::default()
             },
         );
         config.risk_profiles.insert(
@@ -1246,7 +1244,6 @@ mod tests {
                     ]),
                     ..ModelProviderConfig::default()
                 },
-                ..OllamaModelProviderConfig::default()
             },
         );
         config.agents.insert(
