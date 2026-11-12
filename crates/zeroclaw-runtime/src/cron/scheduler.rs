@@ -1149,7 +1149,6 @@ async fn run_agent_job_with_timeout(
         task_identity,
         security: Some(Arc::new(run_security)),
         memory: None,
-        is_subagent: false,
         // `uses_memory = false` fully opts the job out of the engine's
         // memory-context injection (stateless digest jobs)...
         suppress_memory_inject: !job.uses_memory,

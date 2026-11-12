@@ -233,7 +233,6 @@ impl Agent {
             &config.agents,
             agent_model_provider.and_then(|e| e.api_key.as_deref()),
             config,
-            false,
             tui_env,
             live_config.clone(),
             // Daemon direct-turn construction is a top-level origin: no

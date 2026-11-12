@@ -810,7 +810,6 @@ pub async fn run_gateway(
                     .model_provider_for_agent(agent_alias)
                     .and_then(|e| e.api_key.as_deref()),
                 &config,
-                false,
                 None,
                 None,
                 // Gateway request handling is a top-level origin.
@@ -917,7 +916,6 @@ pub async fn run_gateway(
                 .model_provider_for_agent(&alias)
                 .and_then(|e| e.api_key.as_deref()),
             &config,
-            false,
             None,
             None,
             // Dashboard agent-tool enumeration: top-level origin.

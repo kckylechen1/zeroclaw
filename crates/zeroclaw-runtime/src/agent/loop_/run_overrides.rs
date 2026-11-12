@@ -17,7 +17,6 @@ pub struct AgentRunOverrides {
     pub task_identity: Option<crate::tools::task_context::TaskIdentity>,
     pub security: Option<Arc<SecurityPolicy>>,
     pub memory: Option<Arc<dyn Memory>>,
-    pub is_subagent: bool,
     /// Spawn-site opt-out of the engine's memory-context injection (e.g. a
     /// cron job configured with `uses_memory = false`). Default `false`.
     pub suppress_memory_inject: bool,

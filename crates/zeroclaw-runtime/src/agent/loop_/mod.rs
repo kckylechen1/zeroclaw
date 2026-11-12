@@ -54,10 +54,6 @@ pub(crate) use super::text_tool_prompt::retain_registered_tool_descriptions;
 
 // Bounded interactive line IO moved to `super::capped_line`.
 
-// Channel factories moved to `super::channel_factories`.
-pub use super::channel_factories::register_channel_map_fn;
-pub(crate) use super::channel_factories::{live_channel_registry, seed_channel_handles};
-
 // Prompt / export helpers moved to `super::prompt_helpers`.
 #[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use super::prompt_helpers::tools_to_openai_format;

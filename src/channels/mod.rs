@@ -14,10 +14,8 @@ pub use zeroclaw_config::multi_agent::{
 
 use crate::config::Config;
 use anyhow::{Context, Result};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
 use zeroclaw_runtime::i18n::{get_required_cli_string, get_required_cli_string_with_args};
 
 const SYSTEMD_STATUS_ARGS: [&str; 3] = ["--user", "is-active", "zeroclaw.service"];
@@ -291,10 +289,6 @@ pub async fn deliver_announcement(
         "delivery channel `{channel}` is not configured under `[gateway.bridges.{channel}]` \
          (in-process channels have been retired; outbound delivery runs through gateway bridges)"
     )
-}
-
-pub fn build_channel_map(_config: &Config) -> HashMap<String, Arc<dyn Channel>> {
-    HashMap::new()
 }
 
 pub async fn start_channels(

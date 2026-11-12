@@ -289,7 +289,7 @@ Local recursion stays denied (frozen contract D1): a v1 child cannot spawn a chi
 
 1. **No parent credentials or config tree.** Model access is an opaque host-resolved binding (SA-7d); the child never holds provider keys.
 2. **No parent memory.** No `memory_store`/`memory_forget`/`memory_purge`, no live parent backend, no parent agent UUID (SA-7e/SA-17). Personal-memory changes can only return as typed candidates in the report; the parent decides disposition.
-3. **No channel handles.** A child seeds zero channel handles on every spawn path; its `ask_user` fails closed. User input is requested through typed parent-request events (SA-7c/SA-25).
+3. **No channel handles.** Child construction takes no parent channel handles. Profile admission and the child tool catalog refuse `ask_user` and `escalate_to_human`. User input is requested through typed parent-request events (SA-7c/SA-25).
 4. **No parent-alias identity.** The child runs under a run-scoped principal (SA-13), auditable as its own actor.
 5. **One result channel.** The child returns a `SubAgentReportV1` (SA-21); there is no prose relay contract and no second durable task ledger for the v1 path (SA-26).
 

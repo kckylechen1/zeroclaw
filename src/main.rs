@@ -2136,12 +2136,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 );
             }
 
-            // Register channel map factory for late-bound tool handle population.
-            zeroclaw_runtime::agent::loop_::register_channel_map_fn(Box::new({
-                let config_clone = config.clone();
-                move || channels::build_channel_map(&config_clone)
-            }));
-
             Box::pin(agent::run(
                 config,
                 &agent_alias,

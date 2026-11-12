@@ -30,9 +30,7 @@ pub use super::session_model_provider::{
     build_session_model_provider, tool_dispatcher_for_provider,
 };
 
-pub(crate) use super::routed_approval::{
-    RoutedApproval, RoutedApprovalChannel, resolve_routed_approval,
-};
+pub(crate) use super::routed_approval::{RoutedApproval, resolve_routed_approval};
 
 #[derive(Debug)]
 struct HistoryTrimNotice {

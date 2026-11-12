@@ -1447,7 +1447,6 @@ fn production_tools(
         &cfg.agents,
         None,
         cfg,
-        false,
         None,
         Some(live),
         None,
