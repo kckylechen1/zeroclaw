@@ -798,10 +798,8 @@ impl ReliableModelProviderEntry {
     }
 }
 
-/// ModelProvider wrapper with retry + auth-key rotation. The model_provider Vec exists
-/// for tests to exercise multi-provider failover; production wiring always
-/// passes a single primary. Per-model failover chains are also test-only —
-/// the schema no longer surfaces them.
+/// ModelProvider wrapper with retry and auth-key rotation over ordered entries.
+/// Production entries carry the configured provider aliases and pinned models.
 pub struct ReliableModelProvider {
     /// `[providers.models.<family>.<alias>]` config-key alias.
     alias: String,
@@ -811,8 +809,6 @@ pub struct ReliableModelProvider {
     /// Extra API keys for rotation (index tracks round-robin position).
     api_keys: Vec<String>,
     key_index: AtomicUsize,
-    /// Per-model failover chains. Test-only: model_name → [alt1, alt2, ...].
-    model_fallbacks: HashMap<String, Vec<String>>,
     /// Transient provider cooldowns after retryable rate limits.
     /// Source of truth: live provider 429 / Retry-After evidence observed by
     /// this wrapper. It is intentionally in-memory and per wrapper instance.
@@ -857,7 +853,6 @@ impl ReliableModelProvider {
             base_backoff_ms: base_backoff_ms.max(50),
             api_keys: Vec::new(),
             key_index: AtomicUsize::new(0),
-            model_fallbacks: HashMap::new(),
             rate_limit_cooldowns: Mutex::new(HashMap::new()),
             key_cooldowns: Mutex::new(HashMap::new()),
             last_installed_key: Mutex::new(None),
@@ -867,21 +862,6 @@ impl ReliableModelProvider {
     pub fn with_api_keys(mut self, keys: Vec<String>) -> Self {
         self.api_keys = keys;
         self
-    }
-
-    #[cfg(test)]
-    pub fn with_model_fallbacks(mut self, fallbacks: HashMap<String, Vec<String>>) -> Self {
-        self.model_fallbacks = fallbacks;
-        self
-    }
-
-    /// Build the list of models to try: [original, alt1, alt2, ...]
-    fn model_chain<'a>(&'a self, model: &'a str) -> Vec<&'a str> {
-        let mut chain = vec![model];
-        if let Some(fallbacks) = self.model_fallbacks.get(model) {
-            chain.extend(fallbacks.iter().map(|s| s.as_str()));
-        }
-        chain
     }
 
     /// Advance to the next API key that is not inside a cooldown window.
@@ -1157,196 +1137,175 @@ impl ModelProvider for ReliableModelProvider {
         model: &str,
         temperature: Option<f64>,
     ) -> anyhow::Result<String> {
-        let models = self.model_chain(model);
         let mut failures = Vec::new();
 
-        // Outer: model fallback chain. Middle: model_provider priority. Inner: retries.
-        // Each iteration: attempt one (model_provider, model) call. On success, return
-        // immediately. On non-retryable error, break to next model_provider. On
-        // retryable error, sleep with exponential backoff and retry.
-        for current_model in &models {
-            for entry in &self.model_providers {
-                let provider_name = entry.display_name.as_str();
-                if self.provider_should_skip_for_cooldown(entry) {
-                    self.log_cooldown_skip(provider_name);
-                    Self::record_cooldown_skip_failure(&mut failures, provider_name, current_model);
-                    continue;
-                }
+        // Try entries in priority order, retrying each with exponential backoff.
+        // Return on success; a non-retryable error advances to the next entry.
+        for entry in &self.model_providers {
+            let provider_name = entry.display_name.as_str();
+            if self.provider_should_skip_for_cooldown(entry) {
+                self.log_cooldown_skip(provider_name);
+                Self::record_cooldown_skip_failure(&mut failures, provider_name, model);
+                continue;
+            }
 
-                let mut backoff_ms = self.base_backoff_ms;
-                let mut last_error_detail: Option<String> = None;
-                let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
+            let mut backoff_ms = self.base_backoff_ms;
+            let mut last_error_detail: Option<String> = None;
+            let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
-                for attempt in 0..=self.max_retries {
-                    match ProviderDispatch::from_ref(entry.provider())
-                        .chat_with_system(system_prompt, message, current_model, temperature)
-                        .await
-                    {
-                        Ok(resp) => {
-                            // Re-roll a transient empty completion instead of
-                            // returning a blank turn (bounded by `max_retries`).
-                            if attempt < self.max_retries && resp.trim().is_empty() {
-                                self.backoff_after_empty_completion(
-                                    &mut failures,
-                                    provider_name,
-                                    current_model,
-                                    attempt,
-                                    &mut backoff_ms,
-                                )
-                                .await;
-                                continue;
-                            }
-                            let served_model = entry.served_model(current_model);
-                            if attempt > 0
-                                || served_model != model
-                                || self
-                                    .model_providers
-                                    .first()
-                                    .map(|entry| entry.display_name.as_str())
-                                    != Some(provider_name)
-                            {
-                                ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": served_model, "attempt": attempt, "original_model": model})), "ModelProvider recovered (failover/retry)");
-                                let primary = self
-                                    .model_providers
-                                    .first()
-                                    .map(|entry| entry.display_name.as_str())
-                                    .unwrap_or("");
-                                record_provider_fallback(
-                                    primary,
-                                    model,
-                                    provider_name,
-                                    served_model,
-                                );
-                            }
-                            return Ok(resp);
+            for attempt in 0..=self.max_retries {
+                match ProviderDispatch::from_ref(entry.provider())
+                    .chat_with_system(system_prompt, message, model, temperature)
+                    .await
+                {
+                    Ok(resp) => {
+                        // Re-roll a transient empty completion instead of
+                        // returning a blank turn (bounded by `max_retries`).
+                        if attempt < self.max_retries && resp.trim().is_empty() {
+                            self.backoff_after_empty_completion(
+                                &mut failures,
+                                provider_name,
+                                model,
+                                attempt,
+                                &mut backoff_ms,
+                            )
+                            .await;
+                            continue;
                         }
-                        Err(e) => {
-                            // Context window exceeded: no history to truncate
-                            // in chat_with_system, bail immediately.
-                            if is_context_window_exceeded(&e) {
-                                let error_detail = compact_error_detail(&e);
-                                push_failure(
-                                    &mut failures,
-                                    provider_name,
-                                    current_model,
-                                    attempt + 1,
-                                    self.max_retries + 1,
-                                    "non_retryable",
-                                    &error_detail,
-                                    None,
-                                );
-                                anyhow::bail!(
-                                    "Request exceeds model context window. Attempts:\n{}",
-                                    failures.join("\n")
-                                );
-                            }
-
-                            let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
-                            let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
-                            let rate_limited = is_rate_limited(&e);
-                            let failure_reason = failure_reason(rate_limited, non_retryable);
+                        let served_model = entry.served_model(model);
+                        if attempt > 0
+                            || served_model != model
+                            || self
+                                .model_providers
+                                .first()
+                                .map(|entry| entry.display_name.as_str())
+                                != Some(provider_name)
+                        {
+                            ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": served_model, "attempt": attempt, "original_model": model})), "ModelProvider recovered (failover/retry)");
+                            let primary = self
+                                .model_providers
+                                .first()
+                                .map(|entry| entry.display_name.as_str())
+                                .unwrap_or("");
+                            record_provider_fallback(primary, model, provider_name, served_model);
+                        }
+                        return Ok(resp);
+                    }
+                    Err(e) => {
+                        // Context window exceeded: no history to truncate
+                        // in chat_with_system, bail immediately.
+                        if is_context_window_exceeded(&e) {
                             let error_detail = compact_error_detail(&e);
-                            let diagnostic = provider_error_diagnostic(&e);
-                            last_error_detail = Some(error_detail.clone());
-                            last_diagnostic = Some(diagnostic.clone());
-
                             push_failure(
                                 &mut failures,
                                 provider_name,
-                                current_model,
+                                model,
                                 attempt + 1,
                                 self.max_retries + 1,
-                                failure_reason,
+                                "non_retryable",
                                 &error_detail,
-                                Some(&diagnostic),
+                                None,
                             );
+                            anyhow::bail!(
+                                "Request exceeds model context window. Attempts:\n{}",
+                                failures.join("\n")
+                            );
+                        }
 
-                            // Rate-limit with rotatable keys: cycle to the next API key
-                            // so the retry hits a different quota bucket.
-                            let rotated = rate_limited
-                                && !non_retryable_rate_limit
-                                && self.rotate_and_apply_key(
-                                    entry,
-                                    &e,
+                        let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
+                        let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
+                        let rate_limited = is_rate_limited(&e);
+                        let failure_reason = failure_reason(rate_limited, non_retryable);
+                        let error_detail = compact_error_detail(&e);
+                        let diagnostic = provider_error_diagnostic(&e);
+                        last_error_detail = Some(error_detail.clone());
+                        last_diagnostic = Some(diagnostic.clone());
+
+                        push_failure(
+                            &mut failures,
+                            provider_name,
+                            model,
+                            attempt + 1,
+                            self.max_retries + 1,
+                            failure_reason,
+                            &error_detail,
+                            Some(&diagnostic),
+                        );
+
+                        // Rate-limit with rotatable keys: cycle to the next API key
+                        // so the retry hits a different quota bucket.
+                        let rotated = rate_limited
+                            && !non_retryable_rate_limit
+                            && self.rotate_and_apply_key(entry, &e, provider_name, &error_detail);
+
+                        if non_retryable {
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(
+                                    provider_failure_attrs(
+                                        provider_name,
+                                        model,
+                                        &error_detail,
+                                        &diagnostic,
+                                    )
+                                ),
+                                "Non-retryable error, moving on"
+                            );
+                            break;
+                        }
+
+                        // A successful key swap already moved us to a fresh
+                        // quota bucket — cooling the whole provider on top
+                        // of that would strand a provider that is fine.
+                        if rate_limited && !rotated && self.model_providers.len() > 1 {
+                            self.cool_down_rate_limited_provider(entry, model, &e);
+                            break;
+                        }
+
+                        if attempt < self.max_retries {
+                            let wait = self.compute_backoff(backoff_ms, &e);
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(provider_retry_attrs(
                                     provider_name,
+                                    model,
+                                    attempt + 1,
+                                    wait,
+                                    failure_reason,
                                     &error_detail,
-                                );
-
-                            if non_retryable {
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                    .with_attrs(
-                                        provider_failure_attrs(
-                                            provider_name,
-                                            current_model,
-                                            &error_detail,
-                                            &diagnostic,
-                                        )
-                                    ),
-                                    "Non-retryable error, moving on"
-                                );
-                                break;
-                            }
-
-                            // A successful key swap already moved us to a fresh
-                            // quota bucket — cooling the whole provider on top
-                            // of that would strand a provider that is fine.
-                            if rate_limited && !rotated && self.model_providers.len() > 1 {
-                                self.cool_down_rate_limited_provider(entry, current_model, &e);
-                                break;
-                            }
-
-                            if attempt < self.max_retries {
-                                let wait = self.compute_backoff(backoff_ms, &e);
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                    .with_attrs(
-                                        provider_retry_attrs(
-                                            provider_name,
-                                            current_model,
-                                            attempt + 1,
-                                            wait,
-                                            failure_reason,
-                                            &error_detail,
-                                            &diagnostic,
-                                        )
-                                    ),
-                                    "ModelProvider call failed, retrying"
-                                );
-                                tokio::time::sleep(Duration::from_millis(wait)).await;
-                                backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
-                            }
+                                    &diagnostic,
+                                )),
+                                "ModelProvider call failed, retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(wait)).await;
+                            backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
                         }
                     }
                 }
-
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(provider_exhausted_attrs(
-                            provider_name,
-                            current_model,
-                            last_error_detail.as_deref(),
-                            last_diagnostic.as_ref(),
-                        )),
-                    "Exhausted retries, trying next model_provider/model"
-                );
             }
 
-            if *current_model != model {
-                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"original_model": model, "fallback_model": *current_model})), "Model fallback exhausted all model_providers, trying next fallback model");
-            }
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(provider_exhausted_attrs(
+                        provider_name,
+                        model,
+                        last_error_detail.as_deref(),
+                        last_diagnostic.as_ref(),
+                    )),
+                "Exhausted retries, trying next model_provider/model"
+            );
         }
 
         anyhow::bail!(
@@ -1361,200 +1320,184 @@ impl ModelProvider for ReliableModelProvider {
         model: &str,
         temperature: Option<f64>,
     ) -> anyhow::Result<String> {
-        let models = self.model_chain(model);
         let mut failures = Vec::new();
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
 
-        for current_model in &models {
-            for entry in &self.model_providers {
-                let provider_name = entry.display_name.as_str();
-                if self.provider_should_skip_for_cooldown(entry) {
-                    self.log_cooldown_skip(provider_name);
-                    Self::record_cooldown_skip_failure(&mut failures, provider_name, current_model);
-                    continue;
-                }
+        for entry in &self.model_providers {
+            let provider_name = entry.display_name.as_str();
+            if self.provider_should_skip_for_cooldown(entry) {
+                self.log_cooldown_skip(provider_name);
+                Self::record_cooldown_skip_failure(&mut failures, provider_name, model);
+                continue;
+            }
 
-                let mut backoff_ms = self.base_backoff_ms;
-                let mut last_error_detail: Option<String> = None;
-                let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
+            let mut backoff_ms = self.base_backoff_ms;
+            let mut last_error_detail: Option<String> = None;
+            let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
-                for attempt in 0..=self.max_retries {
-                    match ProviderDispatch::from_ref(entry.provider())
-                        .chat_with_history(&effective_messages, current_model, temperature)
-                        .await
-                    {
-                        Ok(resp) => {
-                            // Re-roll a transient empty completion instead of
-                            // returning a blank turn (bounded by `max_retries`).
-                            if attempt < self.max_retries && resp.trim().is_empty() {
-                                self.backoff_after_empty_completion(
-                                    &mut failures,
-                                    provider_name,
-                                    current_model,
-                                    attempt,
-                                    &mut backoff_ms,
-                                )
-                                .await;
-                                continue;
-                            }
-                            let served_model = entry.served_model(current_model);
-                            if attempt > 0
-                                || served_model != model
-                                || context_truncated
-                                || self
-                                    .model_providers
-                                    .first()
-                                    .map(|entry| entry.display_name.as_str())
-                                    != Some(provider_name)
-                            {
-                                ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": served_model, "attempt": attempt, "original_model": model, "context_truncated": context_truncated})), "ModelProvider recovered (failover/retry)");
-                                let primary = self
-                                    .model_providers
-                                    .first()
-                                    .map(|entry| entry.display_name.as_str())
-                                    .unwrap_or("");
-                                record_provider_fallback(
-                                    primary,
-                                    model,
-                                    provider_name,
-                                    served_model,
-                                );
-                            }
-                            return Ok(resp);
+            for attempt in 0..=self.max_retries {
+                match ProviderDispatch::from_ref(entry.provider())
+                    .chat_with_history(&effective_messages, model, temperature)
+                    .await
+                {
+                    Ok(resp) => {
+                        // Re-roll a transient empty completion instead of
+                        // returning a blank turn (bounded by `max_retries`).
+                        if attempt < self.max_retries && resp.trim().is_empty() {
+                            self.backoff_after_empty_completion(
+                                &mut failures,
+                                provider_name,
+                                model,
+                                attempt,
+                                &mut backoff_ms,
+                            )
+                            .await;
+                            continue;
                         }
-                        Err(e) => {
-                            // Context window exceeded: truncate history and retry
-                            if is_context_window_exceeded(&e) && !context_truncated {
-                                let dropped = truncate_for_context(&mut effective_messages);
-                                if dropped > 0 {
-                                    context_truncated = true;
-                                    ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": *current_model, "dropped": dropped, "remaining": effective_messages.len()})), "Context window exceeded; truncated history and retrying");
-                                    continue; // Retry with truncated messages (counts as an attempt)
-                                }
-                                // No complete older turn can be removed safely.
-                                let error_detail = compact_error_detail(&e);
-                                let truncation_limit =
-                                    context_truncation_limit(&effective_messages);
-                                push_failure(
-                                    &mut failures,
-                                    provider_name,
-                                    current_model,
-                                    attempt + 1,
-                                    self.max_retries + 1,
-                                    "non_retryable",
-                                    &error_detail,
-                                    None,
-                                );
-                                anyhow::bail!(
-                                    "Request exceeds model context window and cannot be reduced without \
-                                     breaking message/tool pairing ({truncation_limit}). \
-                                     Try using a model with a larger context window, reducing the number \
-                                     of tools/skills, or enabling compact_context in config. Attempts:\n{}",
-                                    failures.join("\n")
-                                );
+                        let served_model = entry.served_model(model);
+                        if attempt > 0
+                            || served_model != model
+                            || context_truncated
+                            || self
+                                .model_providers
+                                .first()
+                                .map(|entry| entry.display_name.as_str())
+                                != Some(provider_name)
+                        {
+                            ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": served_model, "attempt": attempt, "original_model": model, "context_truncated": context_truncated})), "ModelProvider recovered (failover/retry)");
+                            let primary = self
+                                .model_providers
+                                .first()
+                                .map(|entry| entry.display_name.as_str())
+                                .unwrap_or("");
+                            record_provider_fallback(primary, model, provider_name, served_model);
+                        }
+                        return Ok(resp);
+                    }
+                    Err(e) => {
+                        // Context window exceeded: truncate history and retry
+                        if is_context_window_exceeded(&e) && !context_truncated {
+                            let dropped = truncate_for_context(&mut effective_messages);
+                            if dropped > 0 {
+                                context_truncated = true;
+                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": model, "dropped": dropped, "remaining": effective_messages.len()})), "Context window exceeded; truncated history and retrying");
+                                continue; // Retry with truncated messages (counts as an attempt)
                             }
-
-                            let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
-                            let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
-                            let rate_limited = is_rate_limited(&e);
-                            let failure_reason = failure_reason(rate_limited, non_retryable);
+                            // No complete older turn can be removed safely.
                             let error_detail = compact_error_detail(&e);
-                            let diagnostic = provider_error_diagnostic(&e);
-                            last_error_detail = Some(error_detail.clone());
-                            last_diagnostic = Some(diagnostic.clone());
-
+                            let truncation_limit = context_truncation_limit(&effective_messages);
                             push_failure(
                                 &mut failures,
                                 provider_name,
-                                current_model,
+                                model,
                                 attempt + 1,
                                 self.max_retries + 1,
-                                failure_reason,
+                                "non_retryable",
                                 &error_detail,
-                                Some(&diagnostic),
+                                None,
                             );
+                            anyhow::bail!(
+                                "Request exceeds model context window and cannot be reduced without \
+                                 breaking message/tool pairing ({truncation_limit}). \
+                                 Try using a model with a larger context window, reducing the number \
+                                 of tools/skills, or enabling compact_context in config. Attempts:\n{}",
+                                failures.join("\n")
+                            );
+                        }
 
-                            let rotated = rate_limited
-                                && !non_retryable_rate_limit
-                                && self.rotate_and_apply_key(
-                                    entry,
-                                    &e,
+                        let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
+                        let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
+                        let rate_limited = is_rate_limited(&e);
+                        let failure_reason = failure_reason(rate_limited, non_retryable);
+                        let error_detail = compact_error_detail(&e);
+                        let diagnostic = provider_error_diagnostic(&e);
+                        last_error_detail = Some(error_detail.clone());
+                        last_diagnostic = Some(diagnostic.clone());
+
+                        push_failure(
+                            &mut failures,
+                            provider_name,
+                            model,
+                            attempt + 1,
+                            self.max_retries + 1,
+                            failure_reason,
+                            &error_detail,
+                            Some(&diagnostic),
+                        );
+
+                        let rotated = rate_limited
+                            && !non_retryable_rate_limit
+                            && self.rotate_and_apply_key(entry, &e, provider_name, &error_detail);
+
+                        if non_retryable {
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(
+                                    provider_failure_attrs(
+                                        provider_name,
+                                        model,
+                                        &error_detail,
+                                        &diagnostic,
+                                    )
+                                ),
+                                "Non-retryable error, moving on"
+                            );
+                            break;
+                        }
+
+                        // A successful key swap already moved us to a fresh
+                        // quota bucket — cooling the whole provider on top
+                        // of that would strand a provider that is fine.
+                        if rate_limited && !rotated && self.model_providers.len() > 1 {
+                            self.cool_down_rate_limited_provider(entry, model, &e);
+                            break;
+                        }
+
+                        if attempt < self.max_retries {
+                            let wait = self.compute_backoff(backoff_ms, &e);
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(provider_retry_attrs(
                                     provider_name,
+                                    model,
+                                    attempt + 1,
+                                    wait,
+                                    failure_reason,
                                     &error_detail,
-                                );
-
-                            if non_retryable {
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                    .with_attrs(
-                                        provider_failure_attrs(
-                                            provider_name,
-                                            current_model,
-                                            &error_detail,
-                                            &diagnostic,
-                                        )
-                                    ),
-                                    "Non-retryable error, moving on"
-                                );
-                                break;
-                            }
-
-                            // A successful key swap already moved us to a fresh
-                            // quota bucket — cooling the whole provider on top
-                            // of that would strand a provider that is fine.
-                            if rate_limited && !rotated && self.model_providers.len() > 1 {
-                                self.cool_down_rate_limited_provider(entry, current_model, &e);
-                                break;
-                            }
-
-                            if attempt < self.max_retries {
-                                let wait = self.compute_backoff(backoff_ms, &e);
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                    .with_attrs(
-                                        provider_retry_attrs(
-                                            provider_name,
-                                            current_model,
-                                            attempt + 1,
-                                            wait,
-                                            failure_reason,
-                                            &error_detail,
-                                            &diagnostic,
-                                        )
-                                    ),
-                                    "ModelProvider call failed, retrying"
-                                );
-                                tokio::time::sleep(Duration::from_millis(wait)).await;
-                                backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
-                            }
+                                    &diagnostic,
+                                )),
+                                "ModelProvider call failed, retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(wait)).await;
+                            backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
                         }
                     }
                 }
-
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(provider_exhausted_attrs(
-                            provider_name,
-                            current_model,
-                            last_error_detail.as_deref(),
-                            last_diagnostic.as_ref(),
-                        )),
-                    "Exhausted retries, trying next model_provider/model"
-                );
             }
+
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(provider_exhausted_attrs(
+                        provider_name,
+                        model,
+                        last_error_detail.as_deref(),
+                        last_diagnostic.as_ref(),
+                    )),
+                "Exhausted retries, trying next model_provider/model"
+            );
         }
 
         anyhow::bail!(
@@ -1613,201 +1556,185 @@ impl ModelProvider for ReliableModelProvider {
         model: &str,
         temperature: Option<f64>,
     ) -> anyhow::Result<ChatResponse> {
-        let models = self.model_chain(model);
         let mut failures = Vec::new();
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
 
-        for current_model in &models {
-            for entry in &self.model_providers {
-                let provider_name = entry.display_name.as_str();
-                if self.provider_should_skip_for_cooldown(entry) {
-                    self.log_cooldown_skip(provider_name);
-                    Self::record_cooldown_skip_failure(&mut failures, provider_name, current_model);
-                    continue;
-                }
+        for entry in &self.model_providers {
+            let provider_name = entry.display_name.as_str();
+            if self.provider_should_skip_for_cooldown(entry) {
+                self.log_cooldown_skip(provider_name);
+                Self::record_cooldown_skip_failure(&mut failures, provider_name, model);
+                continue;
+            }
 
-                let mut backoff_ms = self.base_backoff_ms;
-                let mut last_error_detail: Option<String> = None;
-                let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
+            let mut backoff_ms = self.base_backoff_ms;
+            let mut last_error_detail: Option<String> = None;
+            let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
-                for attempt in 0..=self.max_retries {
-                    match ProviderDispatch::from_ref(entry.provider())
-                        .chat_with_tools(&effective_messages, tools, current_model, temperature)
-                        .await
-                    {
-                        Ok(resp) => {
-                            // Re-roll a transient empty completion instead of
-                            // returning a blank turn (bounded by `max_retries`;
-                            // see `is_empty_completion`).
-                            if attempt < self.max_retries && is_empty_completion(&resp) {
-                                self.backoff_after_empty_completion(
-                                    &mut failures,
-                                    provider_name,
-                                    current_model,
-                                    attempt,
-                                    &mut backoff_ms,
-                                )
-                                .await;
-                                continue;
-                            }
-                            let served_model = entry.served_model(current_model);
-                            if attempt > 0
-                                || served_model != model
-                                || context_truncated
-                                || self
-                                    .model_providers
-                                    .first()
-                                    .map(|entry| entry.display_name.as_str())
-                                    != Some(provider_name)
-                            {
-                                ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": served_model, "attempt": attempt, "original_model": model, "context_truncated": context_truncated})), "ModelProvider recovered (failover/retry)");
-                                let primary = self
-                                    .model_providers
-                                    .first()
-                                    .map(|entry| entry.display_name.as_str())
-                                    .unwrap_or("");
-                                record_provider_fallback(
-                                    primary,
-                                    model,
-                                    provider_name,
-                                    served_model,
-                                );
-                            }
-                            return Ok(resp);
+            for attempt in 0..=self.max_retries {
+                match ProviderDispatch::from_ref(entry.provider())
+                    .chat_with_tools(&effective_messages, tools, model, temperature)
+                    .await
+                {
+                    Ok(resp) => {
+                        // Re-roll a transient empty completion instead of
+                        // returning a blank turn (bounded by `max_retries`;
+                        // see `is_empty_completion`).
+                        if attempt < self.max_retries && is_empty_completion(&resp) {
+                            self.backoff_after_empty_completion(
+                                &mut failures,
+                                provider_name,
+                                model,
+                                attempt,
+                                &mut backoff_ms,
+                            )
+                            .await;
+                            continue;
                         }
-                        Err(e) => {
-                            // Context window exceeded: truncate history and retry
-                            if is_context_window_exceeded(&e) && !context_truncated {
-                                let dropped = truncate_for_context(&mut effective_messages);
-                                if dropped > 0 {
-                                    context_truncated = true;
-                                    ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": *current_model, "dropped": dropped, "remaining": effective_messages.len()})), "Context window exceeded; truncated history and retrying");
-                                    continue; // Retry with truncated messages (counts as an attempt)
-                                }
-                                // No complete older turn can be removed safely.
-                                let error_detail = compact_error_detail(&e);
-                                let truncation_limit =
-                                    context_truncation_limit(&effective_messages);
-                                push_failure(
-                                    &mut failures,
-                                    provider_name,
-                                    current_model,
-                                    attempt + 1,
-                                    self.max_retries + 1,
-                                    "non_retryable",
-                                    &error_detail,
-                                    None,
-                                );
-                                anyhow::bail!(
-                                    "Request exceeds model context window and cannot be reduced without \
-                                     breaking message/tool pairing ({truncation_limit}). \
-                                     Try using a model with a larger context window, reducing the number \
-                                     of tools/skills, or enabling compact_context in config. Attempts:\n{}",
-                                    failures.join("\n")
-                                );
+                        let served_model = entry.served_model(model);
+                        if attempt > 0
+                            || served_model != model
+                            || context_truncated
+                            || self
+                                .model_providers
+                                .first()
+                                .map(|entry| entry.display_name.as_str())
+                                != Some(provider_name)
+                        {
+                            ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": served_model, "attempt": attempt, "original_model": model, "context_truncated": context_truncated})), "ModelProvider recovered (failover/retry)");
+                            let primary = self
+                                .model_providers
+                                .first()
+                                .map(|entry| entry.display_name.as_str())
+                                .unwrap_or("");
+                            record_provider_fallback(primary, model, provider_name, served_model);
+                        }
+                        return Ok(resp);
+                    }
+                    Err(e) => {
+                        // Context window exceeded: truncate history and retry
+                        if is_context_window_exceeded(&e) && !context_truncated {
+                            let dropped = truncate_for_context(&mut effective_messages);
+                            if dropped > 0 {
+                                context_truncated = true;
+                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": model, "dropped": dropped, "remaining": effective_messages.len()})), "Context window exceeded; truncated history and retrying");
+                                continue; // Retry with truncated messages (counts as an attempt)
                             }
-
-                            let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
-                            let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
-                            let rate_limited = is_rate_limited(&e);
-                            let failure_reason = failure_reason(rate_limited, non_retryable);
+                            // No complete older turn can be removed safely.
                             let error_detail = compact_error_detail(&e);
-                            let diagnostic = provider_error_diagnostic(&e);
-                            last_error_detail = Some(error_detail.clone());
-                            last_diagnostic = Some(diagnostic.clone());
-
+                            let truncation_limit = context_truncation_limit(&effective_messages);
                             push_failure(
                                 &mut failures,
                                 provider_name,
-                                current_model,
+                                model,
                                 attempt + 1,
                                 self.max_retries + 1,
-                                failure_reason,
+                                "non_retryable",
                                 &error_detail,
-                                Some(&diagnostic),
+                                None,
                             );
+                            anyhow::bail!(
+                                "Request exceeds model context window and cannot be reduced without \
+                                 breaking message/tool pairing ({truncation_limit}). \
+                                 Try using a model with a larger context window, reducing the number \
+                                 of tools/skills, or enabling compact_context in config. Attempts:\n{}",
+                                failures.join("\n")
+                            );
+                        }
 
-                            let rotated = rate_limited
-                                && !non_retryable_rate_limit
-                                && self.rotate_and_apply_key(
-                                    entry,
-                                    &e,
+                        let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
+                        let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
+                        let rate_limited = is_rate_limited(&e);
+                        let failure_reason = failure_reason(rate_limited, non_retryable);
+                        let error_detail = compact_error_detail(&e);
+                        let diagnostic = provider_error_diagnostic(&e);
+                        last_error_detail = Some(error_detail.clone());
+                        last_diagnostic = Some(diagnostic.clone());
+
+                        push_failure(
+                            &mut failures,
+                            provider_name,
+                            model,
+                            attempt + 1,
+                            self.max_retries + 1,
+                            failure_reason,
+                            &error_detail,
+                            Some(&diagnostic),
+                        );
+
+                        let rotated = rate_limited
+                            && !non_retryable_rate_limit
+                            && self.rotate_and_apply_key(entry, &e, provider_name, &error_detail);
+
+                        if non_retryable {
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(
+                                    provider_failure_attrs(
+                                        provider_name,
+                                        model,
+                                        &error_detail,
+                                        &diagnostic,
+                                    )
+                                ),
+                                "Non-retryable error, moving on"
+                            );
+                            break;
+                        }
+
+                        // A successful key swap already moved us to a fresh
+                        // quota bucket — cooling the whole provider on top
+                        // of that would strand a provider that is fine.
+                        if rate_limited && !rotated && self.model_providers.len() > 1 {
+                            self.cool_down_rate_limited_provider(entry, model, &e);
+                            break;
+                        }
+
+                        if attempt < self.max_retries {
+                            let wait = self.compute_backoff(backoff_ms, &e);
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(provider_retry_attrs(
                                     provider_name,
+                                    model,
+                                    attempt + 1,
+                                    wait,
+                                    failure_reason,
                                     &error_detail,
-                                );
-
-                            if non_retryable {
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                    .with_attrs(
-                                        provider_failure_attrs(
-                                            provider_name,
-                                            current_model,
-                                            &error_detail,
-                                            &diagnostic,
-                                        )
-                                    ),
-                                    "Non-retryable error, moving on"
-                                );
-                                break;
-                            }
-
-                            // A successful key swap already moved us to a fresh
-                            // quota bucket — cooling the whole provider on top
-                            // of that would strand a provider that is fine.
-                            if rate_limited && !rotated && self.model_providers.len() > 1 {
-                                self.cool_down_rate_limited_provider(entry, current_model, &e);
-                                break;
-                            }
-
-                            if attempt < self.max_retries {
-                                let wait = self.compute_backoff(backoff_ms, &e);
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                    .with_attrs(
-                                        provider_retry_attrs(
-                                            provider_name,
-                                            current_model,
-                                            attempt + 1,
-                                            wait,
-                                            failure_reason,
-                                            &error_detail,
-                                            &diagnostic,
-                                        )
-                                    ),
-                                    "ModelProvider call failed, retrying"
-                                );
-                                tokio::time::sleep(Duration::from_millis(wait)).await;
-                                backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
-                            }
+                                    &diagnostic,
+                                )),
+                                "ModelProvider call failed, retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(wait)).await;
+                            backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
                         }
                     }
                 }
-
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(provider_exhausted_attrs(
-                            provider_name,
-                            current_model,
-                            last_error_detail.as_deref(),
-                            last_diagnostic.as_ref(),
-                        )),
-                    "Exhausted retries, trying next model_provider/model"
-                );
             }
+
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(provider_exhausted_attrs(
+                        provider_name,
+                        model,
+                        last_error_detail.as_deref(),
+                        last_diagnostic.as_ref(),
+                    )),
+                "Exhausted retries, trying next model_provider/model"
+            );
         }
 
         anyhow::bail!(
@@ -1822,210 +1749,190 @@ impl ModelProvider for ReliableModelProvider {
         model: &str,
         temperature: Option<f64>,
     ) -> anyhow::Result<ChatResponse> {
-        let models = self.model_chain(model);
         let mut failures = Vec::new();
         let mut effective_messages = request.messages.to_vec();
         let mut context_truncated = false;
 
-        for current_model in &models {
-            for entry in &self.model_providers {
-                let provider_name = entry.display_name.as_str();
-                if self.provider_should_skip_for_cooldown(entry) {
-                    self.log_cooldown_skip(provider_name);
-                    Self::record_cooldown_skip_failure(&mut failures, provider_name, current_model);
-                    continue;
-                }
+        for entry in &self.model_providers {
+            let provider_name = entry.display_name.as_str();
+            if self.provider_should_skip_for_cooldown(entry) {
+                self.log_cooldown_skip(provider_name);
+                Self::record_cooldown_skip_failure(&mut failures, provider_name, model);
+                continue;
+            }
 
-                let mut backoff_ms = self.base_backoff_ms;
-                let mut last_error_detail: Option<String> = None;
-                let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
+            let mut backoff_ms = self.base_backoff_ms;
+            let mut last_error_detail: Option<String> = None;
+            let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
-                for attempt in 0..=self.max_retries {
-                    let req = ChatRequest {
-                        messages: &effective_messages,
-                        tools: request.tools,
-                        thinking: request.thinking,
-                    };
-                    match ProviderDispatch::from_ref(entry.provider())
-                        .chat(req, current_model, temperature)
-                        .await
-                    {
-                        Ok(resp) => {
-                            // Re-roll a transient empty completion instead of
-                            // returning a blank turn (bounded by `max_retries`;
-                            // see `is_empty_completion`).
-                            if attempt < self.max_retries && is_empty_completion(&resp) {
-                                self.backoff_after_empty_completion(
-                                    &mut failures,
-                                    provider_name,
-                                    current_model,
-                                    attempt,
-                                    &mut backoff_ms,
-                                )
-                                .await;
-                                continue;
-                            }
-                            let served_model = entry.served_model(current_model);
-                            if attempt > 0
-                                || served_model != model
-                                || context_truncated
-                                || self
-                                    .model_providers
-                                    .first()
-                                    .map(|entry| entry.display_name.as_str())
-                                    != Some(provider_name)
-                            {
-                                ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": served_model, "attempt": attempt, "original_model": model, "context_truncated": context_truncated})), "ModelProvider recovered (failover/retry)");
-                                let primary = self
-                                    .model_providers
-                                    .first()
-                                    .map(|entry| entry.display_name.as_str())
-                                    .unwrap_or("");
-                                record_provider_fallback(
-                                    primary,
-                                    model,
-                                    provider_name,
-                                    served_model,
-                                );
-                            }
-                            return Ok(resp);
+            for attempt in 0..=self.max_retries {
+                let req = ChatRequest {
+                    messages: &effective_messages,
+                    tools: request.tools,
+                    thinking: request.thinking,
+                };
+                match ProviderDispatch::from_ref(entry.provider())
+                    .chat(req, model, temperature)
+                    .await
+                {
+                    Ok(resp) => {
+                        // Re-roll a transient empty completion instead of
+                        // returning a blank turn (bounded by `max_retries`;
+                        // see `is_empty_completion`).
+                        if attempt < self.max_retries && is_empty_completion(&resp) {
+                            self.backoff_after_empty_completion(
+                                &mut failures,
+                                provider_name,
+                                model,
+                                attempt,
+                                &mut backoff_ms,
+                            )
+                            .await;
+                            continue;
                         }
-                        Err(e) => {
-                            // Context window exceeded: truncate history and retry
-                            if is_context_window_exceeded(&e) && !context_truncated {
-                                let dropped = truncate_for_context(&mut effective_messages);
-                                if dropped > 0 {
-                                    context_truncated = true;
-                                    ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": *current_model, "dropped": dropped, "remaining": effective_messages.len()})), "Context window exceeded; truncated history and retrying");
-                                    continue; // Retry with truncated messages (counts as an attempt)
-                                }
-                                // No complete older turn can be removed safely.
-                                let error_detail = compact_error_detail(&e);
-                                let truncation_limit =
-                                    context_truncation_limit(&effective_messages);
-                                push_failure(
-                                    &mut failures,
-                                    provider_name,
-                                    current_model,
-                                    attempt + 1,
-                                    self.max_retries + 1,
-                                    "non_retryable",
-                                    &error_detail,
-                                    None,
-                                );
-                                anyhow::bail!(
-                                    "Request exceeds model context window and cannot be reduced without \
-                                     breaking message/tool pairing ({truncation_limit}). \
-                                     Try using a model with a larger context window, reducing the number \
-                                     of tools/skills, or enabling compact_context in config. Attempts:\n{}",
-                                    failures.join("\n")
-                                );
+                        let served_model = entry.served_model(model);
+                        if attempt > 0
+                            || served_model != model
+                            || context_truncated
+                            || self
+                                .model_providers
+                                .first()
+                                .map(|entry| entry.display_name.as_str())
+                                != Some(provider_name)
+                        {
+                            ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": served_model, "attempt": attempt, "original_model": model, "context_truncated": context_truncated})), "ModelProvider recovered (failover/retry)");
+                            let primary = self
+                                .model_providers
+                                .first()
+                                .map(|entry| entry.display_name.as_str())
+                                .unwrap_or("");
+                            record_provider_fallback(primary, model, provider_name, served_model);
+                        }
+                        return Ok(resp);
+                    }
+                    Err(e) => {
+                        // Context window exceeded: truncate history and retry
+                        if is_context_window_exceeded(&e) && !context_truncated {
+                            let dropped = truncate_for_context(&mut effective_messages);
+                            if dropped > 0 {
+                                context_truncated = true;
+                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "model": model, "dropped": dropped, "remaining": effective_messages.len()})), "Context window exceeded; truncated history and retrying");
+                                continue; // Retry with truncated messages (counts as an attempt)
                             }
-
-                            let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
-                            let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
-                            let rate_limited = is_rate_limited(&e);
-                            let failure_reason = failure_reason(rate_limited, non_retryable);
+                            // No complete older turn can be removed safely.
                             let error_detail = compact_error_detail(&e);
-                            let diagnostic = provider_error_diagnostic(&e);
-                            last_error_detail = Some(error_detail.clone());
-                            last_diagnostic = Some(diagnostic.clone());
-
+                            let truncation_limit = context_truncation_limit(&effective_messages);
                             push_failure(
                                 &mut failures,
                                 provider_name,
-                                current_model,
+                                model,
                                 attempt + 1,
                                 self.max_retries + 1,
-                                failure_reason,
+                                "non_retryable",
                                 &error_detail,
-                                Some(&diagnostic),
+                                None,
                             );
+                            anyhow::bail!(
+                                "Request exceeds model context window and cannot be reduced without \
+                                 breaking message/tool pairing ({truncation_limit}). \
+                                 Try using a model with a larger context window, reducing the number \
+                                 of tools/skills, or enabling compact_context in config. Attempts:\n{}",
+                                failures.join("\n")
+                            );
+                        }
 
-                            let rotated = rate_limited
-                                && !non_retryable_rate_limit
-                                && self.rotate_and_apply_key(
-                                    entry,
-                                    &e,
+                        let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
+                        let non_retryable = is_non_retryable(&e) || non_retryable_rate_limit;
+                        let rate_limited = is_rate_limited(&e);
+                        let failure_reason = failure_reason(rate_limited, non_retryable);
+                        let error_detail = compact_error_detail(&e);
+                        let diagnostic = provider_error_diagnostic(&e);
+                        last_error_detail = Some(error_detail.clone());
+                        last_diagnostic = Some(diagnostic.clone());
+
+                        push_failure(
+                            &mut failures,
+                            provider_name,
+                            model,
+                            attempt + 1,
+                            self.max_retries + 1,
+                            failure_reason,
+                            &error_detail,
+                            Some(&diagnostic),
+                        );
+
+                        let rotated = rate_limited
+                            && !non_retryable_rate_limit
+                            && self.rotate_and_apply_key(entry, &e, provider_name, &error_detail);
+
+                        if non_retryable {
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(
+                                    provider_failure_attrs(
+                                        provider_name,
+                                        model,
+                                        &error_detail,
+                                        &diagnostic,
+                                    )
+                                ),
+                                "Non-retryable error, moving on"
+                            );
+                            break;
+                        }
+
+                        // A successful key swap already moved us to a fresh
+                        // quota bucket — cooling the whole provider on top
+                        // of that would strand a provider that is fine.
+                        if rate_limited && !rotated && self.model_providers.len() > 1 {
+                            self.cool_down_rate_limited_provider(entry, model, &e);
+                            break;
+                        }
+
+                        if attempt < self.max_retries {
+                            let wait = self.compute_backoff(backoff_ms, &e);
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(provider_retry_attrs(
                                     provider_name,
+                                    model,
+                                    attempt + 1,
+                                    wait,
+                                    failure_reason,
                                     &error_detail,
-                                );
-
-                            if non_retryable {
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                    .with_attrs(
-                                        provider_failure_attrs(
-                                            provider_name,
-                                            current_model,
-                                            &error_detail,
-                                            &diagnostic,
-                                        )
-                                    ),
-                                    "Non-retryable error, moving on"
-                                );
-                                break;
-                            }
-
-                            // A successful key swap already moved us to a fresh
-                            // quota bucket — cooling the whole provider on top
-                            // of that would strand a provider that is fine.
-                            if rate_limited && !rotated && self.model_providers.len() > 1 {
-                                self.cool_down_rate_limited_provider(entry, current_model, &e);
-                                break;
-                            }
-
-                            if attempt < self.max_retries {
-                                let wait = self.compute_backoff(backoff_ms, &e);
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                    .with_attrs(
-                                        provider_retry_attrs(
-                                            provider_name,
-                                            current_model,
-                                            attempt + 1,
-                                            wait,
-                                            failure_reason,
-                                            &error_detail,
-                                            &diagnostic,
-                                        )
-                                    ),
-                                    "ModelProvider call failed, retrying"
-                                );
-                                tokio::time::sleep(Duration::from_millis(wait)).await;
-                                backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
-                            }
+                                    &diagnostic,
+                                )),
+                                "ModelProvider call failed, retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(wait)).await;
+                            backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
                         }
                     }
                 }
-
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(provider_exhausted_attrs(
-                            provider_name,
-                            current_model,
-                            last_error_detail.as_deref(),
-                            last_diagnostic.as_ref(),
-                        )),
-                    "Exhausted retries, trying next model_provider/model"
-                );
             }
 
-            if *current_model != model {
-                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"original_model": model, "fallback_model": *current_model})), "Model fallback exhausted all model_providers, trying next fallback model");
-            }
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(provider_exhausted_attrs(
+                        provider_name,
+                        model,
+                        last_error_detail.as_deref(),
+                        last_diagnostic.as_ref(),
+                    )),
+                "Exhausted retries, trying next model_provider/model"
+            );
         }
 
         anyhow::bail!(
@@ -2073,12 +1980,7 @@ impl ModelProvider for ReliableModelProvider {
 
             let provider_clone = provider_name.to_string();
 
-            let current_model = self
-                .model_chain(model)
-                .first()
-                .copied()
-                .unwrap_or(model)
-                .to_string();
+            let current_model = model.to_owned();
             let served_model = entry.served_model(&current_model).to_string();
             let fallback_record = ProviderFallbackRecord::new_if_recovered(
                 self.model_providers
@@ -2137,8 +2039,7 @@ impl ModelProvider for ReliableModelProvider {
         temperature: Option<f64>,
         options: StreamOptions,
     ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
-        // Try each model_provider/model combination for streaming
-        // For streaming, we use the first model_provider that supports it and has streaming enabled
+        // Use the first available entry that supports streaming when enabled.
         for entry in &self.model_providers {
             let provider_name = entry.display_name.as_str();
             let model_provider = entry.provider();
@@ -2154,11 +2055,7 @@ impl ModelProvider for ReliableModelProvider {
             // Clone model_provider data for the stream
             let provider_clone = provider_name.to_string();
 
-            // Try the first model in the chain for streaming
-            let current_model = match self.model_chain(model).first() {
-                Some(m) => (*m).to_string(),
-                None => model.to_string(),
-            };
+            let current_model = model.to_owned();
             let served_model = entry.served_model(&current_model).to_string();
             let fallback_record = ProviderFallbackRecord::new_if_recovered(
                 self.model_providers
@@ -2218,7 +2115,7 @@ impl ModelProvider for ReliableModelProvider {
         temperature: Option<f64>,
         options: StreamOptions,
     ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
-        // Try each model_provider/model combination for streaming with history.
+        // Use the first available entry that supports streaming with history.
         // Mirrors stream_chat_with_system but delegates to the underlying
         // model_provider's stream_chat_with_history, preserving the full conversation.
         for entry in &self.model_providers {
@@ -2235,10 +2132,7 @@ impl ModelProvider for ReliableModelProvider {
 
             let provider_clone = provider_name.to_string();
 
-            let current_model = match self.model_chain(model).first() {
-                Some(m) => (*m).to_string(),
-                None => model.to_string(),
-            };
+            let current_model = model.to_owned();
             let served_model = entry.served_model(&current_model).to_string();
             let fallback_record = ProviderFallbackRecord::new_if_recovered(
                 self.model_providers
