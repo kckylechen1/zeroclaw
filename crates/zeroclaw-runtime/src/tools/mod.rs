@@ -518,7 +518,6 @@ pub fn all_tools(
     _agents: &HashMap<String, AliasedAgentConfig>,
     _fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
 ) -> AllToolsResult {
     all_tools_with_runtime(
@@ -535,7 +534,6 @@ pub fn all_tools(
         _agents,
         _fallback_api_key,
         root_config,
-        is_subagent_caller,
         tui_env,
         // No runtime adapter / live-config here; and no lineage —
         // callers of the non-runtime variant are top-level origins.
@@ -569,12 +567,6 @@ pub fn all_tools_with_runtime(
     _agents: &HashMap<String, AliasedAgentConfig>,
     _fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    // Formerly the legacy `spawn_subagent` tool's depth-1 self-cap flag.
-    // `spawn_subagent` is retired (spawn_subagent wall); the parameter
-    // stays in the signature (underscored, intentionally unused) so call
-    // sites do not churn and the registry contract is unchanged for
-    // callers.
-    _is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
     // Live config handle for task authority and reminder resolution. Daemon
     // callers observe reloads; one-shot callers use the root config snapshot.

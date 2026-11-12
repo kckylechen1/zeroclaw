@@ -113,90 +113,10 @@ pub(crate) async fn resolve_routed_approval(
     }
 }
 
-pub(crate) struct RoutedApprovalChannel {
-    handles: tools::PerToolChannelHandle,
-    route: zeroclaw_config::autonomy::ApprovalRoute,
-}
-
-impl RoutedApprovalChannel {
-    pub(crate) fn new(
-        handles: tools::PerToolChannelHandle,
-        route: zeroclaw_config::autonomy::ApprovalRoute,
-    ) -> Self {
-        Self { handles, route }
-    }
-}
-
-impl ::zeroclaw_api::attribution::Attributable for RoutedApprovalChannel {
-    fn role(&self) -> ::zeroclaw_api::attribution::Role {
-        ::zeroclaw_api::attribution::Role::Channel(::zeroclaw_api::attribution::ChannelKind::Cli)
-    }
-    fn alias(&self) -> &str {
-        "approval-route"
-    }
-}
-
-#[async_trait::async_trait]
-impl zeroclaw_api::channel::Channel for RoutedApprovalChannel {
-    fn name(&self) -> &str {
-        "approval-route"
-    }
-
-    async fn send(&self, _message: &zeroclaw_api::channel::SendMessage) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn listen(
-        &self,
-        _tx: tokio::sync::mpsc::Sender<zeroclaw_api::channel::ChannelMessage>,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    /// Non-attributed entry point: delegates to
-    /// [`Self::request_approval_attributed`] and drops the attribution so the
-    /// routing decision lives in exactly one place.
-    async fn request_approval(
-        &self,
-        recipient: &str,
-        request: &zeroclaw_api::channel::ChannelApprovalRequest,
-    ) -> anyhow::Result<Option<zeroclaw_api::channel::ChannelApprovalResponse>> {
-        Ok(self
-            .request_approval_attributed(recipient, request)
-            .await?
-            .map(|attributed| attributed.response))
-    }
-
-    async fn request_approval_attributed(
-        &self,
-        recipient: &str,
-        request: &zeroclaw_api::channel::ChannelApprovalRequest,
-    ) -> anyhow::Result<Option<zeroclaw_api::channel::AttributedApprovalResponse>> {
-        match resolve_routed_approval(&self.handles, &self.route, recipient, request).await {
-            // The deciding approver's name travels on the response itself;
-            // `None` for a bridge-synthesized fail-closed deny.
-            //
-            // Cross-crate construction: `AttributedApprovalResponse` is
-            // `#[non_exhaustive]`, so struct-literal syntax is forbidden from
-            // here. Build via the dedicated constructors.
-            RoutedApproval::Decided {
-                response,
-                decider,
-                source,
-            } => Ok(Some(
-                zeroclaw_api::channel::AttributedApprovalResponse::from_runtime(response, source)
-                    .with_decider_opt(decider),
-            )),
-            // No originating channel to inherit on this path; let the gate apply
-            // the non-interactive default (auto-deny).
-            RoutedApproval::Fallthrough => Ok(None),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::approval_bridge::AskUserApprovalBridge;
     use parking_lot::RwLock;
     use std::collections::HashMap;
     use zeroclaw_api::channel::{ChannelApprovalRequest, ChannelApprovalResponse};
@@ -394,18 +314,19 @@ mod tests {
     use zeroclaw_api::channel::Channel as _;
 
     #[tokio::test]
-    async fn routed_channel_returns_and_attributes_approver_decision() {
+    async fn routed_bridge_returns_and_attributes_approver_decision() {
         let h = registry(vec![StubChannel {
             name: "ops".into(),
             behavior: StubBehavior::Answer(ChannelApprovalResponse::Approve),
         }]);
-        let bridge = RoutedApprovalChannel::new(h, route("ops", OnNoApprover::Deny));
+        let bridge = AskUserApprovalBridge::new(h, Some(route("ops", OnNoApprover::Deny)));
         let out = bridge
             .request_approval_attributed("r", &req())
             .await
             .unwrap()
             .expect("the approver decided");
         assert_eq!(out.response, ChannelApprovalResponse::Approve);
+        assert_eq!(out.source, zeroclaw_api::channel::ApprovalSource::Operator);
         assert_eq!(
             out.decided_by.as_deref(),
             Some("ops"),
@@ -414,8 +335,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routed_channel_fails_closed_when_approver_unregistered() {
-        let bridge = RoutedApprovalChannel::new(registry(vec![]), route("ops", OnNoApprover::Deny));
+    async fn routed_bridge_fails_closed_when_approver_unregistered() {
+        let bridge =
+            AskUserApprovalBridge::new(registry(vec![]), Some(route("ops", OnNoApprover::Deny)));
         let out = bridge
             .request_approval_attributed("r", &req())
             .await
@@ -430,13 +352,17 @@ mod tests {
             out.decided_by.is_none(),
             "a bridge-synthesized fail-closed deny has no deciding channel"
         );
+        assert_eq!(
+            out.source,
+            zeroclaw_api::channel::ApprovalSource::Unavailable
+        );
     }
 
     #[tokio::test]
-    async fn routed_channel_inherit_returns_none_on_channelless_path() {
-        let bridge = RoutedApprovalChannel::new(
+    async fn routed_bridge_inherit_returns_none_without_originator() {
+        let bridge = AskUserApprovalBridge::new(
             registry(vec![]),
-            route("ops", OnNoApprover::InheritOriginator),
+            Some(route("ops", OnNoApprover::InheritOriginator)),
         );
         let out = bridge.request_approval("r", &req()).await.unwrap();
         assert_eq!(

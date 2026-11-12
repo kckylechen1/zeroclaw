@@ -437,6 +437,38 @@ fn child_context_inventory_has_no_authority_surfaces() {
 }
 
 #[test]
+fn child_admission_and_registry_refuse_user_reaching_tools_sa7c() {
+    // SA-7c: the surviving child path admits a profile and builds its own
+    // tool set; no parent channel handle is an input to either boundary.
+    assert!(SubAgentToolNameV1::parse("ask_user").is_err());
+    for name in ["ask_user", "escalate_to_human"] {
+        // Deserialized profiles still cross both gates, even when they
+        // bypass the tool-name parser. Keep the digest valid so a refusal
+        // proves the capability boundary rather than a malformed profile.
+        let mut serialized = serde_json::to_value(test_profile()).unwrap();
+        serialized["tool_policy"]["tools"] = serde_json::json!([name]);
+        let mut profile: SubAgentProfileV1 = serde_json::from_value(serialized).unwrap();
+        profile.digest = profile.compute_digest();
+        profile.verify_digest().unwrap();
+
+        match ChildToolSet::from_profile(&profile) {
+            Err(super::ChildToolSetError::NotInV1Catalog { name: refused }) => {
+                assert_eq!(refused, name);
+            }
+            other => panic!("child registry must refuse {name}: {other:?}"),
+        }
+
+        let mut registry = SubAgentProfileRegistry::new();
+        match registry.admit(profile) {
+            Err(super::ProfileAdmissionError::NonEmptyToolPolicy { first, .. }) => {
+                assert_eq!(first, name);
+            }
+            other => panic!("profile admission must refuse {name}: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn private_dyad_and_agent_soul_fail_closed_at_the_partition_gate() {
     // Forbidden 5 (SA-14) and 6 (SA-15).
     assert!(ChildPartitionKey::parse(SourcePartition::PrivateDyad).is_err());
@@ -1303,7 +1335,6 @@ fn v1_child_capability_set_is_disjoint_from_a_real_parent_registry() {
         &HashMap::new(),
         None,
         &zeroclaw_config::schema::Config::default(),
-        false,
         None,
         None,
         None,
@@ -1316,6 +1347,13 @@ fn v1_child_capability_set_is_disjoint_from_a_real_parent_registry() {
         "precondition: the parent registry really carries tools"
     );
     let child_set = ChildToolSet::from_profile(&test_profile()).unwrap();
+    for name in ["ask_user", "escalate_to_human"] {
+        assert!(
+            parent_names.contains(name),
+            "precondition: the parent registry carries {name}"
+        );
+        assert!(!child_set.names().contains(&name));
+    }
     for name in child_set.names() {
         assert!(
             !parent_names.contains(name),

@@ -24,7 +24,7 @@ use super::{
     agent_provider_composite, api_key_and_uri_for_provider, autosave_memory_key,
     build_system_prompt_for_turn, compute_excluded_mcp_tools, is_model_switch_requested,
     resolved_agent_for_turn, retain_registered_tool_descriptions, run_tool_call_loop,
-    scope_session_key, seed_channel_handles, synthetic_session_key_for_run,
+    scope_session_key, synthetic_session_key_for_run,
 };
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -137,7 +137,6 @@ pub async fn run(
                 .has_filesystem_access()
                 .then(|| crate::tools::task_context::TaskIdentity::capture(&config, agent_alias))
         });
-        let is_subagent_caller = overrides.is_subagent;
         let suppress_memory_inject = overrides.suppress_memory_inject;
         let memory_free = overrides.memory_free;
         // Unified spawn lineage (SA-9/SA-11): the run's effective lineage
@@ -203,7 +202,6 @@ pub async fn run(
             &config.agents,
             agent_model_provider.and_then(|e| e.api_key.as_deref()),
             &config,
-            is_subagent_caller,
             None,
             None,
             Some(effective_lineage.clone()),
@@ -243,28 +241,11 @@ pub async fn run(
         let scoped::ScopedAssembled {
             registry,
             task_owner,
-            ask_user_handle,
-            escalate_handle,
             activated_handle,
             mcp_tool_names,
             ..
         } = assembled;
         let tools_registry = registry.into_inner();
-
-        // The SA-7c child gate lives inside `seed_channel_handles`: a
-        // SubAgent child run (`overrides.is_subagent`) seeds nothing, so
-        // its channel tools fail closed and the child reaches the user
-        // only through its typed report.
-        let count = seed_channel_handles(is_subagent_caller, &ask_user_handle, &escalate_handle);
-        if count > 0 {
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Register)
-                    .with_category(::zeroclaw_log::EventCategory::Channel)
-                    .with_attrs(::serde_json::json!({"count": count})),
-                &format!("Registered {} channel(s) for CLI agent", count),
-            );
-        }
 
         // ── Resolve model_provider ─────────────────────────────────────────
         let agent_provider_ref = agent_provider_composite(&config, agent_alias);

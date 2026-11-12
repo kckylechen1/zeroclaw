@@ -5,13 +5,11 @@
 
 use super::{
     apply_text_tool_prompt_policy, estimate_history_tokens, make_query_summary,
-    maybe_inject_channel_delivery_defaults, seed_channel_handles, truncate_tool_result,
+    maybe_inject_channel_delivery_defaults, truncate_tool_result,
 };
 
 use crate::agent::history::DEFAULT_MAX_HISTORY_MESSAGES;
 use crate::agent::tool_execution::{ToolDispatchContext, execute_one_tool};
-use parking_lot::RwLock;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
 use zeroclaw_api::channel::{
@@ -31,88 +29,6 @@ zeroclaw_api::mock_tool_attribution!(
     CancelsTurnTool,
     VerboseTool,
 );
-
-struct SeedMockChannel;
-
-impl ::zeroclaw_api::attribution::Attributable for SeedMockChannel {
-    fn role(&self) -> ::zeroclaw_api::attribution::Role {
-        ::zeroclaw_api::attribution::Role::Channel(
-            ::zeroclaw_api::attribution::ChannelKind::Telegram,
-        )
-    }
-
-    fn alias(&self) -> &str {
-        "default"
-    }
-}
-
-#[async_trait::async_trait]
-impl Channel for SeedMockChannel {
-    fn name(&self) -> &str {
-        "matrix"
-    }
-
-    async fn send(&self, _message: &SendMessage) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn listen(&self, _tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
-// ── seed_channel_handles tests ───────────────────────────────
-
-#[test]
-fn seed_channel_handles_populates_ask_user_and_escalate_handles() {
-    let channel = Arc::new(SeedMockChannel) as Arc<dyn Channel>;
-    super::register_channel_map_fn(Box::new(move || {
-        let mut map = HashMap::new();
-        map.insert("matrix.default".to_string(), Arc::clone(&channel));
-        map
-    }));
-
-    let ask_user_handle = Arc::new(RwLock::new(HashMap::new()));
-    let escalate_handle = Arc::new(RwLock::new(HashMap::new()));
-
-    let count = seed_channel_handles(
-        false,
-        &Some(Arc::clone(&ask_user_handle)),
-        &Some(Arc::clone(&escalate_handle)),
-    );
-
-    assert_eq!(count, 1);
-    assert!(ask_user_handle.read().contains_key("matrix.default"));
-    assert!(escalate_handle.read().contains_key("matrix.default"));
-}
-
-#[test]
-fn child_run_seeds_zero_channel_handles_sa7c() {
-    // SA-7c (frozen SubAgent contract): a child run must not inherit a live
-    // `ask_user` handle or any user-reaching channel Arc, on ANY spawn
-    // path. The gate sits inside `seed_channel_handles`, so a CLI child
-    // (whose process registered a global channel-map factory) cannot be
-    // re-widened by a call site forgetting to check.
-    let channel = Arc::new(SeedMockChannel) as Arc<dyn Channel>;
-    super::register_channel_map_fn(Box::new(move || {
-        let mut map = HashMap::new();
-        map.insert("matrix.default".to_string(), Arc::clone(&channel));
-        map
-    }));
-
-    let ask_user_handle = Arc::new(RwLock::new(HashMap::new()));
-    let escalate_handle = Arc::new(RwLock::new(HashMap::new()));
-
-    let count = seed_channel_handles(
-        true,
-        &Some(Arc::clone(&ask_user_handle)),
-        &Some(Arc::clone(&escalate_handle)),
-    );
-
-    assert_eq!(count, 0, "a child run must seed zero channel handles");
-    assert!(ask_user_handle.read().is_empty());
-    assert!(escalate_handle.read().is_empty());
-}
 
 // ── maybe_inject_channel_delivery_defaults tests ──────────────
 
@@ -11350,7 +11266,6 @@ async fn process_message_seam_narrows_safe_defaults_outside_allowed_tools() {
         &config.agents,
         None,
         &config,
-        false,
         None,
     );
 

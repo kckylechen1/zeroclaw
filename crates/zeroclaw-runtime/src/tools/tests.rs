@@ -79,7 +79,6 @@ fn email_factory_respects_compile_feature_and_channel_activation() {
             &HashMap::new(),
             None,
             &cfg,
-            false,
             None,
         )
         .tools;
@@ -135,7 +134,6 @@ fn sop_run_tools_stay_retired_from_the_registry() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -201,7 +199,6 @@ async fn retired_tools_stay_absent_without_removing_human_channel_tools() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
         None,
         None,
@@ -293,7 +290,6 @@ fn shared_store_tools_open_data_dir_not_per_agent_workspace() {
         &HashMap::new(),
         None,
         &root_config,
-        false,
         None,
         None,
         None,
@@ -457,7 +453,6 @@ fn all_tools_excludes_browser_when_disabled() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -505,7 +500,6 @@ fn minimal_composition_cuts_registry_to_membership() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -586,7 +580,6 @@ fn absent_composition_keeps_full_assembly() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -641,7 +634,6 @@ fn all_tools_includes_browser_when_enabled() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -793,7 +785,6 @@ fn delegate_stays_absent_from_every_registry() {
             &agents,
             Some("delegate-test-credential"),
             &cfg,
-            false,
             None,
         )
         .tools;
@@ -920,7 +911,6 @@ fn registry_keeps_root_advisor_and_bridge_snapshot_separate_from_runtime_config(
             &HashMap::new(),
             None,
             &root_config,
-            false,
             None,
         )
         .tools;
@@ -1002,7 +992,6 @@ async fn registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth() {
         &cfg.agents,
         None,
         &lineage_registry_config(),
-        true, // is_subagent_caller: registry belongs to a child run
         None,
         None,
         Some(at_cap.clone()),
@@ -1090,7 +1079,6 @@ fn all_tools_includes_read_skill_in_compact_mode() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -1127,7 +1115,6 @@ fn all_tools_excludes_read_skill_in_full_mode() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -1144,14 +1131,10 @@ fn retired_operator_tools_absent_from_every_assembly_path() {
     //
     // - absent `composition` (resolves as full),
     // - explicit `composition = "full"`,
-    // - a SubAgent caller (the registry factory the spawned-child path
-    //   shares with the top level; inheritance is downstream of the
-    //   cut, so there is nothing to inherit),
     // - config sections explicitly enabling the retired tools.
     fn assembled(
         tmp: &TempDir,
         composition: Option<zeroclaw_config::composition::Composition>,
-        is_subagent_caller: bool,
         enable_retired_sections: bool,
     ) -> (Vec<String>, Vec<String>) {
         let security = Arc::new(SecurityPolicy::default());
@@ -1186,7 +1169,6 @@ fn retired_operator_tools_absent_from_every_assembly_path() {
             &HashMap::new(),
             None,
             &cfg,
-            is_subagent_caller,
             None,
         );
         (
@@ -1199,29 +1181,17 @@ fn retired_operator_tools_absent_from_every_assembly_path() {
         )
     }
 
-    for (label, composition, is_subagent, enable) in [
-        ("absent composition", None, false, false),
+    for (label, composition, enable) in [
+        ("absent composition", None, false),
         (
             "explicit full composition",
             Some(zeroclaw_config::composition::Composition::Full),
             false,
-            false,
         ),
-        (
-            "subagent caller, full composition",
-            Some(zeroclaw_config::composition::Composition::Full),
-            true,
-            false,
-        ),
-        (
-            "enabled retired sections, absent composition",
-            None,
-            false,
-            true,
-        ),
+        ("enabled retired sections, absent composition", None, true),
     ] {
         let tmp = TempDir::new().unwrap();
-        let (tools, arcs) = assembled(&tmp, composition, is_subagent, enable);
+        let (tools, arcs) = assembled(&tmp, composition, enable);
         for retired in RETIRED_OPERATOR_TOOL_NAMES {
             assert!(
                 !tools.iter().any(|n| n == retired),
@@ -1282,7 +1252,6 @@ fn all_tools_registers_read_skill_for_compact_agent_override_over_global_full() 
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -1338,7 +1307,6 @@ fn all_tools_omits_read_skill_for_full_agent_override_over_global_compact() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -1380,7 +1348,6 @@ fn vi_verify_is_not_registered_even_when_verifiable_intent_is_enabled() {
         &HashMap::new(),
         None,
         &cfg,
-        false,
         None,
     )
     .tools;
@@ -1540,7 +1507,6 @@ async fn tone_proposals_resolve_defaults_in_fixed_and_live_registries() {
             &cfg.agents,
             None,
             &cfg,
-            false,
             None,
             use_live.then(|| live.clone()),
             None,

@@ -19,8 +19,7 @@ use zeroclaw_providers::{ChatMessage, ModelProvider};
 
 use super::{
     agent_turn, apply_text_tool_prompt_policy, build_tool_instructions_for_names,
-    compute_excluded_mcp_tools, live_channel_registry, native_tool_specs_present_for_turn,
-    resolved_agent_for_turn, seed_channel_handles,
+    compute_excluded_mcp_tools, native_tool_specs_present_for_turn, resolved_agent_for_turn,
 };
 
 /// Process a single message through the full agent (with tools and memory).
@@ -151,7 +150,6 @@ pub async fn process_message_with_task_identity(
                 .as_ref()
                 .and_then(|e| e.api_key.as_deref()),
             &config,
-            false,
             None,
             None,
             // Gateway/WS and ACP turn seeding is a top-level origin: the
@@ -188,27 +186,11 @@ pub async fn process_message_with_task_identity(
         let scoped::ScopedAssembled {
             registry,
             task_owner,
-            ask_user_handle,
-            escalate_handle,
             activated_handle: activated_handle_pm,
             mcp_tool_names: mcp_tool_names_pm,
             ..
         } = assembled;
         let tools_registry = registry.into_inner();
-
-        // Populate all channel-driven tool handles from the registered factory.
-        // `process_message` is the parent channel-turn entry; `false` keeps
-        // the SA-7c child gate (inside the seed function) inert here.
-        let count = seed_channel_handles(false, &ask_user_handle, &escalate_handle);
-        if count > 0 {
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Register)
-                    .with_category(::zeroclaw_log::EventCategory::Channel)
-                    .with_attrs(::serde_json::json!({"count": count})),
-                &format!("Registered {} channel(s) for process_message agent", count),
-            );
-        }
 
         let model_name = match agent_model_provider
             .as_ref()
@@ -402,15 +384,6 @@ pub async fn process_message_with_task_identity(
             }
         }
 
-        let routed_approval_channel = risk_profile.approval_route.as_ref().and_then(|route| {
-            live_channel_registry().map(|handles| {
-                crate::agent::agent::RoutedApprovalChannel::new(handles, route.clone())
-            })
-        });
-        let routed_approval_channel_ref = routed_approval_channel
-            .as_ref()
-            .map(|c| c as &dyn zeroclaw_api::channel::Channel);
-
         zeroclaw_api::NATIVE_THINKING_OVERRIDE
             .scope(
                 thinking_params.native_thinking,
@@ -437,10 +410,9 @@ pub async fn process_message_with_task_identity(
                     agent.resolved.parallel_tools,
                     agent.resolved.max_tool_result_chars,
                     agent.resolved.max_context_tokens,
-                    // Cross-channel HITL: a route-only approval bridge when the
-                    // profile sets `approval_route` and channels are live, else
-                    // `None` (today's channel-less auto-deny). See above.
-                    routed_approval_channel_ref,
+                    // This direct-turn entry has no approval back-channel;
+                    // gated tools keep the non-interactive auto-deny.
+                    None,
                     origin,
                     Some(crate::agent::memory_inject::TurnMemory {
                         handle: mem.as_ref(),
