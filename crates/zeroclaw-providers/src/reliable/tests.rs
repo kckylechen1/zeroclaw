@@ -739,27 +739,42 @@ fn failure_summary_includes_provider_diagnostic_fields() {
 }
 
 #[tokio::test]
-async fn context_window_error_aborts_retries_and_model_fallbacks() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut model_fallbacks = std::collections::HashMap::new();
-    model_fallbacks.insert(
-        "gpt-5.3-codex".to_string(),
-        vec!["gpt-5.2-codex".to_string()],
-    );
+async fn context_window_error_aborts_retries_and_pinned_fallbacks() {
+    let primary_calls = Arc::new(AtomicUsize::new(0));
+    let fallback_calls = Arc::new(AtomicUsize::new(0));
 
-    let model_provider = ReliableModelProvider::new("test", vec![(
-            "openai-codex".into(),
-            Box::new(MockModelProvider {
-                calls: Arc::clone(&calls),
-                fail_until_attempt: usize::MAX,
-                response: "never",
-                error: "OpenAI Codex stream error: Your input exceeds the context window of this model. Please adjust your input and try again.",
-            }),
-        )],
+    let model_provider = ReliableModelProvider::new_with_entries(
+        "test",
+        vec![
+            ReliableModelProviderEntry::new_pinned(
+                "openai-codex",
+                "openai-codex.test",
+                "test",
+                "gpt-5.3-codex",
+                Box::new(MockModelProvider {
+                    calls: Arc::clone(&primary_calls),
+                    fail_until_attempt: usize::MAX,
+                    response: "never",
+                    error: "OpenAI Codex stream error: Your input exceeds the context window of \
+                            this model. Please adjust your input and try again.",
+                }),
+            ),
+            ReliableModelProviderEntry::new_pinned(
+                "openai-codex",
+                "openai-codex.test",
+                "test",
+                "gpt-5.2-codex",
+                Box::new(MockModelProvider {
+                    calls: Arc::clone(&fallback_calls),
+                    fail_until_attempt: 0,
+                    response: "should not be reached",
+                    error: "unused",
+                }),
+            ),
+        ],
         4,
         1,
-    )
-    .with_model_fallbacks(model_fallbacks);
+    );
 
     let err = model_provider
         .simple_chat("hello", "gpt-5.3-codex", Some(0.0))
@@ -769,7 +784,8 @@ async fn context_window_error_aborts_retries_and_model_fallbacks() {
 
     assert!(msg.contains("context window"));
     // chat_with_system has no history to truncate, so it bails immediately
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -923,25 +939,31 @@ async fn model_failover_tries_fallback_model() {
         response: "ok from sonnet",
     });
 
-    let mut fallbacks = HashMap::new();
-    fallbacks.insert("claude-opus".to_string(), vec!["claude-sonnet".to_string()]);
-
-    let model_provider = ReliableModelProvider::new(
+    let mut config = zeroclaw_config::schema::Config::default();
+    let alias = config.providers.models.ensure("anthropic", "test").unwrap();
+    alias.model = Some("claude-opus".into());
+    alias.fallback_models = vec!["claude-sonnet".into()];
+    let mut entries = Vec::new();
+    crate::push_pinned_entries(
+        &mut entries,
+        &config,
+        "anthropic",
         "test",
-        vec![(
-            "anthropic".into(),
-            Box::new(mock.clone()) as Box<dyn ModelProvider>,
-        )],
-        0, // no retries — force immediate model failover
+        Box::new(Arc::clone(&mock)),
+        None,
+    );
+
+    let model_provider = ReliableModelProvider::new_with_entries(
+        "test", entries, 0, // no retries — force immediate model failover
         1,
-    )
-    .with_model_fallbacks(fallbacks);
+    );
 
     let result = model_provider
         .simple_chat("hello", "claude-opus", Some(0.0))
         .await
         .unwrap();
     assert_eq!(result, "ok from sonnet");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     let seen = mock.models_seen.lock();
     assert_eq!(seen.len(), 2);
@@ -959,22 +981,19 @@ async fn model_failover_all_models_fail() {
         response: "never",
     });
 
-    let mut fallbacks = HashMap::new();
-    fallbacks.insert(
-        "model-a".to_string(),
-        vec!["model-b".to_string(), "model-c".to_string()],
-    );
-
-    let model_provider = ReliableModelProvider::new(
-        "test",
-        vec![(
-            "p1".into(),
-            Box::new(mock.clone()) as Box<dyn ModelProvider>,
-        )],
-        0,
-        1,
-    )
-    .with_model_fallbacks(fallbacks);
+    let entries = ["model-a", "model-b", "model-c"]
+        .into_iter()
+        .map(|model| {
+            ReliableModelProviderEntry::new_pinned(
+                "p1",
+                "p1.test",
+                "test",
+                model,
+                Box::new(Arc::clone(&mock)),
+            )
+        })
+        .collect();
+    let model_provider = ReliableModelProvider::new_with_entries("test", entries, 0, 1);
 
     let err = model_provider
         .simple_chat("hello", "model-a", Some(0.0))
@@ -984,9 +1003,13 @@ async fn model_failover_all_models_fail() {
         err.to_string()
             .contains("All model_providers/models failed")
     );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 
     let seen = mock.models_seen.lock();
     assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0], "model-a");
+    assert_eq!(seen[1], "model-b");
+    assert_eq!(seen[2], "model-c");
 }
 
 // ── New tests: auth rotation ──
@@ -1738,19 +1761,27 @@ async fn chat_tries_model_failover_on_failure() {
         response_text: "ok from sonnet",
     });
 
-    let mut fallbacks = HashMap::new();
-    fallbacks.insert("claude-opus".to_string(), vec!["claude-sonnet".to_string()]);
-
-    let model_provider = ReliableModelProvider::new(
+    let model_provider = ReliableModelProvider::new_with_entries(
         "test",
-        vec![(
-            "anthropic".into(),
-            Box::new(mock.clone()) as Box<dyn ModelProvider>,
-        )],
+        vec![
+            ReliableModelProviderEntry::new_pinned(
+                "anthropic",
+                "anthropic.test",
+                "test",
+                "claude-opus",
+                Box::new(Arc::clone(&mock)),
+            ),
+            ReliableModelProviderEntry::new_pinned(
+                "anthropic",
+                "anthropic.test",
+                "test",
+                "claude-sonnet",
+                Box::new(Arc::clone(&mock)),
+            ),
+        ],
         0, // no retries — force immediate model failover
         1,
-    )
-    .with_model_fallbacks(fallbacks);
+    );
 
     let messages = vec![ChatMessage::user("hello")];
     let request = ChatRequest {
@@ -1758,11 +1789,19 @@ async fn chat_tries_model_failover_on_failure() {
         tools: None,
         thinking: None,
     };
-    let result = model_provider
-        .chat(request, "claude-opus", Some(0.0))
-        .await
-        .unwrap();
-    assert_eq!(result.text.as_deref(), Some("ok from sonnet"));
+    let (result, fallback) = scope_provider_fallback(async {
+        let result = model_provider.chat(request, "claude-opus", Some(0.0)).await;
+        (result, take_last_provider_fallback())
+    })
+    .await;
+    assert_eq!(result.unwrap().text.as_deref(), Some("ok from sonnet"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let fallback = fallback.expect("pinned-model downgrade must be recorded");
+    assert_eq!(fallback.requested_model, "claude-opus");
+    assert_eq!(fallback.actual_model, "claude-sonnet");
+    assert_eq!(fallback.requested_provider, "anthropic");
+    assert_eq!(fallback.actual_provider, "anthropic");
 
     let seen = mock.models_seen.lock();
     assert_eq!(seen.len(), 2);
