@@ -19,9 +19,32 @@ For bounded multi-step reasoning inside a single conversation, the `reasoning_su
 
 A narrower mechanism: `[[model_routes]]` lets an agent override the configured `model_provider` for prompts marked with a hint string. Useful when one agent should occasionally reach for a different model without spinning up a second agent. Each route entry carries a `hint` (the string a prompt must declare to fire it), a `model_provider` (the dotted `<type>.<alias>` profile to switch to, e.g. `deepseek.reasoner`), and a `model` (the provider-local model id, e.g. `deepseek-reasoner`). Configure routes through the gateway or `zeroclaw config set`; see the [Config reference](../reference/config.md#model_routes) for the field schema.
 
-Routes only fire when a prompt explicitly carries the matching hint. The default request path uses the agent's primary `model_provider`.
+Routes fire for matching explicit hints or hints selected by the configured
+classifier. The default request path uses the agent's primary `model_provider`.
 
 `model_provider` is always a provider profile reference in dotted `<type>.<alias>` form, such as `anthropic.sonnet` or `openai.default`. The profile carries the endpoint, credential reference, compatibility flavor, fallback chain, and configured default model. The `model` field is provider-local state under that profile.
+
+### Complexity hints and the retired cost selector
+
+The runtime profile can map the three complexity tiers to ordinary route names:
+
+```toml
+[runtime_profiles.default.auto_classify]
+simple_hint = "fast"
+standard_hint = "default"
+complex_hint = "reasoning"
+```
+
+The former `cost_optimized_hint` field had no runtime reader and is retired.
+Existing keys under `[runtime_profiles.<alias>.auto_classify]` and the matching
+`ZEROCLAW_runtime_profiles__<alias>__auto_classify__cost_optimized_hint`
+environment override are ignored with the `cost_optimized_routing_removed`
+warning. Remove that field; there is no automatic replacement.
+
+Names such as `cost-optimized` and `cheapest` remain valid ordinary route hints.
+They select only the route explicitly configured under that name. Provider
+`pricing`, live pricing and cost accounting remain available; prices do not
+automatically choose a route.
 
 ## Runtime model switching
 

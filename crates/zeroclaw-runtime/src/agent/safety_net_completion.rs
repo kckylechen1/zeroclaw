@@ -88,7 +88,6 @@ async fn completion_route_classification_cache_and_next_turn() {
                 model: route.model.clone(),
             },
         )],
-        "text-model".into(),
     );
     let mut agent = build_agent(Box::new(provider), vec![]);
     agent.model_provider_name = "custom.text".into();

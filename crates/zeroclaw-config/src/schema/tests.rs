@@ -10220,6 +10220,99 @@ async fn onboard_state_quickstart_completed_round_trips() {
 }
 
 #[test]
+#[allow(clippy::large_futures)]
+async fn load_or_init_warns_on_retired_cost_selector_and_keeps_complexity_hints() {
+    let _env_guard = env_override_lock().await;
+    let home = TempDir::new().unwrap();
+    let workspace = home.path().join("profile-a");
+    fs::create_dir_all(&workspace).await.unwrap();
+    let config_path = workspace.join("config.toml");
+    let contents = r#"schema_version = 3
+
+[providers.models.ollama.local]
+model = "qwen3"
+pricing = { "qwen3.input" = 0.1, "qwen3.output" = 0.2 }
+
+[risk_profiles.shared]
+[runtime_profiles.fast.auto_classify]
+simple_hint = "cost-optimized"
+standard_hint = "regular"
+complex_hint = "cheapest"
+cost_optimized_hint = "legacy-cost-selector"
+
+[agents.assistant]
+model_provider = "ollama.local"
+risk_profile = "shared"
+runtime_profile = "fast"
+"#;
+    fs::write(&config_path, contents).await.unwrap();
+    let _home = EnvValueGuard::set("HOME", home.path());
+    let _workspace = EnvValueGuard::set("ZEROCLAW_WORKSPACE", &workspace);
+    let _config_dir = EnvValueGuard::remove("ZEROCLAW_CONFIG_DIR");
+
+    let mut config = Box::pin(Config::load_or_init()).await.unwrap();
+    assert!(config.degraded_sections.is_empty());
+    assert!(config.degraded_security.is_empty());
+    let agent = config.resolved_agent_config("assistant").unwrap();
+    let hints = agent.resolved.auto_classify.unwrap();
+    assert_eq!(hints.simple_hint.as_deref(), Some("cost-optimized"));
+    assert_eq!(hints.standard_hint.as_deref(), Some("regular"));
+    assert_eq!(hints.complex_hint.as_deref(), Some("cheapest"));
+    let pricing = &config.providers.models.ollama["local"].base.pricing;
+    assert_eq!(pricing.get("qwen3.input"), Some(&0.1));
+    assert_eq!(pricing.get("qwen3.output"), Some(&0.2));
+
+    let warnings = config.collect_warnings();
+    let retired: Vec<_> = warnings
+        .iter()
+        .filter(|warning| warning.code == "cost_optimized_routing_removed")
+        .collect();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(
+        retired[0].path,
+        "runtime_profiles.*.auto_classify.cost_optimized_hint"
+    );
+    let retired_path = "runtime_profiles.fast.auto_classify.cost_optimized_hint";
+    assert!(
+        !config
+            .prop_fields()
+            .iter()
+            .any(|field| field.name == retired_path)
+    );
+    assert!(config.set_prop(retired_path, "cheapest").is_err());
+    let live_path = "runtime_profiles.fast.auto_classify.simple_hint";
+    assert!(
+        config
+            .prop_fields()
+            .iter()
+            .any(|field| field.name == live_path)
+    );
+    assert_eq!(config.get_prop(live_path).unwrap(), "cost-optimized");
+    config.set_prop(live_path, "fast").unwrap();
+    assert_eq!(config.get_prop(live_path).unwrap(), "fast");
+    assert!(
+        serde_json::to_value(&hints)
+            .unwrap()
+            .get("cost_optimized_hint")
+            .is_none()
+    );
+    assert_eq!(fs::read_to_string(config_path).await.unwrap(), contents);
+}
+
+#[cfg(feature = "schema-export")]
+#[test]
+async fn auto_classify_schema_keeps_only_the_three_complexity_hints() {
+    use crate::scattered_types::AutoClassifyConfig;
+
+    let schema = serde_json::to_value(schemars::schema_for!(AutoClassifyConfig)).unwrap();
+    let properties = schema["properties"].as_object().unwrap();
+    for key in ["simple_hint", "standard_hint", "complex_hint"] {
+        assert!(properties.contains_key(key), "missing live field {key}");
+    }
+    assert!(!properties.contains_key("cost_optimized_hint"));
+}
+
+#[test]
 async fn per_agent_nested_prop_fields_use_agent_alias_paths() {
     let mut config = Config::default();
     config

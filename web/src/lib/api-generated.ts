@@ -2329,8 +2329,6 @@ export interface components {
         AutoClassifyConfig: {
             /** @default null */
             complex_hint: string | null;
-            /** @default cost-optimized */
-            cost_optimized_hint: string;
             /** @default null */
             simple_hint: string | null;
             /** @default null */

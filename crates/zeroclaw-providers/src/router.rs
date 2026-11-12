@@ -7,27 +7,6 @@ use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use std::collections::HashMap;
 
-/// Score a model against a user-keyed pricing map. Sums any entry matching
-/// the model directly, plus optional `.input` and `.output` dimension keys.
-/// Returns `None` when nothing matches.
-fn score_model(pricing: &HashMap<String, f64>, model: &str) -> Option<f64> {
-    let mut total = 0.0;
-    let mut matched = false;
-    if let Some(v) = pricing.get(model) {
-        total += *v;
-        matched = true;
-    }
-    if let Some(v) = pricing.get(&format!("{model}.input")) {
-        total += *v;
-        matched = true;
-    }
-    if let Some(v) = pricing.get(&format!("{model}.output")) {
-        total += *v;
-        matched = true;
-    }
-    matched.then_some(total)
-}
-
 /// A single route: maps a task hint to a model_provider + model combo.
 #[derive(Debug, Clone)]
 pub struct Route {
@@ -41,7 +20,6 @@ pub struct RouterModelProvider {
     routes: HashMap<String, (usize, String)>, // hint → (provider_index, model)
     model_providers: Vec<(String, Box<dyn ModelProvider>)>,
     default_index: usize,
-    default_model: String,
 }
 
 impl RouterModelProvider {
@@ -52,7 +30,6 @@ impl RouterModelProvider {
         alias: &str,
         model_providers: Vec<(String, Box<dyn ModelProvider>)>,
         routes: Vec<(String, Route)>,
-        default_model: String,
     ) -> Self {
         // Build model_provider name → index lookup
         let name_to_index: HashMap<&str, usize> = model_providers
@@ -81,62 +58,7 @@ impl RouterModelProvider {
             routes: resolved_routes,
             model_providers,
             default_index: 0,
-            default_model,
         }
-    }
-    pub fn resolve_cost_optimized(
-        &self,
-        model: &str,
-        model_provider_pricing: &HashMap<String, HashMap<String, f64>>,
-        required_vision: bool,
-        required_tools: bool,
-    ) -> (usize, String) {
-        let hint = model.strip_prefix("hint:");
-        let is_cost_hint = matches!(hint, Some("cost-optimized" | "cheapest"));
-
-        if !is_cost_hint {
-            return self.resolve(model);
-        }
-
-        let mut candidates: Vec<(usize, String, f64)> = Vec::new();
-
-        for (idx, route_model) in self.routes.values() {
-            // Capability filtering
-            if let Some((_, model_provider)) = self.model_providers.get(*idx) {
-                if required_vision && !model_provider.supports_vision() {
-                    continue;
-                }
-                if required_tools && !model_provider.supports_native_tools() {
-                    continue;
-                }
-            }
-
-            let Some((model_provider_name, _)) = self.model_providers.get(*idx) else {
-                continue;
-            };
-            if let Some(pricing) = model_provider_pricing.get(model_provider_name)
-                && let Some(total_cost) = score_model(pricing, route_model)
-            {
-                candidates.push((*idx, route_model.clone(), total_cost));
-            }
-        }
-
-        // Sort by total cost (ascending) and pick the cheapest
-        candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-
-        if let Some((idx, route_model, _)) = candidates.into_iter().next() {
-            return (idx, route_model);
-        }
-
-        // Fallback to default
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "No cost-optimized route found with matching pricing data, \
-             falling back to default"
-        );
-        (self.default_index, self.default_model.clone())
     }
 
     fn resolve(&self, model: &str) -> (usize, String) {
@@ -155,47 +77,6 @@ impl RouterModelProvider {
 
         // Not a hint or hint not found — use default model_provider with the model as-is
         (self.default_index, model.to_string())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct CostOptimizedStrategy {
-    /// Per-provider pricing data (model_provider name → user-keyed pricing map).
-    pub model_provider_pricing: HashMap<String, HashMap<String, f64>>,
-    /// Whether the request requires vision support.
-    pub required_vision: bool,
-    /// Whether the request requires native tool support.
-    pub required_tools: bool,
-}
-
-impl CostOptimizedStrategy {
-    /// Create a new cost-optimized strategy with the given per-provider
-    /// pricing data.
-    pub fn new(model_provider_pricing: HashMap<String, HashMap<String, f64>>) -> Self {
-        Self {
-            model_provider_pricing,
-            required_vision: false,
-            required_tools: false,
-        }
-    }
-
-    /// Set whether vision support is required.
-    pub fn with_vision(mut self, required: bool) -> Self {
-        self.required_vision = required;
-        self
-    }
-
-    /// Set whether native tool support is required.
-    pub fn with_tools(mut self, required: bool) -> Self {
-        self.required_tools = required;
-        self
-    }
-
-    /// Score a route by summing pricing entries that match the model.
-    /// Returns `None` if no pricing data is available for the route.
-    pub fn score(&self, model_provider_name: &str, model: &str) -> Option<f64> {
-        let pricing = self.model_provider_pricing.get(model_provider_name)?;
-        score_model(pricing, model)
     }
 }
 
@@ -495,12 +376,7 @@ mod tests {
             })
             .collect();
 
-        let router = RouterModelProvider::new(
-            "test",
-            provider_list,
-            route_list,
-            "default-model".to_string(),
-        );
+        let router = RouterModelProvider::new("test", provider_list, route_list);
 
         (router, mocks)
     }
@@ -697,6 +573,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cost_named_hints_dispatch_only_to_their_configured_routes() {
+        let (router, mocks) = make_router(
+            vec![
+                ("default", "default-response"),
+                ("selected", "selected-response"),
+            ],
+            vec![
+                ("cost-optimized", "selected", "configured-cost-model"),
+                ("cheapest", "selected", "configured-cheapest-model"),
+            ],
+        );
+
+        for (hint, model) in [
+            ("hint:cost-optimized", "configured-cost-model"),
+            ("hint:cheapest", "configured-cheapest-model"),
+        ] {
+            let response = ProviderDispatch::from_ref(&router)
+                .chat_with_system(None, "hello", hint, None)
+                .await
+                .unwrap();
+            assert_eq!(response, "selected-response");
+            assert_eq!(mocks[1].last_model(), model);
+        }
+        assert_eq!(mocks[0].call_count(), 0);
+        assert_eq!(mocks[1].call_count(), 2);
+    }
+
+    #[tokio::test]
     async fn unknown_hint_falls_back_to_default() {
         let (router, mocks) = make_router(
             vec![("default", "default-response"), ("other", "other-response")],
@@ -782,7 +686,6 @@ mod tests {
                 Box::new(Arc::clone(&mock)) as Box<dyn ModelProvider>,
             )],
             vec![],
-            "model".into(),
         );
 
         let result = router
@@ -803,7 +706,6 @@ mod tests {
                 Box::new(Arc::clone(&mock)) as Box<dyn ModelProvider>,
             )],
             vec![],
-            "model".into(),
         );
 
         let messages = vec![ChatMessage {
@@ -853,312 +755,6 @@ mod tests {
         assert_eq!(mocks[0].call_count(), 0);
     }
 
-    // ── Cost-optimized routing tests ────────────────────────────────
-
-    use crate::traits::ProviderCapabilities;
-
-    /// Mock model_provider with configurable capability flags.
-    struct CapableMockModelProvider {
-        response: &'static str,
-        vision: bool,
-        tools: bool,
-    }
-
-    impl CapableMockModelProvider {
-        fn new(response: &'static str, vision: bool, tools: bool) -> Self {
-            Self {
-                response,
-                vision,
-                tools,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ModelProvider for CapableMockModelProvider {
-        fn capabilities(&self) -> ProviderCapabilities {
-            ProviderCapabilities {
-                native_tool_calling: self.tools,
-                vision: self.vision,
-                prompt_caching: false,
-                extended_thinking: false,
-            }
-        }
-
-        async fn chat_with_system(
-            &self,
-            _system_prompt: Option<&str>,
-            _message: &str,
-            _model: &str,
-            _temperature: Option<f64>,
-        ) -> anyhow::Result<String> {
-            Ok(self.response.to_string())
-        }
-    }
-    impl ::zeroclaw_api::attribution::Attributable for CapableMockModelProvider {
-        fn role(&self) -> ::zeroclaw_api::attribution::Role {
-            ::zeroclaw_api::attribution::Role::Provider(
-                ::zeroclaw_api::attribution::ProviderKind::Model(
-                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
-                ),
-            )
-        }
-        fn alias(&self) -> &str {
-            "CapableMockModelProvider"
-        }
-    }
-
-    /// Build a per-provider pricing map for tests. Each tuple is
-    /// `(provider_name, model, input_per_mtok, output_per_mtok)`.
-    fn make_pricing(entries: Vec<(&str, &str, f64, f64)>) -> HashMap<String, HashMap<String, f64>> {
-        let mut map: HashMap<String, HashMap<String, f64>> = HashMap::new();
-        for (model_provider, model, input, output) in entries {
-            let inner = map.entry(model_provider.to_string()).or_default();
-            inner.insert(format!("{model}.input"), input);
-            inner.insert(format!("{model}.output"), output);
-        }
-        map
-    }
-
-    #[test]
-    fn cost_optimized_selects_cheapest_provider() {
-        let model_providers: Vec<(String, Box<dyn ModelProvider>)> = vec![
-            (
-                "expensive".into(),
-                Box::new(CapableMockModelProvider::new("exp", false, false)),
-            ),
-            (
-                "cheap".into(),
-                Box::new(CapableMockModelProvider::new("chp", false, false)),
-            ),
-        ];
-        let routes = vec![
-            (
-                "expensive".to_string(),
-                Route {
-                    provider_name: "expensive".into(),
-                    model: "big-model".into(),
-                },
-            ),
-            (
-                "cheap".to_string(),
-                Route {
-                    provider_name: "cheap".into(),
-                    model: "small-model".into(),
-                },
-            ),
-        ];
-        let router =
-            RouterModelProvider::new("test", model_providers, routes, "default-model".into());
-
-        let prices = make_pricing(vec![
-            ("expensive", "big-model", 15.0, 75.0),
-            ("cheap", "small-model", 0.25, 1.25),
-        ]);
-
-        let (idx, model) =
-            router.resolve_cost_optimized("hint:cost-optimized", &prices, false, false);
-        assert_eq!(model, "small-model");
-        assert_eq!(idx, 1);
-    }
-
-    #[test]
-    fn cost_optimized_respects_vision_requirement() {
-        let model_providers: Vec<(String, Box<dyn ModelProvider>)> = vec![
-            (
-                "no-vision".into(),
-                Box::new(CapableMockModelProvider::new("nv", false, false)),
-            ),
-            (
-                "has-vision".into(),
-                Box::new(CapableMockModelProvider::new("hv", true, false)),
-            ),
-        ];
-        let routes = vec![
-            (
-                "cheap".to_string(),
-                Route {
-                    provider_name: "no-vision".into(),
-                    model: "cheap-model".into(),
-                },
-            ),
-            (
-                "vision".to_string(),
-                Route {
-                    provider_name: "has-vision".into(),
-                    model: "vision-model".into(),
-                },
-            ),
-        ];
-        let router =
-            RouterModelProvider::new("test", model_providers, routes, "default-model".into());
-
-        let prices = make_pricing(vec![
-            ("no-vision", "cheap-model", 0.10, 0.40),
-            ("has-vision", "vision-model", 3.0, 15.0),
-        ]);
-
-        // With vision required, the cheap model (no vision) is filtered out
-        let (_, model) = router.resolve_cost_optimized("hint:cheapest", &prices, true, false);
-        assert_eq!(model, "vision-model");
-    }
-
-    #[test]
-    fn cost_optimized_respects_tools_requirement() {
-        let model_providers: Vec<(String, Box<dyn ModelProvider>)> = vec![
-            (
-                "no-tools".into(),
-                Box::new(CapableMockModelProvider::new("nt", false, false)),
-            ),
-            (
-                "has-tools".into(),
-                Box::new(CapableMockModelProvider::new("ht", false, true)),
-            ),
-        ];
-        let routes = vec![
-            (
-                "basic".to_string(),
-                Route {
-                    provider_name: "no-tools".into(),
-                    model: "basic-model".into(),
-                },
-            ),
-            (
-                "tools".to_string(),
-                Route {
-                    provider_name: "has-tools".into(),
-                    model: "tools-model".into(),
-                },
-            ),
-        ];
-        let router =
-            RouterModelProvider::new("test", model_providers, routes, "default-model".into());
-
-        let prices = make_pricing(vec![
-            ("no-tools", "basic-model", 0.10, 0.40),
-            ("has-tools", "tools-model", 5.0, 15.0),
-        ]);
-
-        // With tools required, the basic model (no tools) is filtered out
-        let (_, model) = router.resolve_cost_optimized("hint:cost-optimized", &prices, false, true);
-        assert_eq!(model, "tools-model");
-    }
-
-    #[test]
-    fn cost_optimized_falls_back_when_no_pricing() {
-        let (router, _) = make_router(
-            vec![("default", "ok"), ("other", "ok")],
-            vec![("route-a", "other", "some-model")],
-        );
-
-        // Empty pricing map — no matches possible
-        let prices: HashMap<String, HashMap<String, f64>> = HashMap::new();
-        let (idx, model) =
-            router.resolve_cost_optimized("hint:cost-optimized", &prices, false, false);
-        assert_eq!(idx, 0);
-        assert_eq!(model, "default-model");
-    }
-
-    #[test]
-    fn cost_optimized_with_single_route() {
-        let model_providers: Vec<(String, Box<dyn ModelProvider>)> = vec![(
-            "only".into(),
-            Box::new(CapableMockModelProvider::new("ok", false, false)),
-        )];
-        let routes = vec![(
-            "single".to_string(),
-            Route {
-                provider_name: "only".into(),
-                model: "the-model".into(),
-            },
-        )];
-        let router =
-            RouterModelProvider::new("test", model_providers, routes, "default-model".into());
-
-        let prices = make_pricing(vec![("only", "the-model", 1.0, 2.0)]);
-
-        let (idx, model) = router.resolve_cost_optimized("hint:cheapest", &prices, false, false);
-        assert_eq!(idx, 0);
-        assert_eq!(model, "the-model");
-    }
-
-    #[test]
-    fn cost_optimized_prefers_lower_total_cost() {
-        let model_providers: Vec<(String, Box<dyn ModelProvider>)> = vec![
-            (
-                "p1".into(),
-                Box::new(CapableMockModelProvider::new("r1", false, false)),
-            ),
-            (
-                "p2".into(),
-                Box::new(CapableMockModelProvider::new("r2", false, false)),
-            ),
-            (
-                "p3".into(),
-                Box::new(CapableMockModelProvider::new("r3", false, false)),
-            ),
-        ];
-        let routes = vec![
-            (
-                "a".to_string(),
-                Route {
-                    provider_name: "p1".into(),
-                    model: "model-a".into(),
-                },
-            ),
-            (
-                "b".to_string(),
-                Route {
-                    provider_name: "p2".into(),
-                    model: "model-b".into(),
-                },
-            ),
-            (
-                "c".to_string(),
-                Route {
-                    provider_name: "p3".into(),
-                    model: "model-c".into(),
-                },
-            ),
-        ];
-        let router =
-            RouterModelProvider::new("test", model_providers, routes, "default-model".into());
-
-        let prices = make_pricing(vec![
-            ("p1", "model-a", 10.0, 50.0), // total: 60
-            ("p2", "model-b", 0.15, 0.60), // total: 0.75 (cheapest)
-            ("p3", "model-c", 3.0, 15.0),  // total: 18
-        ]);
-
-        let (idx, model) =
-            router.resolve_cost_optimized("hint:cost-optimized", &prices, false, false);
-        assert_eq!(model, "model-b");
-        assert_eq!(idx, 1);
-    }
-
-    #[test]
-    fn cost_optimized_strategy_score() {
-        let prices = make_pricing(vec![
-            ("cheap-provider", "cheap-model", 0.10, 0.40),
-            ("expensive-provider", "expensive-model", 15.0, 75.0),
-        ]);
-        let strategy = CostOptimizedStrategy::new(prices);
-
-        assert!(
-            (strategy.score("cheap-provider", "cheap-model").unwrap() - 0.50).abs() < f64::EPSILON
-        );
-        assert!(
-            (strategy
-                .score("expensive-provider", "expensive-model")
-                .unwrap()
-                - 90.0)
-                .abs()
-                < f64::EPSILON
-        );
-        assert!(strategy.score("cheap-provider", "unknown").is_none());
-        assert!(strategy.score("unknown-provider", "cheap-model").is_none());
-    }
-
     #[tokio::test]
     async fn supports_streaming_returns_true_when_any_provider_supports_it() {
         let streaming = Arc::new(StreamingMockModelProvider::new("stream"));
@@ -1181,7 +777,6 @@ mod tests {
                     model: "claude-opus".into(),
                 },
             )],
-            "model".into(),
         );
 
         assert!(router.supports_streaming());
@@ -1209,7 +804,6 @@ mod tests {
                     model: "claude-opus".into(),
                 },
             )],
-            "model".into(),
         );
 
         let mut stream = router.stream_chat_with_system(
@@ -1253,7 +847,6 @@ mod tests {
                     model: "claude-opus".into(),
                 },
             )],
-            "model".into(),
         );
 
         let messages = vec![ChatMessage::user("hello")];
@@ -1297,7 +890,6 @@ mod tests {
                     model: "claude-opus".into(),
                 },
             )],
-            "model".into(),
         );
 
         let messages = vec![ChatMessage::user("hello")];
@@ -1365,7 +957,6 @@ mod tests {
                     model: "vision-model".into(),
                 },
             )],
-            "default-model".into(),
         );
 
         assert!(
@@ -1386,7 +977,6 @@ mod tests {
                 ("aux".into(), aux_provider as Box<dyn ModelProvider>),
             ],
             vec![],
-            "default-model".into(),
         );
 
         assert!(router.supports_vision());
@@ -1415,7 +1005,6 @@ mod tests {
                     model: "text-model".into(),
                 },
             )],
-            "vision-model".into(),
         );
 
         assert!(
@@ -1457,7 +1046,6 @@ mod tests {
                 Box::new(default_provider) as Box<dyn ModelProvider>,
             )],
             vec![],
-            "default-model".into(),
         );
 
         assert!(router.supports_vision());

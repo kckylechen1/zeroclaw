@@ -1727,7 +1727,6 @@ pub fn create_routed_model_provider_with_options(
         primary_name,
         model_providers,
         routes,
-        default_model.to_string(),
     )))
 }
 

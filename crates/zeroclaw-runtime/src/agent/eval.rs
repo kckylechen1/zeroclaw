@@ -257,7 +257,6 @@ mod tests {
             simple_hint: Some("fast".into()),
             standard_hint: None,
             complex_hint: Some("reasoning".into()),
-            ..Default::default()
         };
         assert_eq!(ac.hint_for(ComplexityTier::Simple), Some("fast"));
         assert_eq!(ac.hint_for(ComplexityTier::Standard), None);
@@ -324,7 +323,6 @@ mod tests {
             simple_hint: Some("fast".into()),
             standard_hint: Some("default".into()),
             complex_hint: Some("reasoning".into()),
-            ..Default::default()
         };
         // Empty response for a Simple query → should suggest Standard hint
         let result = evaluate_response("hello", "", ComplexityTier::Simple, Some(&ac));
@@ -337,7 +335,6 @@ mod tests {
             simple_hint: Some("fast".into()),
             standard_hint: Some("default".into()),
             complex_hint: Some("reasoning".into()),
-            ..Default::default()
         };
         // Empty response for Complex → no escalation possible
         let result =
