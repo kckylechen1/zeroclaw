@@ -7901,7 +7901,6 @@ async fn run_tool_call_loop_routed_streaming_uses_live_provider_deltas_once() {
                 model: "routed-model".to_string(),
             },
         )],
-        "default-model".to_string(),
     );
 
     let tools_registry: Vec<Box<dyn Tool>> = Vec::new();

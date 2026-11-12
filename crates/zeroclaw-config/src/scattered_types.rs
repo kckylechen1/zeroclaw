@@ -151,13 +151,9 @@ impl Default for HistoryPrunerConfig {
     }
 }
 
-fn default_cost_optimized_hint() -> String {
-    "cost-optimized".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "agent.auto_classify"]
+#[prefix = "runtime_profile.auto_classify"]
 pub struct AutoClassifyConfig {
     #[serde(default)]
     pub simple_hint: Option<String>,
@@ -165,19 +161,6 @@ pub struct AutoClassifyConfig {
     pub standard_hint: Option<String>,
     #[serde(default)]
     pub complex_hint: Option<String>,
-    #[serde(default = "default_cost_optimized_hint")]
-    pub cost_optimized_hint: String,
-}
-
-impl Default for AutoClassifyConfig {
-    fn default() -> Self {
-        Self {
-            simple_hint: None,
-            standard_hint: None,
-            complex_hint: None,
-            cost_optimized_hint: default_cost_optimized_hint(),
-        }
-    }
 }
 
 fn default_min_quality_score() -> f64 {

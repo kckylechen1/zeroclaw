@@ -98,6 +98,9 @@ use serde::{Deserialize, Serialize};
 ///   `num_predict` or `temperature_override`. These native `/api/chat` options
 ///   were not consumed by the current OpenAI-compatible `/v1` provider and
 ///   were removed from the schema (see `RETIRED_CONFIG_FIELDS`).
+/// - `cost_optimized_routing_removed`: a runtime profile still sets
+///   `auto_classify.cost_optimized_hint`. The unused cost selector was
+///   removed; the three complexity hints and ordinary named routes remain.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
@@ -302,6 +305,10 @@ pub fn is_retired_channel_type(channel_type: &str) -> bool {
 /// checker makes the retirement visible instead of a silent no-op.
 pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
     (
+        "runtime_profiles.*.auto_classify.cost_optimized_hint",
+        "cost_optimized_routing_removed",
+    ),
+    (
         "providers.models.ollama.*.num_ctx",
         "ollama_native_options_removed",
     ),
@@ -404,6 +411,11 @@ pub const RETIRED_CONFIG_VALUES: &[(&str, &[&str], &str)] = &[
 /// the human-readable half of the field tombstone warning.
 fn retired_field_reason(code: &str) -> &'static str {
     match code {
+        "cost_optimized_routing_removed" => {
+            "the unused cost-optimized selector was removed; this field never \
+             selected a route. The simple, standard and complex hints and \
+             ordinary named routes remain; prices do not select routes"
+        }
         "ollama_native_options_removed" => {
             "native Ollama /api/chat options were removed; the current \
              OpenAI-compatible /v1 provider did not consume them. No automatic \

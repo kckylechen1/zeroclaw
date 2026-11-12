@@ -681,6 +681,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn walker_tombstones_cost_selector_under_runtime_profile() {
+        let _guard = super::env_test_lock().await;
+        let _retired = EnvVarGuard::set(
+            "ZEROCLAW_runtime_profiles__fast__auto_classify__cost_optimized_hint",
+            "legacy-cost-selector",
+        );
+        let _live = EnvVarGuard::set(
+            "ZEROCLAW_runtime_profiles__fast__auto_classify__simple_hint",
+            "cost-optimized",
+        );
+        let mut config = Config::default();
+        config.runtime_profiles.insert(
+            "fast".into(),
+            crate::schema::RuntimeProfileConfig {
+                auto_classify: Some(Default::default()),
+                ..Default::default()
+            },
+        );
+        let applied = apply_env_overrides(&mut config).unwrap();
+        assert_eq!(applied.paths.len(), 1);
+        assert_eq!(applied.tombstone_warnings.len(), 1);
+        assert_eq!(
+            applied.tombstone_warnings[0].code,
+            "cost_optimized_routing_removed"
+        );
+        assert_eq!(
+            applied.tombstone_warnings[0].path,
+            "runtime_profiles.fast.auto_classify.cost_optimized_hint"
+        );
+        let hints = config.runtime_profiles["fast"]
+            .auto_classify
+            .as_ref()
+            .unwrap();
+        assert_eq!(hints.simple_hint.as_deref(), Some("cost-optimized"));
+    }
+
+    #[tokio::test]
     async fn walker_propagates_alias_validator_error() {
         let _guard = super::env_test_lock().await;
         // `_invalid` starts with `_`, which the alias validator rejects.
