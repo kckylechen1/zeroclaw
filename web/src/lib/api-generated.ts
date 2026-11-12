@@ -15874,20 +15874,6 @@ export interface components {
              */
             native_tools?: boolean | null;
             /**
-             * Format: uint32
-             * @description Override the Ollama `num_ctx` (context window, in tokens) sent on
-             *     every `/api/chat` request. Defaults to the framework constant
-             *     (`OLLAMA_DEFAULT_NUM_CTX`) when unset.
-             */
-            num_ctx?: number | null;
-            /**
-             * Format: int32
-             * @description Override the Ollama `num_predict` (max output tokens) sent on every
-             *     `/api/chat` request. Defaults to the framework constant
-             *     (`OLLAMA_DEFAULT_NUM_PREDICT`) when unset.
-             */
-            num_predict?: number | null;
-            /**
              * @description Per-model pricing for cost tracking, USD per 1M tokens.
              *
              *     Free-form key/value map. Keys are user-defined model identifiers; an
@@ -15926,15 +15912,6 @@ export interface components {
              *     Higher values (0.7–1.2) give more varied output, which fits open-ended chat.
              */
             temperature?: number | null;
-            /**
-             * Format: double
-             * @description Force every Ollama `/api/chat` request to use this temperature,
-             *     overriding the per-call value passed through
-             *     `ModelProvider::chat_with_system(.., temperature)`. When unset
-             *     (`None`, the default), the per-call temperature wins: full
-             *     backward compatibility.
-             */
-            temperature_override?: number | null;
             /**
              * @description Enable or disable chain-of-thought thinking for models that support it
              *     (e.g. Qwen3, GLM-4). `true` turns thinking on, `false` turns it off.

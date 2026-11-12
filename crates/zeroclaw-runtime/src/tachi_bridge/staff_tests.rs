@@ -2206,7 +2206,6 @@ async fn live_agent_construction_rechecks_delegation_policy_after_reload() {
                 model: Some("fixture-model".into()),
                 ..Default::default()
             },
-            ..Default::default()
         },
     );
     let agent_cfg = cfg.agents.get_mut("home").unwrap();

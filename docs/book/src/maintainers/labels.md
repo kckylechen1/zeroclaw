@@ -247,7 +247,6 @@ to one provider.
 | `provider:copilot` | `copilot.rs` |
 | `provider:gemini` | `gemini.rs`, `gemini_cli.rs` |
 | `provider:kilocli` | `kilocli.rs` |
-| `provider:ollama` | `ollama.rs` |
 | `provider:openai` | `openai.rs`, `openai_codex.rs` |
 | `provider:openrouter` | `openrouter.rs` |
 | `provider:reliable` | `reliable.rs` |

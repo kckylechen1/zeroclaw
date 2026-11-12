@@ -894,6 +894,10 @@ fn factory_empty_name_errors() {
 
 #[test]
 fn ollama_with_custom_url() {
+    assert_eq!(
+        default_model_provider_url("ollama"),
+        Some("http://localhost:11434")
+    );
     let model_provider =
         create_model_provider_with_url("ollama", None, Some("http://10.100.2.32:11434"));
     assert!(model_provider.is_ok());
@@ -1481,43 +1485,6 @@ fn provider_runtime_options_for_agent_unknown_agent_returns_safe_defaults() {
         "unknown agent must not silently inherit any configured provider; got `{:?}`",
         opts.provider_api_url
     );
-}
-
-#[test]
-fn ollama_alias_tuning_fields_populate_tuning_struct() {
-    let alias = zeroclaw_config::schema::OllamaModelProviderConfig {
-        num_ctx: Some(16384),
-        num_predict: Some(4096),
-        temperature_override: Some(0.5),
-        ..zeroclaw_config::schema::OllamaModelProviderConfig::default()
-    };
-
-    let tuning = ollama::OllamaTuning::from_runtime_overrides(
-        alias.num_ctx,
-        alias.num_predict,
-        alias.temperature_override,
-    );
-    assert_eq!(tuning.num_ctx, 16384);
-    assert_eq!(tuning.num_predict, 4096);
-    assert_eq!(tuning.temperature_override, Some(0.5));
-
-    let provider = ollama::OllamaModelProvider::builder("test")
-        .tuning(tuning)
-        .build();
-    assert_eq!(provider.tuning(), tuning);
-}
-
-#[test]
-fn ollama_alias_tuning_defaults_leave_temperature_override_unset() {
-    let alias = zeroclaw_config::schema::OllamaModelProviderConfig::default();
-    let tuning = ollama::OllamaTuning::from_runtime_overrides(
-        alias.num_ctx,
-        alias.num_predict,
-        alias.temperature_override,
-    );
-    assert!(tuning.temperature_override.is_none());
-    assert_eq!(tuning.num_ctx, ollama::OLLAMA_DEFAULT_NUM_CTX);
-    assert_eq!(tuning.num_predict, ollama::OLLAMA_DEFAULT_NUM_PREDICT);
 }
 
 fn config_with_openai_alias() -> zeroclaw_config::schema::Config {
@@ -2173,7 +2140,6 @@ fn resilient_alias_allows_local_fallback_without_profile_api_key() {
                 model: Some("llama3.2".to_string()),
                 ..Default::default()
             },
-            ..Default::default()
         },
     );
 

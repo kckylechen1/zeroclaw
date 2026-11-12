@@ -226,7 +226,6 @@ async fn scheduler_cancel_and_restart_cannot_resume_the_old_agent() {
                     timeout_secs: Some(10),
                     ..Default::default()
                 },
-                ..Default::default()
             },
         );
         config.agents.get_mut(TEST_AGENT).unwrap().model_provider = "ollama.lifecycle".into();

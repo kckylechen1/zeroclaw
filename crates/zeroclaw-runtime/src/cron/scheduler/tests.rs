@@ -964,7 +964,6 @@ async fn queued_and_retried_agent_jobs_keep_their_admitted_task_owner() {
                     timeout_secs: Some(5),
                     ..Default::default()
                 },
-                ..Default::default()
             },
         );
         config.agents.get_mut(TEST_AGENT).unwrap().model_provider = "ollama.tasks".into();

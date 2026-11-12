@@ -2760,7 +2760,6 @@ mod tests {
                     temperature: Some(0.3),
                     ..Default::default()
                 },
-                ..OllamaModelProviderConfig::default()
             },
         );
 

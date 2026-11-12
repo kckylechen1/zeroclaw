@@ -116,7 +116,18 @@ model = "llama3.1"
 uri = "http://host.docker.internal:11434"
 ```
 
-Ollama-specific optional fields are `num_ctx`, `num_predict`, and `temperature_override`.
+The Ollama family uses the OpenAI-compatible `/v1` endpoint. Host-only URLs and
+legacy `/api` or `/api/chat` URLs are normalized to `/v1`; chat requests use
+`/v1/chat/completions`.
+
+The former native `/api/chat` fields `num_ctx`, `num_predict`, and
+`temperature_override` are retired. The current provider did not consume them.
+Existing occurrences of these three keys and their
+`ZEROCLAW_providers__models__ollama__<alias>__*`
+environment overrides are ignored with the `ollama_native_options_removed`
+warning; remove them. They are not automatically mapped to other settings.
+Configure context size on the Ollama server, and set supported shared alias
+fields such as `max_tokens` and `temperature` explicitly when needed.
 
 ### Azure OpenAI
 

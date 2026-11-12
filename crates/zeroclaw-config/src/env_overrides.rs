@@ -632,6 +632,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn walker_tombstones_native_ollama_options_without_hiding_live_aliases() {
+        let _guard = super::env_test_lock().await;
+        let _ctx = EnvVarGuard::set(
+            "ZEROCLAW_providers__models__ollama__local__num_ctx",
+            "16384",
+        );
+        let _predict = EnvVarGuard::set(
+            "ZEROCLAW_providers__models__ollama__local__num_predict",
+            "4096",
+        );
+        let _temperature = EnvVarGuard::set(
+            "ZEROCLAW_providers__models__ollama__retired_only__temperature_override",
+            "0.5",
+        );
+        let _model = EnvVarGuard::set("ZEROCLAW_providers__models__ollama__local__model", "qwen3");
+        // A retired leaf's spelling must not retire an alias with that name.
+        let _alias = EnvVarGuard::set(
+            "ZEROCLAW_providers__models__ollama__num_ctx__model",
+            "llama3.1",
+        );
+
+        let mut config = Config::default();
+        let applied = apply_env_overrides(&mut config).unwrap();
+        assert_eq!(applied.paths.len(), 2);
+        assert_eq!(applied.tombstone_warnings.len(), 3);
+        assert!(
+            applied
+                .tombstone_warnings
+                .iter()
+                .all(|warning| warning.code == "ollama_native_options_removed")
+        );
+        assert_eq!(
+            config.providers.models.ollama["local"]
+                .base
+                .model
+                .as_deref(),
+            Some("qwen3")
+        );
+        assert_eq!(
+            config.providers.models.ollama["num_ctx"]
+                .base
+                .model
+                .as_deref(),
+            Some("llama3.1")
+        );
+        assert!(!config.providers.models.ollama.contains_key("retired_only"));
+    }
+
+    #[tokio::test]
     async fn walker_propagates_alias_validator_error() {
         let _guard = super::env_test_lock().await;
         // `_invalid` starts with `_`, which the alias validator rejects.
