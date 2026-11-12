@@ -127,9 +127,9 @@ RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/regist
       export RUST_TARGET=x86_64-unknown-linux-gnu; \
     fi && \
     if [ -n "$ZEROCLAW_CARGO_FLAGS" ]; then \
-      cargo build --release --locked --target "$RUST_TARGET" -p zeroclawlabs $ZEROCLAW_CARGO_FLAGS; \
+      cargo build --release --locked --target "$RUST_TARGET" -p zeroclawlabs --bin zeroclaw $ZEROCLAW_CARGO_FLAGS; \
     else \
-      cargo build --release --locked --target "$RUST_TARGET" -p zeroclawlabs; \
+      cargo build --release --locked --target "$RUST_TARGET" -p zeroclawlabs --bin zeroclaw; \
     fi
 RUN rm -rf src benches crates xtask tools/fill-translations bridges
 
@@ -170,9 +170,9 @@ RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/regist
            target/"$RUST_TARGET"/release/.fingerprint/fill-translations-* \
            target/"$RUST_TARGET"/release/deps/fill_translations-* && \
     if [ -n "$ZEROCLAW_CARGO_FLAGS" ]; then \
-      cargo build --release --locked --target "$RUST_TARGET" -p zeroclawlabs $ZEROCLAW_CARGO_FLAGS; \
+      cargo build --release --locked --target "$RUST_TARGET" -p zeroclawlabs --bin zeroclaw $ZEROCLAW_CARGO_FLAGS; \
     else \
-      cargo build --release --locked --target "$RUST_TARGET" -p zeroclawlabs; \
+      cargo build --release --locked --target "$RUST_TARGET" -p zeroclawlabs --bin zeroclaw; \
     fi && \
     cp target/"$RUST_TARGET"/release/zeroclaw /app/zeroclaw && \
     "$STRIP" /app/zeroclaw
