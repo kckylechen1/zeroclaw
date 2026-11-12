@@ -57,6 +57,15 @@ pub struct DispatchBindingRow {
     pub notified_outcome: Option<String>,
 }
 
+/// Bounded recovery projection of the existing claims, including uncertain
+/// submissions. No execution state is inferred from this local reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentDelegationBindingRow {
+    pub request_id: String,
+    pub dispatch_id: Option<String>,
+    pub route_digest: Option<String>,
+}
+
 fn legacy_route<'a>(scope: &'a str, agent_alias: &str) -> Option<&'a str> {
     let suffix = scope.strip_prefix(agent_alias)?.strip_prefix(':')?;
     (suffix.len() == 64
@@ -222,6 +231,43 @@ impl SqliteSessionBackend {
         Ok(())
     }
 
+    /// The most recent claims owned by one exact agent, newest first. The one
+    /// extra row lets a caller report truncation without creating a cursor store.
+    pub fn recent_delegation_bindings(
+        &self,
+        agent_alias: &str,
+        limit: usize,
+    ) -> Result<Vec<RecentDelegationBindingRow>> {
+        if !(1..=21).contains(&limit) {
+            bail!("recent delegation limit must be between 1 and 21");
+        }
+        let conn = self.conn.lock();
+        let mut query = conn.prepare(
+            "SELECT agent_alias, request_id, dispatch_id, route_digest
+             FROM session_delegations
+             WHERE agent_alias = ?1 OR (
+                route_digest IS NULL
+                AND length(agent_alias) = length(?1) + 65
+                AND substr(agent_alias, 1, length(?1) + 1) = ?1 || ':'
+                AND substr(agent_alias, length(?1) + 2) NOT GLOB '*[^0-9a-f]*'
+             )
+             ORDER BY rowid DESC LIMIT ?2",
+        )?;
+        query
+            .query_map(params![agent_alias, limit as i64], |row| {
+                let scope: String = row.get(0)?;
+                let route: Option<String> = row.get(3)?;
+                Ok(RecentDelegationBindingRow {
+                    request_id: row.get(1)?,
+                    dispatch_id: row.get(2)?,
+                    route_digest: route
+                        .or_else(|| legacy_route(&scope, agent_alias).map(str::to_owned)),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     /// One page of dispatch bindings strictly after `after_rowid`, ascending.
     /// Pagination is by the implicit rowid; the observer rotates its cursor
     /// across passes so a bounded page can never permanently starve later
@@ -336,6 +382,39 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
     use zeroclaw_api::model_provider::ChatMessage;
+
+    #[test]
+    fn recent_claims_are_bounded_exact_agent_owned_and_include_uncertain_legacy_rows() {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        for i in 0..25 {
+            store
+                .claim_delegation_request("agent_%", &format!("r{i}"), "digest", "route")
+                .unwrap();
+        }
+        store
+            .bind_delegation_request("agent_%", "r24", "digest", "route", "d24")
+            .unwrap();
+        store
+            .claim_delegation_request("agent_AX", "private", "digest", "route")
+            .unwrap();
+        let legacy_route = "a".repeat(64);
+        store.conn.lock().execute(
+            "INSERT INTO session_delegations (agent_alias, request_id, request_digest, dispatch_id)
+             VALUES (?1, 'legacy', 'digest', NULL)",
+            [format!("agent_%:{legacy_route}")],
+        ).unwrap();
+        let rows = store.recent_delegation_bindings("agent_%", 21).unwrap();
+        assert_eq!(rows.len(), 21);
+        assert_eq!(rows[0].request_id, "legacy");
+        assert_eq!(rows[0].route_digest.as_deref(), Some(legacy_route.as_str()));
+        assert!(rows[0].dispatch_id.is_none());
+        assert_eq!(rows[1].request_id, "r24");
+        assert_eq!(rows[1].dispatch_id.as_deref(), Some("d24"));
+        assert!(!rows.iter().any(|row| row.request_id == "private"));
+        assert!(store.recent_delegation_bindings("agent_%", 0).is_err());
+        assert!(store.recent_delegation_bindings("agent_%", 22).is_err());
+    }
 
     #[test]
     fn unsent_release_matches_scope_digest_and_never_removes_known_dispatch() {

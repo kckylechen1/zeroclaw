@@ -6620,7 +6620,8 @@ pub struct GatewayConfig {
 /// The bridge authenticates with its own bearer token; only the token's
 /// SHA-256 hash is stored. Bridge tokens are never minted by pairing and
 /// are not paired tokens: they open `/ws/bridge` and, within the session
-/// scope below, `/ws/chat`, and nothing else.
+/// scope below, `/ws/chat`. Explicit device `tachi_*` grants additionally
+/// admit the bounded delegation facade, never management/operator APIs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "gateway.bridges"]
@@ -14302,15 +14303,14 @@ impl Config {
             if let Some(device) = &bridge.device
                 && (device.agent.is_empty()
                     || !self.agents.contains_key(&device.agent)
-                    || device
-                        .operations
-                        .iter()
-                        .any(|op| !matches!(op.as_str(), "chat" | "answer" | "cancel")))
+                    || device.operations.iter().any(|op| {
+                        !crate::bridge_access::GatewayDeviceBridgeConfig::valid_operation(op)
+                    }))
             {
                 validation_bail!(
                     InvalidFormat,
                     &format!("gateway.bridges.{name}.device"),
-                    "device bridge requires a configured agent and operations from chat, answer, cancel"
+                    "device bridge requires a configured agent and explicit chat, answer, cancel or tachi_start/tachi_status/tachi_result/tachi_cancel operations"
                 );
             }
             if bridge.device.is_some() && bridge.owner.is_some() {

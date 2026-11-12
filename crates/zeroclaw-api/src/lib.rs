@@ -9,6 +9,7 @@ pub mod companion;
 pub mod config_metadata;
 pub mod cost;
 pub mod delegation_admission;
+pub mod delegation_control;
 pub mod delegation_request;
 pub mod device_identity;
 pub mod elicitation;

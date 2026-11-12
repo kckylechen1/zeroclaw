@@ -1,5 +1,99 @@
 # Delegation & SubAgents
 
+## Restricted bridge control
+
+An edge client can use `POST /api/agents/{agent}/delegations/{operation}` with
+`operation` equal to `start`, `status`, `result`, `cancel` or `list`. The bearer
+must belong to an explicitly restricted **device bridge**, with that exact
+agent, an admitted session and the corresponding `tachi_start`, `tachi_status`,
+`tachi_result` or `tachi_cancel` operation. `list` uses `tachi_status`. Missing
+grants are closed; legacy bridges, paired tokens and operator tokens do not
+gain this surface. Existing chat-only device grants are unchanged.
+
+The same live agent/card tool permissions and configured action limits apply.
+This ingress maintains one action bucket per agent across its HTTP calls; it
+does not merge that counter with the Agent tool loop's sender buckets. A
+supervised start or cancellation requires fresh approval even with wildcard
+auto-approval. This HTTP facade cannot approve: it returns `403` with
+`output.code = "approval_required"` when approval is required. It does not
+change the agent's risk profile or create a resumable approval request. Such
+work stays on the existing Agent tool/interactive-approval path; no voice
+text, `approved` field or bridge token can stand in for an owner decision.
+
+For a separately admitted task agent, the bridge scope can match successive
+voice windows without changing a chat-only profile:
+
+```toml
+[gateway.bridges.robot_tasks]
+token_hash = "<SHA-256 of a separately minted bridge token>"
+session_prefix = "yonbo-task-"
+
+[gateway.bridges.robot_tasks.device]
+agent = "task_agent"
+operations = ["tachi_start", "tachi_status", "tachi_result", "tachi_cancel"]
+```
+
+The referenced agent, its risk/runtime profiles and harness map must already
+be explicitly configured. This fragment does not authorize an otherwise
+forbidden or approval-requiring tool, and a token also registered for operator
+or paired-device authority is refused here.
+
+Every JSON request contains `version: 1` and an admitted `session_id`:
+
+| Operation | Other request fields |
+| --- | --- |
+| `start` | `request_id`, `harness` alias, `task` (1–16,384 bytes), `staffing_reason`; optional `issue_ref`, `pr_ref`, `flow_id` |
+| `status`, `result` | `request_id` |
+| `cancel` | `request_id`, `expected_status_revision` from canonical status |
+| `list` | Optional `limit` from 1 to 20; default 20 |
+
+Unknown, duplicate and operation-inapplicable fields are refused. No raw
+command, working directory, model, dispatch ID or approval flag is accepted.
+The owner-configured harness alias resolves through the existing Tachi map.
+
+Replies have `{version, operation, request_id, success, output, error}`.
+`output` is the existing tool's structured JSON, not a model paraphrase.
+Successful replies use HTTP `200`; tool semantic failures use `409`, current
+authorization/approval refusals `403`, invalid credentials `401`, malformed
+requests `400` and ingress limits `429`. A transport deadline uses `504`.
+For `list`, the envelope's `request_id` is null and `output` contains
+`items` and `has_more`. Each item contains `request_id`, nullable `dispatch_id`,
+`submission` (`bound` or `unresolved`) and `route_matches`. This is a bounded
+projection of existing agent-owned SQLite bindings, including uncertain starts;
+it is not execution status. Another agent's rows are excluded. A route mismatch
+remains visible for recovery, while reads/control refuse to send that old
+dispatch to the new route. There is no new task database or schema migration.
+
+The session ID scopes ingress only. Delegations belong to the configured
+agent, so another bridge explicitly granted `tachi_status`, `tachi_result` or
+`tachi_cancel` for that same agent can inspect or control that agent's requests
+from earlier sessions. There is no claim of per-session or per-bridge task
+isolation. Use separate agent bindings when the owner requires that boundary.
+
+The first accepted start returns `output.receipt`. A repeated already-bound
+request returns `output.dispatch_id` with `accepted: true, replayed: true`;
+it does not fabricate the original receipt. Unresolved claims never start a
+second worker. If the client loses the HTTP reply, it inspects the same request
+ID. It must not mint a replacement ID to escape uncertainty. The server lets
+an admitted submission finish its existing claim/bind operation independently
+of HTTP disconnect, bounded to 125 seconds and eight concurrent control calls.
+Gateway shutdown/deadline can leave the claim unresolved. A late access
+revocation or any missing/error response is not proof that nothing started.
+
+Foreground chat cancellation and closing an audio window never call Tachi
+cancel. Explicit task cancellation retains `requested`, `confirmed` and
+`termination_unconfirmed` receipts; unsupported backends remain
+`cancel_unsupported`. Result text remains an `untrusted_external_report`, with
+`accepted_by_body: false`. Existing BridgeOutbox terminal notifications remain
+the proactive delivery owner; this HTTP facade adds no second notification loop.
+
+Upstream comparison: `zeroclaw-labs/zeroclaw` at
+`1a79f89d1e18ed2af337cae73b1a02a6defd57c5` retains a local background delegate
+and control-plane task owner in `crates/zeroclaw-runtime/src/tools/delegate.rs`.
+This fork's baseline `5b25d8ee8cb218996b7dd0961d27b1ac489c0fe7` already uses
+Tachi and durable request bindings instead. This facade reuses those owners;
+no upstream execution engine is ported or existing consumer retired.
+
 A SubAgent is an **ephemeral child run** spawned by a parent agent. Under the frozen SubAgent contract (#202), a child receives a bounded, admitted context (never the parent's identity, credentials, registry, memory UUID, or channel handles) and returns a typed result to the parent, which stays the only user-facing persona.
 
 There is no `[subagents.*]` block in the schema (the daemon-wide `[subagents]` coordinator-limit section retired with the control-plane migration wall); SubAgents are not a separate configuration concept.
