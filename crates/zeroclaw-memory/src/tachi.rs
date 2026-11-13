@@ -16,7 +16,9 @@
 //!
 //! # Known limitations
 //!
-//! - `reindex` and `supersede` are not implemented (trait defaults).
+//! - Nonempty `supersede` and embedding-enabled `reindex` are explicitly
+//!   unsupported until their kernel/host contracts are wired; they never report
+//!   a successful mutation or rebuild. No-embedding reindex remains a no-op.
 //! - Embedding-identity reconciliation (`auto_reindex_on_identity_change`) is
 //!   sqlite-specific and not mirrored here.
 //! - Snapshot / auto-hydrate are not wired for this backend.
@@ -117,7 +119,7 @@ impl TachiMemory {
         vector_weight: f32,
         keyword_weight: f32,
         list_page_size: usize,
-        max_list_grow: usize,
+        max_grow: usize,
     ) -> anyhow::Result<Self> {
         let db_path = workspace_dir.join("memory").join("tachi.db");
         if let Some(parent) = db_path.parent() {
@@ -150,7 +152,7 @@ impl TachiMemory {
             vector_weight,
             keyword_weight,
             list_page_size,
-            max_list_grow: max_list_grow.max(list_page_size),
+            max_list_grow: max_grow.max(list_page_size),
         })
     }
 
@@ -951,6 +953,24 @@ impl Memory for TachiMemory {
         self.swap_embedder(embedder);
     }
 
+    async fn supersede(&self, superseded_ids: &[String], _new_id: &str) -> anyhow::Result<()> {
+        if superseded_ids.is_empty() {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "tachi supersede is unsupported: canonical mutation and scoped read parity are not wired"
+        )
+    }
+
+    async fn reindex(&self) -> anyhow::Result<usize> {
+        if self.embedder.read().dimensions() == 0 {
+            return Ok(0);
+        }
+        anyhow::bail!(
+            "tachi reindex is unsupported: embedding identity and revision-safe backfill are not wired"
+        )
+    }
+
     fn run_light_sleep_governance(&self) -> anyhow::Result<()> {
         let _report = self.run_light_sleep_governance_report()?;
         Ok(())
@@ -1546,6 +1566,7 @@ mod tests {
             "note",
             "beta-only secret token",
             MemoryCategory::Core,
+            None,
             None,
             None,
             None,
