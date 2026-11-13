@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::TryStreamExt;
 use mail_parser::{MessageParser, MimeHeaders};
 use zeroclaw_api::attribution::ToolKind;
 use zeroclaw_api::tool::{Tool, ToolResult};
 use zeroclaw_config::scattered_types::EmailConfig;
 
-use crate::email_imap::imap_connect;
+use crate::email_imap::{PeekPart, imap_connect, uid_fetch_peek};
 use crate::email_search::{format_address, resolve_channel};
 
 zeroclaw_api::tool_attribution!(EmailReadTool, ToolKind::Plugin);
@@ -89,8 +88,7 @@ impl Tool for EmailReadTool {
         session.examine(folder).await?;
 
         // BODY.PEEK[] — never sets \Seen. We do not touch flags under any circumstance.
-        let messages = session.uid_fetch(uid.to_string(), "BODY.PEEK[]").await?;
-        let messages: Vec<_> = messages.try_collect().await?;
+        let messages = uid_fetch_peek(&mut session, &[uid], PeekPart::Body).await?;
         let _ = session.logout().await;
 
         let msg = messages.first().ok_or_else(|| {
@@ -101,7 +99,8 @@ impl Tool for EmailReadTool {
         })?;
 
         let body_bytes = msg
-            .body()
+            .data
+            .as_deref()
             .ok_or_else(|| anyhow::Error::msg(format!("empty response for uid {}", uid)))?;
 
         let parser = MessageParser::default();

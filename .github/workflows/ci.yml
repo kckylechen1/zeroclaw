@@ -598,8 +598,12 @@ jobs:
             https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.9/cargo-deny-0.19.9-x86_64-unknown-linux-musl.tar.gz \
             "$download_dir/cargo-deny.tar.gz"
           tar zxf "$download_dir/cargo-deny.tar.gz" -C ~/.cargo/bin --strip-components=1
-      - name: Check licenses, sources, and advisories
-        run: cargo deny check
+      - name: Check default dependency policy
+        run: cargo deny --locked check
+      - name: Check dependency policy for all workspace features
+        run: cargo deny --workspace --all-features --locked check
+      - name: Verify dependency policy boundaries
+        run: python3 scripts/ci/dependency_policy_smoke.py
       - name: Lockfile integrity
         run: cargo verify-project && cargo fetch --locked
 

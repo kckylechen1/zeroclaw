@@ -1853,3 +1853,262 @@ async fn cached_prepare_reanchors_compaction_boundary_when_history_trim_shifts_p
     assert!(inner.starts_with("START_MARKER"));
     assert!(inner.ends_with("END_MARKER"));
 }
+
+fn tool_retention_history(prompt_mode: bool, turns: usize) -> Vec<ChatMessage> {
+    let mut history = vec![ChatMessage::system("stable system")];
+    for turn in 0..turns {
+        history.push(ChatMessage::user(format!("question {turn}")));
+        for round in 0..2 {
+            let id = format!("call-{turn}-{round}");
+            let output = format!(
+                "HEAD {id}\n{}\n[zeroclaw_tool_receipt:hmac={id}]",
+                "多字节结果".repeat(STALE_TOOL_RESULT_MAX_CHARS)
+            );
+            history.push(ChatMessage::assistant(
+                serde_json::json!({
+                    "tool_calls": [{"id": id, "name": "fixture", "arguments": "{}"}],
+                    "reasoning_content": "opaque provider reasoning",
+                    "extra_content": {"signature": "opaque provider metadata"},
+                })
+                .to_string(),
+            ));
+            history.push(if prompt_mode {
+                ChatMessage::user(format!(
+                    "[Tool results]\n<tool_result id=\"{id}\">\n{output}\n</tool_result>"
+                ))
+            } else {
+                ChatMessage::tool(
+                    serde_json::json!({
+                        "tool_call_id": id,
+                        "tool_name": "fixture",
+                        "content": output,
+                        "metadata": {"source": "fixture"},
+                    })
+                    .to_string(),
+                )
+            });
+        }
+        history.push(ChatMessage::assistant(format!("answer {turn}")));
+    }
+    history
+}
+
+#[tokio::test]
+async fn tool_retention_keeps_current_plus_n_turns_and_preserves_protocol_and_source() {
+    for prompt_mode in [false, true] {
+        let history = tool_retention_history(prompt_mode, 10);
+        let original_bytes = serde_json::to_vec(&history).unwrap();
+        for keep in [0, 1, 2, 8, usize::MAX] {
+            let mut cache = LocalImageCache::new();
+            let cached = prepare_messages_with_tool_retention(
+                &history,
+                &MultimodalConfig::default(),
+                keep,
+                Some(&mut cache),
+            )
+            .await
+            .unwrap();
+            let uncached = prepare_messages_with_tool_retention(
+                &history,
+                &MultimodalConfig::default(),
+                keep,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                serde_json::to_vec(&cached.messages).unwrap(),
+                serde_json::to_vec(&uncached.messages).unwrap(),
+                "a missing session cache has the same cold projection: k={keep}"
+            );
+            assert_eq!(cached.messages.len(), history.len());
+            let first_full_turn = 9usize.saturating_sub(keep);
+            for (index, (before, after)) in history.iter().zip(&cached.messages).enumerate() {
+                assert_eq!(before.role, after.role);
+                if !is_tool_result_carrier(before) {
+                    assert_eq!(before.content, after.content);
+                    continue;
+                }
+                let turn = (index - 1) / 6;
+                if turn >= first_full_turn {
+                    assert_eq!(before.content, after.content, "turn={turn}, k={keep}");
+                } else if prompt_mode {
+                    let body = after
+                        .content
+                        .split_once(">\n")
+                        .unwrap()
+                        .1
+                        .strip_suffix("\n</tool_result>")
+                        .unwrap();
+                    assert!(body.len() <= STALE_TOOL_RESULT_MAX_CHARS);
+                    let id = format!("call-{turn}-{}", (index - 1) % 6 / 2 - 1);
+                    assert!(after.content.starts_with("[Tool results]"));
+                    // The retained carrier stays beside its original call,
+                    // including the result ID, receipt and closing tag.
+                    assert!(after.content.contains(&format!("id=\"{id}\"")));
+                    assert!(after.content.contains(&format!("hmac={id}")));
+                    assert!(after.content.ends_with("</tool_result>"));
+                } else {
+                    let mut before: serde_json::Value =
+                        serde_json::from_str(&before.content).unwrap();
+                    let mut after: serde_json::Value =
+                        serde_json::from_str(&after.content).unwrap();
+                    let before_content = before.as_object_mut().unwrap().remove("content").unwrap();
+                    let after_content = after.as_object_mut().unwrap().remove("content").unwrap();
+                    assert_eq!(before, after, "IDs and provider metadata must survive");
+                    let compacted = after_content.as_str().unwrap();
+                    assert!(compacted.len() <= STALE_TOOL_RESULT_MAX_CHARS);
+                    assert!(compacted.starts_with("HEAD call-"));
+                    assert!(compacted.ends_with(']'));
+                    assert!(compacted.contains("characters truncated"));
+                    assert!(compacted.len() < before_content.as_str().unwrap().len());
+                }
+            }
+            assert_eq!(serde_json::to_vec(&history).unwrap(), original_bytes);
+        }
+    }
+}
+
+#[tokio::test]
+async fn tool_retention_freezes_warm_prefix_and_advances_only_after_expiry() {
+    for keep in [0, 1, 2, 8] {
+        let mut cache = LocalImageCache::new();
+        let history = tool_retention_history(false, 10);
+        let initial = prepare_messages_with_tool_retention(
+            &history,
+            &MultimodalConfig::default(),
+            keep,
+            Some(&mut cache),
+        )
+        .await
+        .unwrap();
+        let initial_cutoff = cache.compacted_prefix_len();
+        let extended = tool_retention_history(false, 11);
+        let warm = prepare_messages_with_tool_retention(
+            &extended,
+            &MultimodalConfig::default(),
+            keep,
+            Some(&mut cache),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cache.compacted_prefix_len(), initial_cutoff);
+        assert_eq!(
+            serde_json::to_vec(&initial.messages).unwrap(),
+            serde_json::to_vec(&warm.messages[..history.len()]).unwrap(),
+            "already-sent warm prefix bytes must not change: k={keep}"
+        );
+        cache.expire_prompt_cache_window();
+        let cold = prepare_messages_with_tool_retention(
+            &extended,
+            &MultimodalConfig::default(),
+            keep,
+            Some(&mut cache),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cache.compacted_prefix_len(), initial_cutoff + 6);
+        assert_ne!(
+            serde_json::to_vec(&warm.messages).unwrap(),
+            serde_json::to_vec(&cold.messages).unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn tool_retention_profile_increase_restores_text_and_decrease_waits_for_cold_window() {
+    let history = tool_retention_history(false, 4);
+    let mut cache = LocalImageCache::new();
+    let zero = prepare_messages_with_tool_retention(
+        &history,
+        &MultimodalConfig::default(),
+        0,
+        Some(&mut cache),
+    )
+    .await
+    .unwrap();
+    let two = prepare_messages_with_tool_retention(
+        &history,
+        &MultimodalConfig::default(),
+        2,
+        Some(&mut cache),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cache.compacted_prefix_len(), 7);
+    assert_eq!(two.messages[9].content, history[9].content);
+    assert_ne!(zero.messages[9].content, history[9].content);
+    let lower_warm = prepare_messages_with_tool_retention(
+        &history,
+        &MultimodalConfig::default(),
+        0,
+        Some(&mut cache),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cache.compacted_prefix_len(), 7);
+    assert_eq!(
+        serde_json::to_vec(&lower_warm.messages).unwrap(),
+        serde_json::to_vec(&two.messages).unwrap()
+    );
+    cache.expire_prompt_cache_window();
+    let lower_cold = prepare_messages_with_tool_retention(
+        &history,
+        &MultimodalConfig::default(),
+        0,
+        Some(&mut cache),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&lower_cold.messages).unwrap(),
+        serde_json::to_vec(&zero.messages).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn tool_retention_does_not_count_tool_or_parse_feedback_as_a_new_turn() {
+    for prompt_mode in [false, true] {
+        let mut history = tool_retention_history(prompt_mode, 2);
+        history.push(ChatMessage::user(format!(
+            "{TOOL_PARSE_ERROR_FEEDBACK_PREFIX} retry the malformed call"
+        )));
+        let prepared =
+            prepare_messages_with_tool_retention(&history, &MultimodalConfig::default(), 0, None)
+                .await
+                .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&prepared.messages[7..]).unwrap(),
+            serde_json::to_vec(&history[7..]).unwrap(),
+            "all current-turn output remains full through parse repair"
+        );
+        assert_ne!(prepared.messages[3].content, history[3].content);
+    }
+}
+
+#[tokio::test]
+async fn tool_retention_leaves_unparseable_prompt_result_boundaries_unabridged() {
+    let bulk = "untrusted text ".repeat(STALE_TOOL_RESULT_MAX_CHARS);
+    for carrier in [
+        format!(
+            "[Tool results]\n<tool_result id=\"first\">\n{bulk}\n<tool_result id=\"nested\">x\n</tool_result>\n</tool_result>"
+        ),
+        format!("[Tool results]\n<tool_result id=\"first\">\n{bulk}"),
+        format!(
+            "[Tool results]\n<tool_result id=\"first\">\n{bulk}\n</tool_result>\ntrailing prose"
+        ),
+        format!("[Tool results]\n{bulk}"),
+    ] {
+        let history = vec![
+            ChatMessage::user("old question"),
+            ChatMessage::assistant("old call"),
+            ChatMessage::user(&carrier),
+            ChatMessage::user("current question"),
+        ];
+        let prepared =
+            prepare_messages_with_tool_retention(&history, &MultimodalConfig::default(), 0, None)
+                .await
+                .unwrap();
+        assert_eq!(prepared.messages[2].content, carrier);
+    }
+}

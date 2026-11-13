@@ -110,6 +110,8 @@ pub async fn maybe_run_skill_review(
                         parallel_tools: false,
                         // sequential for the mutation-capable fork
                         max_tool_result_chars,
+                        // The review needs the parent's full tool evidence.
+                        keep_tool_context_turns: usize::MAX,
                         context_token_budget: max_context_tokens,
                         knobs: &crate::agent::loop_::LoopKnobs::default(),
                     },
