@@ -50,8 +50,6 @@ pub mod channels;
 /// depend on clap command enums and `gateway_helpers`.
 pub mod commands {
     #[cfg(feature = "agent-runtime")]
-    pub mod eval;
-    #[cfg(feature = "agent-runtime")]
     pub mod self_test;
     pub mod update;
 }

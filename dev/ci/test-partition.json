@@ -30,8 +30,7 @@
       "zeroclaw-schema-markdown",
       "zeroclaw-spawn",
       "zeroclaw-tool-call-parser",
-      "zeroclaw-tools",
-      "zeroclaw-yonbo-node"
+      "zeroclaw-tools"
     ]
   },
   "features": {

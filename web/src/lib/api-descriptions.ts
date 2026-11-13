@@ -634,7 +634,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "delegate": "Delegate tool global default configuration (`[delegate]`).",
     "embedding_routes": "Embedding-routing rules — route `hint:<name>` to specific\nmodel_provider + model combos for embedding requests.",
     "escalation": "Escalation routing configuration (`[escalation]`).",
-    "eval": "Agent evaluation harness (`[eval]`) — surfaced via `zeroclaw eval`.\nDistinct from `[agent.eval]`, which is the in-loop response-quality scorer.",
     "file_download": "Standalone file download tool configuration (`[file_download]`).",
     "file_upload": "Standalone file upload tool configuration (`[file_upload]`).",
     "file_upload_bundle": "Standalone multi-file bundle upload tool configuration\n(`[file_upload_bundle]`).",
@@ -1030,10 +1029,6 @@ export const fieldDescriptions: FieldDescriptions = {
     "enabled": "Enable emergency stop controls.",
     "require_otp_to_resume": "Require a valid OTP before resume operations.",
     "state_file": "File path used to persist estop state."
-  },
-  "EvalHarnessConfig": {
-    "mode": "Default execution mode (`replay` or `live`) used when `--mode` is omitted.",
-    "suite_dir": "Default directory of `*.json` trace fixtures used when `--suite` is omitted."
   },
   "ExternalRegistry": {
     "enabled": "Whether this registry is eligible for installs. Default: `true`.",

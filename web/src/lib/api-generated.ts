@@ -4656,15 +4656,6 @@ export interface components {
              */
             escalation: components["schemas"]["EscalationConfig"];
             /**
-             * @description Agent evaluation harness (`[eval]`) — surfaced via `zeroclaw eval`.
-             *     Distinct from `[agent.eval]`, which is the in-loop response-quality scorer.
-             * @default {
-             *       "mode": "replay",
-             *       "suite_dir": "evals"
-             *     }
-             */
-            eval: components["schemas"]["EvalHarnessConfig"];
-            /**
              * @description Standalone file download tool configuration (`[file_download]`).
              * @default {
              *       "headers": {},
@@ -7661,23 +7652,6 @@ export interface components {
              * @default 0.5
              */
             min_quality_score: number;
-        };
-        /**
-         * @description Configuration for the agent evaluation harness (`[eval]`), surfaced via the
-         *     `zeroclaw eval` command. Distinct from `[agent.eval]`, which is the in-loop
-         *     response-quality scorer.
-         */
-        EvalHarnessConfig: {
-            /**
-             * @description Default execution mode (`replay` or `live`) used when `--mode` is omitted.
-             * @default replay
-             */
-            mode: string;
-            /**
-             * @description Default directory of `*.json` trace fixtures used when `--suite` is omitted.
-             * @default evals
-             */
-            suite_dir: string;
         };
         ExternalRegistry: {
             /**

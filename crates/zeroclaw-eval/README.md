@@ -13,11 +13,13 @@ measure model quality — that is the live mode added in a later phase.
 
 ```bash
 # Replay every *.json fixture in the suite directory (defaults to ./evals)
-zeroclaw eval run
+cargo run -p zeroclaw-eval -- run
 
 # Point at an explicit suite, emit machine-readable JSON
-zeroclaw eval run --suite evals --format json
+cargo run -p zeroclaw-eval -- run --suite evals --format json
 ```
+
+The development CLI does not load the body configuration. Pass `--suite` and `--mode` explicitly if the former `[eval]` settings differed from the defaults. The separate `[agent.eval]` scorer is unchanged.
 
 Exits non-zero if any case fails, so it can gate CI. `--mode live` is reserved for
 a later phase and currently returns a clear error.
