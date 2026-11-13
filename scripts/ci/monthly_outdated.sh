@@ -13,14 +13,14 @@ case "${1:-}" in
       rustc --version
       cargo --version
       cargo outdated --version
-      printf '\nCommand: cargo outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10\n'
-      printf '%s\n' 'Coverage limit: cargo-outdated preserves direct rusqlite and matrix-sdk constraints in its hypothetical latest-version graph.'
-      printf '%s\n' 'This defers latest-version updates outside the declared rusqlite and matrix-sdk constraints: matrix-sdk-sqlite shares the workspace rusqlite SQLite links graph, so bumping either crate alone can force an incompatible libsqlite3-sys selection, and the two move as one coordinated review. Other dependencies remain eligible for hypothetical updates; transitive choices still obey this constrained graph.'
+      printf '\nCommand: cargo outdated --workspace --exclude rusqlite --exit-code 10\n'
+      printf '%s\n' 'Coverage limit: cargo-outdated preserves direct rusqlite constraints in its hypothetical latest-version graph.'
+      printf '%s\n' 'The optional Tachi PortableKernel shares the workspace rusqlite/libsqlite3-sys SQLite links graph. Latest-version upgrades outside the declared rusqlite constraint require a coordinated review with its pinned git revision. Other dependencies remain eligible for hypothetical updates; transitive choices still obey this constrained graph.'
       printf '\n## Scanner output\n\n'
     } > "$OUTPUT_FILE" 2>&1
 
     exit_code=0
-    cargo outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10 >> "$OUTPUT_FILE" 2>&1 || exit_code=$?
+    cargo outdated --workspace --exclude rusqlite --exit-code 10 >> "$OUTPUT_FILE" 2>&1 || exit_code=$?
     case "$exit_code" in
       0) result=clean ;;
       10) result=inventory ;;
