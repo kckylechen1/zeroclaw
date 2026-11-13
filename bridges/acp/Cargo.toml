@@ -1,0 +1,33 @@
+[package]
+name = "zeroclaw-bridge-acp"
+description = "ACP v1 stdio bridge to the ZeroClaw gateway conversation"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "zeroclaw-acp-bridge"
+path = "src/main.rs"
+
+[dependencies]
+# Locale discovery and Fluent formatting share the config implementation.
+# The bridge has no runtime, provider, memory, tools or gateway dependency.
+zeroclaw-config = { workspace = true, features = ["i18n"] }
+zeroclaw-log.workspace = true
+zeroclaw-spawn.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+tokio = { version = "1.50", default-features = false, features = ["rt-multi-thread", "macros", "time", "net", "io-util", "io-std", "sync"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+toml = "1.0"
+uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.26"

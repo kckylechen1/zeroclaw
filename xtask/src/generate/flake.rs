@@ -35,28 +35,50 @@ pub fn render_zone(root: &Path) -> anyhow::Result<String> {
         "        # Default feature set: canonical lean Dist.".to_string(),
         "        # Override with `packages.zeroclaw.override { features = [ ... ]; }`.".to_string(),
         format!("        zeroclawDefaultFeatures = [ {feature_list} ];"),
-        "        buildZeroclaw = { pname, cargoPkg, features ? zeroclawDefaultFeatures }:"
+        "        rootFeatureGraph = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).features;"
             .to_string(),
-        "          (pkgs.makeRustPlatform {".to_string(),
-        "            cargo = rustToolchain;".to_string(),
-        "            rustc = rustToolchain;".to_string(),
-        "          }).buildRustPackage {".to_string(),
-        "            inherit pname;".to_string(),
-        format!("            version = \"{version}\";"),
-        "            src = ./.;".to_string(),
-        "            cargoLock = {".to_string(),
-        "              lockFile = ./Cargo.lock;".to_string(),
-        "              outputHashes = builtins.fromJSON (builtins.readFile ./nix/hashes.json);"
+        "        rootFeatureClosure = features: builtins.map (node: node.key) (builtins.genericClosure {"
             .to_string(),
-        "            };".to_string(),
-        "            cargoBuildFlags =".to_string(),
-        "              [ \"-p\" cargoPkg \"--no-default-features\" ]".to_string(),
-        "              ++ pkgs.lib.optionals (features != [])".to_string(),
-        "                [ \"--features\" (pkgs.lib.concatStringsSep \",\" features) ];"
+        "          startSet = builtins.map (feature: { key = feature; }) features;".to_string(),
+        "          operator = node: builtins.map (feature: { key = feature; })".to_string(),
+        "            (builtins.filter (feature: builtins.hasAttr feature rootFeatureGraph)"
             .to_string(),
-        "            doCheck = false;".to_string(),
-        "            buildInputs = [ pkgs.stdenv.cc.cc ];".to_string(),
-        "          };".to_string(),
+        "              (rootFeatureGraph.${node.key} or []));".to_string(),
+        "        });".to_string(),
+        "        buildZeroclaw = pkgs.lib.makeOverridable".to_string(),
+        "          ({ pname, cargoPkg, features ? zeroclawDefaultFeatures }:".to_string(),
+        "            let".to_string(),
+        "              withAcpBridge = builtins.elem \"agent-runtime\" (rootFeatureClosure features);"
+            .to_string(),
+        "            in".to_string(),
+        "            (pkgs.makeRustPlatform {".to_string(),
+        "              cargo = rustToolchain;".to_string(),
+        "              rustc = rustToolchain;".to_string(),
+        "            }).buildRustPackage {".to_string(),
+        "              inherit pname;".to_string(),
+        format!("              version = \"{version}\";"),
+        "              src = ./.;".to_string(),
+        "              cargoLock = {".to_string(),
+        "                lockFile = ./Cargo.lock;".to_string(),
+        "                outputHashes = builtins.fromJSON (builtins.readFile ./nix/hashes.json);"
+            .to_string(),
+        "              };".to_string(),
+        "              cargoBuildFlags =".to_string(),
+        "                [ \"-p\" cargoPkg \"--no-default-features\" ]".to_string(),
+        "                ++ pkgs.lib.optionals withAcpBridge [ \"-p\" \"zeroclaw-bridge-acp\" ]"
+            .to_string(),
+        "                ++ pkgs.lib.optionals (features != [])".to_string(),
+        "                  [ \"--features\" (pkgs.lib.concatStringsSep \",\"".to_string(),
+        "                    (builtins.map (feature: \"${cargoPkg}/${feature}\") features)) ];"
+            .to_string(),
+        "              doCheck = false;".to_string(),
+        "              buildInputs = [ pkgs.stdenv.cc.cc ];".to_string(),
+        "              postInstall = ''".to_string(),
+        "                test -x \"$out/bin/zeroclaw\"".to_string(),
+        "              '' + pkgs.lib.optionalString withAcpBridge ''".to_string(),
+        "                test -x \"$out/bin/zeroclaw-acp-bridge\"".to_string(),
+        "              '';".to_string(),
+        "            });".to_string(),
     ];
     let body = lines.join("\n");
     Ok(body)

@@ -644,9 +644,19 @@ invoking user with mode `0600`. Revoke the entry and disconnect clients before
 downgrading to a binary that does not understand `owner`; an old binary may
 otherwise interpret it as an unrestricted legacy channel bridge.
 
-Build the separate `zeroclaw-acp-bridge` binary with the existing
-`agent-runtime` feature. Its execution path uses only JSON-RPC and gateway
-transport; it never constructs an Agent or ACP database. Point Zed's custom
+Build the `zeroclaw-acp-bridge` binary from the independent
+`zeroclaw-bridge-acp` package:
+
+```bash
+scripts/dev/cargo-local.sh build --release --locked -p zeroclaw-bridge-acp --bin zeroclaw-acp-bridge
+```
+
+The bridge uses JSON-RPC and gateway transport, with shared locale discovery
+and Fluent strings from `zeroclaw-config`. It does not compile the runtime,
+providers, memory, tools or gateway crates, and never constructs an Agent or
+ACP database. The source installer and Nix package also install this binary
+when the selected root features enable `agent-runtime`, including indirectly.
+Point Zed's custom
 `agent_servers` entry at the binary with `args = ["--config", "/absolute/adapter.toml"]`.
 The standalone file contains:
 

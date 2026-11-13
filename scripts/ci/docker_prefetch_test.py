@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Exercise each real Docker prefetch stub layer against Cargo's target paths.
 
-This runs only the mkdir/echo layer in a temporary manifest-only workspace.
+This checks the manifest COPY declarations, then runs only the mkdir/echo layer
+in a temporary manifest-only workspace.
 The source-image matrix remains responsible for compiling the actual images.
 """
 
@@ -15,6 +16,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILES = ("Dockerfile", "Dockerfile.debian")
+
+
+def missing_manifest_copies(dockerfile_text):
+    """Check the three manifest COPY forms used by these source Dockerfiles."""
+    section = dockerfile_text.split("# 1. Copy manifests to cache dependencies", 1)[1]
+    section = section.split("# Create dummy targets", 1)[0]
+    lines = {line.strip() for line in section.splitlines()}
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]
+    missing = []
+    for member in workspace["members"]:
+        path = Path(member) / "Cargo.toml"
+        if member == ".":
+            expected = "COPY Cargo.toml Cargo.lock ./"
+        elif path.parts[0] == "crates" and len(path.parts) == 3:
+            expected = "COPY --parents crates/*/Cargo.toml ./"
+        else:
+            expected = f"COPY {path.as_posix()} {path.as_posix()}"
+        if expected not in lines:
+            missing.append(path.as_posix())
+    return sorted(missing)
 
 
 def prefetch_layer(dockerfile):
@@ -70,6 +91,28 @@ def missing_targets(workspace):
 
 
 class DockerPrefetchTargets(unittest.TestCase):
+    def test_prefetch_copies_every_workspace_manifest(self):
+        for dockerfile in DOCKERFILES:
+            with self.subTest(dockerfile=dockerfile):
+                self.assertEqual(
+                    missing_manifest_copies((ROOT / dockerfile).read_text()), []
+                )
+
+    def test_missing_bridge_manifest_copy_is_detected(self):
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]
+        member = next(
+            member for member in workspace["members"] if member.startswith("bridges/")
+        )
+        path = f"{member}/Cargo.toml"
+        copy = f"COPY {path} {path}\n"
+        for dockerfile in DOCKERFILES:
+            with self.subTest(dockerfile=dockerfile):
+                source = (ROOT / dockerfile).read_text()
+                self.assertIn(copy, source)
+                self.assertEqual(
+                    missing_manifest_copies(source.replace(copy, "")), [path]
+                )
+
     def test_real_prefetch_layers_supply_every_declared_target(self):
         for dockerfile in DOCKERFILES:
             with self.subTest(dockerfile=dockerfile), tempfile.TemporaryDirectory() as tmp:

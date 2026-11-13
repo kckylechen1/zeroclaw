@@ -44,25 +44,43 @@
         # Default feature set: canonical lean Dist.
         # Override with `packages.zeroclaw.override { features = [ ... ]; }`.
         zeroclawDefaultFeatures = [ "agent-runtime" "channel-acp-server" "channel-discord" "channel-email" "channel-telegram" "channel-webhook" "gateway" "integrations-saas" "observability-prometheus" "schema-export" ];
-        buildZeroclaw = { pname, cargoPkg, features ? zeroclawDefaultFeatures }:
-          (pkgs.makeRustPlatform {
-            cargo = rustToolchain;
-            rustc = rustToolchain;
-          }).buildRustPackage {
-            inherit pname;
-            version = "0.8.3";
-            src = ./.;
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-              outputHashes = builtins.fromJSON (builtins.readFile ./nix/hashes.json);
-            };
-            cargoBuildFlags =
-              [ "-p" cargoPkg "--no-default-features" ]
-              ++ pkgs.lib.optionals (features != [])
-                [ "--features" (pkgs.lib.concatStringsSep "," features) ];
-            doCheck = false;
-            buildInputs = [ pkgs.stdenv.cc.cc ];
-          };
+        rootFeatureGraph = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).features;
+        rootFeatureClosure = features: builtins.map (node: node.key) (builtins.genericClosure {
+          startSet = builtins.map (feature: { key = feature; }) features;
+          operator = node: builtins.map (feature: { key = feature; })
+            (builtins.filter (feature: builtins.hasAttr feature rootFeatureGraph)
+              (rootFeatureGraph.${node.key} or []));
+        });
+        buildZeroclaw = pkgs.lib.makeOverridable
+          ({ pname, cargoPkg, features ? zeroclawDefaultFeatures }:
+            let
+              withAcpBridge = builtins.elem "agent-runtime" (rootFeatureClosure features);
+            in
+            (pkgs.makeRustPlatform {
+              cargo = rustToolchain;
+              rustc = rustToolchain;
+            }).buildRustPackage {
+              inherit pname;
+              version = "0.8.3";
+              src = ./.;
+              cargoLock = {
+                lockFile = ./Cargo.lock;
+                outputHashes = builtins.fromJSON (builtins.readFile ./nix/hashes.json);
+              };
+              cargoBuildFlags =
+                [ "-p" cargoPkg "--no-default-features" ]
+                ++ pkgs.lib.optionals withAcpBridge [ "-p" "zeroclaw-bridge-acp" ]
+                ++ pkgs.lib.optionals (features != [])
+                  [ "--features" (pkgs.lib.concatStringsSep ","
+                    (builtins.map (feature: "${cargoPkg}/${feature}") features)) ];
+              doCheck = false;
+              buildInputs = [ pkgs.stdenv.cc.cc ];
+              postInstall = ''
+                test -x "$out/bin/zeroclaw"
+              '' + pkgs.lib.optionalString withAcpBridge ''
+                test -x "$out/bin/zeroclaw-acp-bridge"
+              '';
+            });
         # >>> end generated:flake-packages <<<
       in {
         packages.zeroclaw = buildZeroclaw { pname = "zeroclaw"; cargoPkg = "zeroclawlabs"; };
