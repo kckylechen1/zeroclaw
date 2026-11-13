@@ -45,6 +45,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod recent;
+
 const METADATA_ZC_KEY: &str = "zeroclaw_key";
 pub(crate) const METADATA_ZC_CATEGORY: &str = "zeroclaw_category";
 // pub(crate): tachi_governance partitions near-dup on these same keys; a
@@ -488,16 +490,6 @@ impl TachiMemory {
         }
     }
 
-    fn list_prefix_recent(
-        store: &MemoryStore,
-        prefix: &str,
-        limit: usize,
-    ) -> anyhow::Result<Vec<portable_kernel::MemoryEntry>> {
-        store
-            .list_by_path_recent(prefix, limit.max(1), false)
-            .map_err(|e| anyhow::Error::msg(format!("tachi list_recent failed: {e}")))
-    }
-
     fn agent_path_prefix(agent: Option<&str>) -> String {
         match agent {
             Some(agent) => format!("/agents/{}/", Self::agent_segment(Some(agent))),
@@ -807,13 +799,20 @@ impl TachiMemory {
         let prefix = path_prefix.unwrap_or_else(|| "/agents".to_string());
         if is_recent_recall_query(query) {
             let store = self.store.clone();
-            // Over-fetch so post-filters still fill `limit`.
-            let fetch = limit.saturating_mul(4).max(limit).max(16);
-            let prefix_c = prefix.clone();
+            // Apply host scope before the limited read; retain output admission.
+            let selections = recent::queries(
+                prefix,
+                limit,
+                session_id,
+                since,
+                until,
+                namespace,
+                allowed_agents,
+            );
             let mut entries =
                 tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
                     let store = store.lock();
-                    let rows = Self::list_prefix_recent(&store, &prefix_c, fetch)?;
+                    let rows = recent::read(&store, &selections, limit)?;
                     Ok(rows
                         .into_iter()
                         .map(|row| Self::memcore_to_zeroclaw(row, Some(1.0)))
@@ -1368,6 +1367,9 @@ impl ::zeroclaw_api::attribution::Attributable for TachiMemory {
 
 #[cfg(all(test, feature = "tachi"))]
 mod key_lookup_tests;
+
+#[cfg(all(test, feature = "tachi"))]
+mod recent_recall_tests;
 
 #[cfg(all(test, feature = "tachi"))]
 mod session_scope_tests;
