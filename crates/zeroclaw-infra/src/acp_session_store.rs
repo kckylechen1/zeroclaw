@@ -824,6 +824,64 @@ impl AcpSessionStore {
         Ok(rows)
     }
 
+    /// Archive every persisted column and child row before deleting an agent's
+    /// terminal sessions. The immediate transaction prevents a second store
+    /// handle from adding data between export and the cascading DELETE.
+    pub fn archive_and_delete_sessions_by_agent(
+        &self,
+        agent_alias: &str,
+        archive_path: &Path,
+    ) -> Result<usize> {
+        use crate::owned_archive::{sqlite_rows, write_verified_json};
+        let mut conn = self.conn.lock();
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let live: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM acp_sessions WHERE agent_alias = ?1 AND killed_at IS NULL",
+            [agent_alias],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            live == 0,
+            "live ACP sessions remain; original ACP data retained"
+        );
+        let sessions = sqlite_rows(
+            &transaction,
+            "SELECT * FROM acp_sessions WHERE agent_alias = ?1 ORDER BY id",
+            agent_alias,
+        )?;
+        let messages = sqlite_rows(
+            &transaction,
+            "SELECT m.* FROM acp_messages m JOIN acp_sessions s ON s.id = m.session_id
+             WHERE s.agent_alias = ?1 ORDER BY m.id",
+            agent_alias,
+        )?;
+        let tool_calls = sqlite_rows(
+            &transaction,
+            "SELECT t.* FROM acp_tool_calls t JOIN acp_messages m ON m.id = t.message_id
+             JOIN acp_sessions s ON s.id = m.session_id WHERE s.agent_alias = ?1 ORDER BY t.id",
+            agent_alias,
+        )?;
+        let events = sqlite_rows(
+            &transaction,
+            "SELECT e.* FROM acp_session_events e JOIN acp_sessions s ON s.id = e.session_id
+             WHERE s.agent_alias = ?1 ORDER BY e.id",
+            agent_alias,
+        )?;
+        let snapshot = serde_json::json!({
+            "format": "zeroclaw-agent-archive", "version": 1, "store": "acp", "agent_alias": agent_alias,
+            "tables": {"acp_sessions": sessions, "acp_messages": messages,
+                "acp_tool_calls": tool_calls, "acp_session_events": events},
+        });
+        write_verified_json(archive_path, &snapshot).context("archive complete ACP history")?;
+        let removed = transaction.execute(
+            "DELETE FROM acp_sessions WHERE agent_alias = ?1",
+            [agent_alias],
+        )?;
+        transaction.commit()?;
+        Ok(removed)
+    }
+
     /// Re-point every ACP session (live or killed) from `from` to `to`,
     /// returning the row count. The agent-rename cascadekeeps the
     /// session and its transcript; only the owning alias moves. Unlike delete,
@@ -903,6 +961,9 @@ fn parse_ts(s: &str, field: &'static str, session_uuid: &str) -> DateTime<Utc> {
         Utc::now()
     })
 }
+
+#[cfg(test)]
+mod archive_tests;
 
 #[cfg(test)]
 mod tests {

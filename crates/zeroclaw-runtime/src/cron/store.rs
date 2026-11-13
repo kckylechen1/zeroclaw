@@ -300,6 +300,53 @@ pub fn remove_jobs_by_agent(config: &Config, agent_alias: &str) -> Result<usize>
     Ok(changed)
 }
 
+/// Retain the complete jobs and run records before the agent-delete cascade.
+/// A write transaction covers snapshot, verified publication and deletion.
+pub fn archive_and_remove_jobs_by_agent(
+    config: &Config,
+    agent_alias: &str,
+    archive_path: &std::path::Path,
+) -> Result<usize> {
+    use zeroclaw_infra::owned_archive::{sqlite_rows, write_verified_json};
+    with_initialized_connection(config, |conn| {
+        let transaction =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let active: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM cron_jobs WHERE agent_alias = ?1 AND locked_at IS NOT NULL",
+            [agent_alias],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            active == 0,
+            "cron jobs are in flight; original cron state retained"
+        );
+        let jobs = sqlite_rows(
+            &transaction,
+            "SELECT * FROM cron_jobs WHERE agent_alias = ?1 ORDER BY id",
+            agent_alias,
+        )?;
+        let runs = sqlite_rows(
+            &transaction,
+            "SELECT r.* FROM cron_runs r JOIN cron_jobs j ON j.id = r.job_id
+             WHERE j.agent_alias = ?1 ORDER BY r.id",
+            agent_alias,
+        )?;
+        write_verified_json(
+            archive_path,
+            &serde_json::json!({
+                "format": "zeroclaw-agent-archive", "version": 1, "store": "cron", "agent_alias": agent_alias,
+                "tables": {"cron_jobs": jobs, "cron_runs": runs},
+            }),
+        )?;
+        let removed = transaction.execute(
+            "DELETE FROM cron_jobs WHERE agent_alias = ?1",
+            [agent_alias],
+        )?;
+        transaction.commit()?;
+        Ok(removed)
+    })
+}
+
 /// Re-point every cron job owned by `from` to `to`, returning the row count.
 /// Called by the agent-rename cascade the job keeps running, just
 /// under the renamed owner. `agent_alias` is plain TEXT (not a UUID), so this

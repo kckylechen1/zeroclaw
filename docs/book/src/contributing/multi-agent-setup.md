@@ -91,7 +91,13 @@ The owned-state cascade attempts to:
 - clear agent attribution from retained conversation sessions; and
 - write `manifest.json` with counts and surfaced warnings.
 
-These side effects are best-effort. An export or archive-file write can fail while later cleanup continues. Verify the applicable `workspace/`, `cascade/*.json`, and `manifest.json` entries instead of assuming the archive is complete. The CLI prints surfaced cascade warnings. The delete API also returns them, but the dashboard does not currently display them; dashboard operators must check the gateway logs as well.
+Each database cleanup requires its own complete, durable archive and successful byte-for-byte readback. SQLite memory, cron jobs and run history, and terminal ACP sessions use a write transaction across export, archive publication and deletion. A failed export, write or readback retains that store's records. A newly live ACP session or in-flight cron job also blocks that store's cleanup. Other stores can still finish, so inspect the counts and warnings for each one.
+
+The versioned `cascade/*.json` files contain the raw persisted columns and record IDs, including memory embeddings, ACP messages, tool arguments/results, events and the stored plan. SQLite binary values use a `sqlite_blob` byte array. Archive files are never overwritten: an identical snapshot can be retried, while a different or damaged existing file blocks cleanup. On Unix the archive directories and files are restricted to `0700` and `0600`.
+
+Memory backends without a guarded archive operation, including the current Tachi adapter, retain their original data and report that cleanup is unsupported. They do not fall back to an export followed by an unguarded bulk purge. Markdown workspace archival and retained conversation attribution follow the existing lifecycle. Config removal still commits before these side effects; this change does not create a cross-store transaction or restore the removed config on partial failure.
+
+Verify the applicable `workspace/`, `cascade/*.json`, and `manifest.json` entries instead of assuming the archive is complete. The CLI prints surfaced cascade warnings. The delete API also returns them, but the dashboard does not currently display them; dashboard operators must check the gateway logs as well.
 
 > Do not replace this flow with direct TOML edits, `zeroclaw config set`, manual workspace deletion, or SQL deletion. Those paths do not run the gateway's reference and owned-state cascade.
 

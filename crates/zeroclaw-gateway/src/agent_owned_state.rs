@@ -32,15 +32,27 @@ pub struct OwnedStateReport {
     pub warnings: Vec<String>,
 }
 
-async fn write_json(path: &Path, bytes: Vec<u8>) {
-    if let Err(err) = tokio::fs::write(path, bytes).await {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                .with_attrs(::serde_json::json!({"path": path.display().to_string(), "err": err.to_string()})),
-            "owned-state cascade: failed to write archive file"
-        );
+async fn write_json(path: &Path, value: serde_json::Value) -> anyhow::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        zeroclaw_infra::owned_archive::write_verified_json(&path, &value)
+    })
+    .await?
+}
+
+fn removed_or_retained(
+    store: &str,
+    result: anyhow::Result<usize>,
+    warnings: &mut Vec<String>,
+) -> usize {
+    match result {
+        Ok(count) => count,
+        Err(error) => {
+            warnings.push(format!(
+                "{store} archive/purge: {error:#}; original records retained"
+            ));
+            0
+        }
     }
 }
 
@@ -52,79 +64,44 @@ pub async fn cascade_owned_state(
     archive_dir: &Path,
 ) -> OwnedStateReport {
     let cascade_dir = archive_dir.join("cascade");
-    let _ = tokio::fs::create_dir_all(&cascade_dir).await;
     let mut warnings: Vec<String> = Vec::new();
 
-    // ── memory: export → archive → purge. Failures are SURFACED in `warnings`,
-    // not masked as 0 (markdown/none have no DB rows — their memory lives in the
-    // archived workspace — but a real backend error must stay visible). ────────
-    let mem_rows = match mem.export_agent(alias).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            warnings.push(format!("memory export: {e}"));
-            Vec::new()
-        }
-    };
-    if let Ok(bytes) = serde_json::to_vec_pretty(&mem_rows) {
-        write_json(&cascade_dir.join("memory.json"), bytes).await;
-    }
-    let memory_purged = match mem.purge_agent(alias).await {
-        Ok(n) => n,
-        Err(e) => {
-            warnings.push(format!("memory purge: {e}"));
-            0
-        }
-    };
+    // Each store owns the guarded export → verified archive → exact deletion.
+    // An unsupported backend or any failure retains that store's original data.
+    // There is intentionally no cross-store transaction or unguarded fallback.
+    let memory_purged = removed_or_retained(
+        "memory",
+        mem.archive_and_purge_agent(alias, &cascade_dir.join("memory.json"))
+            .await,
+        &mut warnings,
+    );
 
-    // ── cron: list → archive → remove (cron_runs cascade off job_id) ─────────
-    let cron_jobs = match zeroclaw_runtime::cron::list_jobs_by_agent(config, alias) {
-        Ok(jobs) => jobs,
-        Err(e) => {
-            warnings.push(format!("cron list: {e}"));
-            Vec::new()
+    let owned_config = config.clone();
+    let owned_alias = alias.to_owned();
+    let stores = tokio::task::spawn_blocking(move || {
+        let cron = zeroclaw_runtime::cron::archive_and_remove_jobs_by_agent(
+            &owned_config,
+            &owned_alias,
+            &cascade_dir.join("cron.json"),
+        );
+        let acp = AcpSessionStore::new(&owned_config.data_dir).and_then(|store| {
+            store.archive_and_delete_sessions_by_agent(&owned_alias, &cascade_dir.join("acp.json"))
+        });
+        (cron, acp)
+    })
+    .await;
+    let (cron_removed, acp_removed) = match stores {
+        Ok((cron, acp)) => (
+            removed_or_retained("cron", cron, &mut warnings),
+            removed_or_retained("acp", acp, &mut warnings),
+        ),
+        Err(error) => {
+            warnings.push(format!(
+                "owned-state archive worker failed: {error}; inspect each archive before retrying"
+            ));
+            (0, 0)
         }
     };
-    if let Ok(bytes) = serde_json::to_vec_pretty(&cron_jobs) {
-        write_json(&cascade_dir.join("cron.json"), bytes).await;
-    }
-    let cron_removed = match zeroclaw_runtime::cron::remove_jobs_by_agent(config, alias) {
-        Ok(n) => n,
-        Err(e) => {
-            warnings.push(format!("cron remove: {e}"));
-            0
-        }
-    };
-
-    // ── acp: list → archive → delete (only killed sessions remain) ───────────
-    let mut acp_removed = 0;
-    match AcpSessionStore::new(&config.data_dir) {
-        Ok(store) => {
-            let sessions = store.list_sessions_by_agent(alias).unwrap_or_default();
-            // AcpSessionSummary isn't Serialize; hand-map the fields we keep.
-            let json: Vec<serde_json::Value> = sessions
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "session_uuid": s.session_uuid,
-                        "agent_alias": s.agent_alias,
-                        "workspace_dir": s.workspace_dir,
-                        "token_count": s.token_count,
-                        "message_count": s.message_count,
-                        "created_at": s.created_at.to_rfc3339(),
-                        "last_activity": s.last_activity.to_rfc3339(),
-                    })
-                })
-                .collect();
-            if let Ok(bytes) = serde_json::to_vec_pretty(&json) {
-                write_json(&cascade_dir.join("acp.json"), bytes).await;
-            }
-            match store.delete_sessions_by_agent(alias) {
-                Ok(n) => acp_removed = n,
-                Err(e) => warnings.push(format!("acp delete: {e}")),
-            }
-        }
-        Err(e) => warnings.push(format!("acp store open: {e}")),
-    }
 
     // ── session metadata: clear the stale agent attribution (keep the convo) ─
     let sessions_cleared = match session_backend {
@@ -148,7 +125,7 @@ pub async fn cascade_owned_state(
         );
     }
 
-    let report = OwnedStateReport {
+    let mut report = OwnedStateReport {
         memory_purged,
         cron_removed,
         acp_removed,
@@ -166,8 +143,8 @@ pub async fn cascade_owned_state(
         "sessions_cleared": report.sessions_cleared,
         "warnings": report.warnings,
     });
-    if let Ok(bytes) = serde_json::to_vec_pretty(&manifest) {
-        write_json(&archive_dir.join("manifest.json"), bytes).await;
+    if let Err(error) = write_json(&archive_dir.join("manifest.json"), manifest).await {
+        report.warnings.push(format!("archive manifest: {error:#}"));
     }
 
     report
@@ -255,5 +232,82 @@ pub async fn cascade_rename_agent(
         acp_sessions,
         sessions_repointed,
         warnings,
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    use zeroclaw_api::memory_traits::MemoryCategory;
+    use zeroclaw_memory::sqlite::SqliteMemory;
+
+    #[tokio::test]
+    async fn failed_archive_keeps_memory_and_reports_independent_store_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: directory.path().join("data"),
+            ..Config::default()
+        };
+        let memory = Arc::new(SqliteMemory::new("archive-test", &config.data_dir).unwrap());
+        let agent_id = memory.ensure_agent_uuid("alpha").await.unwrap();
+        memory
+            .store_with_agent(
+                "note",
+                "must survive",
+                MemoryCategory::Core,
+                None,
+                None,
+                None,
+                Some(&agent_id),
+            )
+            .await
+            .unwrap();
+        let archive = directory.path().join("archive");
+        std::fs::create_dir_all(archive.join("cascade")).unwrap();
+        std::fs::create_dir(archive.join("cascade/memory.json")).unwrap();
+        let shared: Arc<dyn Memory> = memory.clone();
+        let report = cascade_owned_state(&config, &shared, None, "alpha", &archive).await;
+        assert_eq!(report.memory_purged, 0);
+        assert_eq!(
+            memory.export_agent("alpha").await.unwrap()[0].content,
+            "must survive"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("memory archive/purge"))
+        );
+        assert!(archive.join("cascade/cron.json").is_file());
+        assert!(archive.join("cascade/acp.json").is_file());
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(archive.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["memory_rows"], 0);
+        assert!(!manifest["warnings"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupported_memory_backend_reports_retention_without_purge_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: directory.path().join("data"),
+            ..Config::default()
+        };
+        let memory: Arc<dyn Memory> = Arc::new(zeroclaw_memory::none::NoneMemory::new("none"));
+        let report = cascade_owned_state(
+            &config,
+            &memory,
+            None,
+            "alpha",
+            &directory.path().join("archive"),
+        )
+        .await;
+        assert_eq!(report.memory_purged, 0);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unsupported") && warning.contains("retained"))
+        );
     }
 }

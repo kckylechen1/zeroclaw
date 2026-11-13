@@ -54,6 +54,65 @@ async fn recv_log_event(
 }
 
 #[test]
+fn verified_agent_archive_keeps_run_history_and_failed_snapshots() {
+    let tmp = TempDir::new().unwrap();
+    let config = test_config(&tmp);
+    let first = add_job(&config, "alpha", "*/5 * * * *", "echo alpha").unwrap();
+    let other = add_job(&config, "beta", "*/5 * * * *", "echo beta").unwrap();
+    let connection = Connection::open(cron_db(&config)).unwrap();
+    connection.execute(
+        "INSERT INTO cron_runs (job_id, started_at, finished_at, status, output, duration_ms, execution_status, delivery_status)
+         VALUES (?1, 'start', 'finish', 'ok', 'complete run output', 17, 'success', 'delivered')",
+        [&first.id],
+    ).unwrap();
+    let blocker = tmp.path().join("file");
+    std::fs::write(&blocker, b"blocked").unwrap();
+    assert!(
+        archive_and_remove_jobs_by_agent(&config, "alpha", &blocker.join("cron.json")).is_err()
+    );
+    assert!(get_job(&config, &first.id).is_ok());
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM cron_runs", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    connection
+        .execute(
+            "UPDATE cron_jobs SET locked_at = 'running' WHERE id = ?1",
+            [&first.id],
+        )
+        .unwrap();
+    let path = tmp.path().join("archive/cron.json");
+    assert!(archive_and_remove_jobs_by_agent(&config, "alpha", &path).is_err());
+    assert!(!path.exists());
+    connection
+        .execute(
+            "UPDATE cron_jobs SET locked_at = NULL WHERE id = ?1",
+            [&first.id],
+        )
+        .unwrap();
+    assert_eq!(
+        archive_and_remove_jobs_by_agent(&config, "alpha", &path).unwrap(),
+        1
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(snapshot["tables"]["cron_jobs"][0]["id"], first.id);
+    assert_eq!(snapshot["tables"]["cron_runs"][0]["job_id"], first.id);
+    assert_eq!(
+        snapshot["tables"]["cron_runs"][0]["output"],
+        "complete run output"
+    );
+    assert_eq!(
+        snapshot["tables"]["cron_runs"][0]["delivery_status"],
+        "delivered"
+    );
+    assert!(get_job(&config, &first.id).is_err());
+    assert!(get_job(&config, &other.id).is_ok());
+}
+
+#[test]
 fn read_only_queries_on_empty_workspace_do_not_initialize_cron_db() {
     let tmp = TempDir::new().unwrap();
     let config = test_config(&tmp);
