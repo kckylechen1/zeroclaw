@@ -17,7 +17,7 @@ class CutoverInventoryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.path = Path(self.temp.name) / "offline.db"
+        self.path = Path(self.temp.name).resolve() / "offline.db"
         with sqlite3.connect(self.path) as conn:
             conn.executescript("""
                 CREATE TABLE agents(id TEXT PRIMARY KEY, alias TEXT);
