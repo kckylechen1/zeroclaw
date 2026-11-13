@@ -26,7 +26,8 @@ REVIEWED_LICENSES = (
 )
 AGPL_PACKAGES = {name for name, _, license_id in REVIEWED_LICENSES
                  if license_id == "AGPL-3.0-only"}
-OPTIONAL_RNG_VERSIONS = (("rand", "0.8.6"), ("rand_chacha", "0.3.1"))
+RETIRED_RNG_PACKAGES = {"rand_chacha", "ppv-lite86"}
+RETIRED_RNG_SERIES = {"rand": ("0.8.", "0.9."), "rand_core": ("0.9.",)}
 
 
 def run(cargo, args, repo):
@@ -49,54 +50,59 @@ def fail(message, command, result):
     raise RuntimeError(failure_context(message, command, result))
 
 
-class DefaultGraphViolation(RuntimeError):
+class GraphViolation(RuntimeError):
     def __init__(self, message, command, result, agpl, rng):
         super().__init__(failure_context(message, command, result))
         self.agpl = set(agpl)
         self.rng = set(rng)
 
 
-def check_default_graph(cargo, repo, manifest=None):
+def check_graph(cargo, repo, manifest=None, *, workspace=False):
     manifest = manifest or repo / "Cargo.toml"
+    scope = "workspace/all-features" if workspace else "default production"
+    selection = ["--workspace", "--all-features"] if workspace else ["-p", "zeroclawlabs"]
+    edges = "normal,build,dev" if workspace else "normal,build"
     lock = manifest.with_name("Cargo.lock")
     before = lock.read_bytes()
     command, result = run(cargo, [
         "tree", "--locked", "--offline", "--manifest-path", str(manifest),
-        "-p", "zeroclawlabs", "--target", "all", "--edges", "normal,build",
-        "--prefix", "none",
-        "--format", "{p}",
+        *selection, "--target", "all", "--edges", edges,
+        "--prefix", "none", "--format", "{p}",
     ], repo)
     if result.returncode != 0:
-        fail("Could not inspect the default production dependency graph", command, result)
+        fail(f"Could not inspect the {scope} dependency graph", command, result)
     if lock.read_bytes() != before:
-        fail("Default graph inspection changed Cargo.lock", command, result)
+        fail(f"{scope} graph inspection changed Cargo.lock", command, result)
     packages = set()
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
         fields = line.split()
         if len(fields) < 2 or not fields[1].startswith("v") or len(fields[1]) == 1:
-            fail(f"Unrecognized default dependency entry: {line!r}", command, result)
+            fail(f"Unrecognized {scope} dependency entry: {line!r}", command, result)
         packages.add((fields[0], fields[1][1:]))
     names = {name for name, _ in packages}
     if "zeroclawlabs" not in names:
-        fail("Default graph did not contain the selected root package", command, result)
+        fail(f"{scope} graph did not contain the selected root package", command, result)
     violations = []
     forbidden_agpl = sorted((name, version) for name, version in packages
-                            if name in AGPL_PACKAGES)
-    forbidden_rng = sorted(packages.intersection(OPTIONAL_RNG_VERSIONS))
+                            if not workspace and name in AGPL_PACKAGES)
+    forbidden_rng = sorted((name, version) for name, version in packages
+                           if name in RETIRED_RNG_PACKAGES
+                           or version.startswith(RETIRED_RNG_SERIES.get(name, ())))
     if forbidden_agpl:
         violations.append(f"Optional AGPL packages entered the default graph: {forbidden_agpl}")
     if forbidden_rng:
-        violations.append(f"Optional Tachi RNG versions entered the default graph: {forbidden_rng}")
+        violations.append(f"Retired RNG packages entered the {scope} graph: {forbidden_rng}")
     if violations:
-        raise DefaultGraphViolation("; ".join(violations), command, result,
-                                    forbidden_agpl, forbidden_rng)
-    print("PASS default production graph excludes optional AGPL/RNG packages on all targets")
+        raise GraphViolation("; ".join(violations), command, result,
+                             forbidden_agpl, forbidden_rng)
+    boundary = "retired RNG" if workspace else "optional AGPL and retired RNG"
+    print(f"PASS {scope} graph excludes {boundary} packages on all targets")
 
 
 def write_package(path, name, version, license_id, dependencies="", workspace=False,
-                  table="dependencies"):
+                  table="dependencies", members=()):
     path.mkdir(parents=True)
     (path / "Cargo.toml").write_text(
         "[package]\n"
@@ -104,6 +110,8 @@ def write_package(path, name, version, license_id, dependencies="", workspace=Fa
         f"license = {json.dumps(license_id)}\nedition = \"2021\"\n"
         "[lib]\npath = \"lib.rs\"\n"
         + ("[workspace]\nresolver = \"2\"\n" if workspace else "")
+        + (f"members = {json.dumps(members)}\ndefault-members = [\".\"]\n"
+           if members else "")
         + (f"[{table}]\n" + dependencies if dependencies else ""),
         encoding="utf-8",
     )
@@ -112,40 +120,49 @@ def write_package(path, name, version, license_id, dependencies="", workspace=Fa
 
 
 def write_fixture(directory, name, packages, wildcard=False,
-                  root_name="zeroclaw-policy-fixture", table="dependencies"):
+                  root_name="zeroclaw-policy-fixture", table="dependencies",
+                  member=False, optional=False):
     root = directory / name / "root"
     dependencies = []
     for index, (package, version, license_id) in enumerate(packages):
         dependency = root.parent / "deps" / str(index)
         write_package(dependency, package, version, license_id)
         requirement = "" if wildcard else f", version = {json.dumps('=' + version)}"
+        activation = ", optional = true" if optional else ""
         dependencies.append(
             f"dep_{index} = {{ package = {json.dumps(package)}, "
-            f"path = {json.dumps(str(dependency))}{requirement} }}\n"
+            f"path = {json.dumps(str(dependency))}{requirement}{activation} }}\n"
         )
-    write_package(root, root_name, "0.0.0", "MIT",
-                  "".join(dependencies), workspace=True, table=table)
+    if member:
+        write_package(root, root_name, "0.0.0", "MIT", workspace=True, members=("member",))
+    write_package(root / "member" if member else root,
+                  "zeroclaw-policy-member" if member else root_name, "0.0.0", "MIT",
+                  "".join(dependencies), workspace=not member, table=table)
     return root
 
 
-def check_default_rejection(cargo, repo, directory, name, packages, *,
-                            expected_agpl=(), expected_rng=(), windows_only=False):
+def check_graph_rejection(cargo, repo, directory, name, packages, *,
+                          expected_agpl=(), expected_rng=(), workspace=False,
+                          table="dependencies", optional=False):
     root = write_fixture(directory, name, packages, root_name="zeroclawlabs",
-                         table="target.'cfg(windows)'.dependencies" if windows_only
-                         else "dependencies")
+                         table=table, member=workspace, optional=optional)
     manifest = root / "Cargo.toml"
     command, result = run(cargo, [
         "generate-lockfile", "--offline", "--manifest-path", str(manifest),
     ], repo)
     if result.returncode != 0:
         fail(f"{name}: fixture resolution failed", command, result)
+    if workspace:
+        # The fixture dependency lives only in a second workspace member.
+        # The default root graph must stay clean before the full graph refuses it.
+        check_graph(cargo, repo, manifest)
     try:
-        check_default_graph(cargo, repo, manifest)
-    except DefaultGraphViolation as error:
+        check_graph(cargo, repo, manifest, workspace=workspace)
+    except GraphViolation as error:
         if error.agpl != set(expected_agpl) or error.rng != set(expected_rng):
-            raise RuntimeError(f"{name}: unexpected default-graph refusal\n{error}") from error
+            raise RuntimeError(f"{name}: unexpected dependency-graph refusal\n{error}") from error
     else:
-        raise RuntimeError(f"{name}: default graph accepted optional-only dependencies")
+        raise RuntimeError(f"{name}: dependency graph accepted forbidden dependencies")
     print(f"PASS {name}")
 
 
@@ -212,19 +229,36 @@ def main():
     args = parser.parse_args()
     config = args.config.resolve(strict=True)
     cargo = str(Path(args.cargo).resolve()) if os.sep in args.cargo else args.cargo
-    check_default_graph(cargo, repo)
-    legacy_rng = tuple((name, version, "MIT") for name, version in OPTIONAL_RNG_VERSIONS)
-    duplicates = legacy_rng + (
-        ("rand", "0.9.4", "MIT"), ("rand", "0.10.3", "MIT"),
-        ("rand_chacha", "0.9.0", "MIT"),
+    check_graph(cargo, repo)
+    check_graph(cargo, repo, workspace=True)
+    retired_rng = (
+        ("rand", "0.8.6", "MIT"), ("rand", "0.9.4", "MIT"),
+        ("rand_chacha", "0.3.1", "MIT"), ("rand_chacha", "0.9.0", "MIT"),
+        ("rand_core", "0.9.5", "MIT"), ("ppv-lite86", "0.2.21", "MIT"),
+    )
+    # Retirement covers each old series, including a later patch release.
+    later_retired_rng = tuple((name, next_patch(version), license_id)
+                              for name, version, license_id in retired_rng)
+    reviewed_rng_skips = (("rand_core", "0.6.4"), ("getrandom", "0.2.17"),
+                          ("getrandom", "0.3.4"))
+    duplicates = tuple((name, version, "MIT") for name, version in reviewed_rng_skips) + (
+        ("rand_core", "0.10.1", "MIT"), ("getrandom", "0.4.3", "MIT"),
     )
     with tempfile.TemporaryDirectory(prefix="zeroclaw-dependency-policy-") as temporary:
         directory = Path(temporary)
         memcore = next(package for package in REVIEWED_LICENSES if package[0] == "memcore")
-        check_default_rejection(cargo, repo, directory, "windows-only-agpl-is-denied",
-                                (memcore,), expected_agpl=(memcore[:2],), windows_only=True)
-        check_default_rejection(cargo, repo, directory, "default-legacy-rng-is-denied",
-                                legacy_rng, expected_rng=OPTIONAL_RNG_VERSIONS)
+        check_graph_rejection(cargo, repo, directory, "windows-only-agpl-is-denied",
+                              (memcore,), expected_agpl=(memcore[:2],),
+                              table="target.'cfg(windows)'.dependencies")
+        check_graph_rejection(cargo, repo, directory, "default-retired-rng-is-denied",
+                              retired_rng, expected_rng=tuple(p[:2] for p in retired_rng))
+        check_graph_rejection(cargo, repo, directory, "workspace-optional-windows-rng-is-denied",
+                              (memcore, *later_retired_rng), workspace=True, optional=True,
+                              table="target.'cfg(windows)'.dependencies",
+                              expected_rng=tuple(p[:2] for p in later_retired_rng))
+        check_graph_rejection(cargo, repo, directory, "workspace-dev-rng-is-denied",
+                              (retired_rng[-1],), workspace=True, table="dev-dependencies",
+                              expected_rng=(retired_rng[-1][:2],))
         cases = (
             ("reviewed-licenses", REVIEWED_LICENSES, "licenses", {}),
             ("unreviewed-license-packages", (
@@ -240,17 +274,25 @@ def main():
             ), "licenses", {"rejected": 4}),
             ("reviewed-duplicate-versions", duplicates, "bans", {}),
             ("duplicate-skips-do-not-cover-new-versions", tuple(
-                (name, next_patch(version) if (name, version) in OPTIONAL_RNG_VERSIONS else version,
+                (name, next_patch(version) if (name, version) in reviewed_rng_skips else version,
                  license_id) for name, version, license_id in duplicates
             ), "bans", {"duplicate": 2}),
         )
         for name, packages, check, expected in cases:
             check_case(cargo, config, repo, directory, name, packages, check, expected)
+        # Separate pairs ensure that restoring any one retired skip fails its
+        # own probe; a third unskipped version must not mask that regression.
+        for name, retired, other in (
+            ("rand", "0.8.6", "0.10.3"), ("rand", "0.9.4", "0.10.3"),
+            ("rand_chacha", "0.3.1", "0.9.0"), ("rand_core", "0.9.5", "0.10.1"),
+        ):
+            check_case(cargo, config, repo, directory, f"retired-{name}-{retired}-skip-is-denied",
+                       ((name, retired, "MIT"), (name, other, "MIT")), "bans", {"duplicate": 1})
         check_case(cargo, config, repo, directory, "unversioned-path-is-denied",
                    (("zeroclaw-unversioned-path", "1.0.0", "MIT"),),
                    "bans", {"wildcard": 1}, wildcard=True)
-    print("Dependency policy: real default graph, 2 default graph rejection probes, "
-          "and 7 cargo-deny boundary cases passed")
+    print("Dependency policy: both real graphs, graph rejection probes, "
+          "and cargo-deny boundary cases passed")
 
 
 if __name__ == "__main__":

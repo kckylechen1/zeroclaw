@@ -2,10 +2,6 @@
 # https://rustsec.org/
 
 [advisories]
-# Keep the retained exception and its reason synchronized with deny.toml.
-# Track replacement in https://github.com/kckylechen1/zeroclaw/issues/432
-# and https://github.com/kckylechen1/zeroclaw/issues/647.
-# Remove the exception from both files when its consumer no longer needs it.
-ignore = [
-    "RUSTSEC-2026-0441",  # pin-utils 0.1.0 unmaintained; retained email-tools -> async-imap 0.11.3; checked async-imap 0.12.0 still depends on pin-utils; tracking #432/#647
-]
+# No retained advisory exceptions. Keep any future exception and its consumer
+# and removal condition synchronized with deny.toml (tracking #432/#647).
+ignore = []
