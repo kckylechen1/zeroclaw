@@ -1386,6 +1386,160 @@ fn relocated_image_marker_identifies_producing_call_with_identical_captions() {
     }
 }
 
+/// Owner-invoked acceptance, separate from hermetic CI. Four bounded model
+/// calls use only generated color squares and a synthetic counter. Credentials
+/// are supplied in the child process environment and are never logged here.
+#[tokio::test]
+#[ignore = "requires owner-authorized xAI API usage and explicit environment opt-in"]
+async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
+    assert_eq!(
+        std::env::var("ZEROCLAW_LIVE_TOOL_IMAGES").as_deref(),
+        Ok("1")
+    );
+    let model = std::env::var("ZEROCLAW_LIVE_TOOL_IMAGES_MODEL")
+        .expect("an explicitly selected model is required");
+    let key = std::env::var("ZEROCLAW_LIVE_TOOL_IMAGES_API_KEY")
+        .expect("an explicitly supplied API credential is required");
+    assert!(!key.trim().is_empty());
+    let provider = OpenAiCompatibleModelProvider::builder("live-image-acceptance")
+        .display_name("xAI")
+        .base_url("https://api.x.ai/v1")
+        .credential(Some(&key))
+        .auth_style(AuthStyle::Bearer)
+        .vision(true)
+        .max_tokens(Some(512))
+        .timeout_secs(90)
+        .build();
+    // Valid 128x128 PNGs; their colors occur only in the image bytes, not in
+    // prompts, tool descriptions, filenames or tool-result captions.
+    let images = [
+        "iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABWklEQVR4nO3OQQ0AMBAEofVv+iqDxzRBALvtg/wgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwg7gEgaMOyrMtNTwAAAABJRU5ErkJggg==",
+        "iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABWklEQVR4nO3OQQ0AMBAEofVv+iqDxzRBANvuo/wgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwgzg/i/CDOD+L8IM4P4vwg7QGY6MOyYa3yZwAAAABJRU5ErkJggg==",
+    ];
+    for parallel in [false, true] {
+        let names: &[&str] = if parallel {
+            &["snapshot_a", "status", "snapshot_b"]
+        } else {
+            &["snapshot_a"]
+        };
+        let tools: Vec<_> = names.iter().map(|name| serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": if *name == "status" { "Read the synthetic counter" } else { "Read a synthetic snapshot" },
+                "parameters": { "type": "object", "properties": {}, "additionalProperties": false }
+            }
+        })).collect();
+        let prompt = format!(
+            "Call each of these tools exactly once in one parallel tool-call batch: {}. \
+             After receiving their results, identify each snapshot's dominant color from \
+             its image. Return only a JSON object keyed by tool name, with lowercase \
+             color strings for snapshots and the integer counter value for status. \
+             Do not call tools again after receiving results.",
+            names.join(", ")
+        );
+        let mut messages = vec![ChatMessage::user(prompt)];
+        let first = provider
+            .chat_with_tools(&messages, &tools, &model, None)
+            .await;
+        assert!(
+            first.is_ok(),
+            "live tool-request phase failed; diagnostics withheld"
+        );
+        let first = first.unwrap();
+        let mut actual: Vec<_> = first
+            .tool_calls
+            .iter()
+            .map(|call| call.name.as_str())
+            .collect();
+        actual.sort_unstable();
+        let mut expected = names.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "model must request the complete named batch"
+        );
+        messages.push(ChatMessage::assistant(
+            serde_json::json!({
+                "content": first.text.unwrap_or_default(),
+                "tool_calls": first.tool_calls.clone(),
+                "reasoning_content": first.reasoning_content,
+            })
+            .to_string(),
+        ));
+        for call in &first.tool_calls {
+            let content = match call.name.as_str() {
+                "snapshot_a" => format!(
+                    "Synthetic snapshot\n[IMAGE:data:image/png;base64,{}]",
+                    images[0]
+                ),
+                "snapshot_b" => format!(
+                    "Synthetic snapshot\n[IMAGE:data:image/png;base64,{}]",
+                    images[1]
+                ),
+                "status" => "counter=7".to_string(),
+                _ => unreachable!("the requested batch was checked above"),
+            };
+            messages.push(ChatMessage::tool(
+                serde_json::json!({
+                    "tool_call_id": call.id, "content": content
+                })
+                .to_string(),
+            ));
+        }
+        let wire = serde_json::to_value(provider.build_raw_native_tool_chat_request(
+            &messages,
+            Some(&tools),
+            &model,
+            None,
+            true,
+        ))
+        .unwrap();
+        let wire_messages = wire["messages"].as_array().unwrap();
+        assert_eq!(wire_messages.last().unwrap()["role"], "user");
+        assert_eq!(
+            wire_messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .count(),
+            names.len()
+        );
+        assert!(
+            wire_messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .all(|message| message["content"].is_string())
+        );
+        let second = provider
+            .chat_with_tools(&messages, &tools, &model, None)
+            .await;
+        assert!(
+            second.is_ok(),
+            "live image-result phase failed; diagnostics withheld"
+        );
+        let second = second.unwrap();
+        assert!(
+            second.tool_calls.is_empty(),
+            "model must answer after the tool batch"
+        );
+        let answer: serde_json::Value = serde_json::from_str(second.text.as_deref().unwrap_or(""))
+            .expect("synthetic result must be JSON");
+        let expected = if parallel {
+            serde_json::json!({ "snapshot_a": "red", "snapshot_b": "blue", "status": 7 })
+        } else {
+            serde_json::json!({ "snapshot_a": "red" })
+        };
+        assert_eq!(
+            answer, expected,
+            "images must retain producing-tool attribution"
+        );
+        println!(
+            "live tool-image acceptance: {} PASS",
+            if parallel { "parallel" } else { "ordinary" }
+        );
+    }
+}
+
 #[test]
 fn convert_messages_for_native_tool_result_resolves_name_from_tool_name_map() {
     let history_json = serde_json::json!({
