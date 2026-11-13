@@ -62,32 +62,9 @@ cargo test -- tools::file_read
 cargo test -- tools::file_write
 ```
 
-## Container Security
+## Tool sandbox isolation
 
-ZeroClaw Docker images follow CIS Docker Benchmark best practices:
-
-| Control | Implementation |
-|---------|----------------|
-| **4.1 Non-root user** | Container runs as UID 65534 (distroless nonroot) |
-| **4.2 Minimal base image** | `gcr.io/distroless/cc-debian12:nonroot` — no shell, no package manager |
-| **4.6 HEALTHCHECK** | Not applicable (stateless CLI/gateway) |
-| **5.25 Read-only filesystem** | Supported via `docker run --read-only` with `/workspace` volume |
-
-### Verifying Container Security
-
-```bash
-# Build and verify non-root user
-docker build -t zeroclaw .
-docker inspect --format='{{.Config.User}}' zeroclaw
-# Expected: 65534:65534
-
-# Run with read-only filesystem (production hardening)
-docker run --read-only -v /path/to/workspace:/workspace zeroclaw gateway
-```
-
-### CI Enforcement
-
-The `docker` job in `.github/workflows/checks-on-pr.yml` automatically verifies:
-1. Container does not run as root (UID 0)
-2. Runtime stage uses `:nonroot` variant
-3. Explicit `USER` directive with numeric UID exists
+The native application can run tools in a Docker sandbox. See the
+[sandbox configuration guide](docs/book/src/security/sandboxing.md) for image,
+resource and permission controls. Product container images and their release
+workflows have been retired; they are not part of this fork's security claims.

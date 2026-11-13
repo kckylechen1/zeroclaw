@@ -170,13 +170,6 @@ pub fn dist_target_exclusions(
     parse_target_exclusions(pkg.metadata.get("zeroclaw"))
 }
 
-/// Features whose build needs system libraries/tooling absent from the minimal
-/// static container image, excluded from `Selection::All`. Read from
-/// `[package.metadata.zeroclaw] container_excluded_features`; never shadowed.
-pub fn container_excluded_features(pkg: &cargo_metadata::Package) -> Vec<String> {
-    read_registry_list(pkg, "container_excluded_features")
-}
-
 fn read_registry_list(pkg: &cargo_metadata::Package, key: &str) -> Vec<String> {
     pkg.metadata
         .get("zeroclaw")
@@ -372,12 +365,11 @@ fn resolve_feature_list_from_package(
 ) -> anyhow::Result<Vec<String>> {
     let all_features: Vec<String> = root.features.keys().cloned().collect();
     let non_row = non_row_features(meta, root);
-    let container_excluded = container_excluded_features(root);
+
     let ctx = FeatureCtx {
         graph: &root.features,
         all: &all_features,
         non_row: &non_row,
-        container_excluded: &container_excluded,
     };
     selection.to_feature_list(&ctx)
 }
@@ -448,14 +440,13 @@ pub fn resolve(manifest_dir: &Path, selection: &Selection) -> anyhow::Result<Res
 
     let all_features: Vec<String> = root.features.keys().cloned().collect();
     let non_row = non_row_features(&meta, root);
-    let container_excluded = container_excluded_features(root);
+
     let default_features = expand_default(&root.features, &non_row);
 
     let ctx = FeatureCtx {
         graph: &root.features,
         all: &all_features,
         non_row: &non_row,
-        container_excluded: &container_excluded,
     };
     let cargo_flags = selection.to_cargo_flags(&ctx)?;
 
@@ -508,15 +499,14 @@ pub enum Selection {
     /// `channels-full` aggregate. Not offered by installer menus until a
     /// stable broad artifact lifecycle exists.
     DistBroad,
-    /// Every selectable feature (all − non_row − pure-alias). The docker
-    /// `:all-features` kitchen sink.
+    /// Every selectable feature (all − non_row − pure-alias).
     All,
     /// Explicit comma/space feature list (`--features X,Y`).
     Features(Vec<String>),
 }
 
 impl Selection {
-    /// Canonical short id for this selection (menu key, docker tag stem, etc.).
+    /// Canonical short id for this selection (menu key, package selection, etc.).
     /// Surfaces render from this - they never type the name literally.
     pub fn id(&self) -> &'static str {
         match self {
@@ -593,11 +583,7 @@ impl Selection {
             Selection::All => ctx
                 .all
                 .iter()
-                .filter(|f| {
-                    !ctx.non_row.contains(f)
-                        && !ctx.is_alias(f)
-                        && !ctx.container_excluded.contains(f)
-                })
+                .filter(|f| !ctx.non_row.contains(f) && !ctx.is_alias(f))
                 .cloned()
                 .collect(),
             Selection::Features(feats) => {
@@ -630,7 +616,6 @@ pub struct FeatureCtx<'a> {
     pub graph: &'a std::collections::BTreeMap<String, Vec<String>>,
     pub all: &'a [String],
     pub non_row: &'a [String],
-    pub container_excluded: &'a [String],
 }
 
 impl FeatureCtx<'_> {
@@ -784,12 +769,11 @@ mod tests {
         let pkg = workspace_root_package(&meta).unwrap();
         let all_features: Vec<String> = pkg.features.keys().cloned().collect();
         let non_row = non_row_features(&meta, pkg);
-        let container_excluded = container_excluded_features(pkg);
+
         let ctx = FeatureCtx {
             graph: &pkg.features,
             all: &all_features,
             non_row: &non_row,
-            container_excluded: &container_excluded,
         };
 
         let dist = resolve_feature_list(&root(), &Selection::Dist).unwrap();

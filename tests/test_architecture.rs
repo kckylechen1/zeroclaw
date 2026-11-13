@@ -11,6 +11,3 @@ mod config_save_isolation;
 
 #[path = "architecture/cli_fluent_coverage.rs"]
 mod cli_fluent_coverage;
-
-#[path = "architecture/container_release.rs"]
-mod container_release;

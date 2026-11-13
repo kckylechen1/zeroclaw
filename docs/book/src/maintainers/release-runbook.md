@@ -18,12 +18,12 @@ Last verified against the `v0.8.2` release cycle.
 2. [Open and merge a version bump PR](#step-2-bump-and-merge-the-version-pr)
 3. [Dry-run the release workflows locally with `act`](#step-3-dry-run-the-release-workflows-locally-with-act)
 4. [Trigger the `Release Stable` workflow via manual dispatch](#step-4-trigger-the-release)
-5. [Approve the two environment gates when prompted](#step-5-approve-the-environment-gates)
+5. [Approve the release environment gate when prompted](#step-5-approve-the-environment-gates)
 6. [Verify the release exists and assets are downloadable](#step-6-verify-the-release)
 7. [Versioned documentation deployment](#step-7-versioned-documentation-deployment)
 
-That is the entire process. Everything else (Docker and the website redeploy)
-runs automatically as downstream jobs. Homebrew Core
+That is the entire process. The website redeploy
+runs automatically as a downstream job. Homebrew Core
 detects the stable GitHub release through its own autobump service. You do not
 need to do anything for those unless a job explicitly fails or Homebrew's
 external bump remains stale.
@@ -62,8 +62,7 @@ Bump `workspace.package.version` in the workspace `Cargo.toml`, then run the two
 This updates README badges and workflow description
 examples, then regenerates every spec-driven install surface via
 `cargo generate installers`: setup.bat, `dist/aur/PKGBUILD`,
-`dist/scoop/zeroclaw.json`, `flake.nix`, the Dockerfile/Containerfile feature
-sets, and `dev/ci/docker-tags.toml`. Those surfaces derive their version and
+`dist/scoop/zeroclaw.json`, and `flake.nix`. Those surfaces derive their version and
 feature lists from the canonical install spec (`Cargo.toml` plus
 `[package.metadata.zeroclaw]`), so the bump keeps them in step automatically;
 never hand-edit a generated region. This script also refreshes the Nix git
@@ -115,7 +114,7 @@ Commit everything together:
 chore: bump version to vX.Y.Z
 ```
 
-If the PR also changes `[workspace.package] rust-version` or pinned Rust toolchains, treat it as a compatibility change, not just release plumbing. The PR should name the new MSRV, explain the source-build upgrade path, and show that CI, Docker, installer, and generated surfaces agree on the new floor before merge.
+If the PR also changes `[workspace.package] rust-version` or pinned Rust toolchains, treat it as a compatibility change, not just release plumbing. The PR should name the new MSRV, explain the source-build upgrade path, and show that CI, installer, and generated surfaces agree on the new floor before merge.
 
 Open a PR. Label it `type:ci`, `size:XS`, and any path labels the PR labeler
 adds. If the PR raises a toolchain floor, also apply `risk:high` and route it
@@ -255,7 +254,7 @@ the flag soup.
 `act` does **not** honor GitHub's environment-protection gates. With
 the maintainer's real `GITHUB_TOKEN` threaded into the run, a
 successful local invocation of a job that writes to GitHub (a `publish`
-that calls `gh release create`, a `docker` job that pushes to GHCR, a
+that calls `gh release create`, a
 `docs-deploy` that force-pushes `gh-pages`, a `daily-audit` that opens
 an issue) could perform the real-world side effect on first try.
 
@@ -267,7 +266,6 @@ Everything else is skipped with a logged reason:
 
 ```
 ==> skip release-stable-manual:publish (not on dry-run-safe allowlist)
-==> skip release-stable-manual:docker (not on dry-run-safe allowlist)
 ==> skip release-stable-manual:redeploy-website (not on dry-run-safe allowlist)
 ==> skip docs-deploy:deploy (not on dry-run-safe allowlist)
 ==> skip daily-audit:advisories (not on dry-run-safe allowlist)
@@ -299,7 +297,7 @@ not real defects:
 
 - Jobs that depend on a real release tag (`publish` creating a GitHub
   Release).
-- Environment-gated jobs (`publish`, `docker`): the
+- Environment-gated jobs (`publish`): the
   approval UI doesn't exist locally.
 - OIDC-based federated identity tokens.
 
@@ -333,15 +331,14 @@ re-trigger. Do not try to work around it.
 
 ## Step 5: Approve the environment gates
 
-Two jobs are gated by GitHub environment protection rules. When each becomes
+The publish job is gated by GitHub environment protection rules. When it becomes
 pending you will see a **"Waiting for review"** banner in the workflow run.
 
-Approve both when they appear:
+Approve it when it appears:
 
 | Environment | Job | What it does |
 |---|---|---|
 | `github-releases` | `publish` | Creates the GitHub Release and uploads assets |
-| `docker` | `docker` | Pushes images to GHCR |
 
 If you miss the approval window and a job times out, re-run only the failed
 job from the workflow run page; you do not need to restart from scratch.
@@ -357,19 +354,13 @@ Once `publish` completes, confirm:
 [ ] Release notes are non-empty
 [ ] SHA256SUMS asset is present and non-empty
 [ ] At least one binary archive is downloadable (spot-check linux x86_64)
-[ ] Prebuilt Docker and generated Docker matrix jobs are green
 ```
 
 `CHANGELOG-next.md` is intentionally left on `master` after the release: the
 publish job only reads it as the release body, it does not delete it. The next
 release cycle overwrites it, so no manual cleanup is required.
 
-For the normal `workflow_dispatch` path, Docker Publish runs synchronously
-inside the stable release workflow. You do not need a separate Docker check if
-all release jobs are green. If a maintainer instead starts the release by
-pushing a `vX.Y.Z` tag, Docker Publish starts as a separate tag-triggered run;
-confirm that sibling run is green before treating container publication as
-complete. Scoop and AUR need separate attention only when their jobs show red.
+Scoop and AUR need separate attention only when their jobs show red.
 Homebrew Core is external to this workflow; its
 [autobump service](https://docs.brew.sh/Autobump) checks eligible formulae on
 its own schedule.

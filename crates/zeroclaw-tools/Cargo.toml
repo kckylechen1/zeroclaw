@@ -58,9 +58,8 @@ webpki-roots = "1.0.6"
 # Concrete SaaS/vendor business tool family (Composio). Default-on so the standard
 # build is unchanged; slim companion builds drop this feature to keep the
 # family out of the compiled surface.
-integrations-saas = []
 email-tools = ["dep:async-imap", "dep:mail-parser"]
-default = ["integrations-saas", "email-tools"]
+default = ["email-tools"]
 # Exposes cross-crate test-only constructors (e.g.
 # `McpRegistry::for_test_with_server_count`) so downstream test
 # suites can build registry fixtures without spawning real stdio

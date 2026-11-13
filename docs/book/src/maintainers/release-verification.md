@@ -67,37 +67,6 @@ cosign verify-blob \
 
 ---
 
-## Container Images
-
-ZeroClaw container images on GHCR are signed by digest using the same keyless model.
-
-### Verify a container image
-
-```bash
-IMAGE="ghcr.io/zeroclaw-labs/zeroclaw"
-TAG="v1.5.0"
-
-cosign verify \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  --certificate-identity-regexp "^https://github.com/zeroclaw-labs/zeroclaw/" \
-  "${IMAGE}:${TAG}"
-```
-
-### Verify by digest (recommended for air-gapped or pinned deployments)
-
-```bash
-# Resolve the digest first
-DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${TAG}" \
-  --format '{{json .Manifest}}' | jq -r '.digest')
-
-cosign verify \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  --certificate-identity-regexp "^https://github.com/zeroclaw-labs/zeroclaw/" \
-  "${IMAGE}@${DIGEST}"
-```
-
----
-
 ## SBOM
 
 Two SBOM files are published alongside each release:

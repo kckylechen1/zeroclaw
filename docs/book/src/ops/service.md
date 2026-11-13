@@ -130,20 +130,6 @@ launchctl load ~/Library/LaunchAgents/com.zeroclaw.daemon.plist
 
 </div>
 
-### Docker
-
-Compose:
-
-```yaml
-services:
-  zeroclaw:
-    image: ghcr.io/zeroclaw-labs/zeroclaw:latest
-    mem_limit: 2g
-    cpus: 2.0
-    ulimits:
-      nofile: 16384
-```
-
 ## Running multiple workspaces
 
 Each ZeroClaw daemon owns one config directory (which contains its `data/` dir). To run two side by side, give each its own config directory via `--config-dir` (or the `ZEROCLAW_CONFIG_DIR` env var):

@@ -25,8 +25,6 @@ This fork is maintained by `kckylechen1`; review routing is in [CODEOWNERS](../C
 |---|---|---|
 | `ci.yml` | `pull_request` → any base; `push` → `master`; `merge_group` (reserved) | Scope classification, docs validation, selected Rust/build checks, and the aggregate result; trusted code pushes also warm Rust caches. The reserved trigger does not enable a queue. |
 | `release-stable-manual.yml` | `workflow_dispatch`, tag push `v*` | Stable release (manual, version-gated) |
-| `docker-publish.yml` | `workflow_call`, `workflow_dispatch`, tag push `v*` | Build, sign, and scan the generated Docker variant matrix |
-| `trivy-scheduled.yml` | `workflow_dispatch`; weekly schedule | Re-scan published `dist` and `default-features` images for new CVEs |
 | `cross-platform-build-manual.yml` | `workflow_dispatch` | Full platform build matrix (manual smoke check) |
 | `cross-platform-clippy.yml` | `pull_request` when runtime, infra, or this workflow changes; `workflow_dispatch`; weekly schedule | Advisory full-workspace macOS/Windows Clippy, including test targets; outside the required PR gate |
 | `docs-deploy.yml` | `push` → `master` (book, `xtask/`, `locales.toml` paths); tag push `v*`; nightly schedule; `workflow_dispatch` | Build and publish the versioned mdBook + rustdoc site to `gh-pages` |
@@ -41,8 +39,8 @@ This fork is maintained by `kckylechen1`; review routing is in [CODEOWNERS](../C
 | PR opened or updated against `master` or a temporary parent branch | `ci.yml`; applicable docs/code checks and aggregate policy are described below. Runtime, infra, or cross-platform workflow changes also trigger `cross-platform-clippy.yml`. |
 | `merge_group` | Reserved CI compatibility only. GitHub's merge-queue eligibility does not currently include this user-owned repository. |
 | Push to `master` | `ci.yml` (scope-selected checks and docs style; code changes also warm trusted Rust caches; repository structure and Nix checks remain PR-only) and, when the book changes, `docs-deploy.yml` |
-| Manual dispatch | `cross-platform-build-manual.yml`, `cross-platform-clippy.yml`, `docker-publish.yml`, `trivy-scheduled.yml`, or `release-stable-manual.yml` |
-| Tag push `vX.Y.Z` | `release-stable-manual.yml` (full release pipeline) and `docker-publish.yml` (generated variant matrix) |
+| Manual dispatch | `cross-platform-build-manual.yml`, `cross-platform-clippy.yml`, or `release-stable-manual.yml` |
+| Tag push `vX.Y.Z` | `release-stable-manual.yml` (full release pipeline) |
 
 There is no automatic release on merge. `ci.yml` does run after trusted
 `master` pushes so post-merge Quality Gate runs can seed Rust caches for later
@@ -86,11 +84,10 @@ for the full procedure. In summary:
 2. Version bump PR is merged.
 3. Maintainer triggers `release-stable-manual.yml` via `workflow_dispatch`
    with the version number, or pushes an annotated tag `vX.Y.Z`.
-4. Workflow builds all targets, creates the GitHub Release, pushes the prebuilt
-   Docker images, calls the generated Docker variant matrix, updates Scoop and
+4. Workflow builds all targets, creates the GitHub Release, updates Scoop and
    AUR, and sends announcements. Homebrew Core discovers the release through
    its own autobump service.
-5. Maintainer approves the two environment gates (`github-releases`, `docker`)
+5. Maintainer approves the `github-releases` environment gate
    when prompted.
 
 ### 3) Full Platform Build (manual)
@@ -140,8 +137,6 @@ flowchart TD
   A["workflow_dispatch: version=X.Y.Z\nor tag push vX.Y.Z"] --> V["validate\nsemver · Cargo.toml match · tag uniqueness"]
   V --> BLD["build all targets"]
   BLD --> PUB["publish\nGitHub Release · SHA256SUMS"]
-  BLD --> DOC["docker\nprebuilt :vX.Y.Z · :latest · :debian"]
-  PUB & DOC --> MATRIX["docker-publish.yml\nminimal · default-features · dist · all-features"]
   PUB -. release detected .-> HB["homebrew core\nofficial autobump"]
 ```
 

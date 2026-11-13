@@ -13,7 +13,7 @@ Where to start:
 - New to ZeroClaw? → [Quickstart](./getting-started/quickstart.md)
 - Just want it running fast without safety prompts? → [YOLO mode](./getting-started/yolo.md)
 - Controlling what the agent is allowed to do? → [Security & Autonomy](./security/overview.md)
-- Installing on a specific platform? → [Linux](./setup/linux.md) · [macOS](./setup/macos.md) · [Windows](./setup/windows.md) · [Docker](./setup/container.md)
+- Installing on a specific platform? → [Linux](./setup/linux.md) · [macOS](./setup/macos.md) · [Windows](./setup/windows.md)
 - Understanding the architecture? → [Architecture overview](./architecture/overview.md)
 - Wiring up a chat platform? → [Channels](./channels/overview.md)
 - Pointing it at an LLM? → [Model Providers](./providers/overview.md)

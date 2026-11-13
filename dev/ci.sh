@@ -11,31 +11,12 @@ else
 fi
 
 compose_cmd=(docker compose -f "$COMPOSE_FILE")
-SMOKE_CACHE_DIR="${SMOKE_CACHE_DIR:-.cache/buildx-smoke}"
 
 run_in_ci() {
   local cmd="$1"
   "${compose_cmd[@]}" run --rm local-ci bash -c "./scripts/ci/toolchain_gate.sh && $cmd"
 }
 
-build_smoke_image() {
-  if docker buildx version >/dev/null 2>&1; then
-    mkdir -p "$SMOKE_CACHE_DIR"
-    local build_args=(
-      --load
-      --target dev
-      --cache-to "type=local,dest=$SMOKE_CACHE_DIR,mode=max"
-      -t zeroclaw-local-smoke:latest
-      .
-    )
-    if [ -f "$SMOKE_CACHE_DIR/index.json" ]; then
-      build_args=(--cache-from "type=local,src=$SMOKE_CACHE_DIR" "${build_args[@]}")
-    fi
-    docker buildx build "${build_args[@]}"
-  else
-    DOCKER_BUILDKIT=1 docker build --target dev -t zeroclaw-local-smoke:latest .
-  fi
-}
 
 print_help() {
   cat <<'EOF'
@@ -57,8 +38,7 @@ Commands:
   audit         Run cargo audit (container only)
   deny          Run cargo deny check (container only)
   security      Run cargo audit + cargo deny (container only)
-  docker-smoke  Build and verify runtime image (host docker daemon)
-  all           Run lint, test, build, security, docker-smoke
+  all           Run lint, test, build, security
   clean         Remove local CI containers and volumes
 EOF
 }
@@ -129,10 +109,6 @@ case "$1" in
     run_in_ci "cargo audit"
     ;;
 
-  docker-smoke)
-    build_smoke_image
-    docker run --rm zeroclaw-local-smoke:latest --version
-    ;;
 
   all)
     # The `test` arm above and the `cargo test` invocation below both use
@@ -145,8 +121,6 @@ case "$1" in
     run_in_ci "cargo build --release --locked --verbose"
     run_in_ci "cargo deny check licenses sources"
     run_in_ci "cargo audit"
-    build_smoke_image
-    docker run --rm zeroclaw-local-smoke:latest --version
     ;;
 
   clean)

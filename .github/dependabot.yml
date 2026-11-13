@@ -51,7 +51,7 @@ updates:
           - patch
 
   - package-ecosystem: docker
-    directory: "/"
+    directory: "/dev/ci"
     schedule:
       interval: daily
     target-branch: master

@@ -102,10 +102,6 @@ Runs `cargo deny check advisories` daily at 09:00 UTC against the dependency tre
 
 Runs `npm audit --audit-level=high` daily at 09:23 UTC against `web/package-lock.json`. Opens one deduplicated `security` + `dependencies` issue when high-severity npm advisories affect the committed web lockfile.
 
-### Weekly Trivy Image Scan (`trivy-scheduled.yml`)
-
-Scans the published `dist` and `default-features` GHCR images every Saturday and uploads HIGH/CRITICAL findings to the Security tab as SARIF. The scan is report-first (`exit-code: 0` for findings), but a missing expected image fails the job before Trivy setup with the absent tag and the owning publisher workflow named in the error.
-
 ### PR Path Labeler (`pr-path-labeler.yml`)
 
 Auto-applies path and scope labels based on changed files. It runs on PR open, reopen, and every pushed update to the PR branch. Because `sync-labels: true` is enabled, labels defined in `.github/labeler.yml` are recalculated from the current PR file set.
@@ -121,16 +117,6 @@ Runs on every PR open/edit/synchronize. Runs the validator unit tests (`scripts/
 ### Deploy mdBook docs to Pages (`docs-deploy.yml`)
 
 Triggered on tag push, on `master` pushes that touch `docs/book/`, `xtask/`, `locales.toml`, or the deploy workflow itself, nightly (to refresh code-derived pages such as rustdoc), and on `workflow_dispatch`; builds and publishes versioned docs to the `gh-pages` branch. The PR's read-only `Docs Build` job is separate from this publisher. See [Release Runbook → Versioned documentation deployment](./release-runbook.md#step-7-versioned-documentation-deployment) for the version-floor and bootstrap rules.
-
-### Docker Image PR Check (`docker-image-pr.yml`)
-
-Runs only when Docker image or release-Docker context files change. It prepares a smoke `docker-ctx` with the same helper used by the stable release workflow, then builds the default prebuilt image and the Debian compatibility prebuilt image from `Dockerfile.ci` without pushing either image. This catches image dependency and `COPY` path breakage before release without giving PR runs registry write permission or running on every PR.
-
-### Docker Publish (`docker-publish.yml`)
-
-Builds, signs, and scans the generated four-variant matrix from `dev/ci/docker-tags.toml`: `minimal`, `default-features`, `dist`, and `all-features`. A human-created `v*` tag starts this workflow directly. A stable release started with `workflow_dispatch` creates its tag with `GITHUB_TOKEN`, which does not emit another tag-push event, so `release-stable-manual.yml` calls Docker Publish synchronously at the immutable release tag after the canonical release and Docker jobs succeed.
-
-This matrix supplements rather than replaces the stable release's prebuilt `latest`, versioned, and `debian` images. The two paths use different build inputs and publish distinct tags.
 
 ## Manual and Advisory Workflows
 
@@ -156,7 +142,7 @@ Ordinary prose PRs do not trigger this workflow. It remains separate advisory co
 
 ### Release Stable (`release-stable-manual.yml`)
 
-Manual trigger for the full release pipeline. Builds all targets, creates the GitHub Release, pushes the prebuilt `latest`, versioned, and `debian` Docker images to GHCR, calls the generated Docker variant matrix at the release tag, and triggers the website redeploy. Homebrew Core detects new releases through its own autobump service. The workflow declares `github-releases` and `docker` environments; their required reviewers and other protection settings must be verified in the target repository.
+Manual trigger for the full release pipeline. Builds all targets, creates the GitHub Release, and triggers the website redeploy. Homebrew Core detects new releases through its own autobump service. The workflow declares the `github-releases` environment; its required reviewers and other protection settings must be verified in the target repository.
 
 See the [Release Runbook](./release-runbook.md) for the full procedure.
 
@@ -171,9 +157,9 @@ authoritative automation.
 | Secret | Used by |
 |---|---|
 | `WEBSITE_REPO_PAT` | `release-stable-manual.yml` (triggers the website repo redeploy) |
-| `GITHUB_TOKEN` (automatic) | All workflows that push commits, open PRs, or push images to GHCR |
+| `GITHUB_TOKEN` (automatic) | Workflows that push commits or open PRs |
 
-Docker images push to GHCR using the automatic `GITHUB_TOKEN`; there is no separate registry token. The release pipeline does not publish to crates.io, so no `CARGO_REGISTRY_TOKEN` is required.
+The release pipeline does not publish to crates.io, so no `CARGO_REGISTRY_TOKEN` is required.
 
 ## Build cache behavior
 
@@ -207,21 +193,15 @@ All third-party refs are pinned to a full commit SHA with a trailing version com
 | Action | Used in | Purpose |
 |---|---|---|
 | `actions/checkout` (`v6.0.2`) | Most workflows | Repository checkout |
-| `actions/cache` (`v4.2.3`, `v5.0.5`) | `docker-image-pr.yml` | Generic dependency and Trivy database caching |
 | `actions/setup-node` (`v6.4.0`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml` | Node toolchain for the web-dashboard build |
-| `actions/upload-artifact` (`v7.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `docker-publish.yml`, `trivy-scheduled.yml`, `monthly-outdated.yml` | Upload build artifacts, Trivy SARIF handoff artifacts and monthly dependency scan reports |
-| `actions/download-artifact` (`v8.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `docker-publish.yml` | Download build artifacts and Trivy SARIF handoff artifacts |
+| `actions/upload-artifact` (`v7.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `monthly-outdated.yml` | Upload build artifacts and monthly dependency scan reports |
+| `actions/download-artifact` (`v8.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml` | Download build artifacts |
 | `actions/labeler` (`v6.1.0`) | `pr-path-labeler.yml` | Apply path/scope labels from `.github/labeler.yml` |
 | `dtolnay/rust-toolchain` (`stable`) | `ci.yml`, `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `cross-platform-clippy.yml`, `daily-audit.yml`, `docs-deploy.yml` | Install Rust toolchain |
 | `Swatinem/rust-cache` (`v2.9.1`) | `ci.yml`, `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `cross-platform-clippy.yml`, `docs-deploy.yml` | Cargo build/dependency caching |
-| `docker/setup-buildx-action` (`v3.11.1`, `v4.0.0`) | `release-stable-manual.yml`, `docker-publish.yml` | Docker Buildx setup |
-| `docker/login-action` (`v3.4.0`, `v4.1.0`) | `release-stable-manual.yml`, `docker-publish.yml`, `trivy-scheduled.yml` | GHCR authentication |
-| `docker/build-push-action` (`v6.18.0`, `v7.1.0`) | `release-stable-manual.yml`, `docker-publish.yml` | Multi-platform image build and push |
-| `sigstore/cosign-installer` (`v3.8.1`) | `release-stable-manual.yml`, `docker-publish.yml` | Install cosign for keyless signing of release assets and container images |
+| `sigstore/cosign-installer` (`v3.8.1`) | `release-stable-manual.yml` | Install cosign for keyless signing of release assets |
 | `anchore/sbom-action` (`v0.17.9`) | `release-stable-manual.yml` | Generate SPDX + CycloneDX SBOMs for each release |
 | `slsa-framework/slsa-github-generator` (`v2.1.0`) | `release-stable-manual.yml` | Reusable workflow that produces SLSA L2 provenance for release artifacts |
-| `aquasecurity/trivy-action` (`v0.36.0`) | `docker-image-pr.yml`, `docker-publish.yml`, `trivy-scheduled.yml` | Report-only container vulnerability scanning |
-| `github/codeql-action/upload-sarif` (`v3.36.2`) | `docker-publish.yml`, `trivy-scheduled.yml` | Upload Trivy SARIF reports to the Security tab |
 | `github/codeql-action/init` (`v3`) | `ci-code-analysis.yml` | Initialize CodeQL Rust analysis |
 | `github/codeql-action/analyze` (`v3`) | `ci-code-analysis.yml` | Upload CodeQL SARIF to the Security tab |
 
@@ -233,12 +213,9 @@ Candidate allowlist patterns for that source inventory, when `selected` mode is 
 actions/*
 dtolnay/rust-toolchain@*
 Swatinem/rust-cache@*
-docker/*
 sigstore/cosign-installer@*
 anchore/sbom-action@*
 slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@*
-aquasecurity/trivy-action@*
-github/codeql-action/upload-sarif@*
 github/codeql-action/init@*
 github/codeql-action/analyze@*
 ```
@@ -265,7 +242,6 @@ Any PR that adds or changes a `uses:` action source should state its allowlist i
 - Keep `CI Required Gate` deterministic and small. A new job needs a clear quality argument and a matching expected-result policy.
 - All third-party action refs must be pinned to a full commit SHA (per the allowlist policy above).
 - Keep scope decisions and expected job results in `scripts/ci/`. Call shared helpers from workflows and local entrypoints instead of copying their decisions. Review changes to the classifier and aggregate together.
-- Keep `scripts/ci/prepare_docker_context.sh`, `docker-image-pr.yml`, and the Docker job in `release-stable-manual.yml` aligned so PR validation exercises the same context shape the release workflow publishes.
 - Run both docs gates with an explicit valid base before pushing committed documentation changes. Preserve the source gate's stated coverage limits and use the real docs build for selected rendering inputs.
 
 ## Emergency rollback

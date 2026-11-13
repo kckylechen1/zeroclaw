@@ -16,7 +16,7 @@ Every new default capability must evaluate all 6 extension planes:
 
 1. **Skill**: Can this capability be authored as a prompt/instruction skill with local workspace scripts or tools?
    - *If yes*: Deliver as a Skill bundle, not a Rust kernel tool.
-2. **MCP / Optional Integration**: Can this capability run as an MCP server or optional first-party crate/feature (`integrations-saas`, etc.)?
+2. **MCP / Optional Integration**: Can this capability run as an MCP server or optional first-party crate or feature?
    - *If yes*: Deliver as an external MCP server or feature-gated optional adapter.
 3. **Node Capability (#55)**: Does this capability interact with physical device sensors, local hardware, or peripheral peripherals?
    - *If yes*: Route to the Node capability fabric via `/ws/nodes`.
