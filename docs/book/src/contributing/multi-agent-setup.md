@@ -95,6 +95,8 @@ Each database cleanup requires its own complete, durable archive and successful 
 
 The versioned `cascade/*.json` files contain the raw persisted columns and record IDs, including memory embeddings, ACP messages, tool arguments/results, events and the stored plan. SQLite binary values use a `sqlite_blob` byte array. Archive files are never overwritten: an identical snapshot can be retried, while a different or damaged existing file blocks cleanup. On Unix the archive directories and files are restricted to `0700` and `0600`.
 
+The legacy ACP database retains its historical schema, reads, plan lookup, live-session checks, rename and controlled deletion. Its unused session, transcript, token, plan, event and activity writers have been retired. Current ACP editor traffic uses gateway sessions; historical ACP records are not converted into new gateway session IDs or automatically revived.
+
 Memory backends without a guarded archive operation, including the current Tachi adapter, retain their original data and report that cleanup is unsupported. They do not fall back to an export followed by an unguarded bulk purge. Markdown workspace archival and retained conversation attribution follow the existing lifecycle. Config removal still commits before these side effects; this change does not create a cross-store transaction or restore the removed config on partial failure.
 
 Verify the applicable `workspace/`, `cascade/*.json`, and `manifest.json` entries instead of assuming the archive is complete. The CLI prints surfaced cascade warnings. The delete API also returns them, but the dashboard does not currently display them; dashboard operators must check the gateway logs as well.
