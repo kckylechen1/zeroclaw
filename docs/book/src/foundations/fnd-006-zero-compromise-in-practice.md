@@ -199,8 +199,10 @@ policy enforcement show real design intent. That intent needs to be understood b
 contributor who writes code near a trust boundary, and this RFC exists partly to give
 contributors the vocabulary to recognize where those boundaries are.
 
-The observability infrastructure is mature. OpenTelemetry, Prometheus, and DORA metrics
-are all implemented against a clean `Observer` trait. The infrastructure is in place.
+The current fork uses the `Observer` trait, optional Prometheus metrics, and
+`zeroclaw-log` for structured logs and event broadcast. Its in-process OpenTelemetry
+backend has been retired; DORA telemetry had no production emitter and is not supported.
+See [Logs & observability](../ops/observability.md) for the retained implementation.
 The teaching gap is in how contributors use it so that it actually helps when something
 goes wrong.
 
@@ -528,10 +530,11 @@ the system was asked to do and what it actually does.
 
 ### 4.6 Observability as Debuggability
 
-The observability infrastructure is mature: OpenTelemetry tracing, Prometheus metrics,
-DORA tracking, and a clean `Observer` trait are all in place. This is production-quality
-work. The teaching gap is between having the infrastructure and using it in a way that
-actually helps when something goes wrong, ideally before you know what went wrong.
+The current fork's `Observer`, optional Prometheus metrics, and `zeroclaw-log` path
+are described in [Logs & observability](../ops/observability.md). The in-process
+OpenTelemetry backend has been retired, and DORA telemetry had no production emitter.
+The teaching gap is between having the retained infrastructure and using it in a way
+that actually helps when something goes wrong, ideally before you know what went wrong.
 
 Consider two log messages. Both compile. Both pass CI. Both are syntactically correct.
 
