@@ -30,6 +30,13 @@ fn render_cargo_install(root: &Path) -> anyhow::Result<String> {
         "    # shellcheck disable=SC2086",
         "    cargo install --path . --locked --force $CARGO_FLAGS",
         "  fi",
+        "  if source_installs_acp_bridge \"Cargo.toml\"; then",
+        "    if [ \"$DRY_RUN\" = true ]; then",
+        "      info \"[dry-run] Would run: cargo install --path bridges/acp --locked --force --bin zeroclaw-acp-bridge\"",
+        "    else",
+        "      cargo install --path bridges/acp --locked --force --bin zeroclaw-acp-bridge",
+        "    fi",
+        "  fi",
     ]
     .join("\n"))
 }

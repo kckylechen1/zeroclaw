@@ -4719,6 +4719,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-bridge-acp"
+version = "0.8.3"
+dependencies = [
+ "futures-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 1.1.8+spec-1.1.0",
+ "uuid",
+ "zeroclaw-config",
+ "zeroclaw-log",
+ "zeroclaw-spawn",
+]
+
+[[package]]
 name = "zeroclaw-bridge-telegram"
 version = "0.8.3"
 dependencies = [
@@ -4752,12 +4770,14 @@ dependencies = [
  "chrono",
  "clap",
  "directories",
+ "fluent",
  "hex",
  "schemars",
  "serde",
  "serde_json",
  "sha2",
  "shellexpand",
+ "sys-locale",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -5042,7 +5062,6 @@ dependencies = [
  "directories",
  "encoding_rs",
  "filetime",
- "fluent",
  "futures-util",
  "glob",
  "hex",
@@ -5067,7 +5086,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "shellexpand",
- "sys-locale",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.21",
@@ -5199,7 +5217,6 @@ dependencies = [
  "dialoguer",
  "directories",
  "futures-util",
- "libc",
  "parking_lot",
  "rcgen",
  "regex",
