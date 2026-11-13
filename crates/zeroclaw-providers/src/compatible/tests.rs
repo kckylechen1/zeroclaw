@@ -1392,6 +1392,81 @@ fn relocated_image_marker_identifies_producing_call_with_identical_captions() {
 #[tokio::test]
 #[ignore = "requires owner-authorized xAI API usage and explicit environment opt-in"]
 async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
+    async fn native_once(
+        provider: &OpenAiCompatibleModelProvider,
+        client: &Client,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+        model: &str,
+        image_results: usize,
+        sends: &mut usize,
+    ) -> ProviderChatResponse {
+        assert!(*sends < 4, "live request budget exhausted");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            let credential = provider.resolve_credential().await?;
+            let normalized =
+                OpenAiCompatibleModelProvider::normalize_messages_for_upstream(messages).await?;
+            let merge = provider.effective_merge_system(model);
+            let effective =
+                OpenAiCompatibleModelProvider::flatten_system_messages(&normalized, merge);
+            let wire = serde_json::to_value(provider.build_raw_native_tool_chat_request(
+                &effective,
+                Some(tools),
+                model,
+                None,
+                !merge,
+            ))?;
+            // Check the exact serde value sent below, after production image
+            // normalization and native conversion. No shadow request is used.
+            if image_results > 0 {
+                let outgoing = wire["messages"].as_array().unwrap();
+                assert_eq!(outgoing.last().unwrap()["role"], "user");
+                let results: Vec<_> = outgoing
+                    .iter()
+                    .filter(|message| message["role"] == "tool")
+                    .collect();
+                assert_eq!(results.len(), tools.len());
+                assert!(results.iter().all(|message| message["content"].is_string()));
+                assert_eq!(
+                    outgoing.last().unwrap()["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|part| part["type"] == "image_url")
+                        .count(),
+                    image_results
+                );
+            }
+            *sends += 1;
+            let response = provider
+                .apply_auth_header(
+                    client.post(provider.chat_completions_url()).json(&wire),
+                    credential.as_deref(),
+                )
+                .send()
+                .await?;
+            anyhow::ensure!(
+                response.status().is_success(),
+                "live native HTTP status refused"
+            );
+            let body = response.text().await?;
+            let parsed: ApiChatResponse = serde_json::from_str(&body)?;
+            let message = parsed
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("live native response has no choices"))?
+                .message;
+            Ok::<_, anyhow::Error>(provider.parse_native_response(message))
+        })
+        .await;
+        assert!(
+            matches!(result, Ok(Ok(_))),
+            "live native request failed; diagnostics withheld"
+        );
+        result.unwrap().unwrap()
+    }
+
     assert_eq!(
         std::env::var("ZEROCLAW_LIVE_TOOL_IMAGES").as_deref(),
         Ok("1")
@@ -1410,6 +1485,19 @@ async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
         .max_tokens(Some(512))
         .timeout_secs(90)
         .build();
+    // Redirects and implicit retries cannot consume extra billed requests or
+    // move the credential beyond the owner-approved host. Product normalization,
+    // constructor, authentication and response mapping remain the exercised path.
+    let client = zeroclaw_http::apply_runtime_proxy_to_builder(
+        Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(90))
+            .connect_timeout(std::time::Duration::from_secs(10)),
+        "model_provider.compatible",
+    )
+    .build()
+    .expect("bounded live client must build");
+    let mut sends = 0;
     // Valid 128x128 PNGs; their colors occur only in the image bytes, not in
     // prompts, tool descriptions, filenames or tool-result captions.
     let images = [
@@ -1439,14 +1527,7 @@ async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
             names.join(", ")
         );
         let mut messages = vec![ChatMessage::user(prompt)];
-        let first = provider
-            .chat_with_tools(&messages, &tools, &model, None)
-            .await;
-        assert!(
-            first.is_ok(),
-            "live tool-request phase failed; diagnostics withheld"
-        );
-        let first = first.unwrap();
+        let first = native_once(&provider, &client, &messages, &tools, &model, 0, &mut sends).await;
         let mut actual: Vec<_> = first
             .tool_calls
             .iter()
@@ -1487,37 +1568,16 @@ async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
                 .to_string(),
             ));
         }
-        let wire = serde_json::to_value(provider.build_raw_native_tool_chat_request(
+        let second = native_once(
+            &provider,
+            &client,
             &messages,
-            Some(&tools),
+            &tools,
             &model,
-            None,
-            true,
-        ))
-        .unwrap();
-        let wire_messages = wire["messages"].as_array().unwrap();
-        assert_eq!(wire_messages.last().unwrap()["role"], "user");
-        assert_eq!(
-            wire_messages
-                .iter()
-                .filter(|message| message["role"] == "tool")
-                .count(),
-            names.len()
-        );
-        assert!(
-            wire_messages
-                .iter()
-                .filter(|message| message["role"] == "tool")
-                .all(|message| message["content"].is_string())
-        );
-        let second = provider
-            .chat_with_tools(&messages, &tools, &model, None)
-            .await;
-        assert!(
-            second.is_ok(),
-            "live image-result phase failed; diagnostics withheld"
-        );
-        let second = second.unwrap();
+            if parallel { 2 } else { 1 },
+            &mut sends,
+        )
+        .await;
         assert!(
             second.tool_calls.is_empty(),
             "model must answer after the tool batch"
@@ -1538,6 +1598,10 @@ async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
             if parallel { "parallel" } else { "ordinary" }
         );
     }
+    assert_eq!(
+        sends, 4,
+        "both native scenarios must complete without fallback"
+    );
 }
 
 #[test]
