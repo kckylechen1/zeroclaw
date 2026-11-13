@@ -1345,6 +1345,25 @@ fn api_key_prefix_cross_provider_mismatch() {
 }
 
 #[test]
+fn factory_rejects_retired_telnyx_credentials_for_retained_providers() {
+    let retired_key = "KEY-private-telnyx-fixture";
+    for destination in ["openai", "anthropic", "openrouter", "xai"] {
+        assert_eq!(
+            check_api_key_prefix(destination, retired_key),
+            Some("telnyx")
+        );
+        let error = create_model_provider(destination, Some(retired_key))
+            .err()
+            .expect("retired credential must be rejected before a provider can send it")
+            .to_string();
+        assert!(error.contains("telnyx") && error.contains("is retired"));
+        assert!(!error.contains("KEY-private"));
+    }
+    // The destination still accepts its own recognized credential.
+    assert!(create_model_provider("openai", Some("sk-provider-fixture")).is_ok());
+}
+
+#[test]
 fn api_key_prefix_correct_match() {
     assert_eq!(check_api_key_prefix("anthropic", "sk-ant-api03-xyz"), None);
     assert_eq!(check_api_key_prefix("openrouter", "sk-or-v1-xyz"), None);

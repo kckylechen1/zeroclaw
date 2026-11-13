@@ -950,6 +950,9 @@ const KEY_PREFIX_MODEL_PROVIDERS: &[(&str, &str)] = &[
     ("pplx-", "perplexity"),
     ("xai-", "xai"),
     ("nvapi-", "nvidia"),
+    // Credential-safety tombstone: retiring the adapter must not allow an
+    // old Telnyx key to be sent to a recognized retained provider.
+    ("KEY-", "telnyx"),
 ];
 
 fn check_api_key_prefix(model_provider_name: &str, key: &str) -> Option<&'static str> {
@@ -1220,6 +1223,7 @@ fn create_model_provider_inner(
             && !has_custom_url
             && let Some(likely_model_provider) = check_api_key_prefix(provider_kind, key_value)
         {
+            zeroclaw_config::providers::reject_retired_model_provider(likely_model_provider)?;
             let visible = &key_value[..key_value.len().min(8)];
             anyhow::bail!(
                 "API key prefix mismatch: key \"{visible}...\" looks like a \
