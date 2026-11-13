@@ -1402,8 +1402,10 @@ async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
         sends: &mut usize,
     ) -> ProviderChatResponse {
         assert!(*sends < 4, "live request budget exhausted");
+        let mut phase = "credential";
         let result = tokio::time::timeout(std::time::Duration::from_secs(90), async {
             let credential = provider.resolve_credential().await?;
+            phase = "normalization";
             let normalized =
                 OpenAiCompatibleModelProvider::normalize_messages_for_upstream(messages).await?;
             let merge = provider.effective_merge_system(model);
@@ -1438,18 +1440,31 @@ async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
                 );
             }
             *sends += 1;
+            phase = "transport";
+            println!("live native HTTP attempt {}", *sends);
             let response = provider
                 .apply_auth_header(
                     client.post(provider.chat_completions_url()).json(&wire),
                     credential.as_deref(),
                 )
                 .send()
-                .await?;
+                .await
+                .inspect_err(|error| {
+                    println!(
+                        "live native transport category: timeout={}, connect={}",
+                        error.is_timeout(),
+                        error.is_connect()
+                    );
+                })?;
+            phase = "status";
+            println!("live native HTTP status {}", response.status().as_u16());
             anyhow::ensure!(
                 response.status().is_success(),
                 "live native HTTP status refused"
             );
+            phase = "body";
             let body = response.text().await?;
+            phase = "parse";
             let parsed: ApiChatResponse = serde_json::from_str(&body)?;
             let message = parsed
                 .choices
@@ -1460,6 +1475,13 @@ async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
             Ok::<_, anyhow::Error>(provider.parse_native_response(message))
         })
         .await;
+        if !matches!(&result, Ok(Ok(_))) {
+            println!(
+                "live native failure phase={phase}, attempts={}, deadline={}",
+                *sends,
+                result.is_err()
+            );
+        }
         assert!(
             matches!(result, Ok(Ok(_))),
             "live native request failed; diagnostics withheld"
