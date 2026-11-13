@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use rustls::RootCertStore;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
@@ -164,8 +165,7 @@ impl ClientCertVerifier for PinnedCertVerifier {
 fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("cannot open certificate file: {path}"))?;
-    let mut reader = std::io::BufReader::new(file);
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_reader_iter(file)
         .collect::<std::result::Result<Vec<_>, _>>()
         .with_context(|| format!("failed to parse PEM certificates from {path}"))?;
     if certs.is_empty() {
@@ -178,8 +178,9 @@ fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
 fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("cannot open private key file: {path}"))?;
-    let mut reader = std::io::BufReader::new(file);
-    let key = rustls_pemfile::private_key(&mut reader)
+    let key = PrivateKeyDer::pem_reader_iter(file)
+        .next()
+        .transpose()
         .with_context(|| format!("failed to parse private key from {path}"))?
         .ok_or_else(|| {
             ::zeroclaw_log::record!(
@@ -248,6 +249,106 @@ mod tests {
         assert!(!certs.is_empty());
 
         let _key = load_private_key(key_file.path().to_str().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn test_load_cert_chain_ignores_other_sections_and_preserves_order() {
+        // These bytes test PEM framing only; build_server_config validates DER.
+        let file = write_temp_file(
+            "preamble\n\
+             -----BEGIN UNSUPPORTED OBJECT-----\nnot base64\n-----END UNSUPPORTED OBJECT-----\n\
+             -----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----\n\
+             -----BEGIN CERTIFICATE-----\nBAUG\n-----END CERTIFICATE-----\n\
+             -----BEGIN CERTIFICATE-----\nBwgJ\n-----END CERTIFICATE-----\n",
+        );
+
+        let certs = load_certs(file.path().to_str().unwrap()).unwrap();
+        let chain: Vec<&[u8]> = certs.iter().map(|cert| cert.as_ref()).collect();
+        assert_eq!(chain, vec![&[4, 5, 6][..], &[7, 8, 9][..]]);
+    }
+
+    #[test]
+    fn test_load_private_key_preserves_formats_and_first_key() {
+        for label in ["RSA PRIVATE KEY", "PRIVATE KEY", "EC PRIVATE KEY"] {
+            let file = write_temp_file(&format!(
+                "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n\
+                 -----BEGIN UNSUPPORTED OBJECT-----\nnot base64\n-----END UNSUPPORTED OBJECT-----\n\
+                 -----BEGIN {label}-----\nBAUG\n-----END {label}-----\n\
+                 -----BEGIN PRIVATE KEY-----\nBwgJ\n-----END PRIVATE KEY-----\n\
+                 -----BEGIN CERTIFICATE-----\nunterminated trailing section\n"
+            ));
+
+            let key = load_private_key(file.path().to_str().unwrap()).unwrap();
+            assert_eq!(key.secret_der(), &[4, 5, 6], "{label}");
+            assert!(
+                matches!(
+                    (label, key),
+                    ("RSA PRIVATE KEY", PrivateKeyDer::Pkcs1(_))
+                        | ("PRIVATE KEY", PrivateKeyDer::Pkcs8(_))
+                        | ("EC PRIVATE KEY", PrivateKeyDer::Sec1(_))
+                ),
+                "key format changed for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_private_key_missing_or_unsupported_produces_clear_error() {
+        for content in [
+            "",
+            "not a PEM document",
+            "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAQID\n-----END ENCRYPTED PRIVATE KEY-----\n",
+        ] {
+            let file = write_temp_file(content);
+            let path = file.path().to_str().unwrap();
+            let err = load_private_key(path).unwrap_err();
+            assert_eq!(err.to_string(), format!("no private key found in {path}"));
+        }
+    }
+
+    #[test]
+    fn test_malformed_pem_sections_are_not_ignored() {
+        for label in ["CERTIFICATE", "PRIVATE KEY"] {
+            for content in [
+                format!("-----BEGIN {label}----\nAQID\n-----END {label}-----\n"),
+                format!("-----BEGIN {label}-----\n!not-base64!\n-----END {label}-----\n"),
+                format!("-----BEGIN {label}-----\nAQID\n"),
+            ] {
+                let file = write_temp_file(&content);
+                let path = file.path().to_str().unwrap();
+                // An invalid recognized section must fail even when the caller
+                // is looking for the other PEM type.
+                let cert_err = load_certs(path).unwrap_err();
+                assert_eq!(
+                    cert_err.to_string(),
+                    format!("failed to parse PEM certificates from {path}")
+                );
+                let key_err = load_private_key(path).unwrap_err();
+                assert_eq!(
+                    key_err.to_string(),
+                    format!("failed to parse private key from {path}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_server_config_rejects_invalid_private_key_der() {
+        ensure_crypto_provider();
+        let (cert_pem, _, _) = test_ca();
+        let cert_file = write_temp_file(&cert_pem);
+        let key_file =
+            write_temp_file("-----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----\n");
+        let tls_config = GatewayTlsConfig {
+            enabled: true,
+            cert_path: cert_file.path().to_str().unwrap().to_string(),
+            key_path: key_file.path().to_str().unwrap().to_string(),
+            client_auth: None,
+        };
+
+        let err = build_server_config(&tls_config).unwrap_err();
+        assert_eq!(err.to_string(), "invalid server certificate or key");
     }
 
     #[test]

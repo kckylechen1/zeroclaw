@@ -40,6 +40,32 @@ safe to expose unauthenticated regardless of TLS posture.
 See [durable bridge intake](durable-bridge-intake.md) for the opt-in source receipt
 and recovery extension used by the Telegram bridge.
 
+### Reverse proxies and client rate limits
+
+`gateway.trust_forwarded_headers` defaults to `false`: client rate limits use
+the connection's peer address and ignore caller-supplied forwarding headers.
+Enable it only when the gateway accepts connections exclusively from trusted
+proxies. It is a deployment assertion, not a proxy-address allowlist; enabling
+it on a directly accessible public listener allows callers to supply the key.
+
+In trusted mode, the gateway uses the terminal address in
+`X-Forwarded-For`, including separately appended header fields. A proxy must
+append its connecting peer or overwrite the list; forwarding the caller's list
+unchanged is unsafe. A loopback or malformed terminal address falls back to a
+non-loopback peer or the shared non-exempt `unknown` key. The gateway never
+walks left into earlier untrusted entries or falls back to `X-Real-IP` when an
+invalid `X-Forwarded-For` is supplied, and never grants the local
+authentication-limiter exemption to a forwarded loopback value.
+
+For nginx, use `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`,
+or overwrite it with `$remote_addr`. If using only `X-Real-IP`, clear the
+higher-priority list with `proxy_set_header X-Forwarded-For "";` and set
+`proxy_set_header X-Real-IP $remote_addr;`. An arbitrary multi-host or same-host
+proxy chain is not inferred: its terminal hop can represent another proxy.
+For such deployments, normalize the authenticated client address at the trusted
+edge and overwrite the header before reaching the gateway. Bearer authentication
+and authorization still apply.
+
 ### Operator credentials and migration
 
 The existing Soul, User Model, review inbox, attention, backup/data-retention,
@@ -618,9 +644,19 @@ invoking user with mode `0600`. Revoke the entry and disconnect clients before
 downgrading to a binary that does not understand `owner`; an old binary may
 otherwise interpret it as an unrestricted legacy channel bridge.
 
-Build the separate `zeroclaw-acp-bridge` binary with the existing
-`agent-runtime` feature. Its execution path uses only JSON-RPC and gateway
-transport; it never constructs an Agent or ACP database. Point Zed's custom
+Build the `zeroclaw-acp-bridge` binary from the independent
+`zeroclaw-bridge-acp` package:
+
+```bash
+scripts/dev/cargo-local.sh build --release --locked -p zeroclaw-bridge-acp --bin zeroclaw-acp-bridge
+```
+
+The bridge uses JSON-RPC and gateway transport, with shared locale discovery
+and Fluent strings from `zeroclaw-config`. It does not compile the runtime,
+providers, memory, tools or gateway crates, and never constructs an Agent or
+ACP database. The source installer and Nix package also install this binary
+when the selected root features enable `agent-runtime`, including indirectly.
+Point Zed's custom
 `agent_servers` entry at the binary with `args = ["--config", "/absolute/adapter.toml"]`.
 The standalone file contains:
 

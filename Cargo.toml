@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-schema-markdown", "crates/zeroclaw-cost", "crates/zeroclaw-http", "crates/zeroclaw-platform", "crates/zeroclaw-policy", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-tools", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "crates/zeroclaw-yonbo-node", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
+members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-schema-markdown", "crates/zeroclaw-cost", "crates/zeroclaw-http", "crates/zeroclaw-platform", "crates/zeroclaw-policy", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-tools", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "crates/zeroclaw-yonbo-node", "bridges/acp", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -33,6 +33,11 @@ directories = "6.0"
 sys-locale = "0.3"
 zeroclaw-policy = { path = "crates/zeroclaw-policy", version = "0.8.3" }
 
+[patch.crates-io]
+# Upstream PR #558's unmerged candidate: rand update plus released protocol fixes.
+# Replace this exact pin with a coordinated Axum/WebSocket release (#432/#647).
+tungstenite = { version = "=0.29.0", git = "https://github.com/snapview/tungstenite-rs", rev = "b40760374c31d43253989c4b30132eeeb5f74e71" }
+
 [package]
 name = "zeroclawlabs"
 # Workspace crates are publish = false during microkernel transition.
@@ -61,11 +66,6 @@ include = [
 [[bin]]
 name = "zeroclaw"
 path = "src/main.rs"
-
-[[bin]]
-name = "zeroclaw-acp-bridge"
-path = "src/bin/zeroclaw-acp-bridge.rs"
-required-features = ["agent-runtime"]
 
 [lib]
 name = "zeroclaw"
@@ -142,10 +142,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 # Gateway integration-test fixtures (enabled with the gateway feature).
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws", "macros"], optional = true }
 tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
-
-# Unix-specific dependencies (for root check, etc.)
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 # Installer/surface metadata: which `[features]` are internal aggregates or
 # meta toggles rather than user-selectable rows. This bit is NOT derivable from

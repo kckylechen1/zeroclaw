@@ -78,6 +78,28 @@ expand_default_features() {
   printf '%s' "$leaf"
 }
 
+# ACP is a separate package, installed when the selected root feature closure
+# enables the agent runtime. Follow local feature edges, including nested
+# presets; dependency features do not select a root-package capability.
+source_installs_acp_bridge() {
+  local toml="$1" queue seen=" " feature members
+  queue=$(printf '%s' "$USER_FEATURES" | tr ',' ' ')
+  case " $CARGO_FLAGS " in
+  *" --no-default-features "*) ;;
+  *) queue="default $queue" ;;
+  esac
+  while [ -n "$queue" ]; do
+    feature=${queue%% *}; queue=${queue#"$feature"}; queue=${queue# }
+    case "$feature" in '' | dep:* | */*) continue ;; esac
+    case "$seen" in *" $feature "*) continue ;; esac
+    seen="$seen$feature "
+    [ "$feature" = agent-runtime ] && return 0
+    members=$(feature_members "$toml" "$feature" | tr '\n' ' ')
+    queue="$queue${queue:+ }$members"
+  done
+  return 1
+}
+
 # ── Feature validation ────────────────────────────────────────────
 
 validate_feature() {
@@ -770,6 +792,7 @@ See all available features:
     if [ "$DRY_RUN" = true ]; then
       info "[dry-run] Would resolve the full preset with: cargo generate features --selection all"
       info "[dry-run] Would run: cargo install --path . --locked --force --no-default-features --features <resolved-full-preset-and-requested-features>"
+      info "[dry-run] Would also run: cargo install --path bridges/acp --locked --force --bin zeroclaw-acp-bridge when the resolved root feature closure enables agent-runtime"
       info "[dry-run] Would build/install the dashboard when the resolved features enable it, then apply the requested PATH settings"
       info "[dry-run] Feature resolution is deferred because it can compile xtask; no checkout, toolchain, binary, or profile was changed"
       exit 0
@@ -886,6 +909,13 @@ See all available features:
   else
     # shellcheck disable=SC2086
     cargo install --path . --locked --force $CARGO_FLAGS
+  fi
+  if source_installs_acp_bridge "Cargo.toml"; then
+    if [ "$DRY_RUN" = true ]; then
+      info "[dry-run] Would run: cargo install --path bridges/acp --locked --force --bin zeroclaw-acp-bridge"
+    else
+      cargo install --path bridges/acp --locked --force --bin zeroclaw-acp-bridge
+    fi
   fi
   # >>> end generated:source-cargo-install <<<
 

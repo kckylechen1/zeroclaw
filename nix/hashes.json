@@ -1,15 +1,7 @@
 {
-  "portable-kernel-1.9.0": "sha256-kxhHtWBLi0If1Equ5qBvB3R0VSoEcTEec5EiOxCzR0Q=",
-  "memcore-2.0.0": "sha256-kxhHtWBLi0If1Equ5qBvB3R0VSoEcTEec5EiOxCzR0Q=",
-  "vault-kit-0.1.0": "sha256-kxhHtWBLi0If1Equ5qBvB3R0VSoEcTEec5EiOxCzR0Q=",
-  "wacore-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
-  "wacore-appstate-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
-  "wacore-binary-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
-  "wacore-derive-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
-  "wacore-libsignal-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
-  "wacore-noise-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
-  "waproto-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
-  "whatsapp-rust-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
-  "whatsapp-rust-tokio-transport-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
-  "whatsapp-rust-ureq-http-client-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM="
+  "async-imap-0.12.0": "sha256-jWYnemBPEsI0zOEhfGZBqZo/2vEhO91hOumpbGl12i8=",
+  "memcore-2.0.0": "sha256-sHdxrtbNU7ZLp2H3z1ZJNfgLzQ1dhiDlPZgzkscxsts=",
+  "portable-kernel-1.9.0": "sha256-sHdxrtbNU7ZLp2H3z1ZJNfgLzQ1dhiDlPZgzkscxsts=",
+  "tungstenite-0.29.0": "sha256-Xkc94GqSVK2GLrW193xtrBFNqTwmm6SULZeA0R6f2f4=",
+  "vault-kit-0.1.0": "sha256-sHdxrtbNU7ZLp2H3z1ZJNfgLzQ1dhiDlPZgzkscxsts="
 }

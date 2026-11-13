@@ -307,19 +307,23 @@ impl ActivatedToolSet {
     }
 
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
-            .iter()
-            .filter(|(name, _)| self.is_allowed(name))
-            .map(|(_, tool)| tool.spec())
+        self.tool_names()
+            .into_iter()
+            .filter_map(|name| self.tools.get(name))
+            .map(|tool| tool.spec())
             .collect()
     }
 
+    /// Admitted names in a stable order, independent of activation order.
     pub fn tool_names(&self) -> Vec<&str> {
-        self.tools
+        let mut names: Vec<&str> = self
+            .tools
             .keys()
             .filter(|name| self.is_allowed(name))
             .map(|name| name.as_str())
-            .collect()
+            .collect();
+        names.sort_unstable();
+        names
     }
 }
 

@@ -104,6 +104,10 @@ pub async fn agent_turn(
                 strict_tool_parsing,
                 parallel_tools,
                 max_tool_result_chars,
+                keep_tool_context_turns: config.zip(agent_alias).map_or_else(
+                    || zeroclaw_config::schema::ResolvedRuntime::default().keep_tool_context_turns,
+                    |(config, alias)| config.effective_keep_tool_context_turns(alias),
+                ),
                 context_token_budget,
                 knobs: &LoopKnobs::default(),
             },

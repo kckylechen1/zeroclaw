@@ -365,10 +365,24 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
         anyhow::bail!("purge_agent not supported by this memory backend")
     }
 
-    /// Export every memory row attributed to `agent_alias`, for the agent-
-    /// deletion archive (export-then-delete,). Pairs with
-    /// [`Self::purge_agent`]: the surface exports these rows to the archive,
-    /// then purges. Default: empty (backends without per-agent export).
+    /// Archive complete agent-owned records before removing exactly those rows.
+    /// The backend must keep a write transaction (or equivalent snapshot guard)
+    /// across export, durable publication, integrity readback and deletion.
+    /// A lossy MemoryEntry export followed by a fresh bulk purge is not safe.
+    /// Unsupported backends retain their data and surface this error; callers
+    /// must never fall back to `purge_agent` after a failure.
+    async fn archive_and_purge_agent(
+        &self,
+        _agent_alias: &str,
+        _archive_path: &std::path::Path,
+    ) -> anyhow::Result<usize> {
+        anyhow::bail!("verified agent archive/purge is unsupported; original memory retained")
+    }
+
+    /// Export the typed memory view attributed to `agent_alias` for inspection
+    /// and portability. This view may omit backend-specific persisted fields;
+    /// destructive agent cleanup must use [`Self::archive_and_purge_agent`].
+    /// Default: empty (backends without per-agent export).
     async fn export_agent(&self, _agent_alias: &str) -> anyhow::Result<Vec<MemoryEntry>> {
         Ok(Vec::new())
     }

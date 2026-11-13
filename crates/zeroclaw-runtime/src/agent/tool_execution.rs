@@ -111,6 +111,101 @@ pub(crate) fn dispatch_tool_name(name: &str, dispatch: ToolDispatchContext<'_>) 
     (!is_excluded_tool(name, dispatch.excluded_tools)).then(|| name.to_owned())
 }
 
+/// Answer only calls that cannot dispatch, without activating a deferred tool
+/// or invoking its hooks. Preparation uses this before asking for approval.
+/// A preceding tool_search can make a suffix alias resolvable in the same
+/// batch, so unknown names remain undecided in that case. Exclusions still win.
+pub(crate) fn undispatchable_tool_outcome(
+    call_name: &str,
+    call_arguments: &serde_json::Value,
+    tool_call_id: Option<&str>,
+    dispatch: ToolDispatchContext<'_>,
+    may_activate_in_batch: bool,
+    meta: &TurnMeta<'_>,
+    observer: &dyn Observer,
+) -> Option<ToolExecutionOutcome> {
+    let unavailable = if is_excluded_tool(call_name, dispatch.excluded_tools) {
+        true
+    } else if let Some(resolved) = resolve_tool(dispatch, call_name, tool_call_id) {
+        if !is_excluded_tool(resolved.tool().name(), dispatch.excluded_tools) {
+            return None;
+        }
+        true
+    } else {
+        let recoverable = dispatch.activated_tools.is_some_and(|activated| {
+            let guard = activated
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.deferred_tool_names().any(|name| name == call_name)
+        });
+        if recoverable || may_activate_in_batch {
+            return None;
+        }
+        false
+    };
+
+    let full_args = scrub_credentials_json(call_arguments);
+    let tool_call_id_owned = tool_call_id.map(str::to_string);
+    observer.record_event(&ObserverEvent::ToolCallStart {
+        tool: call_name.to_string(),
+        tool_call_id: tool_call_id_owned.clone(),
+        arguments: Some(full_args.clone()),
+        channel: Some(meta.channel_name.to_string()),
+        agent_alias: meta.agent_alias.map(str::to_string),
+        parent_agent_alias: meta.parent_agent_alias.map(str::to_string),
+        turn_id: Some(meta.turn_id.to_string()),
+    });
+    Some(if unavailable {
+        unavailable_tool_outcome(
+            call_name,
+            tool_call_id_owned,
+            &full_args,
+            meta,
+            observer,
+            Duration::ZERO,
+        )
+    } else {
+        unknown_tool_outcome(
+            call_name,
+            tool_call_id_owned,
+            &full_args,
+            meta,
+            observer,
+            Duration::ZERO,
+        )
+    })
+}
+
+fn unknown_tool_outcome(
+    call_name: &str,
+    tool_call_id_owned: Option<String>,
+    full_args: &str,
+    meta: &TurnMeta<'_>,
+    observer: &dyn Observer,
+    duration: Duration,
+) -> ToolExecutionOutcome {
+    let reason = format!("Unknown tool: {call_name}");
+    observer.record_event(&ObserverEvent::ToolCall {
+        tool: call_name.to_string(),
+        tool_call_id: tool_call_id_owned,
+        duration,
+        success: false,
+        arguments: Some(full_args.to_string()),
+        result: Some(scrub_credentials(&reason)),
+        channel: Some(meta.channel_name.to_string()),
+        agent_alias: meta.agent_alias.map(str::to_string),
+        parent_agent_alias: meta.parent_agent_alias.map(str::to_string),
+        turn_id: Some(meta.turn_id.to_string()),
+    });
+    ToolExecutionOutcome {
+        output: reason.clone(),
+        success: false,
+        error_reason: Some(reason),
+        duration,
+        receipt: None,
+    }
+}
+
 fn unavailable_tool_outcome(
     call_name: &str,
     tool_call_id_owned: Option<String>,
@@ -246,29 +341,16 @@ async fn execute_one_tool_with_provenance(
             .map(ResolvedTool::Activated)
     });
     let Some(resolved) = resolved else {
-        let reason = format!("Unknown tool: {call_name}");
-        let duration = start.elapsed();
-        observer.record_event(&ObserverEvent::ToolCall {
-            tool: call_name.to_string(),
-            tool_call_id: tool_call_id_owned.clone(),
-            duration,
-            success: false,
-            arguments: Some(full_args.clone()),
-            result: Some(scrub_credentials(&reason)),
-            channel: Some(meta.channel_name.to_string()),
-            agent_alias: meta.agent_alias.map(|s| s.to_string()),
-            parent_agent_alias: meta.parent_agent_alias.map(|s| s.to_string()),
-            turn_id: Some(meta.turn_id.to_string()),
-        });
         return Ok(CompletedToolExecution {
             executed_tool_name: None,
-            outcome: ToolExecutionOutcome {
-                output: reason.clone(),
-                success: false,
-                error_reason: Some(reason),
-                duration,
-                receipt: None,
-            },
+            outcome: unknown_tool_outcome(
+                call_name,
+                tool_call_id_owned,
+                &full_args,
+                meta,
+                observer,
+                start.elapsed(),
+            ),
         });
     };
     let tool = resolved.tool();

@@ -2022,6 +2022,38 @@ impl Memory for SqliteMemory {
         .await?
     }
 
+    async fn archive_and_purge_agent(
+        &self,
+        agent_alias: &str,
+        archive_path: &std::path::Path,
+    ) -> anyhow::Result<usize> {
+        let conn = self.conn.clone();
+        let agent_alias = agent_alias.to_string();
+        let archive_path = archive_path.to_path_buf();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            use zeroclaw_infra::owned_archive::{sqlite_rows, write_verified_json};
+            let mut conn = conn.lock();
+            let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let agents = sqlite_rows(&transaction,
+                "SELECT * FROM agents WHERE alias = ?1 ORDER BY id", &agent_alias)?;
+            let memories = sqlite_rows(&transaction,
+                "SELECT * FROM memories WHERE agent_id = (SELECT id FROM agents WHERE alias = ?1 LIMIT 1) ORDER BY id", &agent_alias)?;
+            // The typed export is deliberately not used here: it omits stored
+            // embeddings, update timestamps and future schema columns.
+            let snapshot = serde_json::json!({
+                "format": "zeroclaw-agent-archive", "version": 1, "store": "sqlite-memory", "agent_alias": agent_alias,
+                "tables": {"agents": agents, "memories": memories},
+            });
+            write_verified_json(&archive_path, &snapshot)?;
+            let removed = transaction.execute(
+                "DELETE FROM memories WHERE agent_id = (SELECT id FROM agents WHERE alias = ?1 LIMIT 1)",
+                [&agent_alias],
+            )?;
+            transaction.commit()?;
+            Ok(removed)
+        }).await?
+    }
+
     async fn rename_agent(&self, from: &str, to: &str) -> anyhow::Result<usize> {
         let conn = self.conn.clone();
         let from = from.to_string();

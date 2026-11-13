@@ -1261,7 +1261,96 @@ fn client_key_uses_forwarded_ip_only_in_trusted_proxy_mode() {
     );
 
     let key = client_key_from_request(Some(peer), &headers, true);
-    assert_eq!(key, "198.51.100.10");
+    assert_eq!(key, "203.0.113.11");
+}
+
+#[test]
+fn client_key_preserves_proxy_suffix_after_opaque_or_separate_prefix() {
+    let peer = SocketAddr::from(([127, 0, 0, 1], 42617));
+    for value in [&b"\x80, 198.51.100.10"[..], &b"garbage, 198.51.100.10"[..]] {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Forwarded-For", HeaderValue::from_bytes(value).unwrap());
+        assert_eq!(
+            client_key_from_request(Some(peer), &headers, true),
+            "198.51.100.10"
+        );
+        assert_eq!(
+            client_key_from_request(Some(peer), &headers, false),
+            "127.0.0.1"
+        );
+    }
+    let mut headers = HeaderMap::new();
+    headers.append("X-Forwarded-For", HeaderValue::from_static("192.0.2.99"));
+    headers.append("X-Forwarded-For", HeaderValue::from_static("198.51.100.10"));
+    assert_eq!(
+        client_key_from_request(Some(peer), &headers, true),
+        "198.51.100.10"
+    );
+}
+
+#[test]
+fn client_key_forwarded_loopback_or_invalid_headers_never_gain_local_exemption() {
+    let local = SocketAddr::from(([127, 0, 0, 1], 42617));
+    let remote = SocketAddr::from(([203, 0, 113, 50], 42617));
+    for (name, value) in [
+        ("X-Forwarded-For", "127.0.0.1"),
+        ("X-Forwarded-For", "::1, 127.0.0.1"),
+        ("X-Forwarded-For", "invalid"),
+        ("X-Forwarded-For", "198.51.100.10, invalid"),
+        ("X-Forwarded-For", "198.51.100.10, 127.0.0.1"),
+        ("X-Forwarded-For", "198.51.100.10, [::1]:8080"),
+        ("X-Forwarded-For", "198.51.100.10, "),
+        ("X-Real-IP", "127.0.0.1"),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(name, HeaderValue::from_static(value));
+        assert_eq!(
+            client_key_from_request(Some(local), &headers, true),
+            "unknown"
+        );
+        assert_eq!(
+            client_key_from_request(Some(remote), &headers, true),
+            "203.0.113.50"
+        );
+    }
+    assert_eq!(
+        client_key_from_request(Some(local), &HeaderMap::new(), true),
+        "127.0.0.1"
+    );
+}
+
+#[test]
+fn client_key_invalid_terminal_field_does_not_fall_back_to_prefix_or_real_ip() {
+    let peer = SocketAddr::from(([127, 0, 0, 1], 42617));
+    for suffix in ["127.0.0.1", "invalid", ""] {
+        let mut headers = HeaderMap::new();
+        headers.append("X-Forwarded-For", HeaderValue::from_static("198.51.100.10"));
+        headers.append("X-Forwarded-For", HeaderValue::from_static(suffix));
+        headers.insert("X-Real-IP", HeaderValue::from_static("203.0.113.12"));
+        assert_eq!(
+            client_key_from_request(Some(peer), &headers, true),
+            "unknown"
+        );
+    }
+}
+
+#[test]
+fn client_key_handles_overwriting_proxy_and_real_ip_without_xff() {
+    let peer = SocketAddr::from(([127, 0, 0, 1], 42617));
+    for value in ["198.51.100.10", "\"198.51.100.10\"", "198.51.100.10:8080"] {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Forwarded-For", HeaderValue::from_static(value));
+        assert_eq!(
+            client_key_from_request(Some(peer), &headers, true),
+            "198.51.100.10"
+        );
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Real-IP", HeaderValue::from_static("198.51.100.10"));
+    assert_eq!(
+        client_key_from_request(Some(peer), &headers, true),
+        "198.51.100.10"
+    );
 }
 
 #[test]

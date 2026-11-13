@@ -26,7 +26,8 @@ serde_json = { version = "1.0", default-features = false, features = ["std"] }
 sha2 = "0.10"
 tokio = { version = "1.50", default-features = false, features = ["fs", "io-util", "macros", "process", "sync", "time"] }
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
-portable_kernel = { package = "portable-kernel", version = "1.9.0", git = "https://github.com/kckylechen1/Tachi.git", rev = "c35ace357375f0e3a9db32d7a3bb529507a72291", default-features = false, optional = true }
+# Tachi #2319's vault-kit entropy change backported to the existing kernel baseline.
+portable_kernel = { package = "portable-kernel", version = "1.9.0", git = "https://github.com/kckylechen1/Tachi.git", rev = "a4147e40e937f2863cd0e124d64061defe0ed433", default-features = false, optional = true }
 tempfile = { version = "3.26", optional = true }
 
 [features]

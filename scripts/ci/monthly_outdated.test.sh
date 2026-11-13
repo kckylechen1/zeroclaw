@@ -25,7 +25,7 @@ cat > "$FIXTURE/bin/cargo" <<'STUB'
 case "$*" in
   --version) echo 'cargo fixture-version' ;;
   'outdated --version') echo 'cargo-outdated 0.19.0' ;;
-  'outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10')
+  'outdated --workspace --exclude rusqlite --exit-code 10')
     printf '%s\n' "$*" >> "$RUNNER_TEMP/cargo-calls"
     echo 'raw stdout canary'
     echo 'raw stderr resolver canary' >&2
@@ -75,14 +75,14 @@ for scenario in clean findings reuse disabled error other large; do
   "${environment[@]}" /bin/bash "$ROOT/scripts/ci/monthly_outdated.sh" scan > "$run/log" 2>&1 || status=$?
   [[ "$status" == "$code" ]]
   [[ "$(cat "$run/outputs")" == "scan_exit_code=$code" ]]
-  [[ "$(cat "$run/cargo-calls")" == 'outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10' ]]
+  [[ "$(cat "$run/cargo-calls")" == 'outdated --workspace --exclude rusqlite --exit-code 10' ]]
   report=$(cat "$run/outdated-output.txt")
   for expected in 'raw stdout canary' 'raw stderr resolver canary' 'Head: fixture-head' \
     'Runner: fixture-os fixture-arch' 'Image: fixture-image fixture-version' \
     'rustc fixture-version' 'cargo fixture-version' 'cargo-outdated 0.19.0' \
-    'Command: cargo outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10' \
-    'Coverage limit: cargo-outdated preserves direct rusqlite and matrix-sdk constraints in its hypothetical latest-version graph.' \
-    'This defers latest-version updates outside the declared rusqlite and matrix-sdk constraints: matrix-sdk-sqlite shares the workspace rusqlite SQLite links graph, so bumping either crate alone can force an incompatible libsqlite3-sys selection, and the two move as one coordinated review. Other dependencies remain eligible for hypothetical updates; transitive choices still obey this constrained graph.' \
+    'Command: cargo outdated --workspace --exclude rusqlite --exit-code 10' \
+    'Coverage limit: cargo-outdated preserves direct rusqlite constraints in its hypothetical latest-version graph.' \
+    'The optional Tachi PortableKernel shares the workspace rusqlite/libsqlite3-sys SQLite links graph. Latest-version upgrades outside the declared rusqlite constraint require a coordinated review with its pinned git revision. Other dependencies remain eligible for hypothetical updates; transitive choices still obey this constrained graph.' \
     "Scan exit code: $code" "Result: $result"; do
     [[ "$report" == *"$expected"* ]]
   done

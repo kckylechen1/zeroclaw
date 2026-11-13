@@ -8,10 +8,10 @@ The branches share a locale registry and provider-backed fill philosophy, but th
 
 | Branch | English source | Translated catalogs | Materializer | Consumer |
 | --- | --- | --- | --- | --- |
-| Runtime and tool Fluent | `crates/zeroclaw-runtime/locales/en/cli.ftl` and `tools.ftl` | `crates/zeroclaw-runtime/locales/<locale>/*.ftl` in the main repository | `cargo fluent fill`, with `check`, `scan`, and `stats` for validation and coverage | Runtime CLI and prompt strings through `zeroclaw-runtime/src/i18n.rs`; tool-owned schema and result strings through `zeroclaw-tools/src/i18n.rs` |
+| Runtime and tool Fluent | `crates/zeroclaw-runtime/locales/en/cli.ftl` and `tools.ftl` | `crates/zeroclaw-runtime/locales/<locale>/*.ftl` in the main repository | `cargo fluent fill`, with `check`, `scan`, and `stats` for validation and coverage | Runtime CLI, prompt and ACP bridge strings through optional `zeroclaw-config/src/i18n.rs`, re-exported by runtime; tool-owned schema and result strings through `zeroclaw-tools/src/i18n.rs` |
 | Documentation gettext | English `docs/book/src/` after generated references and preprocessors supply source text | `docs/book/po/<locale>.po` in the translation-catalog submodule | `cargo mdbook sync` plus `tools/fill-translations` | `mdbook-gettext` during each locale build |
 
-`locales.toml` is the shared registry for locale codes and display labels. It drives docs locale builds and the generated language switcher, and is embedded by the runtime for locale discovery. It does not by itself make every catalog available to every consumer; each loader still defines how its files are embedded or found on disk.
+`locales.toml` is the shared registry for locale codes and display labels. It drives docs locale builds and the generated language switcher, and is embedded by the shared config-owned loader for runtime and bridge locale discovery. It does not by itself make every catalog available to every consumer; each loader still defines how its files are embedded or found on disk.
 
 ## Fluent application strings
 
@@ -24,7 +24,7 @@ Storage and loading are separate concerns:
 - Runtime CLI strings always have embedded English. The loader can also use translated CLI catalogs embedded by `builtin_cli_ftl_source`, then applies a disk catalog as the highest-priority locale source for ordinary messages. Updater, locale-installation, and Telegram command strings use the current build's catalogs because these contracts differ from upstream and retired native runners.
 - Runtime prompt-facing tool descriptions always have embedded English and overlay translated `tools.ftl` values from disk; optional missing lookups return no value.
 - `zeroclaw-tools` independently embeds English and loads disk `tools.ftl` for tool-owned schema and result strings because its crate cannot depend on runtime; required missing lookups render a visible `{key}` marker.
-- `zeroclaw locales fetch` restores selected catalogs from the running binary into that shared disk locale directory. The compatibility command performs no network access. Catalogue names and output filenames are declared by `zeroclaw-config`; `zeroclaw_runtime::i18n::builtin_catalog` owns the bundled contents. A registry check covers every supported locale and catalogue pair.
+- `zeroclaw locales fetch` restores selected catalogs from the running binary into that shared disk locale directory. The compatibility command performs no network access. Catalogue names and output filenames are declared by `zeroclaw-config`; `zeroclaw_config::i18n::builtin_catalog` owns the bundled contents and is re-exported by runtime. A registry check covers every supported locale and catalogue pair.
 
 For runtime and tools, English remains the base map. A translated disk or built-in catalog replaces keys it contains; absent translated keys keep their English value. Required lookups report a key absent from every available source and render a visible `{key}` marker rather than silently inventing text; optional runtime tool-description lookups return no value.
 
@@ -76,7 +76,8 @@ For detailed commands, provider configuration, batching, adding a locale, and re
 ## Source pointers
 
 - Locale registry: `locales.toml`
-- Runtime Fluent loader: `crates/zeroclaw-runtime/src/i18n.rs`
+- Shared Fluent loader: `crates/zeroclaw-config/src/i18n.rs` (`i18n` feature)
+- Runtime compatibility exports: `crates/zeroclaw-runtime/src/i18n.rs`
 - Tool-owned Fluent loader: `crates/zeroclaw-tools/src/i18n.rs`
 - Runtime Fluent catalogs: `crates/zeroclaw-runtime/locales/`
 - Fluent tooling: `xtask/src/cmd/fluent/`

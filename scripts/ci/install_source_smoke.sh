@@ -31,13 +31,22 @@ fi
 printf 'git %s\n' "$*" >> "$ZEROCLAW_SMOKE_LOG"
 exit 97
 SH
-for command in cargo curl rustup gh tar npm cp rm; do
+for command in curl rustup gh tar npm cp rm; do
   cat > "$scratch/bin/$command" <<'SH'
 #!/bin/sh
 printf '%s %s\n' "${0##*/}" "$*" >> "$ZEROCLAW_SMOKE_LOG"
 exit 97
 SH
 done
+cat > "$scratch/bin/cargo" <<'SH'
+#!/bin/sh
+printf 'cargo %s\n' "$*" >> "$ZEROCLAW_SMOKE_LOG"
+if [ "${ZEROCLAW_SMOKE_ALLOW_ROOT_INSTALL:-}" = 1 ] &&
+  [ "${1:-}" = install ] && [ "${2:-}" = --path ] && [ "${3:-}" = . ]; then
+  exit 0
+fi
+exit 97
+SH
 cat > "$scratch/bin/rustc" <<'SH'
 #!/bin/sh
 printf 'rustc 1.96.1 (installer-smoke)\n'
@@ -47,7 +56,15 @@ chmod +x "$scratch/bin/"*
 make_checkout() {
   local path=$1 origin=$2
   mkdir -p "$path"
-  cp "$repo_root/Cargo.toml" "$path/Cargo.toml"
+  # A fixture-only alias chain proves the installer follows the manifest
+  # rather than recognizing a fixed list of known presets.
+  awk '
+    { print }
+    /^\[features\]$/ {
+      print "installer-smoke-indirect = [\"installer-smoke-runtime\", \"installer-smoke-runtime\"]"
+      print "installer-smoke-runtime = [\"slim-control\"]"
+    }
+  ' "$repo_root/Cargo.toml" > "$path/Cargo.toml"
   printf 'preserve this local file\n' > "$path/local-marker"
   "$real_git" -C "$path" init --quiet
   "$real_git" -C "$path" remote add origin "$origin"
@@ -74,12 +91,15 @@ run_installer() {
     </dev/null 2>&1)" || status=$?
   if [[ $expected == success ]]; then
     [[ $status == 0 ]] || fail "expected success, got $status"
-  else
+  elif [[ $expected == refusal ]]; then
     [[ $status != 0 ]] || fail 'expected refusal'
+  else
+    [[ $status == "$expected" ]] || fail "expected exit $expected, got $status"
   fi
   checks=$((checks + 1))
 }
 contains() { [[ $output == *"$1"* ]] || fail "missing output: $1"; }
+excludes() { [[ $output != *"$1"* ]] || fail "unexpected output: $1"; }
 no_mutations() {
   [[ ! -s $ZEROCLAW_SMOKE_LOG ]] || fail "unexpected command: $(cat "$ZEROCLAW_SMOKE_LOG")"
   [[ ! -e $prefix ]] || fail 'install prefix was created'
@@ -98,12 +118,25 @@ done
 # No installation-mode flag must still choose source; dry-run must not compile.
 run_installer success "$scratch/fork" "$scratch/missing" --dry-run
 contains 'cargo install --path . --locked --force'
+contains 'cargo install --path bridges/acp --locked --force --bin zeroclaw-acp-bridge'
 no_mutations
 run_installer success "$scratch/fork" "$scratch/missing" --source --minimal --dry-run
 contains 'cargo install --path . --locked --force --no-default-features'
+excludes 'cargo install --path bridges/acp'
+no_mutations
+for feature in agent-runtime slim-control default installer-smoke-indirect; do
+  run_installer success "$scratch/fork" "$scratch/missing" --minimal --features "$feature" --dry-run
+  contains "cargo install --path . --locked --force --no-default-features --features $feature"
+  contains 'cargo install --path bridges/acp --locked --force --bin zeroclaw-acp-bridge'
+  no_mutations
+done
+run_installer success "$scratch/fork" "$scratch/missing" --minimal --features schema-export --dry-run
+contains 'cargo install --path . --locked --force --no-default-features --features schema-export'
+excludes 'cargo install --path bridges/acp'
 no_mutations
 run_installer success "$scratch/fork" "$scratch/missing" --full --dry-run
 contains 'cargo generate features --selection all'
+contains 'cargo install --path bridges/acp --locked --force --bin zeroclaw-acp-bridge when the resolved root feature closure enables agent-runtime'
 contains 'Feature resolution is deferred'
 no_mutations
 
@@ -150,6 +183,15 @@ for origin in 'https://github.com/kckylechen1/zeroclaw' \
   contains 'cargo install --path . --locked --force'
   no_mutations
 done
+
+# A successful root install must not hide failure to install the separate ACP
+# package. Use the real source branch with only Cargo itself stubbed.
+mkdir -p "$RUSTUP_HOME/toolchains"
+ZEROCLAW_SMOKE_ALLOW_ROOT_INSTALL=1 run_installer 97 "$scratch/fork" "$scratch/missing" \
+  --source --minimal --features agent-runtime
+expected_calls=$'cargo install --path . --locked --force --no-default-features --features agent-runtime\ncargo install --path bridges/acp --locked --force --bin zeroclaw-acp-bridge'
+[[ $(cat "$ZEROCLAW_SMOKE_LOG") == "$expected_calls" ]] || fail 'ACP install did not follow the root install with independent flags'
+: > "$ZEROCLAW_SMOKE_LOG"
 
 # Uninstall preview must not call an installed binary, remove its file, ask
 # about deleting data, or rewrite the caller's shell profile. The rm sentinel

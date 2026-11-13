@@ -1,4 +1,6 @@
-//! ACP session persistence.
+//! Historical ACP session reads, complete archives and controlled lifecycle cleanup.
+//! New ACP editor traffic uses the gateway session owner; this store has no
+//! transcript, token, plan or event writers.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -7,25 +9,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use zeroclaw_api::model_provider::{ChatMessage, ConversationMessage, ToolCall, ToolResultMessage};
 use zeroclaw_api::plan::PlanEntry;
-use zeroclaw_log::{Action, EventOutcome};
-
-/// Internal discriminator for `acp_tool_calls.event_kind`. The 'in' row
-/// records the call args; the 'out' row records the result. Two append-only
-/// rows per call, correlated by the provider-issued `tool_call_id`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolEventKind {
-    In,
-    Out,
-}
-
-impl ToolEventKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::In => "in",
-            Self::Out => "out",
-        }
-    }
-}
 
 pub struct AcpSessionStore {
     conn: Mutex<Connection>,
@@ -205,25 +188,6 @@ impl AcpSessionStore {
             }
             Err(e) => Err(e).context("Failed to add ACP session plan column"),
         }
-    }
-
-    /// Record a new session. Returns the integer `id` assigned by SQLite.
-    pub fn create_session(
-        &self,
-        session_uuid: &str,
-        agent_alias: &str,
-        workspace_dir: &str,
-    ) -> Result<i64> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO acp_sessions
-               (session_uuid, agent_alias, workspace_dir, token_count, created_at, last_activity)
-             VALUES (?1, ?2, ?3, 0, ?4, ?4)",
-            params![session_uuid, agent_alias, workspace_dir, now],
-        )
-        .context("Failed to create ACP session")?;
-        Ok(conn.last_insert_rowid())
     }
 
     /// Load session metadata and full message history for restore.
@@ -495,185 +459,6 @@ impl AcpSessionStore {
         Ok(out)
     }
 
-    /// Append all ConversationMessages from one completed turn, decomposing
-    /// AssistantToolCalls / ToolResults variants into the appropriate tables.
-    /// Single transaction.
-    pub fn append_turn(&self, session_uuid: &str, messages: &[ConversationMessage]) -> Result<()> {
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        let now = Utc::now().to_rfc3339();
-        let mut conn = self.conn.lock();
-
-        // Resolve the integer session_id once. Fail loudly if the UUID is
-        // unknown — we want an error here, not orphaned inserts.
-        let session_id: i64 = conn
-            .query_row(
-                "SELECT id FROM acp_sessions WHERE session_uuid = ?1",
-                params![session_uuid],
-                |row| row.get(0),
-            )
-            .with_context(|| format!("unknown session_uuid: {session_uuid}"))?;
-
-        let tx = conn
-            .transaction()
-            .context("Failed to begin append_turn transaction")?;
-
-        // Track the most recent assistant message_id so a following
-        // ToolResults variant can attach its 'out' rows back to it.
-        let mut last_assistant_msg_id: Option<i64> = None;
-
-        for msg in messages {
-            match msg {
-                ConversationMessage::Chat(chat) => {
-                    tx.execute(
-                        "INSERT INTO acp_messages
-                           (session_id, role, content, reasoning_content, created_at)
-                         VALUES (?1, ?2, ?3, NULL, ?4)",
-                        params![session_id, chat.role, chat.content, now],
-                    )
-                    .context("Failed to insert chat message")?;
-                    if chat.role == "assistant" {
-                        last_assistant_msg_id = Some(tx.last_insert_rowid());
-                    }
-                }
-                ConversationMessage::AssistantToolCalls {
-                    text,
-                    tool_calls,
-                    reasoning_content,
-                } => {
-                    tx.execute(
-                        "INSERT INTO acp_messages
-                           (session_id, role, content, reasoning_content, created_at)
-                         VALUES (?1, 'assistant', ?2, ?3, ?4)",
-                        params![
-                            session_id,
-                            text.as_deref().unwrap_or(""),
-                            reasoning_content,
-                            now,
-                        ],
-                    )
-                    .context("Failed to insert assistant tool-call message")?;
-                    let msg_id = tx.last_insert_rowid();
-                    last_assistant_msg_id = Some(msg_id);
-
-                    for tc in tool_calls {
-                        tx.execute(
-                            "INSERT INTO acp_tool_calls
-                               (message_id, tool_call_id, tool_name, event_kind, payload, outcome, created_at)
-                             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
-                            params![
-                                msg_id,
-                                tc.id,
-                                tc.name,
-                                ToolEventKind::In.as_str(),
-                                tc.arguments,
-                                now,
-                            ],
-                        )
-                        .context("Failed to insert tool_call 'in' row")?;
-                    }
-                }
-                ConversationMessage::ToolResults(results) => {
-                    let msg_id = match last_assistant_msg_id {
-                        Some(id) => id,
-                        None => {
-                            ::zeroclaw_log::record!(
-                                ERROR,
-                                ::zeroclaw_log::Event::new(
-                                    module_path!(),
-                                    ::zeroclaw_log::Action::Write,
-                                )
-                                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                                .with_attrs(::serde_json::json!({
-                                    "session_uuid": session_uuid,
-                                })),
-                                "ToolResults without preceding AssistantToolCalls"
-                            );
-                            return Err(anyhow::Error::msg(
-                                "ToolResults appeared without a preceding AssistantToolCalls \
-                                 message in this turn — cannot determine parent message_id",
-                            ));
-                        }
-                    };
-                    for result in results {
-                        let tool_name: String = tx
-                            .query_row(
-                                "SELECT tool_name FROM acp_tool_calls
-                                 WHERE tool_call_id = ?1 AND event_kind = 'in'
-                                 ORDER BY id DESC LIMIT 1",
-                                params![result.tool_call_id],
-                                |row| row.get(0),
-                            )
-                            .unwrap_or_else(|_| String::from("unknown"));
-                        tx.execute(
-                            "INSERT INTO acp_tool_calls
-                               (message_id, tool_call_id, tool_name, event_kind, payload, outcome, created_at)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            params![
-                                msg_id,
-                                result.tool_call_id,
-                                tool_name,
-                                ToolEventKind::Out.as_str(),
-                                result.content,
-                                EventOutcome::Unknown.as_str(),
-                                now,
-                            ],
-                        )
-                        .context("Failed to insert tool_call 'out' row")?;
-                    }
-                }
-            }
-        }
-
-        tx.execute(
-            "UPDATE acp_sessions SET last_activity = ?1 WHERE id = ?2",
-            params![now, session_id],
-        )
-        .context("Failed to update last_activity")?;
-
-        tx.commit().context("Failed to commit append_turn")?;
-        Ok(())
-    }
-
-    pub fn set_token_count(&self, session_uuid: &str, token_count: u64) -> Result<()> {
-        let conn = self.conn.lock();
-        let rows = conn
-            .execute(
-                "UPDATE acp_sessions SET token_count = ?1 WHERE session_uuid = ?2",
-                params![token_count as i64, session_uuid],
-            )
-            .context("Failed to set token_count")?;
-        if rows == 0 {
-            return Err(anyhow::Error::msg(format!(
-                "set_token_count: no session with uuid {session_uuid}"
-            )));
-        }
-        Ok(())
-    }
-
-    /// Persist the session's latest TodoWrite plan as a JSON array of
-    /// `PlanEntry` (whole-list replace). An empty slice stores an empty
-    /// array (a cleared plan), distinct from SQL NULL (never had one).
-    pub fn set_plan(&self, session_uuid: &str, entries: &[PlanEntry]) -> Result<()> {
-        let plan_json =
-            serde_json::to_string(entries).context("Failed to serialize plan entries")?;
-        let conn = self.conn.lock();
-        let rows = conn
-            .execute(
-                "UPDATE acp_sessions SET plan_json = ?1 WHERE session_uuid = ?2",
-                params![plan_json, session_uuid],
-            )
-            .context("Failed to set plan_json")?;
-        if rows == 0 {
-            return Err(anyhow::Error::msg(format!(
-                "set_plan: no session with uuid {session_uuid}"
-            )));
-        }
-        Ok(())
-    }
-
     /// Load the session's stored plan. Returns an empty vec when the
     /// session has no plan (NULL or absent). Malformed JSON is treated
     /// as an empty plan rather than a hard error, so a corrupt plan
@@ -692,35 +477,6 @@ impl AcpSessionStore {
         Ok(plan_json
             .and_then(|s| serde_json::from_str::<Vec<PlanEntry>>(&s).ok())
             .unwrap_or_default())
-    }
-
-    /// Record a session-lifecycle event. Caller passes typed enums; the SQLite
-    /// layer is the only place strings appear. Same `Action` / `EventOutcome`
-    /// values are used at the matching `zeroclaw_log::record!` call site.
-    pub fn append_event(
-        &self,
-        session_uuid: &str,
-        action: Action,
-        outcome: EventOutcome,
-        payload: Option<&str>,
-    ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock();
-        let session_id: i64 = conn
-            .query_row(
-                "SELECT id FROM acp_sessions WHERE session_uuid = ?1",
-                params![session_uuid],
-                |row| row.get(0),
-            )
-            .with_context(|| format!("unknown session_uuid: {session_uuid}"))?;
-        conn.execute(
-            "INSERT INTO acp_session_events
-               (session_id, action, outcome, payload, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![session_id, action.as_str(), outcome.as_str(), payload, now],
-        )
-        .context("Failed to insert session event")?;
-        Ok(())
     }
 
     /// Delete a session and all its child rows (messages, tool calls, events
@@ -824,6 +580,64 @@ impl AcpSessionStore {
         Ok(rows)
     }
 
+    /// Archive every persisted column and child row before deleting an agent's
+    /// terminal sessions. The immediate transaction prevents a second store
+    /// handle from adding data between export and the cascading DELETE.
+    pub fn archive_and_delete_sessions_by_agent(
+        &self,
+        agent_alias: &str,
+        archive_path: &Path,
+    ) -> Result<usize> {
+        use crate::owned_archive::{sqlite_rows, write_verified_json};
+        let mut conn = self.conn.lock();
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let live: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM acp_sessions WHERE agent_alias = ?1 AND killed_at IS NULL",
+            [agent_alias],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            live == 0,
+            "live ACP sessions remain; original ACP data retained"
+        );
+        let sessions = sqlite_rows(
+            &transaction,
+            "SELECT * FROM acp_sessions WHERE agent_alias = ?1 ORDER BY id",
+            agent_alias,
+        )?;
+        let messages = sqlite_rows(
+            &transaction,
+            "SELECT m.* FROM acp_messages m JOIN acp_sessions s ON s.id = m.session_id
+             WHERE s.agent_alias = ?1 ORDER BY m.id",
+            agent_alias,
+        )?;
+        let tool_calls = sqlite_rows(
+            &transaction,
+            "SELECT t.* FROM acp_tool_calls t JOIN acp_messages m ON m.id = t.message_id
+             JOIN acp_sessions s ON s.id = m.session_id WHERE s.agent_alias = ?1 ORDER BY t.id",
+            agent_alias,
+        )?;
+        let events = sqlite_rows(
+            &transaction,
+            "SELECT e.* FROM acp_session_events e JOIN acp_sessions s ON s.id = e.session_id
+             WHERE s.agent_alias = ?1 ORDER BY e.id",
+            agent_alias,
+        )?;
+        let snapshot = serde_json::json!({
+            "format": "zeroclaw-agent-archive", "version": 1, "store": "acp", "agent_alias": agent_alias,
+            "tables": {"acp_sessions": sessions, "acp_messages": messages,
+                "acp_tool_calls": tool_calls, "acp_session_events": events},
+        });
+        write_verified_json(archive_path, &snapshot).context("archive complete ACP history")?;
+        let removed = transaction.execute(
+            "DELETE FROM acp_sessions WHERE agent_alias = ?1",
+            [agent_alias],
+        )?;
+        transaction.commit()?;
+        Ok(removed)
+    }
+
     /// Re-point every ACP session (live or killed) from `from` to `to`,
     /// returning the row count. The agent-rename cascadekeeps the
     /// session and its transcript; only the owning alias moves. Unlike delete,
@@ -837,23 +651,6 @@ impl AcpSessionStore {
             )
             .context("Failed to rename ACP session owner")?;
         Ok(rows)
-    }
-
-    /// Persist that an admin intentionally killed this ACP session. The
-    /// transcript stays durable, but runtime rehydration must not revive it.
-    pub fn mark_session_killed(&self, session_uuid: &str) -> Result<bool> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock();
-        let rows = conn
-            .execute(
-                "UPDATE acp_sessions
-                    SET killed_at = COALESCE(killed_at, ?1),
-                        last_activity = ?1
-                  WHERE session_uuid = ?2",
-                params![now, session_uuid],
-            )
-            .context("Failed to mark ACP session killed")?;
-        Ok(rows > 0)
     }
 
     /// Return whether this durable ACP session has been intentionally killed.
@@ -872,18 +669,6 @@ impl AcpSessionStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
             Err(e) => Err(e).context("Failed to query ACP session killed marker"),
         }
-    }
-
-    /// Update `last_activity` without appending messages.
-    pub fn touch_session(&self, session_uuid: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE acp_sessions SET last_activity = ?1 WHERE session_uuid = ?2",
-            params![now, session_uuid],
-        )
-        .context("Failed to touch ACP session")?;
-        Ok(())
     }
 }
 
@@ -905,10 +690,12 @@ fn parse_ts(s: &str, field: &'static str, session_uuid: &str) -> DateTime<Utc> {
 }
 
 #[cfg(test)]
+mod archive_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use zeroclaw_api::model_provider::{ChatMessage, ToolCall, ToolResultMessage};
 
     fn open_store() -> (TempDir, AcpSessionStore) {
         let tmp = TempDir::new().unwrap();
@@ -948,10 +735,17 @@ mod tests {
     }
 
     #[test]
-    fn create_and_load_session_metadata() {
+    fn load_existing_session_metadata() {
         let (_tmp, store) = open_store();
         store
-            .create_session("sess-abc", "personal_code", "/home/user/project")
+            .conn
+            .lock()
+            .execute_batch(
+                "INSERT INTO acp_sessions
+                   (session_uuid, agent_alias, workspace_dir, created_at, last_activity)
+                 VALUES ('sess-abc', 'personal_code', '/home/user/project',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z');",
+            )
             .unwrap();
 
         let data = store.load_session("sess-abc").unwrap().unwrap();
@@ -969,15 +763,26 @@ mod tests {
     }
 
     #[test]
-    fn set_and_get_plan_round_trips() {
+    fn get_plan_reads_existing_plan_and_empty_states() {
         use zeroclaw_api::plan::{PlanEntry, PlanPriority, PlanStatus};
         let (_tmp, store) = open_store();
         store
-            .create_session("sess-plan", "alpha", "/tmp/proj")
+            .conn
+            .lock()
+            .execute_batch(
+                r#"INSERT INTO acp_sessions
+                   (session_uuid, agent_alias, workspace_dir, created_at, last_activity, plan_json)
+                 VALUES
+                   ('sess-plan', 'alpha', '/tmp/proj',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                    '[{"content":"A","status":"completed","priority":"high"},
+                      {"content":"B","status":"in_progress","priority":"medium","activeForm":"Doing B"}]'),
+                   ('sess-no-plan', 'alpha', '/tmp/proj',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL),
+                   ('sess-cleared-plan', 'alpha', '/tmp/proj',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '[]');"#,
+            )
             .unwrap();
-
-        // No plan yet → empty.
-        assert!(store.get_plan("sess-plan").unwrap().is_empty());
 
         let plan = vec![
             PlanEntry {
@@ -993,12 +798,9 @@ mod tests {
                 active_form: Some("Doing B".to_string()),
             },
         ];
-        store.set_plan("sess-plan", &plan).unwrap();
         assert_eq!(store.get_plan("sess-plan").unwrap(), plan);
-
-        // Whole-list replace: empty slice clears.
-        store.set_plan("sess-plan", &[]).unwrap();
-        assert!(store.get_plan("sess-plan").unwrap().is_empty());
+        assert!(store.get_plan("sess-no-plan").unwrap().is_empty());
+        assert!(store.get_plan("sess-cleared-plan").unwrap().is_empty());
     }
 
     #[test]
@@ -1008,23 +810,21 @@ mod tests {
     }
 
     #[test]
-    fn set_plan_errors_for_unknown_session() {
-        let (_tmp, store) = open_store();
-        assert!(store.set_plan("nope", &[]).is_err());
-    }
-
-    #[test]
-    fn append_turn_round_trips_chat_messages() {
+    fn load_existing_chat_messages() {
         let (_tmp, store) = open_store();
         store
-            .create_session("sess-msgs", "alpha", "/tmp/proj")
+            .conn
+            .lock()
+            .execute_batch(
+                "INSERT INTO acp_sessions
+                   (id, session_uuid, agent_alias, workspace_dir, created_at, last_activity)
+                 VALUES (1, 'sess-msgs', 'alpha', '/tmp/proj',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                 INSERT INTO acp_messages (session_id, role, content, created_at)
+                 VALUES (1, 'user', 'hello', '2026-01-01T00:00:00Z'),
+                        (1, 'assistant', 'hi', '2026-01-01T00:00:00Z');",
+            )
             .unwrap();
-
-        let msgs = vec![
-            ConversationMessage::Chat(ChatMessage::user("hello")),
-            ConversationMessage::Chat(ChatMessage::assistant("hi")),
-        ];
-        store.append_turn("sess-msgs", &msgs).unwrap();
 
         let data = store.load_session("sess-msgs").unwrap().unwrap();
         assert_eq!(data.messages.len(), 2);
@@ -1039,37 +839,33 @@ mod tests {
     }
 
     #[test]
-    fn append_turn_decomposes_assistant_tool_calls_and_results() {
+    fn load_existing_assistant_tool_calls_and_results() {
         let (_tmp, store) = open_store();
+        // Both tool events belong to the same historical assistant message.
         store
-            .create_session("sess-variants", "alpha", "/tmp/proj")
+            .conn
+            .lock()
+            .execute_batch(
+                r#"INSERT INTO acp_sessions
+                   (id, session_uuid, agent_alias, workspace_dir, created_at, last_activity)
+                 VALUES (1, 'sess-variants', 'alpha', '/tmp/proj',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                 INSERT INTO acp_messages
+                   (id, session_id, role, content, reasoning_content, created_at)
+                 VALUES (1, 1, 'user', 'task', NULL, '2026-01-01T00:00:00Z'),
+                        (2, 1, 'assistant', 'calling shell', 'think think', '2026-01-01T00:00:00Z'),
+                        (3, 1, 'assistant', 'done', NULL, '2026-01-01T00:00:00Z');
+                 INSERT INTO acp_tool_calls
+                   (message_id, tool_call_id, tool_name, event_kind, payload, outcome, created_at)
+                 VALUES (2, 'tc-1', 'shell', 'in', '{"command":"ls"}', NULL, '2026-01-01T00:00:00Z'),
+                        (2, 'tc-1', 'shell', 'out', 'file.txt' || char(10), 'unknown', '2026-01-01T00:00:00Z');"#,
+            )
             .unwrap();
-
-        let msgs = vec![
-            ConversationMessage::Chat(ChatMessage::user("task")),
-            ConversationMessage::AssistantToolCalls {
-                text: Some("calling shell".into()),
-                tool_calls: vec![ToolCall {
-                    id: "tc-1".into(),
-                    name: "shell".into(),
-                    arguments: r#"{"command":"ls"}"#.into(),
-                    extra_content: None,
-                }],
-                reasoning_content: Some("think think".into()),
-            },
-            ConversationMessage::ToolResults(vec![ToolResultMessage {
-                tool_call_id: "tc-1".into(),
-                content: "file.txt\n".into(),
-                tool_name: String::new(),
-            }]),
-            ConversationMessage::Chat(ChatMessage::assistant("done")),
-        ];
-        store.append_turn("sess-variants", &msgs).unwrap();
 
         let data = store.load_session("sess-variants").unwrap().unwrap();
         assert_eq!(data.messages.len(), 4);
 
-        // Round-trip: AssistantToolCalls preserves text + tool_calls + reasoning
+        // Historical AssistantToolCalls preserve text + tool_calls + reasoning.
         match &data.messages[1] {
             ConversationMessage::AssistantToolCalls {
                 text,
@@ -1086,139 +882,38 @@ mod tests {
             other => panic!("expected AssistantToolCalls, got {other:?}"),
         }
 
-        // Round-trip: ToolResults preserves tool_call_id + content
+        // Historical ToolResults preserve tool_call_id + content + provenance.
         match &data.messages[2] {
             ConversationMessage::ToolResults(results) => {
                 assert_eq!(results.len(), 1);
                 assert_eq!(results[0].tool_call_id, "tc-1");
                 assert_eq!(results[0].content, "file.txt\n");
+                assert_eq!(results[0].tool_name, "shell");
             }
             other => panic!("expected ToolResults, got {other:?}"),
         }
     }
 
     #[test]
-    fn no_data_duplication_tool_call_payload_only_in_tool_calls_table() {
-        // The schema contract: tool-call args and results live ONLY in
-        // acp_tool_calls. The assistant's message row carries only the text.
-        let (_tmp, store) = open_store();
-        store
-            .create_session("sess-dup", "alpha", "/tmp/proj")
-            .unwrap();
-
-        store
-            .append_turn(
-                "sess-dup",
-                &[ConversationMessage::AssistantToolCalls {
-                    text: Some("running".into()),
-                    tool_calls: vec![ToolCall {
-                        id: "tc-x".into(),
-                        name: "shell".into(),
-                        arguments: r#"{"command":"echo hi"}"#.into(),
-                        extra_content: None,
-                    }],
-                    reasoning_content: None,
-                }],
-            )
-            .unwrap();
-
-        let conn = store.conn.lock();
-        let msg_content: String = conn
-            .query_row(
-                "SELECT content FROM acp_messages WHERE role = 'assistant' LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(msg_content, "running");
-        assert!(
-            !msg_content.contains("echo hi"),
-            "message content must not contain tool-call args"
-        );
-    }
-
-    #[test]
-    fn append_turn_empty_slice_is_noop() {
-        let (_tmp, store) = open_store();
-        store
-            .create_session("sess-empty", "alpha", "/tmp/proj")
-            .unwrap();
-        store.append_turn("sess-empty", &[]).unwrap();
-        let data = store.load_session("sess-empty").unwrap().unwrap();
-        assert!(data.messages.is_empty());
-    }
-
-    #[test]
-    fn last_activity_updated_on_append() {
-        let (_tmp, store) = open_store();
-        store
-            .create_session("sess-activity", "alpha", "/tmp/proj")
-            .unwrap();
-        let before = store
-            .load_session("sess-activity")
-            .unwrap()
-            .unwrap()
-            .last_activity;
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        store
-            .append_turn(
-                "sess-activity",
-                &[ConversationMessage::Chat(ChatMessage::user("hi"))],
-            )
-            .unwrap();
-        let after = store
-            .load_session("sess-activity")
-            .unwrap()
-            .unwrap()
-            .last_activity;
-        assert!(after >= before);
-    }
-
-    #[test]
-    fn append_turn_unknown_session_errors_atomically() {
-        let (_tmp, store) = open_store();
-        let result = store.append_turn(
-            "does-not-exist",
-            &[ConversationMessage::Chat(ChatMessage::user("hello"))],
-        );
-        assert!(result.is_err());
-        let conn = store.conn.lock();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM acp_messages", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(count, 0, "no orphan rows after failed append_turn");
-    }
-
-    #[test]
     fn delete_session_cascades_to_children() {
         let (_tmp, store) = open_store();
         store
-            .create_session("sess-del", "alpha", "/tmp/proj")
-            .unwrap();
-        store
-            .append_turn(
-                "sess-del",
-                &[
-                    ConversationMessage::AssistantToolCalls {
-                        text: Some("calling".into()),
-                        tool_calls: vec![ToolCall {
-                            id: "tc-1".into(),
-                            name: "shell".into(),
-                            arguments: "{}".into(),
-                            extra_content: None,
-                        }],
-                        reasoning_content: None,
-                    },
-                    ConversationMessage::ToolResults(vec![ToolResultMessage {
-                        tool_call_id: "tc-1".into(),
-                        content: "ok".into(),
-                        tool_name: String::new(),
-                    }]),
-                ],
+            .conn
+            .lock()
+            .execute_batch(
+                "INSERT INTO acp_sessions
+                   (id, session_uuid, agent_alias, workspace_dir, created_at, last_activity)
+                 VALUES (1, 'sess-del', 'alpha', '/tmp/proj',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                 INSERT INTO acp_messages (id, session_id, role, content, created_at)
+                 VALUES (1, 1, 'assistant', 'calling', '2026-01-01T00:00:00Z');
+                 INSERT INTO acp_tool_calls
+                   (message_id, tool_call_id, tool_name, event_kind, payload, outcome, created_at)
+                 VALUES (1, 'tc-1', 'shell', 'in', '{}', NULL, '2026-01-01T00:00:00Z'),
+                        (1, 'tc-1', 'shell', 'out', 'ok', 'unknown', '2026-01-01T00:00:00Z');
+                 INSERT INTO acp_session_events (session_id, action, outcome, created_at)
+                 VALUES (1, 'disconnect', 'success', '2026-01-01T00:00:00Z');",
             )
-            .unwrap();
-        store
-            .append_event("sess-del", Action::Disconnect, EventOutcome::Success, None)
             .unwrap();
 
         assert!(store.delete_session("sess-del").unwrap());
@@ -1239,21 +934,34 @@ mod tests {
     }
 
     #[test]
-    fn mark_session_killed_persists_without_deleting_history() {
+    fn killed_fixture_preserves_history_and_remains_terminal() {
         let (tmp, store) = open_store();
         store
-            .create_session("sess-kill", "alpha", "/tmp/proj")
-            .unwrap();
-        store
-            .append_turn(
-                "sess-kill",
-                &[ConversationMessage::Chat(ChatMessage::user("keep this"))],
+            .conn
+            .lock()
+            .execute_batch(
+                "INSERT INTO acp_sessions
+                   (id, session_uuid, agent_alias, workspace_dir, created_at, last_activity)
+                 VALUES (1, 'sess-kill', 'alpha', '/tmp/proj',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+                 INSERT INTO acp_messages (session_id, role, content, created_at)
+                 VALUES (1, 'user', 'keep this', '2026-01-01T00:00:00Z');",
             )
             .unwrap();
 
         assert!(!store.is_session_killed("sess-kill").unwrap());
-        assert!(store.mark_session_killed("sess-kill").unwrap());
+        assert!(matches!(
+            store.load_session_for_restore("sess-kill").unwrap(),
+            AcpSessionRestore::Restorable(_)
+        ));
+        store.conn.lock().execute(
+            "UPDATE acp_sessions SET killed_at = '2026-01-02T00:00:00Z' WHERE session_uuid = 'sess-kill'", [],
+        ).unwrap();
         assert!(store.is_session_killed("sess-kill").unwrap());
+        assert!(matches!(
+            store.load_session_for_restore("sess-kill").unwrap(),
+            AcpSessionRestore::Killed
+        ));
 
         let data = store.load_session("sess-kill").unwrap().unwrap();
         assert_eq!(
@@ -1272,117 +980,59 @@ mod tests {
             reopened.load_session("sess-kill").unwrap().is_some(),
             "durable history remains loadable after reopen"
         );
+        assert!(matches!(
+            reopened.load_session_for_restore("sess-kill").unwrap(),
+            AcpSessionRestore::Killed
+        ));
     }
 
     #[test]
-    fn mark_nonexistent_session_killed_returns_false() {
+    fn missing_session_is_not_killed() {
         let (_tmp, store) = open_store();
-        assert!(!store.mark_session_killed("ghost").unwrap());
         assert!(!store.is_session_killed("ghost").unwrap());
+        assert!(matches!(
+            store.load_session_for_restore("ghost").unwrap(),
+            AcpSessionRestore::Missing
+        ));
     }
 
     #[test]
-    fn touch_session_updates_last_activity() {
+    fn load_existing_token_count() {
         let (_tmp, store) = open_store();
         store
-            .create_session("sess-touch", "alpha", "/tmp/proj")
+            .conn
+            .lock()
+            .execute_batch(
+                "INSERT INTO acp_sessions
+                   (session_uuid, agent_alias, workspace_dir, token_count, created_at, last_activity)
+                 VALUES ('sess-tok', 'alpha', '/tmp/proj', 152306,
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+            )
             .unwrap();
-        let before = store
-            .load_session("sess-touch")
-            .unwrap()
-            .unwrap()
-            .last_activity;
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        store.touch_session("sess-touch").unwrap();
-        let after = store
-            .load_session("sess-touch")
-            .unwrap()
-            .unwrap()
-            .last_activity;
-        assert!(after >= before);
-    }
-
-    #[test]
-    fn set_token_count_persists_and_load_reads_it() {
-        let (_tmp, store) = open_store();
-        store
-            .create_session("sess-tok", "alpha", "/tmp/proj")
-            .unwrap();
-        assert_eq!(
-            store.load_session("sess-tok").unwrap().unwrap().token_count,
-            0
-        );
-
-        store.set_token_count("sess-tok", 152_306).unwrap();
         assert_eq!(
             store.load_session("sess-tok").unwrap().unwrap().token_count,
             152_306,
-            "ctx-bar value must round-trip through the store"
+            "historical token count must remain readable"
         );
-
-        // Overwrite semantics (not cumulative).
-        store.set_token_count("sess-tok", 42).unwrap();
-        assert_eq!(
-            store.load_session("sess-tok").unwrap().unwrap().token_count,
-            42
-        );
-    }
-
-    #[test]
-    fn set_token_count_errors_on_unknown_session() {
-        // Defensive: a silent zero-row UPDATE would mask a race where the
-        // session was deleted while a Usage event was in flight. The caller
-        // needs the error so the failure is loggable.
-        let (_tmp, store) = open_store();
-        let err = store.set_token_count("nonexistent", 100).unwrap_err();
-        assert!(
-            err.to_string().contains("nonexistent"),
-            "error must name the missing session_uuid; got: {err}"
-        );
-    }
-
-    #[test]
-    fn append_event_writes_action_outcome_payload() {
-        let (_tmp, store) = open_store();
-        store
-            .create_session("sess-evt", "alpha", "/tmp/proj")
-            .unwrap();
-
-        store
-            .append_event(
-                "sess-evt",
-                Action::Cancel,
-                EventOutcome::Failure,
-                Some("turn cancelled by user"),
-            )
-            .unwrap();
-
-        let conn = store.conn.lock();
-        let (action, outcome, payload): (String, String, Option<String>) = conn
-            .query_row(
-                "SELECT action, outcome, payload FROM acp_session_events LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(action, "cancel");
-        assert_eq!(outcome, "failure");
-        assert_eq!(payload.as_deref(), Some("turn cancelled by user"));
     }
 
     #[test]
     fn list_sessions_returns_summaries_ordered_by_recent_activity() {
         let (_tmp, store) = open_store();
-        store.create_session("sess-old", "alpha", "/tmp/a").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        store.create_session("sess-new", "beta", "/tmp/b").unwrap();
         store
-            .append_turn(
-                "sess-new",
-                &[ConversationMessage::Chat(ChatMessage::user("hi"))],
+            .conn
+            .lock()
+            .execute_batch(
+                "INSERT INTO acp_sessions
+                   (id, session_uuid, agent_alias, workspace_dir, token_count, created_at, last_activity)
+                 VALUES (1, 'sess-old', 'alpha', '/tmp/a', 0,
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+                        (2, 'sess-new', 'beta', '/tmp/b', 1234,
+                         '2026-01-01T00:00:01Z', '2026-01-01T00:00:01Z');
+                 INSERT INTO acp_messages (session_id, role, content, created_at)
+                 VALUES (2, 'user', 'hi', '2026-01-01T00:00:01Z');",
             )
             .unwrap();
-        store.set_token_count("sess-new", 1234).unwrap();
 
         let list = store.list_sessions().unwrap();
         assert_eq!(list.len(), 2);
@@ -1406,13 +1056,17 @@ mod tests {
     fn list_sessions_omits_killed_sessions() {
         let (_tmp, store) = open_store();
         store
-            .create_session("sess-live", "alpha", "/tmp/live")
+            .conn
+            .lock()
+            .execute_batch(
+                "INSERT INTO acp_sessions
+                   (session_uuid, agent_alias, workspace_dir, created_at, last_activity, killed_at)
+                 VALUES ('sess-live', 'alpha', '/tmp/live',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL),
+                        ('sess-killed', 'alpha', '/tmp/killed',
+                         '2026-01-01T00:00:01Z', '2026-01-01T00:00:02Z', '2026-01-01T00:00:02Z');",
+            )
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        store
-            .create_session("sess-killed", "alpha", "/tmp/killed")
-            .unwrap();
-        store.mark_session_killed("sess-killed").unwrap();
 
         let list = store.list_sessions().unwrap();
         assert_eq!(list.len(), 1);
@@ -1422,12 +1076,22 @@ mod tests {
     #[test]
     fn per_agent_cascade_counts_live_and_deletes_only_that_agent() {
         let (_tmp, store) = open_store();
-        store.create_session("a-live", "alpha", "/ws/a1").unwrap();
-        store.create_session("a-killed", "alpha", "/ws/a2").unwrap();
-        store.mark_session_killed("a-killed").unwrap();
-        store.create_session("b-live", "beta", "/ws/b1").unwrap();
+        store
+            .conn
+            .lock()
+            .execute_batch(
+                "INSERT INTO acp_sessions
+                   (session_uuid, agent_alias, workspace_dir, created_at, last_activity, killed_at)
+                 VALUES ('a-live', 'alpha', '/ws/a1',
+                         '2001-01-01T00:00:00Z', '2001-01-01T00:00:00Z', NULL),
+                        ('a-killed', 'alpha', '/ws/a2',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', '2026-01-01T00:00:01Z'),
+                        ('b-live', 'beta', '/ws/b1',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL);",
+            )
+            .unwrap();
 
-        // Only un-killed sessions count as live (the HARD-refuse signal).
+        // Only the killed marker changes the HARD-refuse signal, never age.
         assert_eq!(store.count_live_sessions_by_agent("alpha").unwrap(), 1);
         assert_eq!(store.count_live_sessions_by_agent("beta").unwrap(), 1);
         assert_eq!(store.count_live_sessions_by_agent("ghost").unwrap(), 0);
@@ -1444,10 +1108,20 @@ mod tests {
     #[test]
     fn rename_sessions_by_agent_repoints_live_and_killed() {
         let (_tmp, store) = open_store();
-        store.create_session("a-live", "alpha", "/ws/a1").unwrap();
-        store.create_session("a-killed", "alpha", "/ws/a2").unwrap();
-        store.mark_session_killed("a-killed").unwrap();
-        store.create_session("b-live", "beta", "/ws/b1").unwrap();
+        store
+            .conn
+            .lock()
+            .execute_batch(
+                "INSERT INTO acp_sessions
+                   (session_uuid, agent_alias, workspace_dir, created_at, last_activity, killed_at)
+                 VALUES ('a-live', 'alpha', '/ws/a1',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL),
+                        ('a-killed', 'alpha', '/ws/a2',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', '2026-01-01T00:00:01Z'),
+                        ('b-live', 'beta', '/ws/b1',
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL);",
+            )
+            .unwrap();
 
         // Rename re-points BOTH live and killed sessions; unlike delete, a live
         // session is no obstacle.

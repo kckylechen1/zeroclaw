@@ -323,16 +323,21 @@ fn dirs_data_local() -> Option<std::path::PathBuf> {
 }
 
 fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
-    if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
-        for candidate in xff.split(',') {
-            if let Some(ip) = parse_client_ip(candidate) {
-                return Some(ip);
-            }
-        }
+    // The immediate trusted proxy appends the connecting peer on the right.
+    // Only that terminal hop is vouched for. Never walk left across a loopback
+    // or malformed suffix into caller-controlled entries. Decode the suffix
+    // alone so opaque prefix bytes cannot hide a valid proxy-added address.
+    if let Some(xff) = headers.get_all("X-Forwarded-For").iter().next_back() {
+        let candidate = xff.as_bytes().rsplit(|byte| *byte == b',').next()?;
+        return std::str::from_utf8(candidate)
+            .ok()
+            .and_then(parse_client_ip);
     }
 
     headers
-        .get("X-Real-IP")
+        .get_all("X-Real-IP")
+        .iter()
+        .next_back()
         .and_then(|v| v.to_str().ok())
         .and_then(parse_client_ip)
 }
@@ -342,8 +347,21 @@ pub(crate) fn client_key_from_request(
     headers: &HeaderMap,
     trust_forwarded_headers: bool,
 ) -> String {
-    if trust_forwarded_headers && let Some(ip) = forwarded_client_ip(headers) {
-        return ip.to_string();
+    if trust_forwarded_headers {
+        if let Some(ip) = forwarded_client_ip(headers)
+            && !ip.is_loopback()
+        {
+            return ip.to_string();
+        }
+        // A forwarded path must not acquire the local authentication-limiter
+        // exemption from a loopback or malformed terminal hop. An actual local
+        // request with no forwarding headers retains its existing behavior.
+        if headers.contains_key("X-Forwarded-For") || headers.contains_key("X-Real-IP") {
+            return peer_addr
+                .filter(|addr| !addr.ip().is_loopback())
+                .map(|addr| addr.ip().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+        }
     }
 
     peer_addr

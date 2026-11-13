@@ -21,9 +21,12 @@ pub fn image_data_uri(mime: &str, bytes: &[u8]) -> String {
 /// messages remain byte-for-byte identical.
 pub const DEFAULT_PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Maximum character budget for a stale tool-result payload once it falls
-/// behind the compacted prompt-cache boundary.
+/// Maximum byte budget for stale tool-result text once it falls behind the
+/// compacted prompt-cache boundary. JSON envelope metadata is additional.
 pub const STALE_TOOL_RESULT_MAX_CHARS: usize = 4_096;
+
+/// Runtime feedback carried as a user message without opening a new turn.
+pub const TOOL_PARSE_ERROR_FEEDBACK_PREFIX: &str = "[Tool call parse error]";
 
 /// Per-path cache for resolved local image data URIs and per-session
 /// prompt-cache compaction window state. Keyed by absolute path; stores
@@ -48,8 +51,8 @@ impl LocalImageCache {
     }
 
     /// Mark the current prompt-cache window expired so the next provider
-    /// preparation advances the stale tool-result compaction boundary to the
-    /// latest real user turn.
+    /// preparation advances the stale tool-result compaction boundary according
+    /// to the current turn-retention policy.
     pub fn expire_prompt_cache_window(&mut self) {
         self.last_prepared_at = None;
     }
@@ -75,29 +78,28 @@ impl LocalImageCache {
         self.compacted_prefix_len
     }
 
-    fn resolve_compacted_prefix_len(&mut self, messages: &[ChatMessage]) -> usize {
-        let Some(latest_user_idx) = messages
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, message)| is_real_user_turn_message(message))
-            .map(|(index, _)| index)
-        else {
+    fn resolve_compacted_prefix_len(
+        &mut self,
+        messages: &[ChatMessage],
+        keep_tool_context_turns: usize,
+    ) -> usize {
+        if !messages.iter().any(is_real_user_turn_message) {
             self.reset_prompt_cache_window();
             return 0;
-        };
+        }
+        let candidate = tool_context_compaction_cutoff(messages, keep_tool_context_turns);
 
         let now = std::time::Instant::now();
         let is_warm = self
             .last_prepared_at
             .is_some_and(|last| now.saturating_duration_since(last) < DEFAULT_PROMPT_CACHE_TTL);
         let prefix_valid = is_warm
-            && self.compacted_prefix_len <= latest_user_idx
+            && self.compacted_prefix_len <= candidate
             && non_system_prefix_fingerprint(messages, self.compacted_prefix_len)
                 == self.compacted_prefix_fingerprint;
 
         if !prefix_valid {
-            self.compacted_prefix_len = latest_user_idx;
+            self.compacted_prefix_len = candidate;
             self.compacted_prefix_fingerprint =
                 non_system_prefix_fingerprint(messages, self.compacted_prefix_len);
         }
@@ -659,7 +661,25 @@ pub(crate) fn is_prompt_tool_result_message(message: &ChatMessage) -> bool {
 }
 
 fn is_real_user_turn_message(message: &ChatMessage) -> bool {
-    message.role == "user" && !is_prompt_tool_result_message(message)
+    message.role == "user"
+        && !is_prompt_tool_result_message(message)
+        && !message
+            .content
+            .trim_start()
+            .starts_with(TOOL_PARSE_ERROR_FEEDBACK_PREFIX)
+}
+
+fn tool_context_compaction_cutoff(
+    messages: &[ChatMessage],
+    keep_tool_context_turns: usize,
+) -> usize {
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, message)| is_real_user_turn_message(message))
+        .nth(keep_tool_context_turns)
+        .map_or(0, |(index, _)| index)
 }
 
 fn is_tool_result_carrier(message: &ChatMessage) -> bool {
@@ -818,9 +838,59 @@ pub fn compact_stale_tool_result_text(content: &str, max_chars: usize) -> String
     }
 }
 
+/// Prompt-mode dispatchers aggregate several results into one user message.
+/// Compact only bodies with recognizable block boundaries so a parallel batch
+/// never loses an ID/name/header or a closing tag. Tool text can contain markup
+/// too; leave nested or unparseable boundaries untouched. Attributes are copied
+/// verbatim, not interpreted as XML or granted authority.
+fn compact_prompt_tool_result_bodies(content: &str, max_chars: usize) -> Option<String> {
+    const PREFIX: &str = "[Tool results]";
+    const CLOSE: &str = "\n</tool_result>";
+    let trimmed = content.trim_start();
+    let after_prefix = trimmed.strip_prefix(PREFIX)?;
+    let prefix_end = content.len() - after_prefix.len();
+    let mut compacted = content[..prefix_end].to_string();
+    let mut remaining = after_prefix;
+    let mut found_result = false;
+
+    loop {
+        let trimmed = remaining.trim_start();
+        compacted.push_str(&remaining[..remaining.len() - trimmed.len()]);
+        remaining = trimmed;
+        if remaining.is_empty() {
+            return found_result.then_some(compacted);
+        }
+        let after_open = remaining.strip_prefix("<tool_result ")?;
+        let (attributes, body_and_rest) = after_open.split_once(">\n")?;
+        if attributes.contains(['<', '>', '\n', '\r']) {
+            return None;
+        }
+        let (body, rest) = body_and_rest.split_once(CLOSE)?;
+        if body.contains("<tool_result") || body.contains("</tool_result") {
+            return None;
+        }
+        let header_len = remaining.len() - body_and_rest.len();
+        compacted.push_str(&remaining[..header_len]);
+        compacted.push_str(&compact_stale_tool_result_text(body, max_chars));
+        compacted.push_str(CLOSE);
+        remaining = rest;
+        found_result = true;
+    }
+}
+
 fn compact_stale_tool_result_message(message: &ChatMessage, max_chars: usize) -> ChatMessage {
     if max_chars == 0 || message.content.len() <= max_chars {
         return message.clone();
+    }
+
+    if is_prompt_tool_result_message(message) {
+        return compact_prompt_tool_result_bodies(&message.content, max_chars).map_or_else(
+            || message.clone(),
+            |content| ChatMessage {
+                role: message.role.clone(),
+                content,
+            },
+        );
     }
 
     if message.role == "tool"
@@ -912,7 +982,7 @@ pub async fn prepare_messages_for_provider(
     messages: &[ChatMessage],
     config: &MultimodalConfig,
 ) -> anyhow::Result<PreparedMessages> {
-    prepare_messages_inner(messages, config, None).await
+    prepare_messages_inner(messages, config, None, None).await
 }
 
 /// Like [`prepare_messages_for_provider`] but reuses a [`LocalImageCache`]
@@ -923,13 +993,27 @@ pub async fn prepare_messages_for_provider_cached(
     config: &MultimodalConfig,
     cache: &mut LocalImageCache,
 ) -> anyhow::Result<PreparedMessages> {
-    prepare_messages_inner(messages, config, Some(cache)).await
+    prepare_messages_inner(messages, config, Some(cache), Some(0)).await
+}
+
+/// Project a turn's resolved tool-context policy through the existing cache-TTL
+/// compaction window. The current turn and `keep_tool_context_turns` prior turns
+/// keep full text; older results use the existing bounded head/tail projection.
+/// With no session cache each request is cold. No source history is mutated.
+pub async fn prepare_messages_with_tool_retention(
+    messages: &[ChatMessage],
+    config: &MultimodalConfig,
+    keep_tool_context_turns: usize,
+    cache: Option<&mut LocalImageCache>,
+) -> anyhow::Result<PreparedMessages> {
+    prepare_messages_inner(messages, config, cache, Some(keep_tool_context_turns)).await
 }
 
 async fn prepare_messages_inner(
     messages: &[ChatMessage],
     config: &MultimodalConfig,
     mut cache: Option<&mut LocalImageCache>,
+    keep_tool_context_turns: Option<usize>,
 ) -> anyhow::Result<PreparedMessages> {
     // Strip loadable audio markers before any provider sees the history. Left
     // in place, an audio path reaches the model as literal text and fails
@@ -945,9 +1029,12 @@ async fn prepare_messages_inner(
     let max_bytes = max_image_size_mb.saturating_mul(1024 * 1024);
 
     let latest_tool_indices = latest_tool_result_indices(messages);
-    let compacted_prefix_len = cache
-        .as_deref_mut()
-        .map_or(0, |c| c.resolve_compacted_prefix_len(messages));
+    let compacted_prefix_len = keep_tool_context_turns.map_or(0, |keep| {
+        cache.as_deref_mut().map_or_else(
+            || tool_context_compaction_cutoff(messages, keep),
+            |cache| cache.resolve_compacted_prefix_len(messages, keep),
+        )
+    });
     let total_images = count_image_markers_with_latest_tool_results(messages, &latest_tool_indices);
 
     if total_images == 0 {

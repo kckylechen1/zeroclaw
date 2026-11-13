@@ -137,6 +137,41 @@ async fn trusted_forwarded_clients_have_independent_shared_rate_buckets() {
 }
 
 #[tokio::test]
+async fn rotating_xff_prefix_cannot_reset_trusted_proxy_pairing_budget() {
+    let state = state(true, 1);
+    assert_eq!(
+        request(
+            &state,
+            "127.0.0.1:40000",
+            &[("x-forwarded-for", "192.0.2.1, 198.51.100.10")]
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(
+            &state,
+            "127.0.0.1:40001",
+            &[("x-forwarded-for", "192.0.2.2, 198.51.100.10")]
+        )
+        .await
+        .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        request(
+            &state,
+            "127.0.0.1:40002",
+            &[("x-forwarded-for", "192.0.2.2, 198.51.100.11")]
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn missing_empty_or_invalid_trusted_headers_fall_back_to_peer() {
     for headers in [
         vec![],

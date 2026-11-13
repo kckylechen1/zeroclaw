@@ -109,6 +109,7 @@ impl SourceIndex {
         let mut paths = Vec::new();
         collect_rs_files(&root.join("crates"), &mut paths)?;
         collect_rs_files(&root.join("src"), &mut paths)?;
+        collect_rs_files(&root.join("bridges"), &mut paths)?;
 
         let files = paths
             .into_iter()
@@ -443,6 +444,27 @@ impl Tool for FileRead {
         let index = SourceIndex::build(root.path()).unwrap();
         assert!(index.references_key("tool-file-read"));
         assert!(!index.references_key("tool-missing-tool"));
+    }
+
+    #[test]
+    fn source_reference_check_includes_bridge_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root.path().join("bridges/acp/src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("main.rs"),
+            r#"get_required_cli_string("acp-bridge-allow-once")"#,
+        )
+        .unwrap();
+        std::fs::write(
+            source_dir.join("tests.rs"),
+            r#"get_required_cli_string("fixture-test-only-key")"#,
+        )
+        .unwrap();
+
+        let index = SourceIndex::build(root.path()).unwrap();
+        assert!(index.references_key("acp-bridge-allow-once"));
+        assert!(!index.references_key("fixture-test-only-key"));
     }
 
     #[test]

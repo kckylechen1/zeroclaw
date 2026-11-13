@@ -117,6 +117,74 @@ async fn sqlite_recall_for_agents_does_not_lose_allowed_rows_behind_disallowed_m
 }
 
 #[tokio::test]
+async fn sqlite_verified_archive_keeps_all_raw_fields_and_preserves_failed_snapshots() {
+    let (tmp, mem) = temp_sqlite();
+    let alpha = mem.ensure_agent_uuid("alpha").await.unwrap();
+    let beta = mem.ensure_agent_uuid("beta").await.unwrap();
+    for (id, key) in [(&alpha, "alpha-note"), (&beta, "beta-note")] {
+        mem.store_with_agent(
+            key,
+            "complete memory",
+            MemoryCategory::Core,
+            Some("session-one"),
+            None,
+            None,
+            Some(id),
+        )
+        .await
+        .unwrap();
+    }
+    {
+        let conn = mem.conn.lock();
+        conn.execute("UPDATE memories SET embedding = X'0001FF', updated_at = 'raw-update', pinned = 1 WHERE agent_id = ?1", [&alpha]).unwrap();
+    }
+    let blocker = tmp.path().join("blocker");
+    std::fs::write(&blocker, b"keep").unwrap();
+    assert!(
+        mem.archive_and_purge_agent("alpha", &blocker.join("memory.json"))
+            .await
+            .is_err()
+    );
+    assert_eq!(mem.export_agent("alpha").await.unwrap().len(), 1);
+    let path = tmp.path().join("archive/memory.json");
+    assert_eq!(
+        mem.archive_and_purge_agent("alpha", &path).await.unwrap(),
+        1
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let row = &snapshot["tables"]["memories"][0];
+    assert_eq!(row["content"], "complete memory");
+    assert_eq!(
+        row["embedding"],
+        serde_json::json!({"sqlite_blob": [0, 1, 255]})
+    );
+    assert_eq!(row["updated_at"], "raw-update");
+    assert_eq!(row["pinned"], 1);
+    assert_eq!(row["session_id"], "session-one");
+    assert_eq!(row["agent_id"], snapshot["tables"]["agents"][0]["id"]);
+    assert!(mem.export_agent("alpha").await.unwrap().is_empty());
+    assert_eq!(mem.export_agent("beta").await.unwrap().len(), 1);
+    // Same path is an immutable snapshot: a new record must survive retries.
+    mem.store_with_agent(
+        "new",
+        "after export",
+        MemoryCategory::Core,
+        None,
+        None,
+        None,
+        Some(&alpha),
+    )
+    .await
+    .unwrap();
+    assert!(mem.archive_and_purge_agent("alpha", &path).await.is_err());
+    assert_eq!(
+        mem.export_agent("alpha").await.unwrap()[0].content,
+        "after export"
+    );
+}
+
+#[tokio::test]
 async fn sqlite_purge_agent_deletes_only_that_agents_rows() {
     let (_tmp, mem) = temp_sqlite();
     let alpha = mem.ensure_agent_uuid("alpha").await.unwrap();

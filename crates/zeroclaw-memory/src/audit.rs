@@ -381,6 +381,23 @@ impl<M: Memory> Memory for AuditedMemory<M> {
         self.inner.purge_agent(agent_alias).await
     }
 
+    async fn archive_and_purge_agent(
+        &self,
+        agent_alias: &str,
+        archive_path: &std::path::Path,
+    ) -> anyhow::Result<usize> {
+        self.log_audit(
+            AuditOp::Purge,
+            None,
+            None,
+            None,
+            Some(&format!("agent_alias={agent_alias}; verified_archive")),
+        );
+        self.inner
+            .archive_and_purge_agent(agent_alias, archive_path)
+            .await
+    }
+
     async fn export_agent(&self, agent_alias: &str) -> anyhow::Result<Vec<MemoryEntry>> {
         self.inner.export_agent(agent_alias).await
     }

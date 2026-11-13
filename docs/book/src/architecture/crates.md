@@ -27,6 +27,7 @@ TOML schema and its validation. Handles:
 - Encrypted secrets store (local key file)
 - Workspace resolution (env vars, Homebrew paths, XDG, container detection)
 - Schema versioning and migration
+- Shared locale discovery and Fluent formatting through the optional `i18n` feature; runtime re-exports this implementation, and the ACP bridge uses it directly
 - Stateless encoding/comparison for persisted token hashes (`tokens`); runtime owns the pairing guard and its live state
 
 All user-facing config keys are documented in [Reference → Config](../reference/config.md), which is generated from this crate.
@@ -45,6 +46,14 @@ The kernel ABI. Defines the core public traits, including:
 The runtime depends only on these traits, not on concrete implementations. This is what makes provider/channel/tool additions a matter of implementing a trait rather than patching the core.
 
 ## Layer: Edge
+
+### `zeroclaw-bridge-acp`
+
+The `bridges/acp` package builds `zeroclaw-acp-bridge`, a standalone ACP v1
+stdio client of the gateway conversation. Its config dependency supplies shared
+locale handling; it has no dependency on runtime, providers, memory, tools or
+the gateway server. The [owner ACP bridge contract](../gateway/api.md#bounded-owner-bridges-and-acp)
+defines its authentication, permission and cancellation boundaries.
 
 ### `zeroclaw-providers`
 

@@ -598,8 +598,12 @@ jobs:
             https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.9/cargo-deny-0.19.9-x86_64-unknown-linux-musl.tar.gz \
             "$download_dir/cargo-deny.tar.gz"
           tar zxf "$download_dir/cargo-deny.tar.gz" -C ~/.cargo/bin --strip-components=1
-      - name: Check licenses, sources, and advisories
-        run: cargo deny check
+      - name: Check default dependency policy
+        run: cargo deny --locked check
+      - name: Check dependency policy for all workspace features
+        run: cargo deny --workspace --all-features --locked check
+      - name: Verify dependency policy boundaries
+        run: python3 scripts/ci/dependency_policy_smoke.py
       - name: Lockfile integrity
         run: cargo verify-project && cargo fetch --locked
 
@@ -639,6 +643,11 @@ jobs:
         run: sudo nix --version
       - name: Evaluate Nix module assertions
         run: sudo nix --extra-experimental-features "nix-command flakes" build .#checks.x86_64-linux.nixos-module-eval --no-link
+      - name: Evaluate package feature overrides
+        run: |
+          sudo nix --extra-experimental-features "nix-command flakes" \
+            eval --json .#packages.x86_64-linux.zeroclaw \
+            --apply "$(cat nix/package-eval.nix)"
 
   nix-hash-drift:
     name: Nix Hash Drift

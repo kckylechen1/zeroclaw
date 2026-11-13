@@ -1980,9 +1980,12 @@ impl McpRegistry {
         }
     }
 
-    /// All prefixed tool names across all connected servers.
+    /// All prefixed tool names across all connected servers, sorted so rebuilt
+    /// registries produce the same deferred catalog and provider tool schemas.
     pub fn tool_names(&self) -> Vec<String> {
-        self.tool_index.keys().cloned().collect()
+        let mut names: Vec<String> = self.tool_index.keys().cloned().collect();
+        names.sort_unstable();
+        names
     }
 
     /// Tool definition for a given prefixed name (cloned).

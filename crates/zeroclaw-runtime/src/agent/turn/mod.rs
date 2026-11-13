@@ -69,7 +69,6 @@ use crate::agent::tool_execution::{
     ToolDispatchContext, execute_tools_parallel, execute_tools_sequential,
     should_execute_tools_in_parallel,
 };
-use crate::security::ingress::{IngressPolicy, ingress_policy};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -79,7 +78,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zeroclaw_api::agent::TurnEvent;
 use zeroclaw_api::channel::Channel;
-use zeroclaw_api::ingress::{IngressContext, IngressDecision};
+use zeroclaw_api::ingress::IngressContext;
 use zeroclaw_providers::{ChatMessage, ModelProvider};
 
 /// Maximum malformed internal tool-protocol retries before returning a safe fallback.
@@ -385,6 +384,7 @@ async fn run_tool_call_loop_turn(
         strict_tool_parsing,
         parallel_tools,
         max_tool_result_chars,
+        keep_tool_context_turns,
         context_token_budget,
         receipt_generator,
         knobs,
@@ -393,34 +393,6 @@ async fn run_tool_call_loop_turn(
     let mut turn_state = TurnState::new(raw_history, raw_canonical);
 
     turn_state.sync_pending();
-
-    let ingress_policy_cfg = IngressPolicy::default();
-    let p1_text = turn_state
-        .history
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map_or("", |m| m.content.as_str());
-    match ingress_policy(p1_text, &ingress, &ingress_policy_cfg) {
-        // DEFAULT — the only arm reachable under the default policy. Proceed
-        // into the loop exactly as today.
-        IngressDecision::Loop => {}
-        // Phase 3: wrap the message as untrusted data before it enters history.
-        // Until framing exists, proceed as Loop (behavior-identical).
-        IngressDecision::Annotate { .. } => {}
-        // Phase 2: divert the turn into a managed SOP run instead of the loop.
-        // Not reachable under the default policy; proceed-as-loop for now.
-        IngressDecision::Gate { .. } => {
-            // TODO(PR C): hand this turn to the SOP run the gate names.
-        }
-        // Not reachable under the default policy; refuse the turn when it is.
-        IngressDecision::Drop { ref reason } => {
-            return Ok(crate::i18n::get_required_cli_string_with_args(
-                "turn-ingress-dropped",
-                &[("reason", reason.as_str())],
-            ));
-        }
-    }
 
     if let Some(turn_memory) = &memory {
         let has_session = turn_memory
@@ -549,22 +521,6 @@ async fn run_tool_call_loop_turn(
             drain_steering_messages(&mut steering)
         };
         for steering_message in pending {
-            match ingress_policy(&steering_message, &ingress, &ingress_policy_cfg) {
-                // DEFAULT — append the injection to history exactly as today.
-                IngressDecision::Loop => {}
-                // Phase 3: frame as untrusted data; proceed as Loop until
-                // framing exists (behavior-identical).
-                IngressDecision::Annotate { .. } => {}
-                // Phase 2: divert this injection into the SOP run rather than
-                // history. Not reachable under the default policy.
-                IngressDecision::Gate { .. } => {
-                    // TODO(PR C): route this steering message into the gated
-                    // SOP run instead of appending it to history.
-                }
-                // Not reachable under the default policy; drop the injection
-                // (do not append it) when it is.
-                IngressDecision::Drop { .. } => continue,
-            }
             let msg = ChatMessage::user(steering_message);
             turn_state.push_dual(msg);
         }
@@ -761,6 +717,7 @@ async fn run_tool_call_loop_turn(
             turn_state.history,
             multimodal_config,
             degrade_strip_images,
+            keep_tool_context_turns,
             image_cache.as_deref_mut(),
         )
         .await?;
@@ -967,13 +924,13 @@ async fn run_tool_call_loop_turn(
             if malformed_tool_protocol_retries <= MAX_MALFORMED_TOOL_PROTOCOL_RETRIES {
                 // This is model feedback, not a tool result: malformed protocol
                 // output has no valid tool_call_id to attach a role=tool message to.
-                let msg = ChatMessage::user(
-                    "[Tool call parse error]\n\
+                let msg = ChatMessage::user(format!(
+                    "{}\n\
                      Your previous response looked like an internal tool-call protocol payload, \
                      but ZeroClaw could not parse it into a valid tool call. Use the supported \
-                     tool-call schema, or answer in natural language if no tool is needed."
-                        .to_string(),
-                );
+                     tool-call schema, or answer in natural language if no tool is needed.",
+                    zeroclaw_providers::multimodal::TOOL_PARSE_ERROR_FEEDBACK_PREFIX,
+                ));
                 turn_state.push_dual(msg);
                 continue;
             }

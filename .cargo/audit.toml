@@ -2,33 +2,6 @@
 # https://rustsec.org/
 
 [advisories]
-ignore = [
-    # ── Synced from deny.toml — baseline triage ─────────────────────────────
-    # Tracking: new ignores need a tracking issue URL reference.
-    # Each entry below mirrors the `reason` field in deny.toml.
-    # When a fix lands, remove from BOTH files.
-    "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained; transitive dep awaiting upstream migration to rustls-pki-types
-    "RUSTSEC-2026-0097",  # rand re-entrancy unsoundness; 0.8.6 copy is patched; 0.7.x copy predates rand::rng() and is not affected
-    "RUSTSEC-2026-0104",  # rustls-webpki CRL parsing panic; 0.102.x copy via rumqttc v0.25.1 has no fix in 0.102.x series; 0.103.x copy patched at v0.103.13; awaiting rumqttc upgrade
-    "RUSTSEC-2026-0049",  # rustls-webpki CRL matching bug; 0.102.x copy via rumqttc v0.25.1; 0.103.x copy is patched; awaiting rumqttc upgrade
-    "RUSTSEC-2026-0098",  # rustls-webpki URI name constraints; 0.102.x copy via rumqttc v0.25.1; 0.103.x copy is patched; awaiting rumqttc upgrade
-    "RUSTSEC-2026-0099",  # rustls-webpki wildcard name constraints; 0.102.x copy via rumqttc v0.25.1; 0.103.x copy is patched; awaiting rumqttc upgrade
-
-    # ── Informational only (no tracking issue required) ────────────────────
-    "RUSTSEC-2024-0384",
-
-    # ── audit.toml/deny.toml drift reconcile + wasmtime CVEs; tracking #8519 ──
-    # cargo-audit reads the whole Cargo.lock, so it flags advisories cargo-deny
-    # (graph-aware) tolerates. Reconcile and remediate per #8519.
-    # RUSTSEC-2026-0149, -0182, -0188 cleared by wasmtime/wasmtime-wasi 43 -> 45.0.3
-    # bump in crates/zeroclaw-plugins. Resolved by #8542.
-    # RUSTSEC-2026-0222 cleared by wasmtime stack 45.0.3 -> 47.0.3 bump
-    # (closes the first-light wasmtime-47 sync item under kckylechen1/zeroclaw#28).
-    # RUSTSEC-2026-0268, -0269 cleared by wasmtime stack 47.0.3 -> 47.0.4 bump (#285, #296).
-    # macro/font helpers unmaintained (transitive); tracking #8519.
-    "RUSTSEC-2024-0388",  # derivative unmaintained; transitive derive helper; tracking #8519
-
-    # ── Sync 2026-11-09: mirror deny.toml entries audit was missing ────────
-    "RUSTSEC-2026-0441",  # pin-utils unmaintained (archived upstream); transitive via async-imap 0.11; no safe upgrade; replacement is upstream's to adopt
-    "RUSTSEC-2026-0253",  # lru unsound LruCache::pop panic-safety; direct+ratatui upgraded to >=0.18.2; remaining 0.16.4 pinned transitively by nostr-sdk 0.44; upstream fix pending
-]
+# No retained advisory exceptions. Keep any future exception and its consumer
+# and removal condition synchronized with deny.toml (tracking #432/#647).
+ignore = []
