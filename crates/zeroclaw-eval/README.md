@@ -19,7 +19,7 @@ cargo run -p zeroclaw-eval -- run
 cargo run -p zeroclaw-eval -- run --suite evals --format json
 ```
 
-The development CLI does not load the body configuration. Pass `--suite` and `--mode` explicitly if the former `[eval]` settings differed from the defaults. The separate `[agent.eval]` scorer is unchanged.
+The development CLI does not load the body configuration. Pass `--suite` and `--mode` explicitly if the former `[eval]` settings differed from the defaults. The separate `[runtime_profiles.<alias>.eval]` scorer is unchanged.
 
 Exits non-zero if any case fails, so it can gate CI. `--mode live` is reserved for
 a later phase and currently returns a clear error.

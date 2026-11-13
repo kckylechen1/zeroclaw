@@ -631,7 +631,7 @@ pub fn retired_section_tombstones(contents: &str) -> Vec<ValidationWarning> {
         .iter()
         .filter_map(|(path, code)| {
             let message = if *path == "eval" && table_path_exists(root.as_table(), path) {
-                "[eval] in config.toml is no longer used: the evaluation harness moved to the development CLI. Pass suite_dir as --suite and mode as --mode; [agent.eval] is unchanged.".to_string()
+                "[eval] in config.toml is no longer used: the evaluation harness moved to the development CLI. Pass suite_dir as --suite and mode as --mode; [runtime_profiles.<alias>.eval] is unchanged.".to_string()
             } else if table_path_exists(root.as_table(), path) {
                 format!(
                     "[{path}] in config.toml is ignored: the section was removed from the \
@@ -737,16 +737,6 @@ delegation_policy = { mode = "allow" }
     fn retired_field_tombstones_silent_when_absent() {
         let contents = "[agents.lead]\nmodel_provider = \"openai.default\"\n";
         assert!(retired_field_tombstones(contents).is_empty());
-    }
-
-    #[test]
-    fn legacy_eval_section_warns_without_affecting_agent_eval() {
-        let warnings =
-            retired_section_tombstones("[eval]\nsuite_dir = \"custom\"\nmode = \"replay\"\n");
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].code, "eval_harness_moved_to_dev_tool");
-        assert!(warnings[0].message.contains("--suite"));
-        assert!(retired_section_tombstones("[agent.eval]\nenabled = true\n").is_empty());
     }
 
     #[test]

@@ -4449,6 +4449,46 @@ port = 8080
 }
 
 #[test]
+#[allow(clippy::large_futures)]
+async fn load_or_init_warns_for_legacy_eval_and_preserves_runtime_scorer() {
+    let _env_guard = env_override_lock().await;
+    let home = TempDir::new().unwrap();
+    let workspace = home.path().join("eval-profile");
+    fs::create_dir_all(&workspace).await.unwrap();
+    fs::write(
+        workspace.join("config.toml"),
+        r#"schema_version = 3
+[eval]
+suite_dir = "custom-traces"
+mode = "replay"
+[runtime_profiles.default.eval]
+enabled = true
+min_quality_score = 0.73
+max_retries = 3
+"#,
+    )
+    .await
+    .unwrap();
+    let _home = EnvValueGuard::set("HOME", home.path());
+    let _workspace = EnvValueGuard::set("ZEROCLAW_WORKSPACE", &workspace);
+    let _config_dir = EnvValueGuard::remove("ZEROCLAW_CONFIG_DIR");
+
+    let config = Box::pin(Config::load_or_init()).await.unwrap();
+    assert!(config.degraded_sections.is_empty());
+    let warnings = config.collect_warnings();
+    let warning = warnings
+        .iter()
+        .find(|warning| warning.code == "eval_harness_moved_to_dev_tool")
+        .expect("legacy eval must produce a load warning");
+    assert_eq!(warning.path, "eval");
+    assert!(warning.message.contains("--suite"));
+    let scorer = &config.runtime_profiles["default"].eval;
+    assert!(scorer.enabled);
+    assert_eq!(scorer.min_quality_score, 0.73);
+    assert_eq!(scorer.max_retries, 3);
+}
+
+#[test]
 async fn load_or_init_retired_pairing_dashboard_section_parses_with_tombstone_warning() {
     // Section-parse finding: `[gateway.pairing_dashboard]` in a config
     // file is an unknown (silently ignored) nested section after schema
@@ -7102,6 +7142,12 @@ async fn full_config_schema_nests_required_by_transport_on_mcp_server_def() {
     #[cfg(feature = "schema-export")]
     let schema = schemars::schema_for!(Config);
     let schema_json = serde_json::to_value(&schema).expect("schema serializes to json");
+    assert!(schema_json.pointer("/properties/eval").is_none());
+    assert!(
+        schema_json
+            .pointer("/$defs/RuntimeProfileConfig/properties/eval")
+            .is_some()
+    );
 
     fn find_extension(
         value: &serde_json::Value,
