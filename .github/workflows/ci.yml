@@ -436,8 +436,7 @@ jobs:
           - name: no default features
             args: --no-default-features
             sys_deps: ""
-          # Root default minus the compile-time integration families
-          # (integrations-saas): the slim companion graph.
+          # Explicit standard feature selection without Cargo defaults.
           - name: minimal companion
             args: --no-default-features --features agent-runtime,default-channels,gateway,observability-prometheus,schema-export
             sys_deps: ""
@@ -782,7 +781,7 @@ jobs:
             exit 0
           fi
           if git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD \
-            | grep -qE '(^|/)Cargo\.toml$|^Cargo\.lock$|^xtask/|^dev/ci/|^dist/|^scripts/ci/install|^install\.sh$|^setup\.bat$|^flake\.nix$|^Containerfile$|^Dockerfile|^\.cargo/config\.toml$|^\.github/workflows/ci\.yml$'; then
+            | grep -qE '(^|/)Cargo\.toml$|^Cargo\.lock$|^xtask/|^dev/ci/|^dist/|^scripts/ci/install|^install\.sh$|^setup\.bat$|^flake\.nix$|^\.cargo/config\.toml$|^\.github/workflows/ci\.yml$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"

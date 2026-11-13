@@ -192,7 +192,7 @@ fi
 # After the workspace version is bumped, regenerate every spec-driven install
 # surface so version and feature sets stay canonical. This OWNS the version and
 # feature content of setup.bat, dist/aur/PKGBUILD, dist/scoop/zeroclaw.json,
-# flake.nix, the Dockerfiles/Containerfile feature sets, and
+# flake.nix and
 # dev/ci/docker-tags.toml. No per-file sed hacks for those. CI's Installer
 # Drift gate fails if this is skipped.
 echo "Generated install surfaces (cargo generate installers)..."

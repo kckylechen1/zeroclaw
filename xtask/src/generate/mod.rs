@@ -1,18 +1,14 @@
 //! `cargo generate installers` - render install surfaces (setup.bat,
-//! Containerfile, Dockerfiles, packaging, ...) from the canonical spec.
+//! native packages, ...) from the canonical spec.
 //! install.sh@HEAD is the behavioral reference. The spec is the single source
 //! of truth; surfaces are derived and drift-checked. Surfaces are registered in
 
-pub mod container;
-pub mod container_base;
-pub mod docker_tags;
 pub mod flake;
 pub mod install_sh;
 pub mod packaging;
 pub mod setup_bat;
 pub mod spec;
 
-use container::ContainerSurface;
 use spec::Selection as Sel;
 use std::path::{Path, PathBuf};
 
@@ -42,21 +38,6 @@ fn registry() -> Vec<Surface> {
             render: |root, cur| setup_bat::render_file(root, cur),
         },
         Surface {
-            name: "containerfile",
-            file: "Containerfile",
-            render: |root, cur| containerfile_surface().render(root, cur),
-        },
-        Surface {
-            name: "dockerfile",
-            file: "Dockerfile",
-            render: |root, cur| render_docker_arg(root, cur),
-        },
-        Surface {
-            name: "dockerfile-debian",
-            file: "Dockerfile.debian",
-            render: |root, cur| render_docker_arg(root, cur),
-        },
-        Surface {
             name: "pkgbuild",
             file: "dist/aur/PKGBUILD",
             render: |root, cur| packaging::render_pkgbuild(root, cur),
@@ -71,32 +52,7 @@ fn registry() -> Vec<Surface> {
             file: "flake.nix",
             render: |root, cur| flake::render_file(root, cur),
         },
-        Surface {
-            name: "docker-tags",
-            file: "dev/ci/docker-tags.toml",
-            render: |root, cur| docker_tags::render_file(root, cur),
-        },
     ]
-}
-
-/// Dockerfile-family ARG default: ships the lean standard Dist selection,
-/// build-time overridable via --build-arg.
-fn render_docker_arg(root: &Path, current: &str) -> anyhow::Result<String> {
-    let body = container::render_features_arg(root, &Sel::Dist)?;
-    let spliced = container::splice(current, "docker-features-arg", &body)?;
-    container_base::splice_zones(root, &spliced)
-}
-
-/// Containerfile surface: standard image ships lean Dist; fat image ships All
-/// (kitchen sink). Selections, not literals.
-fn containerfile_surface() -> ContainerSurface {
-    ContainerSurface {
-        file: "Containerfile",
-        zones: vec![
-            ("container-standard", Sel::Dist, "    "),
-            ("container-fat", Sel::All, "    "),
-        ],
-    }
 }
 
 fn workspace_root() -> PathBuf {
@@ -152,10 +108,6 @@ pub fn run(targets: &[String], check: bool) -> anyhow::Result<()> {
 
     let root = workspace_root();
     let mut drift = false;
-
-    if !check {
-        container_base::refresh_source(&root)?;
-    }
 
     for s in selected {
         let path = root.join(s.file);

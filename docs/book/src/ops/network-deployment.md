@@ -209,7 +209,6 @@ See [Channels → Webhooks](../channels/webhook.md) for the full set of knobs.
 
 ## See also
 
-- [Setup → Container](../setup/container.md): Docker-specific network config
 - [Setup → Service management](../setup/service.md): platform service integration
 - [Operations → Overview](./overview.md)
 - [Security → Overview](../security/overview.md)

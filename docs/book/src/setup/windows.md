@@ -49,7 +49,7 @@ build, download an application binary, install files, or change `PATH`.
 | `--prebuilt` | Exit with source instructions before prerequisite checks or downloads |
 
 The fork has no verified prebuilt binary channel. Upstream release archives,
-Scoop packages, and upstream container images install the upstream product.
+and Scoop packages install the upstream product.
 For a Linux environment on Windows, use a separate fork checkout inside WSL
 and the source installer described in the [README](https://github.com/kckylechen1/zeroclaw/blob/master/README.md#install).
 

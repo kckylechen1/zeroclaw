@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-schema-markdown", "crates/zeroclaw-cost", "crates/zeroclaw-http", "crates/zeroclaw-platform", "crates/zeroclaw-policy", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-tools", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "crates/zeroclaw-yonbo-node", "bridges/acp", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
+members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-schema-markdown", "crates/zeroclaw-cost", "crates/zeroclaw-http", "crates/zeroclaw-platform", "crates/zeroclaw-policy", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-tools", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "crates/zeroclaw-yonbo-node", "bridges/acp", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -19,7 +19,6 @@ zeroclaw-infra = { path = "crates/zeroclaw-infra", version = "0.8.3" }
 zeroclaw-config = { path = "crates/zeroclaw-config", version = "0.8.3", default-features = false }
 zeroclaw-log = { path = "crates/zeroclaw-log", version = "0.8.3" }
 zeroclaw-spawn = { path = "crates/zeroclaw-spawn", version = "0.8.3" }
-zeroclaw-commands = { path = "crates/zeroclaw-commands", version = "0.8.3" }
 zeroclaw-providers = { path = "crates/zeroclaw-providers", version = "0.8.3" }
 zeroclaw-memory = { path = "crates/zeroclaw-memory", version = "0.8.3" }
 zeroclaw-tools = { path = "crates/zeroclaw-tools", version = "0.8.3", default-features = false }
@@ -161,14 +160,6 @@ non_row_features = [
     "embedded-web",
     "voice-surface",
 ]
-# Features whose build needs system C libraries or tooling the minimal static
-# container image (StageX, no system package manager) does not provide. Excluded
-# from the container kitchen-sink (Selection::All) so the all-features image
-# builds; still available via source --features or a nix override. Not derivable
-# from the feature graph, so it lives in the canonical registry.
-container_excluded_features = [
-    ]
-
 # Compatibility exclusions for standard distribution artifacts. Release
 # workflows pass only their target triple; feature policy stays here.
 [package.metadata.zeroclaw.dist_target_exclusions]
@@ -182,7 +173,6 @@ default = [
     "gateway",
     "observability-prometheus",
     "schema-export",
-    "integrations-saas",
 ]
 
 # Optional lean control profile. Select with --no-default-features; Cargo
@@ -194,17 +184,6 @@ slim-control = [
     "channel-acp-server",
     "channel-webhook",
     ]
-
-# Concrete integration families forwarded from zeroclaw-tools. Default-on so
-# the standard build keeps the pre-feature compiled surface and registry; a
-# slim companion build selects `--no-default-features --features agent-runtime,...`
-# and omits these to keep the families out of the dependency graph. The
-# implementations stay in-tree either way — turning a family off is a compile
-# selection, not a deletion.
-integrations-saas = [
-    "zeroclaw-tools/integrations-saas",
-    "zeroclaw-runtime/integrations-saas",
-]
 
 # The core agent runtime — agent loop, tools, persistence subsystems.
 # Without this, you get the kernel: config + providers + memory + CLI chat.
