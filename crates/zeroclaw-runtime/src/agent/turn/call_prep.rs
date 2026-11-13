@@ -8,12 +8,18 @@ use super::delivery_defaults::maybe_inject_channel_delivery_defaults;
 use super::events::{StreamDelta, emit_tool_call_pair};
 use super::redact::scrub_credentials;
 use super::tool_logging::tool_log_attributes;
-use crate::agent::tool_execution::{ToolDispatchContext, ToolExecutionOutcome, dispatch_tool_name};
+use crate::agent::tool_execution::{
+    ToolDispatchContext, ToolExecutionOutcome, dispatch_tool_name, undispatchable_tool_outcome,
+};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::time::Duration;
 use zeroclaw_tool_call_parser::{ParsedToolCall, canonicalize_json_for_tool_signature};
+
+#[cfg(test)]
+#[path = "call_preflight_tests.rs"]
+mod preflight_tests;
 
 pub(crate) struct PreparedToolCalls {
     pub(crate) ordered_results: Vec<Option<(String, Option<String>, ToolExecutionOutcome)>>,
@@ -186,6 +192,59 @@ pub(crate) async fn prepare_tool_calls(
             .approval
             .map(|mgr| mgr.needs_approval(&tool_name))
             .unwrap_or(false);
+        if requires_prompt {
+            let may_activate_in_batch = executable_calls
+                .iter()
+                .any(|prepared| prepared.name == "tool_search");
+            let call_id = super::events::resolve_tool_call_id(call);
+            if let Some(outcome) = undispatchable_tool_outcome(
+                &tool_name,
+                &tool_args,
+                Some(&call_id),
+                dispatch,
+                may_activate_in_batch,
+                &ctx.meta(),
+                ctx.observer,
+            ) {
+                ::zeroclaw_log::record!(
+                    INFO,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_category(::zeroclaw_log::EventCategory::Tool)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(tool_log_attributes(
+                            &tool_name,
+                            ::serde_json::json!({
+                                "model": ctx.model,
+                                "iteration": iteration + 1,
+                                "tool": tool_name,
+                                "result": outcome.output,
+                                "trace_id": ctx.turn_id,
+                            })
+                        )),
+                    "tool_call_result"
+                );
+                if let Some(tx) = ctx.on_delta {
+                    let _ = tx
+                        .send(StreamDelta::Status(format!(
+                            "\u{274c} {}: {}\n",
+                            tool_name,
+                            truncate_with_ellipsis(&scrub_credentials(&outcome.output), 200)
+                        )))
+                        .await;
+                }
+                if let Some(tx) = ctx.event_tx {
+                    let prepared_call = ParsedToolCall {
+                        name: tool_name.clone(),
+                        arguments: tool_args.clone(),
+                        tool_call_id: Some(call_id),
+                    };
+                    emit_tool_call_pair(tx, &prepared_call, &outcome).await;
+                }
+                ordered_results[idx] =
+                    Some((tool_name.clone(), call.tool_call_id.clone(), outcome));
+                continue;
+            }
+        }
         let reentrant_agent_tool =
             crate::tools::REENTRANT_AGENT_TOOLS.contains(&tool_name.as_str());
         if requires_prompt && tool_name == "shell" && !reentrant_agent_tool {
