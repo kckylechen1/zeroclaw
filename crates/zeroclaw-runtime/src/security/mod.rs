@@ -12,7 +12,6 @@ pub mod domain_matcher;
 pub mod estop;
 #[cfg(target_os = "linux")]
 pub mod firejail;
-pub mod ingress;
 #[cfg(feature = "sandbox-landlock")]
 pub mod landlock;
 pub mod leak_detector;
@@ -35,9 +34,6 @@ pub use detect::{SandboxPosture, sandbox_posture};
 pub use domain_matcher::DomainMatcher;
 #[allow(unused_imports)]
 pub use estop::{EstopLevel, EstopManager, EstopState, ResumeSelector};
-// Universal ingress policy front door.
-#[allow(unused_imports)]
-pub use ingress::{IngressPolicy, ingress_policy};
 #[allow(unused_imports)]
 pub use otp::OtpValidator;
 #[allow(unused_imports)]
