@@ -106,7 +106,7 @@ fn regional_alias_predicates_cover_expected_variants() {
 fn factory_resolves_builtin_families_and_aliases() {
     // Every built-in family (and the user-facing aliases that map onto
     // one) must construct from a bare name. `None` rows are families
-    // that run without a key (local servers, AWS/CLI auth).
+    // that run without a key (local servers or managed auth).
     let cases: &[(&str, Option<&str>)] = &[
         ("openrouter", Some("provider-test-credential")),
         ("openrouter", None),
@@ -117,8 +117,6 @@ fn factory_resolves_builtin_families_and_aliases() {
         ("ollama", Some("any-value-here")),
         ("gemini", Some("test-key")),
         ("gemini", None),
-        ("telnyx", Some("test-key")),
-        ("telnyx", None),
         ("vercel", Some("key")),
         ("cloudflare", Some("key")),
         ("moonshot", Some("key")),
@@ -127,8 +125,6 @@ fn factory_resolves_builtin_families_and_aliases() {
         ("zai", Some("key")),
         ("glm", Some("key")),
         ("minimax", Some("key")),
-        ("bedrock", None),
-        ("bedrock", Some("ignored")),
         ("qianfan", Some("key")),
         ("doubao", Some("key")),
         ("qwen", Some("key")),
@@ -156,7 +152,6 @@ fn factory_resolves_builtin_families_and_aliases() {
         ("perplexity", Some("key")),
         ("cohere", Some("key")),
         ("copilot", Some("key")),
-        ("kilocli", None),
         ("kilo", Some("kilo-test-key")),
         ("nvidia", Some("nvapi-test")),
         ("astrai", Some("sk-astrai-test")),
@@ -177,7 +172,6 @@ fn factory_resolves_builtin_families_and_aliases() {
         ("ovhcloud", Some("test-key")),
         ("google", Some("test-key")),
         ("google-gemini", Some("test-key")),
-        ("aws-bedrock", None),
         ("github-copilot", Some("test-key")),
         ("vercel-ai", Some("test-key")),
         ("cloudflare-ai", Some("test-key")),
@@ -1047,7 +1041,6 @@ fn factory_all_canonical_model_providers_create_successfully() {
         "zai",
         "glm",
         "minimax",
-        "bedrock",
         "qianfan",
         "doubao",
         "qwen",
@@ -1056,7 +1049,6 @@ fn factory_all_canonical_model_providers_create_successfully() {
         "sglang",
         "vllm",
         "osaurus",
-        "telnyx",
         "groq",
         "mistral",
         "xai",
@@ -1067,8 +1059,6 @@ fn factory_all_canonical_model_providers_create_successfully() {
         "perplexity",
         "cohere",
         "copilot",
-        "gemini_cli",
-        "kilocli",
         "nvidia",
         "astrai",
         "avian",
@@ -1114,9 +1104,6 @@ fn listed_model_providers_match_canonical_slots() {
 #[test]
 fn listed_model_providers_are_constructible() {
     for model_provider in list_model_providers() {
-        if model_provider.name == "azure" {
-            continue;
-        }
         // The custom slot requires a uri (no family-default endpoint);
         // covered by dedicated factory tests.
         if model_provider.name == "custom" {
@@ -2280,4 +2267,60 @@ fn resilient_alias_deep_acyclic_fallback_does_not_overflow() {
         result.is_ok(),
         "a deep acyclic chain must be depth-capped, never overflow or abort the build"
     );
+}
+
+#[test]
+fn retired_model_providers_fail_before_alias_or_kind_override_can_reroute() {
+    let config = zeroclaw_config::schema::Config::default();
+    for retired in zeroclaw_config::providers::RETIRED_MODEL_PROVIDER_NAMES {
+        for name in [retired.to_string(), format!("{retired}.private-alias")] {
+            let options = ModelProviderRuntimeOptions {
+                provider_kind: Some("openai".to_string()),
+                ..ModelProviderRuntimeOptions::default()
+            };
+            let err = create_model_provider_with_options(&name, Some("private-test-key"), &options)
+                .err()
+                .expect("retired provider must not route through a retained provider")
+                .to_string();
+            assert!(err.contains("is retired"), "{retired}: {err}");
+            assert!(!err.contains("private-test-key"));
+            assert!(!err.contains("private-alias"));
+        }
+        let options = ModelProviderRuntimeOptions {
+            provider_kind: Some(retired.to_string()),
+            ..ModelProviderRuntimeOptions::default()
+        };
+        assert!(
+            create_model_provider_for_alias_with_url(
+                &config,
+                "openai",
+                "test",
+                Some("private-test-key"),
+                None,
+                &options,
+            )
+            .err()
+            .expect("retired kind override must fail")
+            .to_string()
+            .contains("is retired")
+        );
+        assert!(crate::catalog::catalog_source_for(retired).is_none());
+        assert!(!canonical_model_provider_slots().contains(retired));
+    }
+    // Regular Gemini, its existing OAuth path, and the Kilo HTTP gateway are
+    // distinct consumers and remain covered by the existing adapter tests.
+    for retained in [
+        "anthropic",
+        "openai",
+        "openrouter",
+        "gemini",
+        "google",
+        "xai",
+        "kilo",
+    ] {
+        assert!(
+            create_model_provider(retained, Some("provider-test-credential")).is_ok(),
+            "{retained}"
+        );
+    }
 }

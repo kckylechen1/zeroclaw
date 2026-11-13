@@ -344,18 +344,6 @@
           - "src/providers/anthropic.rs"
           - "crates/zeroclaw-providers/src/anthropic.rs"
 
-"provider:azure-openai":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/providers/azure_openai.rs"
-          - "crates/zeroclaw-providers/src/azure_openai.rs"
-
-"provider:bedrock":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/providers/bedrock.rs"
-          - "crates/zeroclaw-providers/src/bedrock.rs"
-
 "provider:claude-code":
   - changed-files:
       - any-glob-to-any-file:
@@ -378,15 +366,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "src/providers/gemini.rs"
-          - "src/providers/gemini_cli.rs"
           - "crates/zeroclaw-providers/src/gemini.rs"
-          - "crates/zeroclaw-providers/src/gemini_cli.rs"
-
-"provider:kilocli":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/providers/kilocli.rs"
-          - "crates/zeroclaw-providers/src/kilocli.rs"
 
 "provider:openai":
   - changed-files:
@@ -411,12 +391,6 @@
   - changed-files:
       - any-glob-to-any-file:
           - "crates/zeroclaw-providers/src/router.rs"
-
-"provider:telnyx":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/providers/telnyx.rs"
-          - "crates/zeroclaw-providers/src/telnyx.rs"
 
 "service":
   - changed-files:
@@ -523,7 +497,6 @@
           - "src/tools/cli_discovery.rs"
           - "crates/zeroclaw-runtime/src/tools/shell.rs"
           - "crates/zeroclaw-tools/src/cli_discovery.rs"
-
 
 "tool:web":
   - changed-files:

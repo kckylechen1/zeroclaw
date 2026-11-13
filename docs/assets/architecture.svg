@@ -145,7 +145,7 @@
   <rect x="730" y="216" width="105" height="22" rx="5" fill="#1a2e1a"/>
   <text x="782" y="232" text-anchor="middle" fill="#86efac" font-size="9">Cloudflare AI</text>
   <rect x="845" y="216" width="105" height="22" rx="5" fill="#1a2e1a"/>
-  <text x="897" y="232" text-anchor="middle" fill="#86efac" font-size="9">Bedrock</text>
+  <text x="897" y="232" text-anchor="middle" fill="#86efac" font-size="9">OpenRouter</text>
   <rect x="960" y="216" width="105" height="22" rx="5" fill="#1e3a1e" stroke="#4ade80" stroke-width="1" stroke-dasharray="3,2"/>
   <text x="1012" y="232" text-anchor="middle" fill="#4ade80" font-size="9" font-weight="600">custom:URL</text>
 

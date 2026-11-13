@@ -18,15 +18,11 @@ pub fn catalog_source_for(family: &str) -> Option<(Option<&'static str>, Option<
         // First-party / bespoke factories.
         "openai" => (Some("openai"), Some("openai")),
         "anthropic" => (Some("anthropic"), Some("anthropic")),
-        "azure" => (Some("azure"), None),
-        "bedrock" => (Some("amazon-bedrock"), None),
         "gemini" => (Some("google"), Some("google")),
-        "gemini_cli" => (Some("google"), Some("google")),
         "openrouter" => (Some("openrouter"), Some("openrouter")),
         "copilot" => (Some("github-copilot"), None),
         "minimax" => (Some("minimax"), Some("minimax")),
         "lmstudio" => (Some("lmstudio"), None),
-        "kilocli" => (Some("kilo"), None),
         "kilo" => (Some("kilo"), None),
         "ovh" => (Some("ovhcloud"), None),
         // Compat families — mirrors the consts in CompatFamilySpec impls.
@@ -67,7 +63,6 @@ pub fn catalog_source_for(family: &str) -> Option<(Option<&'static str>, Option<
         "synthetic" => (Some("synthetic"), None),
         "opencode" => (Some("opencode"), None),
         "atomic_chat" => (Some("atomic-chat"), None),
-        "telnyx" => (None, None),
         // Families with no public catalog: local-only servers (no public
         // /models index without a running server) or credential-required
         // APIs with no published catalog. Operator pastes a credential and
@@ -344,8 +339,8 @@ mod tests {
 
     #[test]
     fn bespoke_family_with_only_models_dev() {
-        let (md, or) = catalog_source_for("azure").expect("azure is canonical");
-        assert_eq!(md, Some("azure"));
+        let (md, or) = catalog_source_for("copilot").expect("copilot is canonical");
+        assert_eq!(md, Some("github-copilot"));
         assert_eq!(or, None);
     }
 

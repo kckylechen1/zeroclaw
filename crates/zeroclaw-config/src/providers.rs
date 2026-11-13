@@ -5,29 +5,27 @@ use zeroclaw_macros::Configurable;
 use super::schema::{
     Ai21ModelProviderConfig, AihubmixModelProviderConfig, AnthropicModelProviderConfig,
     AnyscaleModelProviderConfig, ArceeModelProviderConfig, AstraiModelProviderConfig,
-    AtomicChatModelProviderConfig, AvianModelProviderConfig, AzureModelProviderConfig,
-    BaichuanModelProviderConfig, BasetenModelProviderConfig, BedrockModelProviderConfig,
-    CerebrasModelProviderConfig, CloudflareModelProviderConfig, CohereModelProviderConfig,
-    CopilotModelProviderConfig, CustomModelProviderConfig, DeepinfraModelProviderConfig,
-    DeepmystModelProviderConfig, DeepseekModelProviderConfig, DoubaoModelProviderConfig,
-    FeatherlessModelProviderConfig, FireworksModelProviderConfig, FriendliModelProviderConfig,
-    GeminiCliModelProviderConfig, GeminiModelProviderConfig, GithubModelsModelProviderConfig,
+    AtomicChatModelProviderConfig, AvianModelProviderConfig, BaichuanModelProviderConfig,
+    BasetenModelProviderConfig, CerebrasModelProviderConfig, CloudflareModelProviderConfig,
+    CohereModelProviderConfig, CopilotModelProviderConfig, CustomModelProviderConfig,
+    DeepinfraModelProviderConfig, DeepmystModelProviderConfig, DeepseekModelProviderConfig,
+    DoubaoModelProviderConfig, FeatherlessModelProviderConfig, FireworksModelProviderConfig,
+    FriendliModelProviderConfig, GeminiModelProviderConfig, GithubModelsModelProviderConfig,
     GlmModelProviderConfig, GroqModelProviderConfig, HuggingfaceModelProviderConfig,
     HunyuanModelProviderConfig, HyperbolicModelProviderConfig, InceptionModelProviderConfig,
-    KiloCliModelProviderConfig, KiloModelProviderConfig, LambdaAiModelProviderConfig,
-    LeptonModelProviderConfig, LitellmModelProviderConfig, LlamacppModelProviderConfig,
-    LmstudioModelProviderConfig, ManifestModelProviderConfig, MinimaxModelProviderConfig,
-    MistralModelProviderConfig, ModelProviderConfig, MoonshotModelProviderConfig,
-    MorphModelProviderConfig, NearaiModelProviderConfig, NebiusModelProviderConfig,
-    NovitaModelProviderConfig, NscaleModelProviderConfig, NvidiaModelProviderConfig,
-    OllamaModelProviderConfig, OpenAIModelProviderConfig, OpenRouterModelProviderConfig,
-    OpencodeModelProviderConfig, OsaurusModelProviderConfig, OvhModelProviderConfig,
-    PerplexityModelProviderConfig, QianfanModelProviderConfig, QwenModelProviderConfig,
-    RekaModelProviderConfig, SambanovaModelProviderConfig, SglangModelProviderConfig,
-    SiliconflowModelProviderConfig, StepfunModelProviderConfig, SyntheticModelProviderConfig,
-    TelnyxModelProviderConfig, TogetherModelProviderConfig, UpstageModelProviderConfig,
-    VeniceModelProviderConfig, VercelModelProviderConfig, VllmModelProviderConfig,
-    XaiModelProviderConfig, YiModelProviderConfig, ZaiModelProviderConfig,
+    KiloModelProviderConfig, LambdaAiModelProviderConfig, LeptonModelProviderConfig,
+    LitellmModelProviderConfig, LlamacppModelProviderConfig, LmstudioModelProviderConfig,
+    ManifestModelProviderConfig, MinimaxModelProviderConfig, MistralModelProviderConfig,
+    ModelProviderConfig, MoonshotModelProviderConfig, MorphModelProviderConfig,
+    NearaiModelProviderConfig, NebiusModelProviderConfig, NovitaModelProviderConfig,
+    NscaleModelProviderConfig, NvidiaModelProviderConfig, OllamaModelProviderConfig,
+    OpenAIModelProviderConfig, OpenRouterModelProviderConfig, OpencodeModelProviderConfig,
+    OsaurusModelProviderConfig, OvhModelProviderConfig, PerplexityModelProviderConfig,
+    QianfanModelProviderConfig, QwenModelProviderConfig, RekaModelProviderConfig,
+    SambanovaModelProviderConfig, SglangModelProviderConfig, SiliconflowModelProviderConfig,
+    StepfunModelProviderConfig, SyntheticModelProviderConfig, TogetherModelProviderConfig,
+    UpstageModelProviderConfig, VeniceModelProviderConfig, VercelModelProviderConfig,
+    VllmModelProviderConfig, XaiModelProviderConfig, YiModelProviderConfig, ZaiModelProviderConfig,
 };
 use super::schema::{
     AssemblyAiTranscriptionProviderConfig, DeepgramTranscriptionProviderConfig,
@@ -41,16 +39,24 @@ use super::schema::{
 
 #[macro_export]
 macro_rules! define_provider_ref {
-    ($name:ident, $category_doc:literal) => {
+    ($name:ident, $category_doc:literal $(, $validator:path)?) => {
         #[doc = concat!("Reference to a configured `[", $category_doc, ".<type>.<alias>]` entry.")]
         /// Empty value means "no preference" (opt-out). Non-empty values must
         /// resolve to a configured alias; `Config::validate()` enforces this.
         #[derive(
-            Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+            Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize,
         )]
         #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
         #[serde(transparent)]
         pub struct $name(pub String);
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                $( $validator(&value).map_err(serde::de::Error::custom)?; )?
+                Ok(Self(value))
+            }
+        }
 
         impl $name {
             #[must_use]
@@ -131,7 +137,11 @@ macro_rules! define_provider_ref {
     };
 }
 
-define_provider_ref!(ModelProviderRef, "providers.models");
+define_provider_ref!(
+    ModelProviderRef,
+    "providers.models",
+    reject_retired_model_provider
+);
 define_provider_ref!(TtsProviderRef, "providers.tts");
 define_provider_ref!(TranscriptionProviderRef, "providers.transcription");
 define_provider_ref!(ChannelRef, "channels");
@@ -142,11 +152,109 @@ define_provider_ref!(CardRef, "cards");
 
 pub const MAX_FALLBACK_DEPTH: usize = 3;
 
+/// Compatibility guard only: these families no longer have a schema or runtime.
+/// Keep the old spellings here so migrations and direct config deserialization
+/// reject them instead of dropping credentials or selecting a different vendor.
+pub const RETIRED_MODEL_PROVIDER_NAMES: &[&str] = &[
+    "bedrock",
+    "aws-bedrock",
+    "azure",
+    "azure_openai",
+    "azure-openai",
+    "telnyx",
+    "gemini_cli",
+    "gemini-cli",
+    "kilocli",
+    "kilo-cli",
+];
+
+pub fn reject_retired_model_provider(name: &str) -> anyhow::Result<()> {
+    // References may include an alias or a legacy endpoint suffix. Never echo
+    // either: endpoints and alias values can contain private information.
+    let family = name.split(['.', ':']).next().unwrap_or(name);
+    if let Some(retired) = RETIRED_MODEL_PROVIDER_NAMES.iter().find(|&&n| n == family) {
+        anyhow::bail!(
+            "Model provider `{retired}` is retired. Remove its configuration and explicitly \
+             configure a supported provider; credentials and endpoints are not migrated. \
+             The `gemini` API provider (including Gemini CLI OAuth credentials) and `kilo` \
+             API gateway remain supported."
+        );
+    }
+    Ok(())
+}
+
+/// Inspect only provider selectors and family keys, never arbitrary string
+/// values such as model IDs, credentials, headers, or operator-chosen aliases.
+pub fn reject_retired_model_provider_config(value: &toml::Value) -> anyhow::Result<()> {
+    fn check_selector(value: Option<&toml::Value>) -> anyhow::Result<()> {
+        if let Some(name) = value.and_then(toml::Value::as_str) {
+            reject_retired_model_provider(name)?;
+        }
+        Ok(())
+    }
+    for key in [
+        "default_provider",
+        "model_provider",
+        "default_model_provider",
+    ] {
+        check_selector(value.get(key))?;
+    }
+    for map in [
+        value.get("model_providers"),
+        value.get("providers").and_then(|v| v.get("models")),
+    ] {
+        if let Some(table) = map.and_then(toml::Value::as_table) {
+            for (family, entries) in table {
+                reject_retired_model_provider(family)?;
+                if let Some(aliases) = entries.as_table() {
+                    for alias in aliases.values() {
+                        if let Some(fallbacks) =
+                            alias.get("fallback").and_then(toml::Value::as_array)
+                        {
+                            for fallback in fallbacks {
+                                check_selector(Some(fallback))?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(providers) = value.get("providers") {
+        check_selector(providers.get("default_provider"))?;
+    }
+    if let Some(agents) = value.get("agents").and_then(toml::Value::as_table) {
+        for agent in agents.values() {
+            check_selector(agent.get("provider"))?;
+            check_selector(agent.get("model_provider"))?;
+            check_selector(agent.get("classifier_provider"))?;
+            check_selector(agent.get("summary_provider"))?;
+        }
+    }
+    check_selector(
+        value
+            .get("multimodal")
+            .and_then(|v| v.get("vision_model_provider")),
+    )?;
+    for routes in [
+        value.get("model_routes"),
+        value.get("providers").and_then(|v| v.get("model_routes")),
+    ] {
+        if let Some(routes) = routes.and_then(toml::Value::as_array) {
+            for route in routes {
+                check_selector(route.get("provider"))?;
+                check_selector(route.get("model_provider"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[macro_export]
 macro_rules! for_each_model_provider_slot {
     ($mac:ident) => {
         $mac! {
-            (openai, "openai", OpenAIModelProviderConfig),            (azure, "azure", AzureModelProviderConfig),
+            (openai, "openai", OpenAIModelProviderConfig),
             (anthropic, "anthropic", AnthropicModelProviderConfig),            (moonshot, "moonshot", MoonshotModelProviderConfig),
             (qwen, "qwen", QwenModelProviderConfig),
             (glm, "glm", GlmModelProviderConfig),
@@ -160,9 +268,6 @@ macro_rules! for_each_model_provider_slot {
             (openrouter, "openrouter", OpenRouterModelProviderConfig),
             (ollama, "ollama", OllamaModelProviderConfig),
             (gemini, "gemini", GeminiModelProviderConfig),
-            (gemini_cli, "gemini_cli", GeminiCliModelProviderConfig),
-            (bedrock, "bedrock", BedrockModelProviderConfig),
-            (telnyx, "telnyx", TelnyxModelProviderConfig),
             (together, "together", TogetherModelProviderConfig),
             (fireworks, "fireworks", FireworksModelProviderConfig),
             (groq, "groq", GroqModelProviderConfig),
@@ -215,7 +320,6 @@ macro_rules! for_each_model_provider_slot {
             (inception, "inception", InceptionModelProviderConfig),
             (synthetic, "synthetic", SyntheticModelProviderConfig),
             (opencode, "opencode", OpencodeModelProviderConfig),
-            (kilocli, "kilocli", KiloCliModelProviderConfig),
             (kilo, "kilo", KiloModelProviderConfig),
             (custom, "custom", CustomModelProviderConfig),
         }
@@ -225,7 +329,7 @@ macro_rules! for_each_model_provider_slot {
 macro_rules! emit_model_providers_struct {
     ($(($field:ident, $type_str:literal, $cfg_ty:ty)),+ $(,)?) => {
         /// Typed model provider container with one alias map per provider family.
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
+        #[derive(Debug, Clone, Default, Serialize, Configurable)]
         #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
         #[prefix = "providers.models"]
         pub struct ModelProviders {
@@ -234,6 +338,25 @@ macro_rules! emit_model_providers_struct {
                 #[nested]
                 pub $field: HashMap<String, $cfg_ty>,
             )+
+        }
+
+        impl<'de> Deserialize<'de> for ModelProviders {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                #[derive(Deserialize)]
+                struct Slots {
+                    $(
+                        #[serde(default)]
+                        $field: HashMap<String, $cfg_ty>,
+                    )+
+                    #[serde(flatten)]
+                    unknown: HashMap<String, serde::de::IgnoredAny>,
+                }
+                let slots = Slots::deserialize(deserializer)?;
+                for family in slots.unknown.keys() {
+                    reject_retired_model_provider(family).map_err(serde::de::Error::custom)?;
+                }
+                Ok(Self { $( $field: slots.$field, )+ })
+            }
         }
     };
 }

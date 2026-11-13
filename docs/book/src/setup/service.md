@@ -73,11 +73,11 @@ systemctl --user edit zeroclaw.service
 
 </div>
 
-For example, a Bedrock profile that uses `credential_process` needs `AWS_PROFILE` in the service environment:
+For example, set the directory containing the service configuration:
 
 ```ini
 [Service]
-Environment=AWS_PROFILE=zeroclaw-bedrock
+Environment=ZEROCLAW_CONFIG_DIR=/srv/zeroclaw/config
 ```
 
 After saving the override, reload and restart the user service:

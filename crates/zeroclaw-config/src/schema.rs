@@ -619,12 +619,8 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// One trait per family-endpoint enum. Returns the URI template for the chosen
-/// variant — a literal URL for fixed endpoints (`https://api.openai.com/v1`),
-/// or a substitution template for computed endpoints (Azure's
-/// `https://{resource}.openai.azure.com/...`). Substitution happens family-side
-/// in the runtime constructor; for non-templated families the return value is
-/// the final URL.
+/// One trait per family-endpoint enum. Returns the URL for the chosen
+/// variant, such as `https://api.openai.com/v1` for a fixed endpoint.
 ///
 /// Resolution order at runtime is uniform across every model model_provider family:
 /// operator's `cfg.uri` first; family endpoint enum's `uri()` second; loud
@@ -798,7 +794,7 @@ pub struct ModelProviderConfig {
     /// for its prices), filling cost-tracking rates for models the operator
     /// has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
     /// not price (or providers with no HTTP `/models` listing at all, such as
-    /// a subprocess gateway like `kilocli`) fall back to the public models.dev
+    /// a provider without HTTP model listing) fall back to the public models.dev
     /// catalog. Configured rates always win; live prices only fill gaps. A
     /// background task refreshes the price snapshot hourly; the cost-recording
     /// path reads the cached snapshot and never blocks on the network. Default
@@ -879,7 +875,6 @@ pub struct ModelProviderConfig {
 // Pattern reference for adding a new family:
 // - Single-endpoint family with no extras: see `AnthropicModelProviderConfig`
 // - Family with extras: see `OpenAIModelProviderConfig`
-// - Family with computed-endpoint template: see `AzureModelProviderConfig`
 // - Multi-region family with a required `endpoint` field: see `MoonshotModelProviderConfig`
 //
 // The `ModelProviders` container in `crates/zeroclaw-config/src/model_providers.rs`
@@ -949,66 +944,6 @@ impl Default for OpenAIModelProviderConfig {
             },
         }
     }
-}
-
-// ── Azure OpenAI ──
-
-/// Azure OpenAI endpoint template. Single variant; the URL is computed at
-/// runtime by substituting `{resource}` and `{deployment}` from the typed
-/// config fields.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, zeroclaw_macros::ConfigEnum,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum AzureEndpoint {
-    #[default]
-    Default,
-}
-
-impl ModelEndpoint for AzureEndpoint {
-    fn uri(&self) -> &'static str {
-        match self {
-            // Azure's URI is a template — substitution happens in the
-            // AzureModelProvider runtime constructor against the typed
-            // config's resource / deployment fields.
-            Self::Default => "https://{resource}.openai.azure.com/openai/deployments/{deployment}",
-        }
-    }
-}
-
-/// Azure OpenAI model model_provider config. Carries the Azure-specific connection
-/// fields (`resource`, `deployment`, `api_version`) — the URI template
-/// substitutes `{resource}` and `{deployment}` at runtime. Operators can
-/// still override the entire endpoint via `base.uri`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "providers.models.azure"]
-pub struct AzureModelProviderConfig {
-    #[nested]
-    #[serde(flatten)]
-    pub base: ModelProviderConfig,
-    /// Azure resource name (the `<resource>` part of `<resource>.openai.azure.com`).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "azure_openai_resource"
-    )]
-    pub resource: Option<String>,
-    /// Azure deployment name: the deployment created in Azure AI Studio.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "azure_openai_deployment"
-    )]
-    pub deployment: Option<String>,
-    /// Azure API version string (e.g. `2024-10-21`).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "azure_openai_api_version"
-    )]
-    pub api_version: Option<String>,
 }
 
 // ── Anthropic ──
@@ -2105,33 +2040,6 @@ pub struct NvidiaModelProviderConfig {
     pub base: ModelProviderConfig,
 }
 
-// ── Telnyx ──
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, zeroclaw_macros::ConfigEnum,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum TelnyxEndpoint {
-    #[default]
-    Default,
-}
-impl ModelEndpoint for TelnyxEndpoint {
-    fn uri(&self) -> &'static str {
-        match self {
-            Self::Default => "https://api.telnyx.com/v2",
-        }
-    }
-}
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "providers.models.telnyx"]
-pub struct TelnyxModelProviderConfig {
-    #[nested]
-    #[serde(flatten)]
-    pub base: ModelProviderConfig,
-}
-
 // ── Vercel AI Gateway ──
 
 #[derive(
@@ -2549,33 +2457,6 @@ pub struct GeminiModelProviderConfig {
     /// `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` env vars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_project: Option<String>,
-}
-
-// ── Gemini CLI (subprocess wrapper) ──
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum GeminiCliEndpoint {
-    #[default]
-    LocalSubprocess,
-}
-impl ModelEndpoint for GeminiCliEndpoint {
-    fn uri(&self) -> &'static str {
-        // Subprocess — no remote endpoint. Sentinel for trait conformity.
-        "subprocess://gemini-cli"
-    }
-}
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "providers.models.gemini_cli"]
-pub struct GeminiCliModelProviderConfig {
-    #[nested]
-    #[serde(flatten)]
-    pub base: ModelProviderConfig,
-    /// Path to the `gemini` CLI binary. Falls back to `gemini` (PATH lookup).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binary_path: Option<String>,
 }
 
 // ── LMStudio (local default) ──
@@ -3005,34 +2886,6 @@ pub struct OpencodeModelProviderConfig {
     pub base: ModelProviderConfig,
 }
 
-// ── KiloCli (subprocess wrapper) ──
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum KiloCliEndpoint {
-    #[default]
-    LocalSubprocess,
-}
-impl ModelEndpoint for KiloCliEndpoint {
-    fn uri(&self) -> &'static str {
-        match self {
-            Self::LocalSubprocess => "subprocess://kilocli",
-        }
-    }
-}
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "providers.models.kilocli"]
-pub struct KiloCliModelProviderConfig {
-    #[nested]
-    #[serde(flatten)]
-    pub base: ModelProviderConfig,
-    /// Path to the `kilo` CLI binary. Falls back to `kilo` (PATH lookup).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binary_path: Option<String>,
-}
-
 // ── Kilo (AI Gateway — OpenAI-compatible) ──
 
 /// Kilo AI Gateway endpoint. Single canonical endpoint at kilo.ai.
@@ -3106,46 +2959,6 @@ pub struct CustomModelProviderConfig {
     pub base: ModelProviderConfig,
 }
 
-// ── Bedrock (computed-endpoint exemplar, AWS region template) ──
-
-/// AWS Bedrock endpoint template. Single variant; the URL is computed at
-/// runtime by substituting `{region}` from the typed config field.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, zeroclaw_macros::ConfigEnum,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum BedrockEndpoint {
-    #[default]
-    Default,
-}
-
-impl ModelEndpoint for BedrockEndpoint {
-    fn uri(&self) -> &'static str {
-        match self {
-            // Bedrock URI is a template — substitution happens in the
-            // BedrockModelProvider runtime constructor against cfg.region.
-            Self::Default => "https://bedrock-runtime.{region}.amazonaws.com",
-        }
-    }
-}
-
-/// AWS Bedrock model model_provider config. Carries the AWS region (the URI
-/// template substitutes `{region}` from this field). Bedrock auth is
-/// SigV4 — credentials come from the standard AWS credential chain
-/// (env vars, instance metadata, profile), not from `api_key`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "providers.models.bedrock"]
-pub struct BedrockModelProviderConfig {
-    #[nested]
-    #[serde(flatten)]
-    pub base: ModelProviderConfig,
-    /// AWS region for the Bedrock endpoint (e.g. `us-east-1`, `eu-west-1`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-}
-
 // ── FamilyEndpoint default impls (single-endpoint families) ─────
 //
 // Multi-endpoint families (Moonshot, Qwen, Glm, Minimax, Zai, Stepfun) define
@@ -3163,7 +2976,6 @@ macro_rules! impl_default_family_endpoint {
 
 impl_default_family_endpoint! {
     OpenAIModelProviderConfig,
-    AzureModelProviderConfig,
     AnthropicModelProviderConfig,
     AtomicChatModelProviderConfig,
     OpenRouterModelProviderConfig,
@@ -3197,7 +3009,6 @@ impl_default_family_endpoint! {
     NearaiModelProviderConfig,
     NovitaModelProviderConfig,
     NvidiaModelProviderConfig,
-    TelnyxModelProviderConfig,
     VercelModelProviderConfig,
     CloudflareModelProviderConfig,
     OvhModelProviderConfig,
@@ -3208,7 +3019,6 @@ impl_default_family_endpoint! {
     QianfanModelProviderConfig,
     BaichuanModelProviderConfig,
     GeminiModelProviderConfig,
-    GeminiCliModelProviderConfig,
     LmstudioModelProviderConfig,
     LlamacppModelProviderConfig,
     SglangModelProviderConfig,
@@ -3226,9 +3036,7 @@ impl_default_family_endpoint! {
     InceptionModelProviderConfig,
     SyntheticModelProviderConfig,
     OpencodeModelProviderConfig,
-    KiloCliModelProviderConfig,
     CustomModelProviderConfig,
-    BedrockModelProviderConfig,
 }
 
 // ── Aliased Agents ───────────────────────────────────────────────
@@ -13106,6 +12914,9 @@ impl Config {
             // degrades (dropping invalid blocks to defaults); security-critical
             // drops are recorded on `degraded_security` for exposure gating.
             // Strict validation lives in `zeroclaw config migrate`.
+            if let Some(raw) = raw_root.as_ref() {
+                crate::providers::reject_retired_model_provider_config(raw)?;
+            }
             let salvage = crate::migration::migrate_to_current_salvaged(&contents);
             let mut config: Config = salvage.config;
             config.degraded_security = salvage.dropped_security;

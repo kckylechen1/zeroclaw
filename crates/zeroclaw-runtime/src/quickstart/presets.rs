@@ -511,8 +511,6 @@ mod tests {
         );
         assert_eq!(recommendation("ollama"), None);
         assert_eq!(recommendation("atomic_chat"), None);
-        assert_eq!(recommendation("gemini_cli"), None);
-        assert_eq!(recommendation("kilocli"), None);
         assert_eq!(recommendation("anthropic"), None);
     }
 

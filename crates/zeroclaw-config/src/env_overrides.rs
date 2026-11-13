@@ -127,6 +127,11 @@ pub fn apply_env_overrides(config: &mut Config) -> Result<AppliedOverrides> {
         // Err — deprecation visibility should not depend on the rest of
         // the environment being clean.
         let tail_segments: Vec<&str> = tail.split(SEP).collect();
+        if tail_segments.starts_with(&["providers", "models"])
+            && let Some(family) = tail_segments.get(2)
+        {
+            crate::providers::reject_retired_model_provider(family)?;
+        }
         let retired_hit = RETIRED_ENV_TOMBSTONE_PREFIXES
             .iter()
             .find(|(prefix, _)| tail.starts_with(prefix.as_str()))
@@ -359,6 +364,39 @@ mod tests {
             // SAFETY: tests serialize on `env_test_lock()`.
             unsafe { std::env::remove_var(self.0) };
         }
+    }
+
+    #[tokio::test]
+    async fn walker_rejects_retired_model_provider_credentials_without_applying_them() {
+        let _guard = super::env_test_lock().await;
+        for name in [
+            "ZEROCLAW_providers__models__bedrock__private_alias__api_key",
+            "ZEROCLAW_providers__models__azure__private_alias__api_key",
+            "ZEROCLAW_providers__models__azure_openai__private_alias__api_key",
+            "ZEROCLAW_providers__models__telnyx__private_alias__api_key",
+            "ZEROCLAW_providers__models__gemini_cli__private_alias__binary_path",
+            "ZEROCLAW_providers__models__kilocli__private_alias__binary_path",
+        ] {
+            let _value = EnvVarGuard::set(name, "private-test-value");
+            let mut config = Config::default();
+            let error = apply_env_overrides(&mut config).unwrap_err().to_string();
+            assert!(error.contains("is retired"), "{name}: {error}");
+            assert!(!error.contains("private-test-value"));
+            assert!(!error.contains("private_alias"));
+            assert!(config.providers.models.iter_entries().next().is_none());
+        }
+        let _value = EnvVarGuard::set(
+            "ZEROCLAW_providers__models__gemini__gemini_cli__oauth_project",
+            "retained-project",
+        );
+        let mut config = Config::default();
+        apply_env_overrides(&mut config).unwrap();
+        assert_eq!(
+            config.providers.models.gemini["gemini_cli"]
+                .oauth_project
+                .as_deref(),
+            Some("retained-project")
+        );
     }
 
     #[tokio::test]

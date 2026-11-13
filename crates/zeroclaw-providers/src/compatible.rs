@@ -24,7 +24,7 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 /// A model_provider that speaks the OpenAI-compatible chat completions API.
 /// Used by: Venice, Vercel AI Gateway, Cloudflare AI Gateway, Moonshot,
-/// Synthetic, `OpenCode` Zen, `OpenCode` Go, `Z.AI`, `GLM`, `MiniMax`, Bedrock, Qianfan, Groq, Mistral, `xAI`, etc.
+/// Synthetic, `OpenCode` Zen, `OpenCode` Go, `Z.AI`, `GLM`, `MiniMax`, Qianfan, Groq, Mistral, `xAI`, etc.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone)]
 pub struct OpenAiCompatibleModelProvider {
@@ -401,7 +401,7 @@ impl OpenAiCompatibleBuilder {
     ///
     /// Prefer [`OpenAiCompatibleBuilder::merge_system_into_user_preserving_native`]
     /// when you want the merge behaviour but still want native tool calling
-    /// (e.g. Bedrock).
+    /// (e.g. Qwen).
     pub fn merge_system_into_user(mut self) -> Self {
         self.merge_system_into_user = true;
         self
@@ -410,7 +410,7 @@ impl OpenAiCompatibleBuilder {
     /// Merge all system messages into the first user message before sending,
     /// preserving native tool calling. Use when the upstream rejects
     /// `role: system` but still accepts OpenAI-style `tools` payloads (e.g.
-    /// Bedrock's Anthropic pass-through).
+    /// Qwen's system-message compatibility mode).
     pub fn merge_system_into_user_preserving_native(mut self) -> Self {
         self.merge_system_into_user_preserve_native = true;
         self

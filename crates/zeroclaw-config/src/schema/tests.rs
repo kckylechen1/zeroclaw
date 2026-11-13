@@ -8834,39 +8834,39 @@ async fn set_prop_flatten_alias_unknown_leaf_still_unknown_property() {
 
 #[test]
 async fn set_prop_flatten_own_field_still_resolves_after_base_unknown_property() {
-    // AzureModelProviderConfig has BOTH a flattened base and its own
-    // direct fields (resource / deployment / api_version). Setting an
+    // GeminiModelProviderConfig has BOTH a flattened base and its own
+    // direct fields (oauth_project / oauth_client_id). Setting an
     // own-field goes through the flatten site first, which returns
     // "Unknown property" — that must keep falling through so the own
     // field still resolves (the no-over-propagation guarantee).
     let mut config = Config::default();
     config
-        .create_map_key("providers.models.azure", "k8")
+        .create_map_key("providers.models.gemini", "k8")
         .expect("typed family slot accepts a new alias");
     config
-        .set_prop("providers.models.azure.k8.resource", "myres")
+        .set_prop("providers.models.gemini.k8.oauth_project", "myres")
         .unwrap();
     assert_eq!(
         config
             .providers
             .models
-            .azure
+            .gemini
             .get("k8")
             .expect("alias created above")
-            .resource
+            .oauth_project
             .as_deref(),
         Some("myres")
     );
 }
 
 #[test]
-async fn set_prop_flatten_base_field_via_azure_alias_propagates_value_error() {
+async fn set_prop_flatten_base_field_via_gemini_alias_propagates_value_error() {
     let mut config = Config::default();
     config
-        .create_map_key("providers.models.azure", "k8")
+        .create_map_key("providers.models.gemini", "k8")
         .expect("typed family slot accepts a new alias");
     let err = config
-        .set_prop("providers.models.azure.k8.temperature", "abc")
+        .set_prop("providers.models.gemini.k8.temperature", "abc")
         .unwrap_err()
         .to_string();
     assert_value_error(&err);
@@ -9175,8 +9175,8 @@ pricing = { "gpt-4o.input" = 5.0, "gpt-4o.output" = 15.0 }
     let typed_provider_fields = r#"
 schema_version = 3
 
-[providers.models.azure.default.default]
-api_version = "2024-10-21"
+[providers.models.gemini.default.default]
+oauth_project = "example-project"
 
 [providers.models.ollama.local.default]
 model = "llama3.1"
@@ -9184,7 +9184,7 @@ model = "llama3.1"
     assert_eq!(
         Config::extra_nested_model_provider_tables(typed_provider_fields),
         vec![
-            finding("azure", "default", "default"),
+            finding("gemini", "default", "default"),
             finding("ollama", "local", "default")
         ],
         "typed provider fields must still be flagged when extra-nested"
@@ -12924,4 +12924,31 @@ fn http_auth_secret_policy_preserves_missing_empty_and_scoped_hosts() {
         )
         .is_err()
     );
+}
+
+#[test]
+#[allow(clippy::large_futures)]
+async fn load_or_init_rejects_retired_model_provider_without_rewriting_file() {
+    let _env_guard = env_override_lock().await;
+    let home = TempDir::new().unwrap();
+    let config_dir = home.path().join("profile");
+    fs::create_dir_all(&config_dir).await.unwrap();
+    let config_path = config_dir.join("config.toml");
+    let _home = EnvValueGuard::set("HOME", home.path());
+    let _config_dir = EnvValueGuard::set("ZEROCLAW_CONFIG_DIR", &config_dir);
+    let _workspace = EnvValueGuard::remove("ZEROCLAW_WORKSPACE");
+    for family in crate::providers::RETIRED_MODEL_PROVIDER_NAMES {
+        let raw = format!(
+            "schema_version = 3\n[providers.models.{family}.private_alias]\napi_key = \"private-test-key\"\n"
+        );
+        fs::write(&config_path, &raw).await.unwrap();
+        let error = Box::pin(Config::load_or_init())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is retired"), "{family}: {error}");
+        assert!(!error.contains("private-test-key"));
+        assert!(!error.contains("private_alias"));
+        assert_eq!(fs::read_to_string(&config_path).await.unwrap(), raw);
+    }
 }

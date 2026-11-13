@@ -82,18 +82,6 @@ fn provider_runtime_defaults_follow_canonical_provider_recommendations() {
     assert_eq!(remote.default_runtime_profile, None);
     assert_eq!(snapshot.default_runtime_profile, "unbounded");
 
-    let cli_shim = snapshot
-        .model_provider_types
-        .iter()
-        .find(|provider| provider.kind == "gemini_cli")
-        .expect("Gemini CLI should be present in the canonical provider registry");
-    assert!(cli_shim.local);
-    assert_eq!(
-        cli_shim.default_runtime_profile.as_deref(),
-        None,
-        "credential-free cloud CLI providers must not inherit local-small policy",
-    );
-
     for provider in &snapshot.model_provider_types {
         if let Some(default) = provider.default_runtime_profile.as_deref() {
             assert!(

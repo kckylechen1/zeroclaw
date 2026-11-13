@@ -14,7 +14,7 @@ fn collapse_model_probes_groups_identical_and_breaks_divergent() {
         ("openai.a".to_string(), K(10)),
         ("openai.b".to_string(), K(12)),
         (
-            "kilocli.free".to_string(),
+            "custom.unlisted".to_string(),
             E(Severity::Error, "not supported".to_string()),
         ),
     ];
@@ -30,7 +30,7 @@ fn collapse_model_probes_groups_identical_and_breaks_divergent() {
             "kilo.solo: 335 models", // single alias → kept per-alias
             "openai.a: 10 models",   // divergent counts → broken out
             "openai.b: 12 models",
-            "kilocli.free: not supported", // single alias → kept
+            "custom.unlisted: not supported", // single alias → kept
         ]
     );
 }

@@ -3,16 +3,12 @@
 
 pub mod anthropic;
 pub mod auth;
-pub mod azure_openai;
-pub mod bedrock;
 pub mod catalog;
 pub mod compatible;
 pub mod copilot;
 pub mod dispatch;
 pub mod factory;
 pub mod gemini;
-pub mod gemini_cli;
-pub mod kilocli;
 pub mod model_pin;
 pub mod models_dev;
 pub mod multimodal;
@@ -24,7 +20,6 @@ pub mod pricing;
 pub mod reliable;
 pub mod router;
 pub(crate) mod stream_guard;
-pub mod telnyx;
 pub mod traits;
 pub mod vision_override;
 
@@ -955,7 +950,6 @@ const KEY_PREFIX_MODEL_PROVIDERS: &[(&str, &str)] = &[
     ("pplx-", "perplexity"),
     ("xai-", "xai"),
     ("nvapi-", "nvidia"),
-    ("KEY-", "telnyx"),
 ];
 
 fn check_api_key_prefix(model_provider_name: &str, key: &str) -> Option<&'static str> {
@@ -1048,7 +1042,6 @@ pub fn create_model_provider_for_alias_with_url(
 pub fn canonicalize_v2_model_provider_name(name: &str) -> &str {
     match name {
         // Vendor-canonical synonyms.
-        "azure_openai" | "azure-openai" => "azure",
         "grok" => "xai",
         "google" | "google-gemini" => "gemini",
         "together-ai" => "together",
@@ -1056,7 +1049,6 @@ pub fn canonicalize_v2_model_provider_name(name: &str) -> &str {
         "vercel-ai" => "vercel",
         "cloudflare-ai" => "cloudflare",
         "nvidia-nim" | "build.nvidia.com" => "nvidia",
-        "aws-bedrock" => "bedrock",
         "lm-studio" => "lmstudio",
         "lite-llm" => "litellm",
         "hf" => "huggingface",
@@ -1113,8 +1105,6 @@ pub fn canonicalize_v2_model_provider_name(name: &str) -> &str {
         | "minimax-oauth-cn" => "minimax",
         // Doubao / Volcengine.
         "volcengine" | "ark" | "doubao-cn" => "doubao",
-        // Gemini CLI is its own typed slot (subprocess runtime).
-        "gemini-cli" => "gemini_cli",
         // Stepfun-intl folds with a different uri at the schema layer.
         "stepfun-intl" | "step-intl" => "stepfun",
         // Anthropic special folds.
@@ -1176,6 +1166,10 @@ fn create_model_provider_inner(
     api_url: Option<&str>,
     options: &ModelProviderRuntimeOptions,
 ) -> anyhow::Result<Box<dyn ModelProvider>> {
+    zeroclaw_config::providers::reject_retired_model_provider(raw_name)?;
+    if let Some(kind) = options.provider_kind.as_deref() {
+        zeroclaw_config::providers::reject_retired_model_provider(kind.trim())?;
+    }
     if let Some(idx) = raw_name.find(':') {
         let prefix = &raw_name[..idx];
         let url = raw_name[idx + 1..].trim();
@@ -1292,7 +1286,7 @@ pub fn create_resilient_model_provider_with_options(
 
 /// Wrap the primary model_provider in a retry/backoff harness with full
 /// alias context. Production callers (gateway, orchestrator) use this so
-/// the dispatch sees the typed alias config and routes Azure/Codex/Gemini
+/// the dispatch sees the typed alias config and routes Codex/Gemini
 /// extras correctly.
 pub fn create_resilient_model_provider_for_alias(
     config: &zeroclaw_config::schema::Config,
@@ -1794,7 +1788,7 @@ impl ModelProviderCategory {
 }
 
 /// Canonical base URL for `name`, mirroring what `create_model_provider`
-/// would dial. `None` for families without a fixed default (Azure, custom,
+/// would dial. `None` for families without a fixed default (custom,
 /// multi-region, CLI shims).
 #[must_use]
 pub fn default_model_provider_url(name: &str) -> Option<&'static str> {
@@ -1823,7 +1817,6 @@ pub fn default_model_provider_url(name: &str) -> Option<&'static str> {
         "openai" => Some(openai::BASE_URL),
         "openrouter" => Some(openrouter::BASE_URL),
         "ollama" => Some(OllamaEndpoint::default().uri()),
-        "telnyx" => Some(telnyx::BASE_URL),
         "gemini" => Some(gemini::BASE_URL),
         "vercel" => Some(<VercelModelProviderConfig as CompatFamilySpec>::DEFAULT_URL),
         "cloudflare" => Some(<CloudflareModelProviderConfig as CompatFamilySpec>::DEFAULT_URL),
@@ -1910,8 +1903,6 @@ pub fn list_model_providers() -> Vec<ModelProviderInfo> {
             ("openrouter", "OpenRouter", false),
             ("anthropic", "Anthropic", false),
             ("openai", "OpenAI", false),
-            ("telnyx", "Telnyx", false),
-            ("azure", "Azure OpenAI", false),
             ("ollama", "Ollama", true),
             ("gemini", "Google Gemini", false),
         ],
@@ -1930,7 +1921,6 @@ pub fn list_model_providers() -> Vec<ModelProviderInfo> {
             ("zai", "Z.AI", false),
             ("glm", "GLM (Zhipu)", false),
             ("minimax", "MiniMax", false),
-            ("bedrock", "Amazon Bedrock", false),
             ("qianfan", "Qianfan (Baidu)", false),
             ("doubao", "Doubao (Volcengine)", false),
             ("qwen", "Qwen (DashScope / Qwen Code OAuth)", false),
@@ -1944,8 +1934,6 @@ pub fn list_model_providers() -> Vec<ModelProviderInfo> {
             ("perplexity", "Perplexity", false),
             ("cohere", "Cohere", false),
             ("copilot", "GitHub Copilot", false),
-            ("gemini_cli", "Gemini CLI", true),
-            ("kilocli", "KiloCLI", true),
             ("kilo", "Kilo", false),
             ("lmstudio", "LM Studio", true),
             ("llamacpp", "llama.cpp server", true),
@@ -2097,7 +2085,7 @@ pub async fn fetch_context_window(
         "openrouter" => fetch_openrouter_context_window(config).await,
         "together" | "groq" | "fireworks" | "deepinfra" | "hyperbolic" | "anyscale" | "novita"
         | "nebius" => fetch_openai_compatible_context_window(provider_type, config).await,
-        _ => None, // anthropic, openai, ollama, bedrock, etc. don't expose it
+        _ => None, // anthropic, openai, ollama, etc. don't expose it
     }
 }
 
