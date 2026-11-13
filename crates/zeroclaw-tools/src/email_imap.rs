@@ -1,4 +1,5 @@
 /// Shared IMAP connection utility used by email_search and email_read.
+use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
@@ -7,6 +8,10 @@ use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context, Result};
 use async_imap::Session;
+use async_imap::error::{Error as ImapError, Result as ImapResult};
+use async_imap::imap_proto::{
+    AttributeValue, MailboxDatum, MessageSection, Response, SectionPath, Status,
+};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::DnsName;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -64,6 +69,150 @@ pub fn is_tls_close_notify(e: &io::Error) -> bool {
 }
 
 pub type ImapSession = Session<TlsStreamTolerant>;
+
+// chatmail/async-imap#95: FETCH/SEARCH helpers discard tagged NO/BAD completions.
+// Keep its parser, but publish collected data only after this command's OK.
+async fn collect_command<T, R>(
+    session: &mut Session<T>,
+    command: &str,
+    mut collect: impl FnMut(&mut R, &Response<'_>) + Send,
+) -> ImapResult<R>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+    R: Default + Send,
+{
+    let request_id = session.run_command(command).await?;
+    let mut result = R::default();
+    loop {
+        let response = session
+            .read_response()
+            .await?
+            .ok_or(ImapError::ConnectionLost)?;
+        match response.parsed() {
+            Response::Done {
+                tag,
+                status,
+                outcome,
+            } if tag == &request_id => {
+                return match status {
+                    Status::Ok => Ok(result),
+                    Status::No => Err(ImapError::No(format!("outcome: {outcome:?}"))),
+                    Status::Bad => Err(ImapError::Bad(format!("outcome: {outcome:?}"))),
+                    _ => Err(ImapError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unexpected IMAP completion status: {status:?}"),
+                    ))),
+                };
+            }
+            Response::Done { .. } => {}
+            Response::Data {
+                status: Status::Bye,
+                ..
+            } => return Err(ImapError::ConnectionLost),
+            // These tools use one-shot read-only sessions, not mailbox sync.
+            // Unrelated mailbox updates must not become command results.
+            response => collect(&mut result, response),
+        }
+    }
+}
+
+pub(crate) async fn uid_search<T>(
+    session: &mut Session<T>,
+    criteria: &str,
+) -> ImapResult<HashSet<u32>>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    collect_command(
+        session,
+        &format!("UID SEARCH {criteria}"),
+        |ids: &mut HashSet<u32>, response| {
+            if let Response::MailboxData(MailboxDatum::Search(found)) = response {
+                ids.extend(found);
+            }
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PeekPart {
+    Header,
+    Body,
+}
+
+#[derive(Debug)]
+pub(crate) struct PeekMessage {
+    pub(crate) uid: u32,
+    pub(crate) data: Option<Vec<u8>>,
+}
+
+pub(crate) async fn uid_fetch_peek<T>(
+    session: &mut Session<T>,
+    uids: &[u32],
+    part: PeekPart,
+) -> ImapResult<Vec<PeekMessage>>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    // A zero search limit selects no UIDs; IMAP has no empty sequence set.
+    if uids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let uid_set = uids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let query = match part {
+        PeekPart::Header => "BODY.PEEK[HEADER]",
+        PeekPart::Body => "BODY.PEEK[]",
+    };
+    collect_command(
+        session,
+        &format!("UID FETCH {uid_set} {query}"),
+        |messages: &mut Vec<PeekMessage>, response| {
+            let Response::Fetch(_, attributes) = response else {
+                return;
+            };
+            let Some(uid) = attributes.iter().find_map(|attribute| match attribute {
+                AttributeValue::Uid(uid) if uids.contains(uid) => Some(*uid),
+                _ => None,
+            }) else {
+                return;
+            };
+            // A unilateral FETCH may contain only flags, or concern another UID.
+            // Only the requested message part belongs in this command's result.
+            let data = attributes
+                .iter()
+                .find_map(|attribute| match (part, attribute) {
+                    (
+                        PeekPart::Header,
+                        AttributeValue::BodySection {
+                            section: Some(SectionPath::Full(MessageSection::Header)),
+                            data,
+                            ..
+                        }
+                        | AttributeValue::Rfc822Header(data),
+                    )
+                    | (
+                        PeekPart::Body,
+                        AttributeValue::BodySection {
+                            section: None,
+                            data,
+                            ..
+                        }
+                        | AttributeValue::Rfc822(data),
+                    ) => Some(data.as_deref().map(<[u8]>::to_vec)),
+                    _ => None,
+                });
+            if let Some(data) = data {
+                messages.push(PeekMessage { uid, data });
+            }
+        },
+    )
+    .await
+}
 
 pub async fn imap_connect(
     cfg: &EmailConfig,
@@ -142,6 +291,10 @@ pub async fn imap_connect(
             .map_err(|(e, _)| anyhow::Error::msg(format!("IMAP login failed: {}", e)))
     }
 }
+
+#[cfg(test)]
+#[path = "email_imap/protocol_tests.rs"]
+mod protocol_tests;
 
 #[cfg(test)]
 mod tests {

@@ -7,13 +7,9 @@
 unmaintained = "all"
 # yanked: deny | warn | allow
 yanked = "deny"
-# Retained consumer: email-tools -> async-imap 0.11.3 -> pin-utils 0.1.0.
-# The checked async-imap 0.12.0 release also depends on pin-utils.
-# Track replacement in https://github.com/kckylechen1/zeroclaw/issues/432
-# and https://github.com/kckylechen1/zeroclaw/issues/647.
-ignore = [
-    { id = "RUSTSEC-2026-0441", reason = "pin-utils 0.1.0 unmaintained; retained email-tools -> async-imap 0.11.3; checked async-imap 0.12.0 still depends on pin-utils; tracking #432/#647" },
-]
+# No retained advisory exceptions. Future exceptions must identify their
+# consumer and removal condition in both policy files (tracking #432/#647).
+ignore = []
 
 [licenses]
 # All licenses are denied unless explicitly allowed
@@ -97,29 +93,8 @@ name = "base64"
 version = "=0.23.1"
 
 [[bans.skip]]
-name = "rand"
-version = "=0.8.6"
-# Optional memory-tachi -> portable-kernel -> memcore -> vault-kit requires 0.8.
-# Keep its cryptographic nonce/salt consumer until the owning Tachi migration;
-# this exact duplicate exception does not suppress advisory checks (#432/#647).
-# The default-graph guard also rejects this optional legacy RNG pair.
-
-[[bans.skip]]
-name = "rand"
-version = "=0.9.4"
-
-[[bans.skip]]
-name = "rand_chacha"
-version = "=0.3.1"
-# Selected by the same vault-kit -> rand 0.8.6 chain; retire with that constraint.
-
-[[bans.skip]]
 name = "rand_core"
 version = "=0.6.4"
-
-[[bans.skip]]
-name = "rand_core"
-version = "=0.9.5"
 
 [[bans.skip]]
 name = "r-efi"
@@ -245,6 +220,10 @@ version = "=0.6.26"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Optional portable kernel and its internal crates share this immutable source;
-# the exact revision is pinned in zeroclaw-memory/Cargo.toml.
-allow-git = ["https://github.com/kckylechen1/Tachi"]
+# Exact revisions are pinned in zeroclaw-memory/Cargo.toml (Tachi),
+# zeroclaw-tools/Cargo.toml (async-imap) and root Cargo.toml (tungstenite).
+allow-git = [
+    "https://github.com/kckylechen1/Tachi",
+    "https://github.com/chatmail/async-imap",
+    "https://github.com/snapview/tungstenite-rs",
+]

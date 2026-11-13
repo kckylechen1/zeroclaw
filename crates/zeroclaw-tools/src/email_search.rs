@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::TryStreamExt;
 use mail_parser::MessageParser;
 use zeroclaw_api::attribution::ToolKind;
 use zeroclaw_api::tool::{Tool, ToolResult};
 use zeroclaw_config::scattered_types::EmailConfig;
 
-use crate::email_imap::imap_connect;
+use crate::email_imap::{PeekPart, imap_connect, uid_fetch_peek, uid_search};
 
 zeroclaw_api::tool_attribution!(EmailSearchTool, ToolKind::Plugin);
 
@@ -151,7 +150,7 @@ impl Tool for EmailSearchTool {
         }
 
         let criteria = criteria_parts.join(" ");
-        let uids = session.uid_search(&criteria).await?;
+        let uids = uid_search(&mut session, &criteria).await?;
 
         if uids.is_empty() {
             let _ = session.logout().await;
@@ -165,22 +164,15 @@ impl Tool for EmailSearchTool {
         let mut uid_vec: Vec<u32> = uids.into_iter().collect();
         uid_vec.sort_unstable();
         let uid_list: Vec<u32> = uid_vec.into_iter().rev().take(limit).collect();
-        let uid_set = uid_list
-            .iter()
-            .map(|u| u.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let messages = session.uid_fetch(&uid_set, "BODY.PEEK[HEADER]").await?;
-        let messages: Vec<_> = messages.try_collect().await?;
+        let messages = uid_fetch_peek(&mut session, &uid_list, PeekPart::Header).await?;
         let _ = session.logout().await;
 
         let parser = MessageParser::default();
         let mut results: Vec<serde_json::Value> = Vec::new();
 
         for msg in &messages {
-            let uid = msg.uid.unwrap_or(0);
-            let Some(header_bytes) = msg.header() else {
+            let uid = msg.uid;
+            let Some(header_bytes) = msg.data.as_deref() else {
                 continue;
             };
             let Some(parsed) = parser.parse(header_bytes) else {
