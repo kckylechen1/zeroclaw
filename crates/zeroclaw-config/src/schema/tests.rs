@@ -4470,10 +4470,13 @@ max_retries = 3
     .await
     .unwrap();
     let _home = EnvValueGuard::set("HOME", home.path());
-    let _workspace = EnvValueGuard::set("ZEROCLAW_WORKSPACE", &workspace);
-    let _config_dir = EnvValueGuard::remove("ZEROCLAW_CONFIG_DIR");
+    let _workspace = EnvValueGuard::remove("ZEROCLAW_WORKSPACE");
+    let _data_dir = EnvValueGuard::remove("ZEROCLAW_DATA_DIR");
+    let _config_dir = EnvValueGuard::set("ZEROCLAW_CONFIG_DIR", &workspace);
 
     let config = Box::pin(Config::load_or_init()).await.unwrap();
+    assert_eq!(config.config_path, workspace.join("config.toml"));
+    assert_eq!(config.data_dir, workspace.join("data"));
     assert!(config.degraded_sections.is_empty());
     let warnings = config.collect_warnings();
     let warning = warnings
