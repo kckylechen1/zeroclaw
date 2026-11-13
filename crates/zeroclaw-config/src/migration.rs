@@ -1633,7 +1633,7 @@ model = "gpt-4o"
 [providers.models.openrouter.telnyx]
 api_key = "private-openrouter-key"
 [providers.models.gemini.gemini_cli]
-auth_mode = "oauth"
+auth_mode = "o_auth"
 oauth_project = "retained-project"
 oauth_client_id = "private-client-id"
 oauth_client_secret = "private-client-secret"
