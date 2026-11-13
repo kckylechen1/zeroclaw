@@ -119,7 +119,7 @@ impl TachiMemory {
         vector_weight: f32,
         keyword_weight: f32,
         list_page_size: usize,
-        max_grow: usize,
+        max_list_grow: usize,
     ) -> anyhow::Result<Self> {
         let db_path = workspace_dir.join("memory").join("tachi.db");
         if let Some(parent) = db_path.parent() {
@@ -152,7 +152,7 @@ impl TachiMemory {
             vector_weight,
             keyword_weight,
             list_page_size,
-            max_list_grow: max_grow.max(list_page_size),
+            max_list_grow: max_list_grow.max(list_page_size),
         })
     }
 
@@ -1566,7 +1566,6 @@ mod tests {
             "note",
             "beta-only secret token",
             MemoryCategory::Core,
-            None,
             None,
             None,
             None,
