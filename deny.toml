@@ -36,6 +36,20 @@ allow = [
 ]
 unused-allowed-license = "allow"
 
+# ADR-017 section 6 accepts the optional memory-tachi build and its AGPL
+# distribution boundary. The three AGPL packages share the Tachi source pinned
+# in zeroclaw-memory/Cargo.toml; no license is added to the global allowlist.
+# dependency_policy_smoke.py rejects these AGPL packages in the default graph.
+# Re-review the exception when a package version or the Tachi pin changes.
+# borrow-or-share is the reviewed MIT No Attribution dependency reached through
+# memcore -> jsonschema -> referencing -> fluent-uri (tracking #432/#647).
+exceptions = [
+    { name = "memcore", version = "=2.0.0", allow = ["AGPL-3.0-only"] },
+    { name = "portable-kernel", version = "=1.9.0", allow = ["AGPL-3.0-only"] },
+    { name = "vault-kit", version = "=0.1.0", allow = ["AGPL-3.0-only"] },
+    { name = "borrow-or-share", version = "=0.2.4", allow = ["MIT-0"] },
+]
+
 [bans]
 # Reject multiple versions of the same crate in the resolved dependency graph.
 # This prevents silent version splits that inflate compile times, binary size,
@@ -84,7 +98,20 @@ version = "=0.23.1"
 
 [[bans.skip]]
 name = "rand"
+version = "=0.8.6"
+# Optional memory-tachi -> portable-kernel -> memcore -> vault-kit requires 0.8.
+# Keep its cryptographic nonce/salt consumer until the owning Tachi migration;
+# this exact duplicate exception does not suppress advisory checks (#432/#647).
+# The default-graph guard also rejects this optional legacy RNG pair.
+
+[[bans.skip]]
+name = "rand"
 version = "=0.9.4"
+
+[[bans.skip]]
+name = "rand_chacha"
+version = "=0.3.1"
+# Selected by the same vault-kit -> rand 0.8.6 chain; retire with that constraint.
 
 [[bans.skip]]
 name = "rand_core"
