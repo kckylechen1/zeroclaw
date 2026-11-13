@@ -98,27 +98,10 @@ elif [[ -f "$ROOT_LOCK" ]]; then
   echo "  skip: cargo not on PATH; Cargo.lock not refreshed"
 fi
 
-# ── Marketplace: Dokploy ───────────────────────────────────────────
-echo "Marketplace templates..."
-bump "marketplace/dokploy/meta-entry.json" \
-  '"version": "[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?"' \
-  "\"version\": \"${VERSION}\""
-
-bump "marketplace/dokploy/blueprints/zeroclaw/docker-compose.yml" \
-  'ghcr\.io/zeroclaw-labs/zeroclaw:[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?' \
-  "ghcr.io/zeroclaw-labs/zeroclaw:${VERSION}"
-
-# ── Marketplace: EasyPanel ─────────────────────────────────────────
-bump "marketplace/easypanel/meta.yaml" \
-  'ghcr\.io/zeroclaw-labs/zeroclaw:[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?' \
-  "ghcr.io/zeroclaw-labs/zeroclaw:${VERSION}"
-
-
 # ── Docs book examples + matching i18n catalogs ────────────────────
 # Two surgical patterns, both anchored enough to skip release-runbook
 # release-runbook history lines that intentionally pin an original verification
 # month or scheduled-removal release instead of tracking the current version:
-#   - container image tags    `zeroclawlabs/zeroclaw:vX.Y.Z`
 #   - /health response example `"version":"X.Y.Z"` (compact or spaced JSON)
 #   - RPC initialize example   `"serverVersion":"X.Y.Z"` (compact or spaced JSON)
 # The `"version"`/`"serverVersion"` swaps tolerate an optional space after the
@@ -136,9 +119,6 @@ while IFS= read -r -d '' f; do
 done < <(find "$REPO_ROOT/docs/book/src" -type f -name '*.md' -print0)
 for f in "${docs_files[@]}"; do
   rel="${f#$REPO_ROOT/}"
-  bump "$rel" \
-    'zeroclawlabs/zeroclaw:v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?' \
-    "zeroclawlabs/zeroclaw:v${VERSION}"
   bump "$rel" \
     '"version":( ?)"[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?"' \
     "\"version\":\\1\"${VERSION}\""
