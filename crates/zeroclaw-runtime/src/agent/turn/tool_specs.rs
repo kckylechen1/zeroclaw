@@ -257,4 +257,134 @@ mod tests {
             "active provider must decide whether this turn uses native tool transport"
         );
     }
+
+    #[tokio::test]
+    async fn mcp_discovery_and_activation_order_keep_provider_payload_bytes_stable() {
+        use crate::tools::{DeferredMcpToolSet, McpRegistry, ToolSearchTool};
+        use serde_json::{Value, json};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use zeroclaw_config::schema::{McpServerConfig, McpTransport};
+        use zeroclaw_providers::compatible::{AuthStyle, OpenAiCompatibleModelProvider};
+        use zeroclaw_providers::{ChatMessage, ChatRequest, ProviderDispatch};
+        use zeroclaw_tools::mcp_deferred::build_deferred_tools_section_filtered;
+        use zeroclaw_tools::tool_search::ToolAccessPolicy;
+
+        let mcp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(|request: &wiremock::Request| {
+                let request: Value = serde_json::from_slice(&request.body).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "server/discover" => {
+                        return ResponseTemplate::new(200).set_body_json(json!({
+                            "jsonrpc": "2.0", "id": request["id"],
+                            "error": {"code": -32601, "message": "Method not found"}
+                        }));
+                    }
+                    "notifications/initialized" => return ResponseTemplate::new(202),
+                    "initialize" => json!({
+                        "protocolVersion": "2024-11-05", "capabilities": {"tools": {}}
+                    }),
+                    "tools/list" => json!({"tools": [
+                        {"name": "write", "description": "Write fixture data", "inputSchema": {"type": "object"}},
+                        {"name": "read", "description": "Read fixture data", "inputSchema": {"type": "object"}}
+                    ]}),
+                    other => panic!("discovery must not execute a tool: {other}"),
+                };
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0", "id": request["id"], "result": result
+                }))
+            })
+            .mount(&mcp)
+            .await;
+
+        let endpoint = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"role": "assistant", "content": "done"}}]
+            })))
+            .expect(2)
+            .mount(&endpoint)
+            .await;
+        let provider = OpenAiCompatibleModelProvider::builder("ordering-fixture")
+            .display_name("Ordering fixture")
+            .base_url(&format!("{}/v1", endpoint.uri()))
+            .credential(Some("fixture-key"))
+            .auth_style(AuthStyle::Bearer)
+            .build();
+        let policy = ToolAccessPolicy {
+            denied: Some(vec!["zeta__write".into()]),
+            ..ToolAccessPolicy::default()
+        };
+        let names = ["zeta__read", "alpha__write", "alpha__read", "zeta__write"];
+        for reverse in [false, true] {
+            let mut servers = vec!["zeta", "alpha"];
+            let mut activation_order = names.to_vec();
+            if reverse {
+                servers.reverse();
+                activation_order.reverse();
+            }
+            let configs: Vec<_> = servers
+                .into_iter()
+                .map(|name| McpServerConfig {
+                    name: name.into(),
+                    transport: McpTransport::Http,
+                    url: Some(mcp.uri()),
+                    ..McpServerConfig::default()
+                })
+                .collect();
+            let registry = Arc::new(McpRegistry::connect_all(&configs).await.unwrap());
+            assert_eq!(registry.tool_count(), names.len());
+            let deferred = DeferredMcpToolSet::from_registry(registry).await;
+            let system = build_deferred_tools_section_filtered(&deferred, Some(&policy));
+            assert!(!system.contains("zeta__write"));
+            let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
+            let search = ToolSearchTool::new(deferred, Arc::clone(&activated))
+                .with_access_policy(policy.clone());
+            for name in activation_order {
+                let tool = ActivatedToolSet::activate_exact(&activated, name, &[]);
+                assert_eq!(tool.is_some(), name != "zeta__write");
+            }
+            {
+                let set = activated.lock().unwrap();
+                assert_eq!(
+                    set.tool_names(),
+                    vec!["alpha__read", "alpha__write", "zeta__read"]
+                );
+                assert!(set.get_resolved("read").is_none());
+                assert_eq!(set.get_resolved("write").unwrap().name(), "alpha__write");
+            }
+            let tools: Vec<Box<dyn Tool>> = vec![Box::new(search)];
+            let specs =
+                build_iteration_tool_specs(&provider, &tools, &[], Some(&activated)).unwrap();
+            let messages = vec![ChatMessage::system(system), ChatMessage::user("fixture")];
+            ProviderDispatch::from_ref(&provider)
+                .chat(
+                    ChatRequest {
+                        messages: &messages,
+                        tools: Some(&specs.tool_specs),
+                        thinking: None,
+                    },
+                    "fixture-model",
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let requests = endpoint.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body, requests[1].body);
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let sent_names: Vec<_> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            sent_names,
+            vec!["tool_search", "alpha__read", "alpha__write", "zeta__read"]
+        );
+    }
 }
