@@ -299,6 +299,7 @@ async fn exercise_loop(scenario: Scenario, native: bool) {
             strict_tool_parsing: false,
             parallel_tools: false,
             max_tool_result_chars: 0,
+            keep_tool_context_turns: 2,
             context_token_budget: 0,
             receipt_generator: Some(&receipt_generator),
             knobs: &LoopKnobs::default(),

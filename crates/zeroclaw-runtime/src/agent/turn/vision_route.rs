@@ -120,6 +120,7 @@ pub(crate) async fn prepare_messages_for_iteration(
     history: &[ChatMessage],
     multimodal_config: &MultimodalConfig,
     degrade_strip_images: bool,
+    keep_tool_context_turns: usize,
     image_cache: Option<&mut multimodal::LocalImageCache>,
 ) -> Result<multimodal::PreparedMessages> {
     // Enforce the universal leading-turn-order invariant before any provider
@@ -146,31 +147,106 @@ pub(crate) async fn prepare_messages_for_iteration(
                 content: multimodal::strip_media_markers(&m.content),
             })
             .collect();
-        match image_cache {
-            Some(cache) => {
-                multimodal::prepare_messages_for_provider_cached(
-                    &stripped,
-                    multimodal_config,
-                    cache,
-                )
-                .await
-            }
-            None => multimodal::prepare_messages_for_provider(&stripped, multimodal_config).await,
-        }
+        multimodal::prepare_messages_with_tool_retention(
+            &stripped,
+            multimodal_config,
+            keep_tool_context_turns,
+            image_cache,
+        )
+        .await
     } else {
-        match image_cache {
-            Some(cache) => {
-                multimodal::prepare_messages_for_provider_cached(history, multimodal_config, cache)
-                    .await
-            }
-            None => multimodal::prepare_messages_for_provider(history, multimodal_config).await,
-        }
+        multimodal::prepare_messages_with_tool_retention(
+            history,
+            multimodal_config,
+            keep_tool_context_turns,
+            image_cache,
+        )
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tool_retention_preserves_each_parallel_prompt_result_from_real_dispatcher() {
+        use crate::agent::dispatcher::{ToolDispatcher, ToolExecutionResult, XmlToolDispatcher};
+        use zeroclaw_providers::{ConversationMessage, ToolResultMessage};
+
+        let names = ["alpha", "beta", "gamma"];
+        let outputs: Vec<_> = names
+            .iter()
+            .map(|name| format!("HEAD-{name}\n{}\nRECEIPT-{name}", "text ".repeat(2_000)))
+            .collect();
+        let named_results = XmlToolDispatcher.format_results(
+            &names
+                .iter()
+                .zip(&outputs)
+                .map(|(name, output)| ToolExecutionResult {
+                    name: (*name).into(),
+                    output: output.clone(),
+                    success: *name != "gamma",
+                    tool_call_id: Some(format!("call-{name}")),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let structured_results = ConversationMessage::ToolResults(
+            names
+                .iter()
+                .zip(&outputs)
+                .map(|(name, output)| ToolResultMessage {
+                    tool_call_id: format!("call-{name}"),
+                    content: output.clone(),
+                    tool_name: (*name).into(),
+                })
+                .collect(),
+        );
+        let result_blocks =
+            regex::Regex::new(r"(?s)(<tool_result [^>]+>\n)(.*?)\n</tool_result>").unwrap();
+        for carrier in [named_results, structured_results] {
+            let source = vec![
+                ConversationMessage::Chat(ChatMessage::system("stable system")),
+                ConversationMessage::Chat(ChatMessage::user("old question")),
+                ConversationMessage::Chat(ChatMessage::assistant("parallel calls")),
+                carrier,
+                ConversationMessage::Chat(ChatMessage::assistant("old answer")),
+                ConversationMessage::Chat(ChatMessage::user("current question")),
+            ];
+            let source_bytes = serde_json::to_vec(&source).unwrap();
+            let history = XmlToolDispatcher.to_provider_messages(&source);
+            for keep in [0, 1] {
+                let prepared = prepare_messages_for_iteration(
+                    &history,
+                    &MultimodalConfig::default(),
+                    false,
+                    keep,
+                    None,
+                )
+                .await
+                .unwrap();
+                assert_eq!(prepared.messages.len(), history.len());
+                assert_eq!(prepared.messages[2].content, history[2].content);
+                let projected = &prepared.messages[3].content;
+                if keep == 1 {
+                    assert_eq!(projected, &history[3].content);
+                } else {
+                    assert_eq!(projected.matches("<tool_result ").count(), 3);
+                    assert_eq!(projected.matches("</tool_result>").count(), 3);
+                    let before: Vec<_> = result_blocks.captures_iter(&history[3].content).collect();
+                    let after: Vec<_> = result_blocks.captures_iter(projected).collect();
+                    assert_eq!(after.len(), 3);
+                    for (index, (before, after)) in before.iter().zip(&after).enumerate() {
+                        assert_eq!(&before[1], &after[1], "names, IDs and status must survive");
+                        assert!(after[2].len() <= multimodal::STALE_TOOL_RESULT_MAX_CHARS);
+                        assert!(after[2].starts_with(&format!("HEAD-{}", names[index])));
+                        assert!(after[2].ends_with(&format!("RECEIPT-{}", names[index])));
+                    }
+                }
+            }
+            assert_eq!(serde_json::to_vec(&source).unwrap(), source_bytes);
+        }
+    }
 
     #[tokio::test]
     async fn prepare_messages_for_iteration_populates_and_reuses_image_cache() {
@@ -185,7 +261,7 @@ mod tests {
         let cfg = MultimodalConfig::default();
 
         let mut cache = multimodal::LocalImageCache::new();
-        let first = prepare_messages_for_iteration(&history, &cfg, false, Some(&mut cache))
+        let first = prepare_messages_for_iteration(&history, &cfg, false, 0, Some(&mut cache))
             .await
             .unwrap();
         assert!(first.contains_images);
@@ -193,13 +269,13 @@ mod tests {
 
         // A later iteration/turn re-walks the same history; the cache serves it
         // without growing (no second disk read + encode).
-        let _second = prepare_messages_for_iteration(&history, &cfg, false, Some(&mut cache))
+        let _second = prepare_messages_for_iteration(&history, &cfg, false, 0, Some(&mut cache))
             .await
             .unwrap();
         assert_eq!(cache.len(), 1, "subsequent preps reuse the cached entry");
 
         // The cache-less path (channels/CLI pass None) still resolves images.
-        let uncached = prepare_messages_for_iteration(&history, &cfg, false, None)
+        let uncached = prepare_messages_for_iteration(&history, &cfg, false, 0, None)
             .await
             .unwrap();
         assert!(uncached.contains_images);
@@ -214,7 +290,7 @@ mod tests {
             ChatMessage::user("actual user"),
         ];
         let cfg = MultimodalConfig::default();
-        let prepared = prepare_messages_for_iteration(&history, &cfg, false, None)
+        let prepared = prepare_messages_for_iteration(&history, &cfg, false, 0, None)
             .await
             .unwrap();
         let first_non_system = prepared
@@ -240,7 +316,7 @@ mod tests {
             ChatMessage::tool("[AUDIO:/tmp/clip.wav] recorded 3:00 PM"),
         ];
         let cfg = MultimodalConfig::default();
-        let prepared = prepare_messages_for_iteration(&history, &cfg, false, None)
+        let prepared = prepare_messages_for_iteration(&history, &cfg, false, 0, None)
             .await
             .unwrap();
         let joined = prepared
@@ -262,7 +338,7 @@ mod tests {
 
         // Pure system history.
         let system_only = vec![ChatMessage::system("sys")];
-        let err = prepare_messages_for_iteration(&system_only, &cfg, false, None)
+        let err = prepare_messages_for_iteration(&system_only, &cfg, false, 0, None)
             .await
             .expect_err("system-only history must not reach the provider");
         assert!(
@@ -278,7 +354,7 @@ mod tests {
             ChatMessage::assistant("[tool_call] fire"),
             ChatMessage::tool("result"),
         ];
-        let err = prepare_messages_for_iteration(&no_user, &cfg, false, None)
+        let err = prepare_messages_for_iteration(&no_user, &cfg, false, 0, None)
             .await
             .expect_err("no-user history must not reach the provider");
         assert!(

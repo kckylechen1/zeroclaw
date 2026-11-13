@@ -384,6 +384,7 @@ async fn run_tool_call_loop_turn(
         strict_tool_parsing,
         parallel_tools,
         max_tool_result_chars,
+        keep_tool_context_turns,
         context_token_budget,
         receipt_generator,
         knobs,
@@ -716,6 +717,7 @@ async fn run_tool_call_loop_turn(
             turn_state.history,
             multimodal_config,
             degrade_strip_images,
+            keep_tool_context_turns,
             image_cache.as_deref_mut(),
         )
         .await?;
@@ -922,13 +924,13 @@ async fn run_tool_call_loop_turn(
             if malformed_tool_protocol_retries <= MAX_MALFORMED_TOOL_PROTOCOL_RETRIES {
                 // This is model feedback, not a tool result: malformed protocol
                 // output has no valid tool_call_id to attach a role=tool message to.
-                let msg = ChatMessage::user(
-                    "[Tool call parse error]\n\
+                let msg = ChatMessage::user(format!(
+                    "{}\n\
                      Your previous response looked like an internal tool-call protocol payload, \
                      but ZeroClaw could not parse it into a valid tool call. Use the supported \
-                     tool-call schema, or answer in natural language if no tool is needed."
-                        .to_string(),
-                );
+                     tool-call schema, or answer in natural language if no tool is needed.",
+                    zeroclaw_providers::multimodal::TOOL_PARSE_ERROR_FEEDBACK_PREFIX,
+                ));
                 turn_state.push_dual(msg);
                 continue;
             }
