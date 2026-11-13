@@ -1491,6 +1491,7 @@ async fn live_xai_native_tool_images_preserve_ordinary_and_parallel_results() {
     let client = zeroclaw_http::apply_runtime_proxy_to_builder(
         Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .timeout(std::time::Duration::from_secs(90))
             .connect_timeout(std::time::Duration::from_secs(10)),
         "model_provider.compatible",
