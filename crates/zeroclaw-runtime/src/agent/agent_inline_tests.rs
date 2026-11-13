@@ -676,6 +676,62 @@ struct TranscriptCaptureModelProvider {
     seen_messages: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
 }
 
+#[tokio::test]
+async fn dated_turns_share_an_undated_system_prefix_across_entry_points() {
+    let workspace = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut expected_dates = Vec::new();
+    for streamed in [false, true] {
+        for timestamp in ["2026-01-01T12:00:00+00:00", "2026-01-02T12:00:00+00:00"] {
+            let fixed = chrono::DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .with_timezone(&chrono::Local);
+            expected_dates.push(fixed.format("%Y-%m-%d %H:%M:%S %Z").to_string());
+            let mut agent = Agent::builder()
+                .model_provider(Box::new(TranscriptCaptureModelProvider {
+                    responses: Mutex::new(vec![]),
+                    seen_messages: Arc::clone(&seen),
+                }))
+                .tools(vec![])
+                .memory(Arc::new(zeroclaw_memory::NoneMemory::new("none")))
+                .observer(Arc::new(crate::observability::NoopObserver))
+                .tool_dispatcher(Box::new(NativeToolDispatcher))
+                .workspace_dir(workspace.path().to_path_buf())
+                .model_name("fixture-model".into())
+                .turn_datetime(move || fixed)
+                .build()
+                .unwrap();
+            if streamed {
+                let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+                agent
+                    .turn_streamed("fixture question", event_tx, None)
+                    .await
+                    .unwrap();
+            } else {
+                agent.turn("fixture question").await.unwrap();
+            }
+        }
+    }
+    let requests = seen.lock();
+    assert_eq!(requests.len(), expected_dates.len());
+    let system = requests[0].iter().find(|m| m.role == "system").unwrap();
+    assert!(!system.content.contains("CRITICAL CONTEXT: CURRENT DATE"));
+    for (request, date) in requests.iter().zip(&expected_dates) {
+        assert_eq!(
+            request.iter().find(|m| m.role == "system").unwrap().content,
+            system.content
+        );
+        let user = request.iter().rev().find(|m| m.role == "user").unwrap();
+        assert!(
+            user.content.contains(date),
+            "missing current turn date: {}",
+            user.content
+        );
+        assert!(user.content.contains("fixture question"));
+    }
+    assert_ne!(expected_dates[0], expected_dates[1]);
+}
+
 #[async_trait]
 impl ModelProvider for TranscriptCaptureModelProvider {
     async fn chat_with_system(
