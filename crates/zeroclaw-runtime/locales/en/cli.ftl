@@ -793,10 +793,6 @@ history-trim-reason-message-cap = history message limit exceeded
 # meet or exceed the context budget, so no amount of conversation trimming can
 # fit the request (#5808).
 history-trim-floor-exceeds-budget = system prompt and tool definitions ({$floor} tokens) alone meet or exceed the context budget ({$budget} tokens); raise [runtime_profiles.<name>] max_context_tokens or reduce the tool surface by disabling unused integrations
-# Refusal returned when the ingress policy layer (RFC #6971) drops an inbound
-# turn before it reaches the model. Unreachable under the default `Loop` policy
-# (phase 1); becomes live when non-`Loop` policy is configured (phase 3).
-turn-ingress-dropped = This request was not processed: { $reason }
 turn-tool-interrupted-before-result = [interrupted by user before this tool produced a result]
 # Safe reply delivered when the model repeatedly emits malformed internal
 # tool-call protocol and the turn gives up retrying.

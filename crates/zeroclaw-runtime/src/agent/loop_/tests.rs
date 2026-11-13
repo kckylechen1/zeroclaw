@@ -2331,7 +2331,7 @@ async fn run_tool_call_loop_no_images_uses_default_provider() {
 }
 
 #[tokio::test]
-async fn run_tool_call_loop_ingress_default_loop_is_behavior_identical() {
+async fn run_tool_call_loop_ingress_envelope_preserves_normal_turn() {
     async fn run_with(ctx: IngressContext) -> String {
         let model_provider = ScriptedModelProvider::from_text_responses(vec!["identical answer"]);
         let mut history = vec![ChatMessage::user("hello".to_string())];
@@ -2387,17 +2387,17 @@ async fn run_tool_call_loop_ingress_default_loop_is_behavior_identical() {
             turn_id: &turn_id,
         })
         .await
-        .expect("default-Loop ingress must run the turn exactly as today")
+        .expect("ingress metadata must preserve a tool-free turn without memory injection")
     }
 
     let internal = run_with(IngressContext::sub_turn()).await;
     let external = run_with(IngressContext {
-        message_id: Some("ghc_9001".to_string()),
+        message_id: Some("telegram-9001".to_string()),
         source_class: zeroclaw_api::ingress::SourceClass::External,
-        sender: Some("attacker".to_string()),
+        sender: Some("external-peer".to_string()),
         transport: zeroclaw_api::ingress::Transport::Channel {
-            kind: "github".to_string(),
-            alias: "gh".to_string(),
+            kind: "telegram".to_string(),
+            alias: "test-channel".to_string(),
         },
         trust: zeroclaw_api::ingress::TrustClass::Untrusted,
         origin: zeroclaw_api::ingress::TurnOrigin::Channel,
@@ -2407,7 +2407,7 @@ async fn run_tool_call_loop_ingress_default_loop_is_behavior_identical() {
     assert_eq!(internal, "identical answer");
     assert_eq!(
         internal, external,
-        "default-Loop policy must produce identical output regardless of envelope"
+        "ingress metadata must not change a tool-free turn without memory injection"
     );
 }
 

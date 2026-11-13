@@ -1,15 +1,15 @@
-//! Universal ingress policy contract types (RFC phase 1).
+//! Ingress provenance and origin metadata carried into the agent turn.
 
 use serde::{Deserialize, Serialize};
 
 /// Whether an inbound turn originates outside the agent (a transport peer) or
-/// from an internal driver (cron, an SOP step, a subagent).
+/// from an internal driver (cron or a subagent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceClass {
     /// A message from a transport peer (channel user, webhook caller, …).
     External,
-    /// An internally driven turn (cron, SOP step, subagent).
+    /// An internally driven turn (cron or subagent).
     Internal,
 }
 
@@ -18,7 +18,7 @@ pub enum SourceClass {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
-    /// A messaging channel — `kind` is the channel type (e.g. `"github"`),
+    /// A messaging channel — `kind` is the channel type (e.g. `"telegram"`),
     /// `alias` the configured channel alias.
     Channel { kind: String, alias: String },
     /// The HTTP/WebSocket gateway (REST/WS turn).
@@ -63,12 +63,6 @@ pub enum TrustClass {
     /// instructions, when the policy says so.
     Untrusted,
 }
-
-/// Untrusted-data framing instructions for an [`IngressDecision::Annotate`]
-/// disposition. Minimal placeholder for phase 1; the framing fields are
-/// fleshed out when `Annotate` becomes reachable (phase 3).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UntrustedFraming {}
 
 /// The envelope stamped by the entry layer; travels with the turn into the
 /// engine. See the module docs.
@@ -152,18 +146,6 @@ impl IngressContext {
     pub fn from_origin(origin: TurnOrigin) -> Self {
         Self::phase1(origin)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IngressDecision {
-    /// DEFAULT — run the agent. Free: allocates no SOP run, does no IO.
-    Loop,
-    /// Wrap the message as untrusted data with the given framing, then loop.
-    Annotate { framing: UntrustedFraming },
-    /// Hand the turn to a managed SOP run (HITL).
-    Gate { sop: String },
-    /// Refuse the turn; audit-logged.
-    Drop { reason: String },
 }
 
 #[cfg(test)]
