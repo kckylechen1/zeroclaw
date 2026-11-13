@@ -411,6 +411,21 @@ impl Memory for RetrievalPipeline {
         result
     }
 
+    async fn archive_and_purge_agent(
+        &self,
+        agent_alias: &str,
+        archive_path: &std::path::Path,
+    ) -> anyhow::Result<usize> {
+        let result = self
+            .memory
+            .archive_and_purge_agent(agent_alias, archive_path)
+            .await;
+        if !matches!(&result, Ok(0)) {
+            self.invalidate_cache();
+        }
+        result
+    }
+
     async fn export_agent(&self, agent_alias: &str) -> anyhow::Result<Vec<MemoryEntry>> {
         self.memory.export_agent(agent_alias).await
     }

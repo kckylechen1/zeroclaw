@@ -543,6 +543,16 @@ impl Memory for LucidMemory {
         self.local.purge_agent(agent_alias).await
     }
 
+    async fn archive_and_purge_agent(
+        &self,
+        agent_alias: &str,
+        archive_path: &std::path::Path,
+    ) -> anyhow::Result<usize> {
+        self.local
+            .archive_and_purge_agent(agent_alias, archive_path)
+            .await
+    }
+
     async fn export_agent(&self, agent_alias: &str) -> anyhow::Result<Vec<MemoryEntry>> {
         self.local.export_agent(agent_alias).await
     }
