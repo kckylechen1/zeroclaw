@@ -229,6 +229,10 @@ impl Agent {
                                 strict_tool_parsing: self.config.resolved.strict_tool_parsing,
                                 parallel_tools: self.config.resolved.parallel_tools,
                                 max_tool_result_chars: self.config.resolved.max_tool_result_chars,
+                                keep_tool_context_turns: self
+                                    .config
+                                    .resolved
+                                    .keep_tool_context_turns,
                                 context_token_budget: self
                                     .config
                                     .resolved
@@ -678,6 +682,10 @@ impl Agent {
                                 strict_tool_parsing: self.config.resolved.strict_tool_parsing,
                                 parallel_tools: self.config.resolved.parallel_tools,
                                 max_tool_result_chars: self.config.resolved.max_tool_result_chars,
+                                keep_tool_context_turns: self
+                                    .config
+                                    .resolved
+                                    .keep_tool_context_turns,
                                 context_token_budget: self
                                     .config
                                     .resolved

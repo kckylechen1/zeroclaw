@@ -278,6 +278,23 @@ async fn empty_registry_get_tool_def_returns_none() {
     assert!(result.is_none());
 }
 
+#[test]
+fn registry_tool_names_are_stable_across_insertion_orders() {
+    let names = ["zeta__read", "alpha__write", "alpha__read", "beta__list"];
+    let expected = vec!["alpha__read", "alpha__write", "beta__list", "zeta__read"];
+    for order in [names.to_vec(), names.iter().rev().copied().collect()] {
+        let registry = McpRegistry {
+            servers: Vec::new(),
+            tool_index: order
+                .into_iter()
+                .map(|name| (name.to_string(), (0, name.to_string())))
+                .collect(),
+            server_index: HashMap::new(),
+        };
+        assert_eq!(registry.tool_names(), expected);
+    }
+}
+
 #[tokio::test]
 async fn empty_registry_call_tool_unknown_name_returns_error() {
     let registry = McpRegistry::connect_all(&[])

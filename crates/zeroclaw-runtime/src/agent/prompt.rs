@@ -69,8 +69,7 @@ impl SystemPromptBuilder {
     /// threading it through the builder avoids changing that struct's shape,
     /// which has construction sites outside this pipeline). `None` — no
     /// persona configured, direct or via card, or every dial at `medium` —
-    /// renders nothing and reproduces the prompt byte-for-byte as it was
-    /// before persona wiring existed.
+    /// renders nothing and contributes no bytes to the retained section list.
     ///
     /// Placement: after every behavioural-constraint section this pipeline
     /// has (here, just [`ToolHonestySection`] — there is no anti-narration
@@ -91,11 +90,15 @@ impl SystemPromptBuilder {
     /// legacy `SOUL.md` / `IDENTITY.md` files are left out of the workspace
     /// file listing once the owner has written a governed Identity
     /// (ADR-015 §2).
+    ///
+    /// The system prefix deliberately omits wall-clock dates. Agent entry
+    /// points already timestamp each user turn; a date here would invalidate
+    /// their cached prefix at midnight or when the Soul projection rebuilds.
+    /// A caller without per-turn time can explicitly add [`DateTimeSection`].
     pub fn with_persona(persona: crate::agent::persona_projection::PersonaProjection) -> Self {
         let (identity, tone) = persona_sections(persona);
         Self {
             sections: vec![
-                Box::new(DateTimeSection),
                 identity,
                 Box::new(ToolHonestySection),
                 tone,
@@ -178,6 +181,8 @@ pub struct SafetySection;
 pub struct SkillsSection;
 pub struct WorkspaceSection;
 pub struct RuntimeSection;
+/// Opt-in clock context for a builder whose caller does not timestamp turns.
+/// Kept out of the long-lived default and governed-persona system prefixes.
 pub struct DateTimeSection;
 pub struct ChannelMediaSection;
 
@@ -889,7 +894,10 @@ mod tests {
             autonomy_level: AutonomyLevel::Supervised,
         };
 
-        let rendered = DateTimeSection.build(&ctx).unwrap();
+        let rendered = SystemPromptBuilder::default()
+            .add_section(Box::new(DateTimeSection))
+            .build(&ctx)
+            .unwrap();
         assert!(rendered.starts_with("## CRITICAL CONTEXT: CURRENT DATE\n\n"));
         assert!(!rendered.contains("CURRENT DATE & TIME"));
 
@@ -899,6 +907,41 @@ mod tests {
         assert!(payload.contains("UTC offset:"));
         assert!(!payload.contains("Time:"));
         assert!(!payload.contains("ISO 8601:"));
+    }
+
+    #[test]
+    fn retained_default_builders_omit_clock_without_stripping_workspace_dates() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("AGENTS.md"),
+            "The fixture milestone is 2026-01-02.",
+        )
+        .unwrap();
+        let ctx = notes_test_ctx(workspace.path(), &[]);
+        let defaults = SystemPromptBuilder::with_defaults(None);
+        let mut governed = SystemPromptBuilder::with_persona(
+            crate::agent::persona_projection::PersonaProjection {
+                section: Some("## Tone\n\nKeep answers concise.".into()),
+                legacy_files: crate::agent::persona_projection::LegacyPersonaFiles::SuppressAll,
+            },
+        );
+        for builder in [&defaults, &governed] {
+            assert!(
+                builder
+                    .sections
+                    .iter()
+                    .all(|section| section.name() != "datetime")
+            );
+            let rendered = builder.build(&ctx).unwrap();
+            assert!(!rendered.contains("CRITICAL CONTEXT: CURRENT DATE"));
+            assert!(rendered.contains("The fixture milestone is 2026-01-02."));
+        }
+        let before = governed.build(&ctx).unwrap();
+        governed.set_persona(crate::agent::persona_projection::PersonaProjection {
+            section: Some("## Tone\n\nKeep answers concise.".into()),
+            legacy_files: crate::agent::persona_projection::LegacyPersonaFiles::SuppressAll,
+        });
+        assert_eq!(governed.build(&ctx).unwrap(), before);
     }
 
     #[test]
@@ -1136,12 +1179,10 @@ mod tests {
     }
 
     /// Regression guard: a persona-less builder must produce byte-identical
-    /// output to the pre-persona section list (`DateTime, Identity,
-    /// ToolHonesty, Tools, Safety, Skills, Workspace, Runtime, ChannelMedia`
-    /// — the exact order `with_defaults` used before `ToneSection` existed).
+    /// output to the retained undated section list without a tone section.
     /// `ToneSection(None)` must contribute exactly zero bytes.
     #[test]
-    fn no_persona_is_byte_identical_to_the_pre_tone_section_list() {
+    fn no_persona_is_byte_identical_to_the_retained_section_list_without_tone() {
         let tools: Vec<Box<dyn Tool>> = vec![Box::new(TestTool)];
         let ctx = persona_test_ctx(&tools);
 
@@ -1150,7 +1191,6 @@ mod tests {
             .unwrap();
 
         let without_tone_section_at_all = SystemPromptBuilder::default()
-            .add_section(Box::new(DateTimeSection))
             .add_section(Box::new(IdentitySection))
             .add_section(Box::new(ToolHonestySection))
             .add_section(Box::new(NotesSection))
@@ -1166,7 +1206,7 @@ mod tests {
         assert_eq!(
             with_tone_section_but_no_persona, without_tone_section_at_all,
             "ToneSection(None) must render nothing — output must match the \
-             pre-persona section list exactly"
+             undated section list without tone exactly"
         );
         assert!(!with_tone_section_but_no_persona.contains("## Tone"));
     }

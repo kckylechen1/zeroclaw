@@ -99,3 +99,45 @@ Tool-result length limits are separate. `max_tool_result_chars` bounds an
 individual result when it is recorded; it does not trim conversation history.
 Provider-side context enforcement is also separate, though a provider overflow
 can trigger the runtime's reactive token-budget trim.
+
+## Tool context in model requests
+
+`runtime_profiles.<alias>.keep_tool_context_turns` controls the existing
+cache-TTL projection of tool-result text. The current real user turn always
+keeps its full tool text; the configured number adds that many prior turns.
+An omitted value resolves to `2`.
+
+| Value | Full tool text in a cold request |
+| --- | --- |
+| `0` | Current turn |
+| `1` | Current turn and one prior turn |
+| `2` | Current turn and two prior turns |
+| `8` | Current turn and eight prior turns |
+
+Older tool results remain in the request. Oversized text uses the existing
+4,096-byte, UTF-8-safe head-and-tail projection, preserving native result IDs
+and envelope metadata. The byte budget applies to each result's text, not the
+entire JSON envelope or a parallel batch. Prompt-mode batches preserve every
+result's opening and closing tag, including IDs, names and status; only their
+bodies are compacted. Prompt-mode carriers with nested or unparseable block
+boundaries remain unabridged. Assistant tool-call rows and opaque reasoning metadata remain
+unchanged. Prompt-mode `[Tool results]` rows and tool-parse repair feedback do
+not start a new user turn.
+
+The session's 300-second prompt-cache window freezes the compaction boundary
+while requests continue within the TTL. A new turn during that warm window can
+therefore retain more full text than the configured minimum. Once the window
+expires, the next request advances the boundary. Requests without a session
+cache apply the cold projection each time. Increasing the retained-turn count
+restores newly protected text from source history immediately; lowering it
+waits for a cold window. A shifted or changed history prefix also reanchors
+the boundary because the previous cache prefix is no longer valid.
+
+This projection operates on a model-request copy; it does not rewrite canonical
+history or remove tool-call/result pairs. It shares the existing TTL state and
+does not add another history trimmer. Existing image replay limits remain
+independent: keeping a turn's full text does not replay all its older images.
+The final tool-free summary after exhausting the iteration budget and the
+isolated skill-review request retain their existing full-evidence behavior.
+This setting is therefore not a hard limit on every model request or on stored
+history. Token and message-count trimming still enforce their own limits.

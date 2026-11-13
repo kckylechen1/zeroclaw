@@ -522,6 +522,62 @@ async fn native_and_text_calls_activate_exact_deferred_names_without_search() {
 }
 
 #[tokio::test]
+async fn preapproval_preflight_reads_deferred_admission_without_activation() {
+    for (policy, expected_unknown) in [
+        (ToolAccessPolicy::default(), false),
+        (
+            ToolAccessPolicy {
+                denied: Some(vec!["fixture__read".into()]),
+                ..Default::default()
+            },
+            true,
+        ),
+        (
+            ToolAccessPolicy {
+                allowed: Some(vec![]),
+                ..Default::default()
+            },
+            true,
+        ),
+        (
+            ToolAccessPolicy {
+                caller_allowed: Some(vec![]),
+                ..Default::default()
+            },
+            true,
+        ),
+    ] {
+        let fixture = Fixture::new(policy).await;
+        let meta = crate::agent::turn::TurnMeta {
+            agent_alias: None,
+            parent_agent_alias: None,
+            turn_id: "preflight-deferred",
+            channel_name: "fixture",
+        };
+        let outcome = super::undispatchable_tool_outcome(
+            "fixture__read",
+            &json!({"query": "fixture"}),
+            Some("call-fixture"),
+            ToolDispatchContext {
+                tools_registry: &fixture.tools,
+                activated_tools: Some(&fixture.activated),
+                excluded_tools: &[],
+                model_switch_callback: None,
+            },
+            false,
+            &meta,
+            &NoopObserver,
+        );
+        assert_eq!(outcome.is_some(), expected_unknown);
+        if let Some(outcome) = outcome {
+            assert_eq!(outcome.output, "Unknown tool: fixture__read");
+        }
+        assert!(fixture.activated.lock().unwrap().tool_specs().is_empty());
+        assert_eq!(fixture.rpc_calls().await, 0);
+    }
+}
+
+#[tokio::test]
 async fn denied_empty_allow_excluded_and_unknown_calls_never_activate_or_dispatch() {
     let cases = [
         (

@@ -7,40 +7,9 @@
 unmaintained = "all"
 # yanked: deny | warn | allow
 yanked = "deny"
-# Ignore known unmaintained transitive deps we cannot easily replace
-ignore = [
-    # rand -- re-entrancy unsoundness via custom global logger; fixed in rand 0.8.6
-    # for the 0.8.x copy in our tree; the 0.7.x copy predates rand::rng() entirely
-    # and is not affected; the 0.9.x copy is outside the advisory's affected range
-    { id = "RUSTSEC-2026-0097", reason = "rand re-entrancy unsoundness; 0.8.6 copy is patched; 0.7.x copy predates rand::rng() and is not affected" },
-    # rustls-pemfile -- unmaintained, functionality moved to rustls-pki-types;
-    # transitive dep, upstream migration tracked
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive dep awaiting upstream migration to rustls-pki-types" },
-    # pin-utils -- upstream archived 2026-10-01; transitive via async-imap 0.11
-    # with no safe upgrade; advisory recommends core::pin::pin! (Rust 1.68+) as
-    # the replacement, which only async-imap can adopt
-    { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained (archived upstream); transitive via async-imap 0.11; no safe upgrade; advisory replacement core::pin::pin! is upstream's to adopt" },
-    # rustls-webpki -- two versions in tree; direct dep bumped in #5786 but a
-    # second transitive copy via rumqttc v0.25.1 remains; all advisories below
-    # affect only the 0.102.x copy; the 0.103.x copy is patched.
-    # Revisit when rumqttc upgrades past rustls-webpki 0.102.x; tracking #5869 / #8519.
-    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki CRL matching bug; 0.102.x copy via rumqttc v0.25.1; 0.103.x copy is patched; awaiting rumqttc upgrade; tracking #8519" },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki URI name constraints; 0.102.x copy via rumqttc v0.25.1; 0.103.x copy is patched; awaiting rumqttc upgrade; tracking #8519" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard name constraints; 0.102.x copy via rumqttc v0.25.1; 0.103.x copy is patched; awaiting rumqttc upgrade; tracking #8519" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL parsing panic; 0.102.x copy via rumqttc v0.25.1 has no fix in 0.102.x series; 0.103.x copy patched at v0.103.13; awaiting rumqttc upgrade; tracking #8519" },
-    # audit.toml/deny.toml drift reconcile + wasmtime CVEs; tracking #8519.
-    # RUSTSEC-2026-0149, -0182, -0188 cleared by wasmtime/wasmtime-wasi 43 -> 45.0.3
-    # bump in crates/zeroclaw-plugins. Resolved by #8542.
-    # RUSTSEC-2026-0222 cleared by wasmtime stack 45.0.3 -> 47.0.3 bump.
-    # RUSTSEC-2026-0268, -0269 cleared by wasmtime stack 47.0.3 -> 47.0.4 bump (#285, #296).
-    # macro/font helpers unmaintained (transitive); tracking #8519.
-    { id = "RUSTSEC-2024-0388", reason = "derivative unmaintained; transitive derive helper; tracking #8519" },
-    # lru -- unsound LruCache::pop panic-safety (RUSTSEC-2026-0253); patched >=0.18.2.
-    # Direct deps and ratatui-core upgraded to 0.18.2; remaining 0.16.4 pinned by
-    # transitive copies (nostr-sdk 0.44 left the tree with channel-nostr; the
-    # remaining pin comes from other transitive users).
-    { id = "RUSTSEC-2026-0253", reason = "lru unsound LruCache::pop panic-safety; direct+ratatui upgraded to >=0.18.2; remaining 0.16.4 pinned transitively by nostr-sdk 0.44; upstream fix pending" },
-]
+# No retained advisory exceptions. Future exceptions must identify their
+# consumer and removal condition in both policy files (tracking #432/#647).
+ignore = []
 
 [licenses]
 # All licenses are denied unless explicitly allowed
@@ -63,6 +32,20 @@ allow = [
 ]
 unused-allowed-license = "allow"
 
+# ADR-017 section 6 accepts the optional memory-tachi build and its AGPL
+# distribution boundary. The three AGPL packages share the Tachi source pinned
+# in zeroclaw-memory/Cargo.toml; no license is added to the global allowlist.
+# dependency_policy_smoke.py rejects these AGPL packages in the default graph.
+# Re-review the exception when a package version or the Tachi pin changes.
+# borrow-or-share is the reviewed MIT No Attribution dependency reached through
+# memcore -> jsonschema -> referencing -> fluent-uri (tracking #432/#647).
+exceptions = [
+    { name = "memcore", version = "=2.0.0", allow = ["AGPL-3.0-only"] },
+    { name = "portable-kernel", version = "=1.9.0", allow = ["AGPL-3.0-only"] },
+    { name = "vault-kit", version = "=0.1.0", allow = ["AGPL-3.0-only"] },
+    { name = "borrow-or-share", version = "=0.2.4", allow = ["MIT-0"] },
+]
+
 [bans]
 # Reject multiple versions of the same crate in the resolved dependency graph.
 # This prevents silent version splits that inflate compile times, binary size,
@@ -82,10 +65,6 @@ name = "async-channel"
 version = "=1.9.0"
 
 [[bans.skip]]
-name = "bitflags"
-version = "=1.3.2"
-
-[[bans.skip]]
 name = "chacha20"
 version = "=0.9.1"
 
@@ -98,10 +77,6 @@ name = "event-listener"
 version = "=2.5.3"
 
 [[bans.skip]]
-name = "foldhash"
-version = "=0.1.5"
-
-[[bans.skip]]
 name = "getrandom"
 version = "=0.2.17"
 
@@ -111,35 +86,15 @@ version = "=0.3.4"
 
 [[bans.skip]]
 name = "hashbrown"
-version = "=0.15.5"
-
-[[bans.skip]]
-name = "hashbrown"
 version = "=0.16.1"
-
-[[bans.skip]]
-name = "mio"
-version = "=0.8.11"
-
-[[bans.skip]]
-name = "nom"
-version = "=7.1.3"
 
 [[bans.skip]]
 name = "base64"
 version = "=0.23.1"
 
 [[bans.skip]]
-name = "rand"
-version = "=0.9.4"
-
-[[bans.skip]]
 name = "rand_core"
 version = "=0.6.4"
-
-[[bans.skip]]
-name = "rand_core"
-version = "=0.9.5"
 
 [[bans.skip]]
 name = "r-efi"
@@ -154,16 +109,8 @@ name = "self_cell"
 version = "=0.10.3"
 
 [[bans.skip]]
-name = "strum"
-version = "=0.27.2"
-
-[[bans.skip]]
 name = "syn"
 version = "=3.0.9"
-
-[[bans.skip]]
-name = "strum_macros"
-version = "=0.27.2"
 
 [[bans.skip]]
 name = "thiserror"
@@ -188,18 +135,6 @@ version = "=0.4.1"
 [[bans.skip]]
 name = "windows-strings"
 version = "=0.5.1"
-
-[[bans.skip]]
-name = "windows-sys"
-version = "=0.59.0"
-
-[[bans.skip]]
-name = "windows-sys"
-version = "=0.60.2"
-
-[[bans.skip]]
-name = "windows_i686_gnullvm"
-version = "=0.52.6"
 
 [[bans.skip]]
 name = "windows_aarch64_gnullvm"
@@ -281,14 +216,14 @@ version = "=0.52.6"
 name = "winnow"
 version = "=0.6.26"
 
-[[bans.skip]]
-name = "wit-bindgen"
-version = "=0.51.0"
-
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Optional portable kernel and its internal crates share this immutable source;
-# the exact revision is pinned in zeroclaw-memory/Cargo.toml.
-allow-git = ["https://github.com/kckylechen1/Tachi"]
+# Exact revisions are pinned in zeroclaw-memory/Cargo.toml (Tachi),
+# zeroclaw-tools/Cargo.toml (async-imap) and root Cargo.toml (tungstenite).
+allow-git = [
+    "https://github.com/kckylechen1/Tachi",
+    "https://github.com/chatmail/async-imap",
+    "https://github.com/snapview/tungstenite-rs",
+]

@@ -100,6 +100,8 @@ pub struct ResolvedAgentExecution<'a> {
     pub parallel_tools: bool,
     /// Truncation limit for tool outputs.
     pub max_tool_result_chars: usize,
+    /// Completed turns whose full tool-result text survives TTL compaction.
+    pub keep_tool_context_turns: usize,
     /// History-pruning token threshold.
     pub context_token_budget: usize,
     /// Tool-receipt tracer; `None` when receipts are off.
@@ -137,6 +139,7 @@ pub struct ResolvedRuntimeKnobs<'a> {
     pub strict_tool_parsing: bool,
     pub parallel_tools: bool,
     pub max_tool_result_chars: usize,
+    pub keep_tool_context_turns: usize,
     pub context_token_budget: usize,
     pub knobs: &'a LoopKnobs,
 }
@@ -166,6 +169,7 @@ impl<'a> ResolvedAgentExecution<'a> {
             strict_tool_parsing: runtime.strict_tool_parsing,
             parallel_tools: runtime.parallel_tools,
             max_tool_result_chars: runtime.max_tool_result_chars,
+            keep_tool_context_turns: runtime.keep_tool_context_turns,
             context_token_budget: runtime.context_token_budget,
             receipt_generator: io.receipt_generator,
             knobs: runtime.knobs,

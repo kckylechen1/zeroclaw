@@ -676,6 +676,193 @@ struct TranscriptCaptureModelProvider {
     seen_messages: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
 }
 
+#[tokio::test]
+async fn dated_turns_share_an_undated_system_prefix_across_entry_points() {
+    let workspace = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut expected_dates = Vec::new();
+    for streamed in [false, true] {
+        for timestamp in ["2026-01-01T12:00:00+00:00", "2026-01-02T12:00:00+00:00"] {
+            let fixed = chrono::DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .with_timezone(&chrono::Local);
+            expected_dates.push(fixed.format("%Y-%m-%d %H:%M:%S %Z").to_string());
+            let mut agent = Agent::builder()
+                .model_provider(Box::new(TranscriptCaptureModelProvider {
+                    responses: Mutex::new(vec![]),
+                    seen_messages: Arc::clone(&seen),
+                }))
+                .tools(vec![])
+                .memory(Arc::new(zeroclaw_memory::NoneMemory::new("none")))
+                .observer(Arc::new(crate::observability::NoopObserver))
+                .tool_dispatcher(Box::new(NativeToolDispatcher))
+                .workspace_dir(workspace.path().to_path_buf())
+                .model_name("fixture-model".into())
+                .turn_datetime(move || fixed)
+                .build()
+                .unwrap();
+            if streamed {
+                let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+                agent
+                    .turn_streamed("fixture question", event_tx, None)
+                    .await
+                    .unwrap();
+            } else {
+                agent.turn("fixture question").await.unwrap();
+            }
+        }
+    }
+    let requests = seen.lock();
+    assert_eq!(requests.len(), expected_dates.len());
+    let system = requests[0].iter().find(|m| m.role == "system").unwrap();
+    assert!(!system.content.contains("CRITICAL CONTEXT: CURRENT DATE"));
+    for (request, date) in requests.iter().zip(&expected_dates) {
+        assert_eq!(
+            request.iter().find(|m| m.role == "system").unwrap().content,
+            system.content
+        );
+        let user = request.iter().rev().find(|m| m.role == "user").unwrap();
+        assert!(
+            user.content.contains(date),
+            "missing current turn date: {}",
+            user.content
+        );
+        assert!(user.content.contains("fixture question"));
+    }
+    assert_ne!(expected_dates[0], expected_dates[1]);
+}
+
+#[tokio::test]
+async fn resolved_tool_retention_reaches_turn_and_streamed_requests_without_rewriting_history() {
+    use zeroclaw_config::schema::{AliasedAgentConfig, RuntimeProfileConfig};
+
+    for streamed in [false, true] {
+        for keep in [0, 1, 2, 8] {
+            let workspace = tempfile::tempdir().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let mut config = Config::default();
+            config.runtime_profiles.insert(
+                "fixture".into(),
+                RuntimeProfileConfig {
+                    keep_tool_context_turns: Some(keep),
+                    tool_dispatcher: Some("native".into()),
+                    max_history_messages: Some(1_000),
+                    max_context_tokens: Some(1_000_000),
+                    ..RuntimeProfileConfig::default()
+                },
+            );
+            config.agents.insert(
+                "fixture".into(),
+                AliasedAgentConfig {
+                    runtime_profile: "fixture".into(),
+                    ..AliasedAgentConfig::default()
+                },
+            );
+            let mut agent = Agent::builder()
+                .model_provider(Box::new(TranscriptCaptureModelProvider {
+                    responses: Mutex::new(vec![]),
+                    seen_messages: Arc::clone(&seen),
+                }))
+                .tools(vec![])
+                .memory(Arc::new(zeroclaw_memory::NoneMemory::new("none")))
+                .observer(Arc::new(crate::observability::NoopObserver))
+                .tool_dispatcher(Box::new(NativeToolDispatcher))
+                .workspace_dir(workspace.path().to_path_buf())
+                .model_name("fixture-model".into())
+                .config(config.resolved_agent_config("fixture").unwrap())
+                .build()
+                .unwrap();
+            let mut seed = Vec::new();
+            let output = format!("HEAD\n{}\nTAIL", "result ".repeat(1_000));
+            for turn in 0..9 {
+                seed.push(ConversationMessage::Chat(ChatMessage::user(format!(
+                    "question {turn}"
+                ))));
+                seed.push(ConversationMessage::AssistantToolCalls {
+                    text: None,
+                    tool_calls: (0..2)
+                        .map(|parallel| zeroclaw_providers::ToolCall {
+                            id: format!("call-{turn}-{parallel}"),
+                            name: "fixture".into(),
+                            arguments: "{}".into(),
+                            extra_content: Some(serde_json::json!({"signature": "opaque"})),
+                        })
+                        .collect(),
+                    reasoning_content: Some("opaque reasoning".into()),
+                });
+                seed.push(ConversationMessage::ToolResults(
+                    (0..2)
+                        .map(|parallel| zeroclaw_providers::ToolResultMessage {
+                            tool_call_id: format!("call-{turn}-{parallel}"),
+                            content: output.clone(),
+                            tool_name: "fixture".into(),
+                        })
+                        .collect(),
+                ));
+                seed.push(ConversationMessage::Chat(ChatMessage::assistant(format!(
+                    "answer {turn}"
+                ))));
+            }
+            let source = serde_json::to_vec(&seed).unwrap();
+            agent.seed_conversation_history(seed);
+            if streamed {
+                let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+                agent
+                    .turn_streamed("current question", event_tx, None)
+                    .await
+                    .unwrap();
+            } else {
+                agent.turn("current question").await.unwrap();
+            }
+            let requests = seen.lock();
+            assert_eq!(requests.len(), 1);
+            let results: Vec<_> = requests[0].iter().filter(|m| m.role == "tool").collect();
+            assert_eq!(results.len(), 18, "no call/result pair may be dropped");
+            for (index, result) in results.into_iter().enumerate() {
+                let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+                let turn = index / 2;
+                assert_eq!(
+                    payload["tool_call_id"],
+                    format!("call-{turn}-{}", index % 2)
+                );
+                let content = payload["content"].as_str().unwrap();
+                if turn >= 9usize.saturating_sub(keep) {
+                    assert_eq!(
+                        content, output,
+                        "turn={turn}, k={keep}, streamed={streamed}"
+                    );
+                } else {
+                    assert!(
+                        content.len()
+                            <= zeroclaw_providers::multimodal::STALE_TOOL_RESULT_MAX_CHARS
+                    );
+                    assert!(content.starts_with("HEAD"));
+                    assert!(content.ends_with("TAIL"));
+                }
+            }
+            let calls: Vec<serde_json::Value> = requests[0]
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .filter_map(|m| serde_json::from_str(&m.content).ok())
+                .collect();
+            assert_eq!(calls.len(), 9);
+            for call in calls {
+                assert_eq!(call["reasoning_content"], "opaque reasoning");
+                assert_eq!(call["tool_calls"].as_array().unwrap().len(), 2);
+                assert_eq!(
+                    call["tool_calls"][0]["extra_content"]["signature"],
+                    "opaque"
+                );
+            }
+            assert_eq!(
+                serde_json::to_vec(&agent.history()[1..37]).unwrap(),
+                source,
+                "request projection must not overwrite canonical replay history"
+            );
+        }
+    }
+}
+
 #[async_trait]
 impl ModelProvider for TranscriptCaptureModelProvider {
     async fn chat_with_system(

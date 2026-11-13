@@ -45,7 +45,9 @@ urlencoding = "2.1"
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
 which = "8.0"
 
-async-imap = { version = "0.11", features = ["runtime-tokio"], default-features = false, optional = true }
+# Official pin-project migration immediately after the 0.12.0 release.
+# Return to a registry release containing this fix when available (#432/#647).
+async-imap = { version = "=0.12.0", git = "https://github.com/chatmail/async-imap", rev = "d1f2606421c9211f992c1c565a32d8f770476aeb", features = ["runtime-tokio"], default-features = false, optional = true }
 mail-parser = { version = "0.11", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.14.0"
