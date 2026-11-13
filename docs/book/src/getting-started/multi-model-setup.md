@@ -84,7 +84,7 @@ This profile composes existing primitives:
 - `strict_tool_parsing` treats XML/JSON-looking fallback text as assistant text unless the provider returns native tool calls.
 - `max_tool_iterations`, `max_context_tokens`, `max_system_prompt_chars`, and `max_tool_result_chars` bound runaway loops and oversized prompt/tool context.
 - `max_actions_per_hour`, `max_cost_per_day_cents`, and `shell_timeout_secs` keep local runs on the same budget shape as the built-in preset.
-- `parallel_tools = false` and `keep_tool_context_turns = 1` keep local runs sequential and limit retained tool context.
+- `parallel_tools = false` keeps local runs sequential. `keep_tool_context_turns = 1` preserves full tool text for the current turn and one prior turn; older text becomes eligible for the existing bounded projection after the prompt-cache window expires. See [history management](../agents/history-management.md#tool-context-in-model-requests) for warm-window and canonical-history behavior.
 
 With Ollama, this is a no-text-fallback profile: authorized tools remain configured in `risk_profile`, but text-form tool markup from the model is not executed. Use it for chat-first local agents, or for providers that return native/structured tool calls. If a local model must use ZeroClaw's text fallback tool syntax, set `strict_tool_parsing = false` and keep the other small-model limits.
 

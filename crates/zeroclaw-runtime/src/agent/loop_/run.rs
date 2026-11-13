@@ -620,6 +620,7 @@ pub async fn run(
                                         strict_tool_parsing: agent.resolved.strict_tool_parsing,
                                         parallel_tools: agent.resolved.parallel_tools,
                                         max_tool_result_chars: agent.resolved.max_tool_result_chars,
+                                        keep_tool_context_turns: agent.resolved.keep_tool_context_turns,
                                         context_token_budget: agent
                                             .resolved
                                             .effective_context_budget(),
