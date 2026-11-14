@@ -788,6 +788,11 @@ async fn handle_socket(
         drop(lifecycle_guard);
         // Acceptance is independent of delivering its ACK. Even a failed/slow
         // writer must release the admitted claim to execution and recovery.
+        // Handoff has no await: shutdown may drop this socket at the very next
+        // await, but must never drop an accepted claim before its task owns it.
+        if let Some(claim) = start {
+            start_ws_turns(&state, &subscription.conversation, &scope, claim);
+        }
         let sent = match reply {
             Some(reply) => {
                 turn_control::send(
@@ -799,9 +804,6 @@ async fn handle_socket(
             }
             None => true,
         };
-        if let Some(claim) = start {
-            start_ws_turns(&state, &subscription.conversation, &scope, claim);
-        }
         if turn_negotiated && !sent {
             break;
         }
