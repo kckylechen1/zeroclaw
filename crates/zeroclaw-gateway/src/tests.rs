@@ -3642,3 +3642,15 @@ async fn gateway_restart_settles_abandoned_turns_and_refuses_a_second_owner() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn gateway_shutdown_observes_a_signal_sent_before_subscription() {
+    let (signal, _receiver) = tokio::sync::watch::channel(false);
+    signal.send(true).unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        gateway_shutdown(signal.subscribe()),
+    )
+    .await
+    .unwrap();
+}

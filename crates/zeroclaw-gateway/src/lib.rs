@@ -391,6 +391,19 @@ fn default_agent_alias(config: &Config) -> Option<String> {
 
 pub(crate) type ConfigWriteGuard = tokio::sync::OwnedMutexGuard<()>;
 
+/// Retire upgraded sockets even when shutdown preceded watcher registration.
+/// They are detached from Axum's listener and otherwise keep old state alive.
+pub(crate) async fn gateway_shutdown(mut signal: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *signal.borrow_and_update() {
+            return;
+        }
+        if signal.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Shared state for all axum handlers
 #[derive(Clone)]
 pub struct AppState {

@@ -267,8 +267,15 @@ pub async fn handle_ws_chat(
     let session_id = params.session_id;
     let session_name = params.name;
     let session_cwd = params.cwd.or(params.workspace_dir);
-    ws.on_upgrade(move |socket| {
-        handle_socket(
+    let shutdown = state.shutdown_tx.subscribe();
+    ws.on_upgrade(move |socket| async move {
+        // Cover the entire lifetime, including a client that never sends its
+        // connect frame. Dropping a socket only detaches; owned turns keep the
+        // hub/lease until they actually finish.
+        tokio::select! {
+            biased;
+            () = crate::gateway_shutdown(shutdown) => {},
+            () = handle_socket(
             socket,
             state,
             agent_alias,
@@ -278,7 +285,8 @@ pub async fn handle_ws_chat(
             surface,
             auth_subject,
             bridge_scope,
-        )
+            ) => {},
+        }
     })
     .into_response()
 }

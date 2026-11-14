@@ -1803,3 +1803,55 @@ async fn approval_created_offline_waits_for_reconnect_instead_of_becoming_unreac
         "reconnect is not permission to execute"
     );
 }
+
+#[tokio::test]
+async fn production_gateway_shutdown_retires_idle_and_handshake_sockets() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let mut config = fixture.state.config.read().clone();
+    config.gateway.paired_tokens = vec![zeroclaw_config::tokens::hash_token(OWNER_TOKEN)];
+    let data_dir = config.data_dir.clone();
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = probe.local_addr().unwrap();
+    drop(probe);
+    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+    let (reload_tx, _) = tokio::sync::watch::channel(false);
+    let controls = zeroclaw_runtime::daemon::GatewayReloadControls {
+        shutdown_tx: shutdown_tx.clone(), reload_tx,
+    };
+    let server = zeroclaw_spawn::spawn!(async move {
+        crate::run_gateway("127.0.0.1", address.port(), config, None, Some(controls), None).await
+    });
+    tokio::time::timeout(LIMIT, async {
+        loop {
+            if tokio::net::TcpStream::connect(address).await.is_ok() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let query = format!("agent=device-agent&session_id={SESSION}");
+    let (status, mut idle) = DeviceWire::upgrade(address, &query, OWNER_TOKEN).await;
+    assert_eq!(status, 101);
+    idle.connected(json!({"type":"connect"})).await;
+    // Ensure the connection finished attaching rather than merely writing ACK.
+    idle.send(json!({"type":"turn_control","version":1,"op":"negotiate"})).await;
+    idle.until("turn_ready").await;
+    let (status, mut handshake) = DeviceWire::upgrade(address, &query, OWNER_TOKEN).await;
+    assert_eq!(status, 101);
+    handshake.until("session_start").await;
+    assert!(zeroclaw_infra::gateway_session_owner::GatewaySessionOwner::acquire(&data_dir).is_err());
+    shutdown_tx.send(true).unwrap();
+    tokio::time::timeout(LIMIT, server).await.unwrap().unwrap().unwrap();
+    assert!(idle.next().await.is_none(), "retired socket must close without another client message");
+    assert!(handshake.next().await.is_none(), "uncompleted handshake must also release old state");
+    // EOF can become visible just before the handler drops its final state.
+    let replacement = tokio::time::timeout(LIMIT, async {
+        loop {
+            match zeroclaw_infra::gateway_session_owner::GatewaySessionOwner::acquire(&data_dir) {
+                Ok(owner) => break owner,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => tokio::task::yield_now().await,
+                Err(error) => panic!("replacement failed: {error}"),
+            }
+        }
+    }).await.expect("idle sockets must not pin the retired gateway owner");
+    assert_eq!(replacement.recovered_turns(), 0);
+    assert!(fixture.seen.lock().is_empty(), "idle shutdown must not start model work");
+}

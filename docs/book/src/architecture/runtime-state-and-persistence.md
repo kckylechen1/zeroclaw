@@ -96,6 +96,11 @@ data directory concurrently. Reload can acquire a new hub only after all owners
 of the preceding hub release it. Outstanding work blocks replacement rather than
 being misreported as abandoned.
 
+Shutdown retires chat sockets, including incomplete handshakes, and bridge
+control sockets. They cannot keep admitting work or hold an otherwise idle hub
+through reload. Bridge cleanup leaves unacknowledged delivery attempts unknown;
+it does not put them back into the automatic-send queue.
+
 ### Client detach and approvals
 
 Ordinary tool approvals belong to the running conversation, not its sockets.
