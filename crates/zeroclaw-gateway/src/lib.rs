@@ -616,6 +616,9 @@ pub async fn run_gateway(
             );
         }
     }
+    // Acquire before constructing tools, stores or listeners. The hub travels
+    // with AppState into detached turns and keeps ownership until they stop.
+    let ws_conversations = Arc::new(ws_conversation::ConversationHub::owned(&config.data_dir)?);
     let config_state = Arc::new(RwLock::new(config.clone()));
 
     // ── Hooks ──────────────────────────────────────────────────────
@@ -1410,7 +1413,7 @@ pub async fn run_gateway(
         web_dist_dir,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        ws_conversations: Default::default(),
+        ws_conversations,
         bridge_sockets: Default::default(),
     };
 

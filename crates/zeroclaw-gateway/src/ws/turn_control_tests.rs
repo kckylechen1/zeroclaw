@@ -1710,3 +1710,96 @@ async fn s2_wire_events_land_in_structured_log_without_content() {
         );
     }
 }
+
+#[tokio::test]
+async fn offline_approval_reconnect_keeps_request_and_requires_operator() {
+    let fixture = DeviceFixture::new(&["chat", "answer", "cancel"]).await;
+    let mut owner = fixture.socket(OWNER_TOKEN).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    owner
+        .send(json!({"type":"message", "id":id, "content":"approval-probe"}))
+        .await;
+    assert_eq!(owner.until("ack").await["status"], "accepted");
+    let prompt = owner.until("approval_request").await;
+    let conversation = fixture
+        .state
+        .ws_conversations
+        .session_conversations(&format!("gw_{SESSION}"))[0]
+        .clone();
+    drop(owner);
+    tokio::time::timeout(LIMIT, async {
+        while conversation.subscriber_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(conversation.is_running());
+    assert!(!fixture.workspace.join("approved.txt").exists());
+
+    let mut device = fixture.socket(DEVICE_TOKEN).await;
+    let restored = device.until("approval_request").await;
+    assert_eq!(restored["request_id"], prompt["request_id"]);
+    assert!(restored["timeout_secs"].as_u64().unwrap() <= prompt["timeout_secs"].as_u64().unwrap());
+    device.send(json!({"type":"approval_response", "request_id":prompt["request_id"], "decision":"approve"})).await;
+    assert_eq!(
+        device.until("error").await["code"],
+        "BRIDGE_OPERATION_DENIED"
+    );
+    assert!(!fixture.workspace.join("approved.txt").exists());
+    let mut reopened = fixture.socket(OWNER_TOKEN).await;
+    assert_eq!(
+        reopened.until("approval_request").await["request_id"],
+        prompt["request_id"]
+    );
+    reopened.send(json!({"type":"approval_response", "request_id":prompt["request_id"], "decision":"approve"})).await;
+    reopened.until("done").await;
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("approved.txt")).unwrap(),
+        "owner-approved"
+    );
+    assert!(!conversation.resolve_approval(
+        prompt["request_id"].as_str().unwrap(),
+        ChannelApprovalResponse::Approve
+    ));
+    assert_eq!(
+        fixture.seen.lock().len(),
+        2,
+        "reconnect must not run the model/tool again"
+    );
+}
+
+#[tokio::test]
+async fn approval_created_offline_waits_for_reconnect_instead_of_becoming_unreachable() {
+    let fixture = DeviceFixture::new(&["chat"]).await;
+    let mut owner = fixture.socket(OWNER_TOKEN).await;
+    let id = uuid::Uuid::new_v4().to_string();
+    owner
+        .send(json!({"type":"message", "id":id, "content":"approval-probe s2-held-provider"}))
+        .await;
+    assert_eq!(owner.until("ack").await["status"], "accepted");
+    let conversation = fixture
+        .state
+        .ws_conversations
+        .session_conversations(&format!("gw_{SESSION}"))[0]
+        .clone();
+    drop(owner);
+    tokio::time::timeout(LIMIT, async {
+        while conversation.subscriber_count() != 0
+            || conversation.pending_approvals.lock().is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!fixture.workspace.join("approved.txt").exists());
+    let mut reopened = fixture.socket(OWNER_TOKEN).await;
+    let prompt = reopened.until("approval_request").await;
+    reopened.send(json!({"type":"approval_response", "request_id":prompt["request_id"], "decision":"deny"})).await;
+    reopened.until("done").await;
+    assert!(
+        !fixture.workspace.join("approved.txt").exists(),
+        "reconnect is not permission to execute"
+    );
+}
