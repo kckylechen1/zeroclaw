@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_GRANT_TTL_SECS"],"enum":["AuditDecision","RedeemFailure"],"fn":["args_hash"],"struct":["ApprovalStore","Grant"]};

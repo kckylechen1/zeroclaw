@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_RECENT","VERSION"],"enum":["DelegationOperation"],"struct":["DelegationControlRequest","DelegationControlResponse"]};

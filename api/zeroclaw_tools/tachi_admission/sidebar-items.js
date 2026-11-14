@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["WATERSHED_PLACEMENT_TOKENS"],"fn":["scan_text"]};

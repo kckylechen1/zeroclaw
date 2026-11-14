@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OCC_STATE_ENQUEUED","OCC_STATE_INVALIDATED","OCC_STATE_SCHEDULED","REMINDER_VALIDITY_SECS"],"enum":["ReminderChange"],"struct":["ArmReminder","ReminderOccurrence"]};

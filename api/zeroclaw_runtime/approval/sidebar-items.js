@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_REPLACEMENT_LEN"],"enum":["ApprovalRequirement","ApprovalResponse"],"fn":["sanitize_tool_replacement","summarize_args"],"mod":["store"],"struct":["ApprovalLogEntry","ApprovalManager","ApprovalRequest"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["TaskListTool"],"type":["ReminderTargetResolver","TaskOwnerResolver"]};

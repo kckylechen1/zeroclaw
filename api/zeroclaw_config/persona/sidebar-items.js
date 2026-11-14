@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TONE_SECTION_MAX_BYTES"],"enum":["PersonaLevel"],"fn":["dial_guidance"],"struct":["PersonaKnobs"]};

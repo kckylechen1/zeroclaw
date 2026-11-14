@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BTW_SIDE_QUERY_INSTRUCTION","DEFAULT_SIDE_QUERY_TIMEOUT_SECS","MAX_CONCURRENT_SIDE_QUERIES","MAX_SIDE_QUERY_QUESTION_BYTES"],"struct":["SideQueryHandle","SideQueryResponse","SideQuerySnapshot"]};

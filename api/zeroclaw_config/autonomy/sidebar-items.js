@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AutonomyLevel","McpDiscoveredToolPolicy","OnNoApprover"],"struct":["ApprovalRoute"]};

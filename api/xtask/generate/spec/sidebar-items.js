@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Action","Platform","Selection","Value","When"],"fn":["dist_target_exclusions","dry_run_line","exclude_features","finish_steps","non_row_features","resolve","resolve_feature_list","resolve_feature_list_for_target","resolve_flags","resolve_version","source_branch","web_data_dir_expr"],"struct":["FeatureCtx","Plan","Resolved","Step"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["agent","approval","browse","cli_input","cost","cron","daemon","doctor","health","heartbeat","hooks","i18n","identity","integrations","migration","nodes","observability","peers","personal_file","platform","process_stats","quickstart","restart","security","service","skills","spoken","subagent","subagent_v1","tachi_bridge","tools","tunnel","util"]};

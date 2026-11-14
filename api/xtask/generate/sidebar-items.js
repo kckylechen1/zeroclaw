@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["features","run"],"mod":["flake","install_sh","packaging","setup_bat","spec"]};

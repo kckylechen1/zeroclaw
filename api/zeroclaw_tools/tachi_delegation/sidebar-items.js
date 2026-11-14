@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["APPROVAL_REQUIRED","STORAGE_ROOT_CHANGED"],"fn":["route_fingerprint","tools"],"struct":["TachiDelegation"]};

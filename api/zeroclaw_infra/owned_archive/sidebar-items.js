@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_private_dir","sqlite_rows","write_verified_json"]};

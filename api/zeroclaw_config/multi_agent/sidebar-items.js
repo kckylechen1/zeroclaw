@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AccessMode","MemoryBackendKind","OutputModality"],"fn":["bind_channel_identity_into","channel_alias_configured","channel_identity_normalizer"],"struct":["AgentAlias","AgentMemoryConfig","AgentWorkspaceConfig","PeerGroupConfig","PeerGroupName","PeerUsername"],"type":["ChannelIdentityNormalizer"]};

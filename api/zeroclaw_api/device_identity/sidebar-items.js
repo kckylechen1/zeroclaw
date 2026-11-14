@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DeviceKeyAlgorithm","DevicePairingState","DeviceRole"],"struct":["DeviceIdentityV1"]};
