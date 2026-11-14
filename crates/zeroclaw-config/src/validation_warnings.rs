@@ -54,6 +54,8 @@ use serde::{Deserialize, Serialize};
 ///   discovery server or agent cards; the surfaces carried no consumer and
 ///   were deleted, so the keys are ignored (see `RETIRED_CONFIG_SURFACES`
 ///   and `RETIRED_CONFIG_FIELDS`).
+/// - `eval_harness_moved_to_dev_tool`: `[eval]` moved to the development
+///   CLI; pass its former settings using `--suite` and `--mode`.
 /// - `todo_tracker_removed`: a `[todotracker]` section is still present. It
 ///   configured the ZeroCode Code-pane TodoWrite tracker; ZeroCode was
 ///   retired (#387) and no other reader remained, so the section is ignored
@@ -140,6 +142,7 @@ impl ValidationWarning {
 /// in a later announced window, after which the env paths hard-error like
 /// any other unknown path and the file sections parse-drop silently.
 pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
+    ("eval", "eval_harness_moved_to_dev_tool"),
     (
         "gateway.pairing_dashboard",
         "gateway_pairing_dashboard_removed",
@@ -627,7 +630,9 @@ pub fn retired_section_tombstones(contents: &str) -> Vec<ValidationWarning> {
     RETIRED_CONFIG_SURFACES
         .iter()
         .filter_map(|(path, code)| {
-            let message = if table_path_exists(root.as_table(), path) {
+            let message = if *path == "eval" && table_path_exists(root.as_table(), path) {
+                "[eval] in config.toml is no longer used: the evaluation harness moved to the development CLI. Pass suite_dir as --suite and mode as --mode; [runtime_profiles.<alias>.eval] is unchanged.".to_string()
+            } else if table_path_exists(root.as_table(), path) {
                 format!(
                     "[{path}] in config.toml is ignored: the section was removed from the \
                      schema and has no runtime consumer. This compatibility shim will be \

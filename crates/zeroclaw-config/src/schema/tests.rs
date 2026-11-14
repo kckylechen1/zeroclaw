@@ -1744,7 +1744,6 @@ async fn validate_rejects_zero_channel_max_concurrent_per_channel() {
 #[test]
 async fn config_toml_roundtrip() {
     let config = Config {
-        eval: crate::scattered_types::EvalHarnessConfig::default(),
         composition: None,
         tasks: crate::tasks::TasksConfig::default(),
         degraded_security: Vec::new(),
@@ -2654,7 +2653,6 @@ async fn config_save_and_load_tmpdir() {
         },
     );
     let config = Config {
-        eval: crate::scattered_types::EvalHarnessConfig::default(),
         composition: None,
         tasks: crate::tasks::TasksConfig::default(),
         degraded_security: Vec::new(),
@@ -4448,6 +4446,49 @@ port = 8080
             );
         }
     }
+}
+
+#[test]
+#[allow(clippy::large_futures)]
+async fn load_or_init_warns_for_legacy_eval_and_preserves_runtime_scorer() {
+    let _env_guard = env_override_lock().await;
+    let home = TempDir::new().unwrap();
+    let workspace = home.path().join("eval-profile");
+    fs::create_dir_all(&workspace).await.unwrap();
+    fs::write(
+        workspace.join("config.toml"),
+        r#"schema_version = 3
+[eval]
+suite_dir = "custom-traces"
+mode = "replay"
+[runtime_profiles.default.eval]
+enabled = true
+min_quality_score = 0.73
+max_retries = 3
+"#,
+    )
+    .await
+    .unwrap();
+    let _home = EnvValueGuard::set("HOME", home.path());
+    let _workspace = EnvValueGuard::remove("ZEROCLAW_WORKSPACE");
+    let _data_dir = EnvValueGuard::remove("ZEROCLAW_DATA_DIR");
+    let _config_dir = EnvValueGuard::set("ZEROCLAW_CONFIG_DIR", &workspace);
+
+    let config = Box::pin(Config::load_or_init()).await.unwrap();
+    assert_eq!(config.config_path, workspace.join("config.toml"));
+    assert_eq!(config.data_dir, workspace.join("data"));
+    assert!(config.degraded_sections.is_empty());
+    let warnings = config.collect_warnings();
+    let warning = warnings
+        .iter()
+        .find(|warning| warning.code == "eval_harness_moved_to_dev_tool")
+        .expect("legacy eval must produce a load warning");
+    assert_eq!(warning.path, "eval");
+    assert!(warning.message.contains("--suite"));
+    let scorer = &config.runtime_profiles["default"].eval;
+    assert!(scorer.enabled);
+    assert_eq!(scorer.min_quality_score, 0.73);
+    assert_eq!(scorer.max_retries, 3);
 }
 
 #[test]
@@ -7104,6 +7145,12 @@ async fn full_config_schema_nests_required_by_transport_on_mcp_server_def() {
     #[cfg(feature = "schema-export")]
     let schema = schemars::schema_for!(Config);
     let schema_json = serde_json::to_value(&schema).expect("schema serializes to json");
+    assert!(schema_json.pointer("/properties/eval").is_none());
+    assert!(
+        schema_json
+            .pointer("/$defs/RuntimeProfileConfig/properties/eval")
+            .is_some()
+    );
 
     fn find_extension(
         value: &serde_json::Value,

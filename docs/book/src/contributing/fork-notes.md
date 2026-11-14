@@ -152,29 +152,13 @@ the existing memory, enrichment, governance and companion consumers. No store or
 configuration key is retired. See the
 [operator migration procedure](../setup/portable-memory.md).
 
-## Yonbo device host import
+## Yonbo device host ownership
 
-The optional [Yonbo host](https://github.com/kckylechen1/zeroclaw/blob/master/crates/zeroclaw-yonbo-node/README.md)
-imports the independently exercised thin-device prototype as a pure-std crate.
-It defaults to no listener and no display execution. Its PSK maintenance protocol
-is not Gateway Node v2; it does not replace DeviceIdentity, policy ceilings,
-approvals or the missing body-to-device invocation lifecycle in tracker #61.
-The crate owns only its explicitly configured device-local credential/sequence
-store and runtime files. It is not another Agent, task store or controller.
-
-Upstream was checked at `5d4b18d335780af8bf15979b2f45e541f91c5eb9`, against fork
-baseline `fa986b5eb62274e04e254692bfa8f8aeb45d4f00`:
-
-| Source | Local equivalent and decision |
-| --- | --- |
-| Upstream `gateway/src/nodes.rs` and `node_tool.rs` | Skip the older registration/invocation route. This fork keeps v2 signed identity and admission; importing an `approved` argument shortcut would not provide its required authority. |
-| Upstream `zeroclaw-tls` and `zeroclaw-relay-proto` | Defer transport integration to the v2 leaf. They do not provide the bounded display host and would change this pure-std device footprint. |
-| Fork `gateway/src/nodes.rs`, `api/src/node.rs` | Retain unchanged. The live socket handles identity and capability advertisement, but this import adds no production Invoke/result-completer connection to it. |
-
-Only the device prototype is adapted here. A physical consumer now exists, which
-makes this bounded source-import leaf useful; it does not close #61 or activate
-high-risk device authority. Boot installers and cross-build/deployment acceptance
-remain separate. No existing controller dependency or default capability is added.
+The legacy N3B1 Yonbo device crate is retired from the ZeroClaw workspace. Its
+complete 11-file source snapshot is preserved in [Zeroclaw-Robotic](https://github.com/kckylechen1/Zeroclaw-Robotic/tree/main/integration/zeroclaw/source/crates/zeroclaw-yonbo-node),
+which owns future device engineering. N3B1 is distinct from Gateway Node v2.
+This source retirement changes no running device, credential, or Gateway Node
+contract and does not establish device replacement or physical acceptance.
 
 ## Restricted device chat admission
 

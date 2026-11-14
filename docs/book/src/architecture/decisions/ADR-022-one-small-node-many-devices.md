@@ -8,13 +8,14 @@ relates-to:
   - ADR-019
   - ADR-020
   - ADR-021
-  - crates/zeroclaw-yonbo-node
   - crates/zeroclaw-gateway/src/nodes.rs
 ---
 
 # ADR-022: One Small Node, Many Devices - Speakers, Screens, and Off-the-Shelf Voice Satellites
 
 ## Status
+
+The legacy Yonbo N3B1 crate has been retired from ZeroClaw source; its complete 11-file snapshot is preserved in the [Zeroclaw-Robotic archive](https://github.com/kckylechen1/Zeroclaw-Robotic/tree/main/integration/zeroclaw/source/crates/zeroclaw-yonbo-node). Future device engineering belongs there. This changes neither running devices and keys nor Gateway Node v2, and does not establish a replacement or physical acceptance.
 
 Proposed on 2026-10-30. Not accepted until the owner approves it. Merging this document neither accepts the architecture nor activates a device, route, or capability. [#374](https://github.com/kckylechen1/zeroclaw/issues/374) remains the execution index; the slices below are candidates for that queue.
 
@@ -28,7 +29,7 @@ This record keeps ADR-017, ADR-019, ADR-020, and ADR-021 unchanged. It restores 
 - The owner wants a small program that can run on a smart speaker, a TV, or similar, talks to the body, and uses the body's models.
 - Current state in this repository:
   - The gateway's v2 Node path (`/ws/nodes`) has real-process loopback evidence (#514) for device identity, connection generation, revocation, and safe invocation. Its host is currently `src/bin/zeroclaw-node-host.rs` plus `src/node_host.rs`, imports gateway code, and accepts only loopback addresses. This is not a shipped general device SDK or proof of physical-device safety.
-  - `zeroclaw-yonbo-node` is a standalone device process with no async runtime or external dependencies. It speaks N3B1 (per-host PSK, HMAC frames, strict sequence numbers), not v2. #61 is closed historical groundwork; #535 tracks the current Yonbo work.
+  - The archived `zeroclaw-yonbo-node` is a standalone device process with no async runtime or external dependencies. It speaks N3B1 (per-host PSK, HMAC frames, strict sequence numbers), not v2. #61 is closed historical groundwork; #535 tracks the current Yonbo work.
   - ADR-019 §§6 and 8 propose retaining N3B1 on the robot behind an owner-host v2 adapter, and extracting a `zeroclaw-node-host` crate when that real adapter joins the #514 loopback host as the second implementation.
   - ADR-021 proposes one voice adapter at the edge, with capture, bounded local audio processing, and playback on the device. The multi-device voice behavior below is proposed, not delivered by #514.
 - What others do:
@@ -77,7 +78,7 @@ Effective capability follows #55: what the device advertises now, intersected wi
 Following ADR-019 §8, the shared program is not designed ahead of time:
 
 - First write the real owner-host v2-to-N3B1 Yonbo adapter. It and the existing #514 loopback host shape the shared v2 host code. Only with those two implementations does that code become a `zeroclaw-node-host` crate, depending on shared protocol types rather than on the gateway crate.
-- Retain `zeroclaw-yonbo-node` and N3B1 on the robot, including its per-host keys and local refusal rules. #535 is the current execution evidence; #61 is closed. A native-v2 rewrite of the robot process is not required by this proposal.
+- Retain the existing N3B1 device operation, including its per-host keys and local refusal rules; device source ownership is Zeroclaw-Robotic. #535 is the current execution evidence; #61 is closed. A native-v2 rewrite of the robot process is not required by this proposal.
 - Later, the robot and the first owner-built speaker (§7) are the two physical consumers that can justify extracting shared audio or other device modules. This is a separate extraction from the shared v2 host code.
 - Target a small process suitable for the constrained device, without a conversational model runtime. Memory, CPU, latency, and dependency footprint must be measured on that device; a 512 MB target is not a validated result.
 

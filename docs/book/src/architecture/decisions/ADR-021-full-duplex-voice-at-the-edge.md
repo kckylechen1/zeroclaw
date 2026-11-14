@@ -10,13 +10,14 @@ relates-to:
   - ADR-017
   - ADR-019
   - ADR-020
-  - crates/zeroclaw-yonbo-node
   - crates/zeroclaw-gateway
 ---
 
 # ADR-021: Full-Duplex Voice at the Edge - Audio Stays Out of the Body
 
 ## Status
+
+The legacy Yonbo N3B1 crate has been retired from ZeroClaw source; its complete 11-file snapshot is preserved in the [Zeroclaw-Robotic archive](https://github.com/kckylechen1/Zeroclaw-Robotic/tree/main/integration/zeroclaw/source/crates/zeroclaw-yonbo-node). Future device engineering belongs there. This changes neither running devices and keys nor Gateway Node v2, and does not establish a replacement or physical acceptance.
 
 Proposed on 2026-10-30. Not accepted until the owner approves it.
 

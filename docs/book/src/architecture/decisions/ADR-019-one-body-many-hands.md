@@ -12,13 +12,14 @@ relates-to:
   - bridges/telegram
   - crates/zeroclaw-gateway-client
   - crates/zeroclaw-gateway/src/nodes.rs
-  - crates/zeroclaw-yonbo-node
   - crates/zeroclaw-channels
 ---
 
 # ADR-019: One Body, Many Hands - When to Split a Crate or Process, and How Messaging Platforms and Devices Attach
 
 ## Status
+
+The legacy Yonbo N3B1 crate has been retired from ZeroClaw source; its complete 11-file snapshot is preserved in the [Zeroclaw-Robotic archive](https://github.com/kckylechen1/Zeroclaw-Robotic/tree/main/integration/zeroclaw/source/crates/zeroclaw-yonbo-node). Future device engineering belongs there. This changes neither running devices and keys nor Gateway Node v2, and does not establish a replacement or physical acceptance.
 
 Proposed on 2026-10-30. Not accepted until the owner approves it.
 
@@ -121,7 +122,7 @@ Per platform and device:
 - **Slack.** A cloud bridge that accepts direct messages from the owner only, with streaming edits and button approvals. Posting into channels is acting for the owner (§5) and goes through a tool with approval. The agent taking part in group conversations as the owner is out of scope.
 - **Yonbo X1 robot (#535).** The first physical body, in two roles:
   - *Client.* The vendor dialogue path is redirected to an owner-run adapter on the Mac that speaks the device bridge (#496, #498, #499). Switching the adapter's brain from the interim model to ZeroClaw is slice S5. In ZeroClaw mode the adapter injects no persona or memory of its own; identity comes only from the Soul.
-  - *Node.* Body language (S8) is exposed at the level of named actions, faces and the mood light, never raw device frames. The device side is `zeroclaw-yonbo-node` (N3B1), extended with an action command that loads a vetted allowlist of action names. A v2 adapter process on the owner's host translates between the body and N3B1. The model sees only an enum of vetted names. Capability names, schemas and risk classes are defined in the kernel's catalog (#630); the device advertises names only.
+  - *Node.* Body language (S8) is exposed at the level of named actions, faces and the mood light, never raw device frames. The proposed device side is the archived `zeroclaw-yonbo-node` (N3B1), extended with an action command that loads a vetted allowlist of action names. A v2 adapter process on the owner's host translates between the body and N3B1. The model sees only an enum of vetted names. Capability names, schemas and risk classes are defined in the kernel's catalog (#630); the device advertises names only.
   - *Behavior loop.* An optional small model in the owner-host adapter may pick faces, ear and light behaviors a few times a second from conversation and attention state (§4). It talks to the device process directly, not through the gateway, and can select nothing outside the device allowlist. When the link or the model is unavailable the device returns to its idle behavior on its own.
   - *Safety floor.* The body MCU, not the SoC, owns the motors, and each motor frame carries its own duration. This is the floor that still holds when the link drops, and it must be proven before it is relied on. The #626 freeze test ran with the robot idle: no frame was written and nothing moved, which shows only that an absent controller causes no motion. It also found no host-loss watchdog on the MCU over 60 seconds. Whether a motor stops when the controller disappears mid-action, and whether the MCU enforces a frame's duration, are still unknown.
   - *Power-on motion.* The vendor stack plays its start-up action, which includes motor frames, about five seconds after power-on. Any reboot therefore moves the robot. This is outside every capability and grant: operating procedure must place the robot where that movement is safe, and no remote path may reboot it unattended.
@@ -184,7 +185,7 @@ Each slice is one PR:
 2. **WeChat bridge with core extraction.** Add `bridges/wechat` and extract `zeroclaw-bridge-core` from it and `bridges/telegram`. If the diff is too large for one review, split into "extract core, Telegram unchanged" and "add WeChat", in that order, with the WeChat adapter written first on a branch to shape the interface.
 3. **Node host crate with its second consumer.** Extract the #514 root-package host together with the real Yonbo host-side adapter into `zeroclaw-node-host`, depending on shared protocol types rather than the gateway. Preserve existing capability schemas and deadlines; do not create the crate ahead of those two consumers.
 4. **Yonbo action classification and trigger path.** The frame-content classification is reported in #626; complete it with the per-channel breakdown (which motor channels each action uses, maximum duty and duration) and identify what each motor channel drives. Settle the trigger path with a passive capture (named vendor interface, or a replacement player that is the only UART writer and parses telemetry).
-5. **Yonbo body-language Node.** Add the action command and telemetry admission to `zeroclaw-yonbo-node`, a Rust N3B1 client, and a v2 adapter exposing faces and authored light and ear actions as enums, registered in the kernel catalog (#630). Servo and motor actions stay unavailable.
+5. **Yonbo body-language Node.** Add the action command and telemetry admission to a maintained device-side Node in Zeroclaw-Robotic, a Rust N3B1 client, and a v2 adapter exposing faces and authored light and ear actions as enums, registered in the kernel catalog (#630). Servo and motor actions stay unavailable.
 6. **Yonbo motion gate.** Lifted-robot deadman and frame-duration test with recorded evidence; only then, and only through the validated high-risk grant path, expose motor actions.
 7. **iMessage bridge**, when requested.
 8. **Slack DM bridge**, when requested.

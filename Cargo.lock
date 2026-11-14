@@ -4654,6 +4654,7 @@ version = "0.8.3"
 dependencies = [
  "anyhow",
  "async-trait",
+ "clap",
  "regex",
  "serde",
  "serde_json",
@@ -5038,10 +5039,6 @@ dependencies = [
  "zeroclaw-providers",
  "zeroclaw-spawn",
 ]
-
-[[package]]
-name = "zeroclaw-yonbo-node"
-version = "0.8.3"
 
 [[package]]
 name = "zeroclawlabs"

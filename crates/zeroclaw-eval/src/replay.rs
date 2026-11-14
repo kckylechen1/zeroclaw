@@ -1,6 +1,6 @@
 //! A [`ModelProvider`] that replays scripted LLM responses from an [`LlmTrace`].
 //! Promoted from the test-only trace-replay helper so the same deterministic
-//! engine backs both the shipped `zeroclaw eval` command and the test suite.
+//! engine backs both the development CLI and the test suite.
 
 use async_trait::async_trait;
 use std::collections::VecDeque;
