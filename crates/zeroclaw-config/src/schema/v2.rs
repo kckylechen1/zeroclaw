@@ -471,8 +471,6 @@ fn normalize_provider_type(
 
     // Vendor-canonical collapses (synonym kills only; alias unchanged).
     let synonym_canonical = match raw {
-        // Azure: vendor name; was azure_openai|azure-openai|azure
-        "azure_openai" | "azure-openai" | "azure" => Some("azure"),
         // xAI: was xai|grok
         "xai" | "grok" => Some("xai"),
         // Gemini: vendor product name; was gemini|google|google-gemini
@@ -487,8 +485,6 @@ fn normalize_provider_type(
         "cloudflare" | "cloudflare-ai" => Some("cloudflare"),
         // NVIDIA: was nvidia|nvidia-nim|build.nvidia.com
         "nvidia" | "nvidia-nim" | "build.nvidia.com" => Some("nvidia"),
-        // Bedrock: was bedrock|aws-bedrock
-        "bedrock" | "aws-bedrock" => Some("bedrock"),
         // LMStudio: was lmstudio|lm-studio
         "lmstudio" | "lm-studio" => Some("lmstudio"),
         // LiteLLM: was litellm|lite-llm
@@ -527,8 +523,6 @@ fn normalize_provider_type(
         "github_models" | "github-models" => Some("github_models"),
         // Stepfun: was stepfun|step (stepfun-intl handled below as variant)
         "stepfun" | "step" => Some("stepfun"),
-        // KiloCli: was kilocli|kilo-cli
-        "kilocli" | "kilo-cli" => Some("kilocli"),
         _ => None,
     };
 
@@ -662,11 +656,6 @@ fn normalize_provider_type(
     // Doubao / Volcengine
     if matches!(raw, "doubao" | "volcengine" | "ark" | "doubao-cn") {
         return ("doubao".to_string(), incoming_alias.to_string(), extras);
-    }
-
-    // gemini-cli stays as a separate slot (subprocess runtime, not a synonym)
-    if raw == "gemini-cli" {
-        return ("gemini_cli".to_string(), incoming_alias.to_string(), extras);
     }
 
     // stepfun-intl folds into stepfun with a different uri

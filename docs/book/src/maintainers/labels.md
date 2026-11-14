@@ -241,17 +241,13 @@ to one provider.
 | Label | Matches |
 |---|---|
 | `provider:anthropic` | `anthropic.rs` |
-| `provider:azure-openai` | `azure_openai.rs` |
-| `provider:bedrock` | `bedrock.rs` |
 | `provider:compatible` | `compatible.rs` |
 | `provider:copilot` | `copilot.rs` |
-| `provider:gemini` | `gemini.rs`, `gemini_cli.rs` |
-| `provider:kilocli` | `kilocli.rs` |
+| `provider:gemini` | `gemini.rs` |
 | `provider:openai` | `openai.rs`, `openai_codex.rs` |
 | `provider:openrouter` | `openrouter.rs` |
 | `provider:reliable` | `reliable.rs` |
 | `provider:router` | `router.rs` |
-| `provider:telnyx` | `telnyx.rs` |
 
 Some provider labels describe provider families that currently share the OpenAI-compatible provider implementation instead of a dedicated source file. Maintainers may apply these manually when an issue or PR is truly about that family: `provider:glm`, `provider:groq`, `provider:kimi`, `provider:minimax`, `provider:moonshot`, and `provider:qwen`. Do not add shared factory or compatible-provider files to these labeler rules; that would over-label unrelated shared changes.
 

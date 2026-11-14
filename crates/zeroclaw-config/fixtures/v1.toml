@@ -21,13 +21,6 @@ wire_api = "chat_completions"
 name = "anthropic"
 base_url = "https://api.anthropic.com"
 
-[model_providers.azure]
-name = "openai"
-azure_openai_resource = "my-resource"
-azure_openai_deployment = "gpt-4o"
-azure_openai_api_version = "2024-08-01-preview"
-requires_openai_auth = true
-
 [model_providers."anthropic-custom:https://api.z.ai/api/anthropic"]
 name = "anthropic-custom"
 max_tokens = 8192

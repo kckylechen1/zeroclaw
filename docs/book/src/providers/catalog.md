@@ -22,31 +22,13 @@ GPT-4o, GPT-5, o-series reasoning models. When reasoning is streamed, it is carr
 
 OpenAI Codex subscription auth lives on the `openai` slot. Set `wire_api = "responses"` to route through `POST /v1/responses` and `requires_openai_auth = true` to use the Codex subscription login (from the Codex CLI's own `~/.codex/auth.json`) instead of an `api_key` field on the entry. The subscription path does not read `OPENAI_API_KEY`; that variable applies only to the metered `openai` API-key mode. See [Provider Configuration → OAuth and subscription auth](./configuration.md#oauth-and-subscription-auth) for the credential model.
 
-### Bedrock: slot `bedrock`
-
 ### Gemini: slot `gemini`
 
 Google's Gemini API. Supports vision and pre-executed grounded search (see [Streaming](./streaming.md) for `PreExecutedToolCall` events).
 
-### Gemini CLI: slot `gemini_cli`
-
-Shells out to the `gemini` CLI; uses the CLI's existing auth.
-
-### Azure OpenAI: slot `azure`
-
-`resource`, `deployment`, and `api_version` live in this typed config, they are not read from environment variables.
-
 ### Copilot: slot `copilot`
 
 Uses a GitHub Copilot subscription for agent inference. Authentication uses a Copilot OAuth token obtained from GitHub.
-
-### Telnyx: slot `telnyx`
-
-Voice-oriented AI endpoint. Pair with the `clawdtalk` channel for real-time SIP calls.
-
-### KiloCLI: slot `kilocli`
-
-Local inference via KiloCLI.
 
 ### Kilo AI Gateway: slot `kilo`
 
@@ -59,11 +41,6 @@ api_key = "..."
 
 Cloud API via Kilo AI Gateway. Bearer-token auth with multiple model tiers (free, balanced, pro).
 The `/models` endpoint is public (`PUBLIC_MODEL_LISTING`), so model listing works without a credential. Because it is queried live, it is the source that carries pricing into the cost-rates editor. The shared models.dev catalog (`kilo` key) is only a fallback for when the live endpoint is unreachable, and it does not include pricing.
-
-> **Naming migration:** `kilo` now refers to this gateway provider. The KiloCLI
-> subprocess provider keeps its `kilocli` slot (synonym `kilo-cli`). If you
-> previously configured the CLI provider under the `kilo` shorthand, switch to
-> `kilocli`.
 
 ---
 
@@ -80,8 +57,7 @@ the retired native `/api/chat` options.
 Every canonical slot, its default endpoint, whether it runs locally, and its
 full config field set, generated from the provider registry and the config
 schema. Click a slot to expand its fields; click a field to see how to set it.
-Slots with no fixed default need `uri` set on the alias entry (Azure, `custom`,
-multi-region families, CLI shims).
+Slots with no fixed default need `uri` set on the alias entry (`custom` and multi-region families).
 
 {{#model-provider-fields}}
 

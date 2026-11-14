@@ -158,7 +158,7 @@ fn any_live_pricing(config: &Config) -> bool {
 /// (reusing each provider's configured `base_url`, credentials, and options),
 /// fetches one `/models` per gateway, and fills only the flagged models,
 /// falling back to the models.dev catalog for models a gateway doesn't price
-/// (or providers with no HTTP listing, e.g. the `kilocli` subprocess gateway).
+/// (or providers with no HTTP listing).
 /// A fetch error for one source keeps the previous snapshot rather than
 /// regressing good prices to empty; disabling `live_pricing` on the last
 /// flagged provider instead clears the snapshot on the next cycle, so stale

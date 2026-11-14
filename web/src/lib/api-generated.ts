@@ -908,8 +908,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -1066,8 +1066,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -1457,8 +1457,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -1615,8 +1615,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -1846,8 +1846,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -2037,8 +2037,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -2195,8 +2195,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -2393,8 +2393,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -2453,175 +2453,6 @@ export interface components {
             replay_assistant_reasoning?: boolean | null;
             /** @description When true, the client pulls credentials from ZeroClaw's stored `openai-codex` auth profile instead of the `api_key` field above. Import an existing Codex CLI login with `zeroclaw auth login --model-provider openai-codex --import ~/.codex/auth.json`, or run `zeroclaw auth login --model-provider openai-codex`. Turn on only for the OpenAI Codex model_provider; leave off for standard API-key model_providers. */
             requires_openai_auth?: boolean;
-            /**
-             * Format: double
-             * @description Sampling temperature passed to the model. Lower values (0.0–0.3) give
-             *     deterministic, near-verbatim output, which fits code, routing, summarization.
-             *     Higher values (0.7–1.2) give more varied output, which fits open-ended chat.
-             */
-            temperature?: number | null;
-            /**
-             * @description Enable or disable chain-of-thought thinking for models that support it
-             *     (e.g. Qwen3, GLM-4). `true` turns thinking on, `false` turns it off.
-             *     `None` (default) lets the model decide. Forwarded as `enable_thinking`
-             *     in the request body; mirrors the Ollama provider's `think` field.
-             */
-            think?: boolean | null;
-            /**
-             * Format: uint64
-             * @description HTTP request timeout in seconds. Bump this for slow local model_providers (Ollama on CPU, big local models) or high-latency networks; leave unset otherwise.
-             */
-            timeout_secs?: number | null;
-            /**
-             * @description Path to a PEM-encoded CA certificate for TLS connections to this provider.
-             *     Must be an absolute path; shell expansion (e.g. `~`) is not performed.
-             *     Leave unset to use the system's default trust store.
-             */
-            tls_ca_cert_path?: string | null;
-            /** @description Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field. */
-            uri?: string | null;
-            /**
-             * @description Override the provider's vision (image input) capability.
-             *     `None` (default) uses the provider family's built-in default. Several
-             *     families (llama.cpp, the generic OpenAI-compatible endpoint, etc.)
-             *     assume vision-capable because they can serve multimodal models. Set
-             *     `vision = false` for a text-only model served by such a family (e.g. a
-             *     text LLM behind llama.cpp) so image messages are routed to a configured
-             *     `[multimodal] vision_model_provider` instead of being sent to a model
-             *     that rejects them. `Some(true)` forces vision on.
-             */
-            vision?: boolean | null;
-            /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
-            wire_api?: components["schemas"]["WireApi"] | null;
-        };
-        /**
-         * @description Azure OpenAI model model_provider config. Carries the Azure-specific connection
-         *     fields (`resource`, `deployment`, `api_version`) — the URI template
-         *     substitutes `{resource}` and `{deployment}` at runtime. Operators can
-         *     still override the entire endpoint via `base.uri`.
-         */
-        AzureModelProviderConfig: {
-            /** @description Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly. */
-            api_key?: string | null;
-            /** @description Azure API version string (e.g. `2024-10-21`). */
-            api_version?: string | null;
-            /**
-             * @description Arbitrary key/value pairs forwarded verbatim as a top-level
-             *     `chat_template_kwargs` object in the request body of OpenAI-compatible
-             *     providers. Consumed by chat-template-aware backends such as vLLM,
-             *     SGLang, and llama.cpp to pass model-family template variables that
-             *     control behaviour not exposed by other fields. Must be a JSON object
-             *     (TOML inline table); non-object values are ignored with a warning.
-             *     Example (Qwen3 thinking suppression):
-             *       `chat_template_kwargs = { enable_thinking = false }`
-             */
-            chat_template_kwargs?: unknown;
-            /**
-             * Format: uint
-             * @description Context window size (max input tokens) for this model.
-             *     Auto-populated on setup from provider's /models endpoint if available.
-             *     Override manually for custom endpoints or when auto-detection fails.
-             */
-            context_window?: number | null;
-            /** @description Azure deployment name: the deployment created in Azure AI Studio. */
-            deployment?: string | null;
-            /** @description Extra HTTP headers sent with every request. Niche: used for auth bridges, corporate proxies, or custom gateways that demand a tracing header. Most users never touch this; edit `config.toml` directly if you need it. */
-            extra_headers?: {
-                [key: string]: string;
-            };
-            /**
-             * @description Ordered list of other provider aliases to try when every model on this
-             *     alias has failed. Each entry is a dotted `<type>.<alias>` reference into
-             *     `providers.models` and resolves with its own credentials, endpoint, and
-             *     model. A fallback never inherits this alias's key. The walk is
-             *     depth-first: this alias's models are exhausted first, then each fallback
-             *     alias is descended in turn (applying its own `fallback_models` and
-             *     `fallback`). Empty means no provider-level fallback.
-             */
-            fallback?: components["schemas"]["ModelProviderRef"][];
-            /**
-             * @description Ordered alternate models to try on THIS provider before falling over to
-             *     the `fallback` aliases. Same endpoint, key, and headers as the primary
-             *     `model`. Only the model identifier changes. Use this when a provider
-             *     serves a backup model (e.g. a smaller or older variant) that should be
-             *     tried before leaving the provider entirely. Empty means only `model` is
-             *     tried.
-             */
-            fallback_models?: string[];
-            /**
-             * @description Provider implementation to instantiate for this profile. Use this
-             *     when a canonical typed slot should run through a compatible
-             *     implementation, e.g. `[providers.models.openai.proxy] kind =
-             *     "openai-compatible"`.
-             */
-            kind?: string | null;
-            /**
-             * @description Pull live token prices for this provider's models from its own
-             *     OpenAI-compatible `/models` listing (the gateway is the source of truth
-             *     for its prices), filling cost-tracking rates for models the operator
-             *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
-             *     catalog. Configured rates always win; live prices only fill gaps. A
-             *     background task refreshes the price snapshot hourly; the cost-recording
-             *     path reads the cached snapshot and never blocks on the network. Default
-             *     `false`: off means no fetching and behavior identical to a build
-             *     without the feature.
-             */
-            live_pricing?: boolean;
-            /**
-             * Format: uint32
-             * @description Hard cap on response length in tokens. Most models enforce sensible built-in limits already; leave unset unless you specifically need to clip long outputs for cost or latency reasons.
-             */
-            max_tokens?: number | null;
-            /** @description ModelProvider-specific quirk: fold the system prompt into the first user message instead of sending a separate system role. Only needed for models that reject (or mishandle) a standalone system role, e.g. certain older Mistral variants. */
-            merge_system_into_user?: boolean;
-            /** @description Model identifier to send with each request: the ID string from the model_provider's catalog (e.g. `gpt-4o`, `claude-sonnet-4-5`, `llama-3.3-70b`). Must match a model the model_provider actually serves on this account. */
-            model?: string | null;
-            /**
-             * @description Override the provider's default for native tool calling.
-             *     `None` (default) honors the provider's built-in choice. `Some(true)`
-             *     forces native tool calls on, `Some(false)` forces text-fallback.
-             *     Currently consulted only by the Groq factory, which defaults to
-             *     text-fallback because llama-family Groq models reject native tool
-             *     calls with HTTP 400. Setting `native_tools = true` re-enables native
-             *     tool calling for Groq models that support it.
-             */
-            native_tools?: boolean | null;
-            /**
-             * @description Per-model pricing for cost tracking, USD per 1M tokens.
-             *
-             *     Free-form key/value map. Keys are user-defined model identifiers; an
-             *     optional `.input` / `.output` suffix encodes pricing dimension when
-             *     the operator wants to split rates. A bare key without a suffix is
-             *     used as a flat per-token rate when neither dimension is specified.
-             *     Default is empty: cost tracking falls back to "unknown" rates and
-             *     only token usage is recorded.
-             *
-             *     Example: `pricing = { opus = 15.0, sonnet = 3.0 }`
-             *     Or split: `pricing = { "opus.input" = 15.0, "opus.output" = 75.0 }`
-             */
-            pricing?: {
-                [key: string]: number;
-            };
-            /**
-             * @description Extra JSON parameters to include in API requests.
-             *     Merged at the top level of the request body, allowing provider-specific
-             *     features (routing, transforms, etc.) without code changes.
-             *     Example: `provider_extra = { model_provider = { only = ["Anthropic"] } }`
-             */
-            provider_extra?: unknown;
-            /**
-             * @description Whether stored assistant reasoning should be replayed on outbound
-             *     assistant history messages. `Some(false)` strips `reasoning_content`
-             *     and `reasoning` before sending. `None` (default) honours the provider's
-             *     built-in default (true for most compat providers, false for Groq).
-             */
-            replay_assistant_reasoning?: boolean | null;
-            /** @description When true, the client pulls credentials from ZeroClaw's stored `openai-codex` auth profile instead of the `api_key` field above. Import an existing Codex CLI login with `zeroclaw auth login --model-provider openai-codex --import ~/.codex/auth.json`, or run `zeroclaw auth login --model-provider openai-codex`. Turn on only for the OpenAI Codex model_provider; leave off for standard API-key model_providers. */
-            requires_openai_auth?: boolean;
-            /** @description Azure resource name (the `<resource>` part of `<resource>.openai.azure.com`). */
-            resource?: string | null;
             /**
              * Format: double
              * @description Sampling temperature passed to the model. Lower values (0.0–0.3) give
@@ -2775,8 +2606,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -2933,8 +2764,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -2984,171 +2815,6 @@ export interface components {
              *     Example: `provider_extra = { model_provider = { only = ["Anthropic"] } }`
              */
             provider_extra?: unknown;
-            /**
-             * @description Whether stored assistant reasoning should be replayed on outbound
-             *     assistant history messages. `Some(false)` strips `reasoning_content`
-             *     and `reasoning` before sending. `None` (default) honours the provider's
-             *     built-in default (true for most compat providers, false for Groq).
-             */
-            replay_assistant_reasoning?: boolean | null;
-            /** @description When true, the client pulls credentials from ZeroClaw's stored `openai-codex` auth profile instead of the `api_key` field above. Import an existing Codex CLI login with `zeroclaw auth login --model-provider openai-codex --import ~/.codex/auth.json`, or run `zeroclaw auth login --model-provider openai-codex`. Turn on only for the OpenAI Codex model_provider; leave off for standard API-key model_providers. */
-            requires_openai_auth?: boolean;
-            /**
-             * Format: double
-             * @description Sampling temperature passed to the model. Lower values (0.0–0.3) give
-             *     deterministic, near-verbatim output, which fits code, routing, summarization.
-             *     Higher values (0.7–1.2) give more varied output, which fits open-ended chat.
-             */
-            temperature?: number | null;
-            /**
-             * @description Enable or disable chain-of-thought thinking for models that support it
-             *     (e.g. Qwen3, GLM-4). `true` turns thinking on, `false` turns it off.
-             *     `None` (default) lets the model decide. Forwarded as `enable_thinking`
-             *     in the request body; mirrors the Ollama provider's `think` field.
-             */
-            think?: boolean | null;
-            /**
-             * Format: uint64
-             * @description HTTP request timeout in seconds. Bump this for slow local model_providers (Ollama on CPU, big local models) or high-latency networks; leave unset otherwise.
-             */
-            timeout_secs?: number | null;
-            /**
-             * @description Path to a PEM-encoded CA certificate for TLS connections to this provider.
-             *     Must be an absolute path; shell expansion (e.g. `~`) is not performed.
-             *     Leave unset to use the system's default trust store.
-             */
-            tls_ca_cert_path?: string | null;
-            /** @description Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field. */
-            uri?: string | null;
-            /**
-             * @description Override the provider's vision (image input) capability.
-             *     `None` (default) uses the provider family's built-in default. Several
-             *     families (llama.cpp, the generic OpenAI-compatible endpoint, etc.)
-             *     assume vision-capable because they can serve multimodal models. Set
-             *     `vision = false` for a text-only model served by such a family (e.g. a
-             *     text LLM behind llama.cpp) so image messages are routed to a configured
-             *     `[multimodal] vision_model_provider` instead of being sent to a model
-             *     that rejects them. `Some(true)` forces vision on.
-             */
-            vision?: boolean | null;
-            /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
-            wire_api?: components["schemas"]["WireApi"] | null;
-        };
-        /**
-         * @description AWS Bedrock model model_provider config. Carries the AWS region (the URI
-         *     template substitutes `{region}` from this field). Bedrock auth is
-         *     SigV4 — credentials come from the standard AWS credential chain
-         *     (env vars, instance metadata, profile), not from `api_key`.
-         */
-        BedrockModelProviderConfig: {
-            /** @description Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly. */
-            api_key?: string | null;
-            /**
-             * @description Arbitrary key/value pairs forwarded verbatim as a top-level
-             *     `chat_template_kwargs` object in the request body of OpenAI-compatible
-             *     providers. Consumed by chat-template-aware backends such as vLLM,
-             *     SGLang, and llama.cpp to pass model-family template variables that
-             *     control behaviour not exposed by other fields. Must be a JSON object
-             *     (TOML inline table); non-object values are ignored with a warning.
-             *     Example (Qwen3 thinking suppression):
-             *       `chat_template_kwargs = { enable_thinking = false }`
-             */
-            chat_template_kwargs?: unknown;
-            /**
-             * Format: uint
-             * @description Context window size (max input tokens) for this model.
-             *     Auto-populated on setup from provider's /models endpoint if available.
-             *     Override manually for custom endpoints or when auto-detection fails.
-             */
-            context_window?: number | null;
-            /** @description Extra HTTP headers sent with every request. Niche: used for auth bridges, corporate proxies, or custom gateways that demand a tracing header. Most users never touch this; edit `config.toml` directly if you need it. */
-            extra_headers?: {
-                [key: string]: string;
-            };
-            /**
-             * @description Ordered list of other provider aliases to try when every model on this
-             *     alias has failed. Each entry is a dotted `<type>.<alias>` reference into
-             *     `providers.models` and resolves with its own credentials, endpoint, and
-             *     model. A fallback never inherits this alias's key. The walk is
-             *     depth-first: this alias's models are exhausted first, then each fallback
-             *     alias is descended in turn (applying its own `fallback_models` and
-             *     `fallback`). Empty means no provider-level fallback.
-             */
-            fallback?: components["schemas"]["ModelProviderRef"][];
-            /**
-             * @description Ordered alternate models to try on THIS provider before falling over to
-             *     the `fallback` aliases. Same endpoint, key, and headers as the primary
-             *     `model`. Only the model identifier changes. Use this when a provider
-             *     serves a backup model (e.g. a smaller or older variant) that should be
-             *     tried before leaving the provider entirely. Empty means only `model` is
-             *     tried.
-             */
-            fallback_models?: string[];
-            /**
-             * @description Provider implementation to instantiate for this profile. Use this
-             *     when a canonical typed slot should run through a compatible
-             *     implementation, e.g. `[providers.models.openai.proxy] kind =
-             *     "openai-compatible"`.
-             */
-            kind?: string | null;
-            /**
-             * @description Pull live token prices for this provider's models from its own
-             *     OpenAI-compatible `/models` listing (the gateway is the source of truth
-             *     for its prices), filling cost-tracking rates for models the operator
-             *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
-             *     catalog. Configured rates always win; live prices only fill gaps. A
-             *     background task refreshes the price snapshot hourly; the cost-recording
-             *     path reads the cached snapshot and never blocks on the network. Default
-             *     `false`: off means no fetching and behavior identical to a build
-             *     without the feature.
-             */
-            live_pricing?: boolean;
-            /**
-             * Format: uint32
-             * @description Hard cap on response length in tokens. Most models enforce sensible built-in limits already; leave unset unless you specifically need to clip long outputs for cost or latency reasons.
-             */
-            max_tokens?: number | null;
-            /** @description ModelProvider-specific quirk: fold the system prompt into the first user message instead of sending a separate system role. Only needed for models that reject (or mishandle) a standalone system role, e.g. certain older Mistral variants. */
-            merge_system_into_user?: boolean;
-            /** @description Model identifier to send with each request: the ID string from the model_provider's catalog (e.g. `gpt-4o`, `claude-sonnet-4-5`, `llama-3.3-70b`). Must match a model the model_provider actually serves on this account. */
-            model?: string | null;
-            /**
-             * @description Override the provider's default for native tool calling.
-             *     `None` (default) honors the provider's built-in choice. `Some(true)`
-             *     forces native tool calls on, `Some(false)` forces text-fallback.
-             *     Currently consulted only by the Groq factory, which defaults to
-             *     text-fallback because llama-family Groq models reject native tool
-             *     calls with HTTP 400. Setting `native_tools = true` re-enables native
-             *     tool calling for Groq models that support it.
-             */
-            native_tools?: boolean | null;
-            /**
-             * @description Per-model pricing for cost tracking, USD per 1M tokens.
-             *
-             *     Free-form key/value map. Keys are user-defined model identifiers; an
-             *     optional `.input` / `.output` suffix encodes pricing dimension when
-             *     the operator wants to split rates. A bare key without a suffix is
-             *     used as a flat per-token rate when neither dimension is specified.
-             *     Default is empty: cost tracking falls back to "unknown" rates and
-             *     only token usage is recorded.
-             *
-             *     Example: `pricing = { opus = 15.0, sonnet = 3.0 }`
-             *     Or split: `pricing = { "opus.input" = 15.0, "opus.output" = 75.0 }`
-             */
-            pricing?: {
-                [key: string]: number;
-            };
-            /**
-             * @description Extra JSON parameters to include in API requests.
-             *     Merged at the top level of the request body, allowing provider-specific
-             *     features (routing, transforms, etc.) without code changes.
-             *     Example: `provider_extra = { model_provider = { only = ["Anthropic"] } }`
-             */
-            provider_extra?: unknown;
-            /** @description AWS region for the Bedrock endpoint (e.g. `us-east-1`, `eu-west-1`). */
-            region?: string | null;
             /**
              * @description Whether stored assistant reasoning should be replayed on outbound
              *     assistant history messages. `Some(false)` strips `reasoning_content`
@@ -3445,8 +3111,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -3980,8 +3646,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -4191,8 +3857,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -4720,16 +4386,6 @@ export interface components {
              *     }
              */
             gateway: components["schemas"]["GatewayConfig"];
-            /**
-             * @description Gemini CLI tool configuration (`[gemini_cli]`).
-             * @default {
-             *       "enabled": false,
-             *       "env_passthrough": [],
-             *       "max_output_bytes": 2097152,
-             *       "timeout_secs": 600
-             *     }
-             */
-            gemini_cli: components["schemas"]["GeminiCliConfig"];
             /**
              * @description Google Workspace CLI (`gws`) tool configuration (`[google_workspace]`).
              * @default {
@@ -5808,8 +5464,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -6178,8 +5834,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -6427,8 +6083,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -6585,8 +6241,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -6743,8 +6399,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -7192,8 +6848,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -7727,8 +7383,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -8080,8 +7736,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -8243,8 +7899,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -8529,197 +8185,6 @@ export interface components {
             /** @description Path to the PEM-encoded server private key file. */
             key_path: string;
         };
-        /**
-         * @description Gemini CLI tool configuration (`[gemini_cli]` section).
-         *
-         *     Delegates coding tasks to the `gemini -p` CLI. Authentication uses the
-         *     binary's own session by default — no API key needed unless
-         *     `env_passthrough` includes `GOOGLE_API_KEY`.
-         */
-        GeminiCliConfig: {
-            /**
-             * @description Enable the `gemini_cli` tool
-             * @default false
-             */
-            enabled: boolean;
-            /**
-             * @description Extra env vars passed to the gemini subprocess (e.g. GOOGLE_API_KEY)
-             * @default []
-             */
-            env_passthrough: string[];
-            /**
-             * Format: uint
-             * @description Maximum output size in bytes (2MB default)
-             * @default 2097152
-             */
-            max_output_bytes: number;
-            /**
-             * Format: uint64
-             * @description Maximum execution time in seconds (coding tasks can be long)
-             * @default 600
-             */
-            timeout_secs: number;
-        };
-        /** @description Named model_provider profile definition. */
-        GeminiCliModelProviderConfig: {
-            /** @description Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly. */
-            api_key?: string | null;
-            /** @description Path to the `gemini` CLI binary. Falls back to `gemini` (PATH lookup). */
-            binary_path?: string | null;
-            /**
-             * @description Arbitrary key/value pairs forwarded verbatim as a top-level
-             *     `chat_template_kwargs` object in the request body of OpenAI-compatible
-             *     providers. Consumed by chat-template-aware backends such as vLLM,
-             *     SGLang, and llama.cpp to pass model-family template variables that
-             *     control behaviour not exposed by other fields. Must be a JSON object
-             *     (TOML inline table); non-object values are ignored with a warning.
-             *     Example (Qwen3 thinking suppression):
-             *       `chat_template_kwargs = { enable_thinking = false }`
-             */
-            chat_template_kwargs?: unknown;
-            /**
-             * Format: uint
-             * @description Context window size (max input tokens) for this model.
-             *     Auto-populated on setup from provider's /models endpoint if available.
-             *     Override manually for custom endpoints or when auto-detection fails.
-             */
-            context_window?: number | null;
-            /** @description Extra HTTP headers sent with every request. Niche: used for auth bridges, corporate proxies, or custom gateways that demand a tracing header. Most users never touch this; edit `config.toml` directly if you need it. */
-            extra_headers?: {
-                [key: string]: string;
-            };
-            /**
-             * @description Ordered list of other provider aliases to try when every model on this
-             *     alias has failed. Each entry is a dotted `<type>.<alias>` reference into
-             *     `providers.models` and resolves with its own credentials, endpoint, and
-             *     model. A fallback never inherits this alias's key. The walk is
-             *     depth-first: this alias's models are exhausted first, then each fallback
-             *     alias is descended in turn (applying its own `fallback_models` and
-             *     `fallback`). Empty means no provider-level fallback.
-             */
-            fallback?: components["schemas"]["ModelProviderRef"][];
-            /**
-             * @description Ordered alternate models to try on THIS provider before falling over to
-             *     the `fallback` aliases. Same endpoint, key, and headers as the primary
-             *     `model`. Only the model identifier changes. Use this when a provider
-             *     serves a backup model (e.g. a smaller or older variant) that should be
-             *     tried before leaving the provider entirely. Empty means only `model` is
-             *     tried.
-             */
-            fallback_models?: string[];
-            /**
-             * @description Provider implementation to instantiate for this profile. Use this
-             *     when a canonical typed slot should run through a compatible
-             *     implementation, e.g. `[providers.models.openai.proxy] kind =
-             *     "openai-compatible"`.
-             */
-            kind?: string | null;
-            /**
-             * @description Pull live token prices for this provider's models from its own
-             *     OpenAI-compatible `/models` listing (the gateway is the source of truth
-             *     for its prices), filling cost-tracking rates for models the operator
-             *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
-             *     catalog. Configured rates always win; live prices only fill gaps. A
-             *     background task refreshes the price snapshot hourly; the cost-recording
-             *     path reads the cached snapshot and never blocks on the network. Default
-             *     `false`: off means no fetching and behavior identical to a build
-             *     without the feature.
-             */
-            live_pricing?: boolean;
-            /**
-             * Format: uint32
-             * @description Hard cap on response length in tokens. Most models enforce sensible built-in limits already; leave unset unless you specifically need to clip long outputs for cost or latency reasons.
-             */
-            max_tokens?: number | null;
-            /** @description ModelProvider-specific quirk: fold the system prompt into the first user message instead of sending a separate system role. Only needed for models that reject (or mishandle) a standalone system role, e.g. certain older Mistral variants. */
-            merge_system_into_user?: boolean;
-            /** @description Model identifier to send with each request: the ID string from the model_provider's catalog (e.g. `gpt-4o`, `claude-sonnet-4-5`, `llama-3.3-70b`). Must match a model the model_provider actually serves on this account. */
-            model?: string | null;
-            /**
-             * @description Override the provider's default for native tool calling.
-             *     `None` (default) honors the provider's built-in choice. `Some(true)`
-             *     forces native tool calls on, `Some(false)` forces text-fallback.
-             *     Currently consulted only by the Groq factory, which defaults to
-             *     text-fallback because llama-family Groq models reject native tool
-             *     calls with HTTP 400. Setting `native_tools = true` re-enables native
-             *     tool calling for Groq models that support it.
-             */
-            native_tools?: boolean | null;
-            /**
-             * @description Per-model pricing for cost tracking, USD per 1M tokens.
-             *
-             *     Free-form key/value map. Keys are user-defined model identifiers; an
-             *     optional `.input` / `.output` suffix encodes pricing dimension when
-             *     the operator wants to split rates. A bare key without a suffix is
-             *     used as a flat per-token rate when neither dimension is specified.
-             *     Default is empty: cost tracking falls back to "unknown" rates and
-             *     only token usage is recorded.
-             *
-             *     Example: `pricing = { opus = 15.0, sonnet = 3.0 }`
-             *     Or split: `pricing = { "opus.input" = 15.0, "opus.output" = 75.0 }`
-             */
-            pricing?: {
-                [key: string]: number;
-            };
-            /**
-             * @description Extra JSON parameters to include in API requests.
-             *     Merged at the top level of the request body, allowing provider-specific
-             *     features (routing, transforms, etc.) without code changes.
-             *     Example: `provider_extra = { model_provider = { only = ["Anthropic"] } }`
-             */
-            provider_extra?: unknown;
-            /**
-             * @description Whether stored assistant reasoning should be replayed on outbound
-             *     assistant history messages. `Some(false)` strips `reasoning_content`
-             *     and `reasoning` before sending. `None` (default) honours the provider's
-             *     built-in default (true for most compat providers, false for Groq).
-             */
-            replay_assistant_reasoning?: boolean | null;
-            /** @description When true, the client pulls credentials from ZeroClaw's stored `openai-codex` auth profile instead of the `api_key` field above. Import an existing Codex CLI login with `zeroclaw auth login --model-provider openai-codex --import ~/.codex/auth.json`, or run `zeroclaw auth login --model-provider openai-codex`. Turn on only for the OpenAI Codex model_provider; leave off for standard API-key model_providers. */
-            requires_openai_auth?: boolean;
-            /**
-             * Format: double
-             * @description Sampling temperature passed to the model. Lower values (0.0–0.3) give
-             *     deterministic, near-verbatim output, which fits code, routing, summarization.
-             *     Higher values (0.7–1.2) give more varied output, which fits open-ended chat.
-             */
-            temperature?: number | null;
-            /**
-             * @description Enable or disable chain-of-thought thinking for models that support it
-             *     (e.g. Qwen3, GLM-4). `true` turns thinking on, `false` turns it off.
-             *     `None` (default) lets the model decide. Forwarded as `enable_thinking`
-             *     in the request body; mirrors the Ollama provider's `think` field.
-             */
-            think?: boolean | null;
-            /**
-             * Format: uint64
-             * @description HTTP request timeout in seconds. Bump this for slow local model_providers (Ollama on CPU, big local models) or high-latency networks; leave unset otherwise.
-             */
-            timeout_secs?: number | null;
-            /**
-             * @description Path to a PEM-encoded CA certificate for TLS connections to this provider.
-             *     Must be an absolute path; shell expansion (e.g. `~`) is not performed.
-             *     Leave unset to use the system's default trust store.
-             */
-            tls_ca_cert_path?: string | null;
-            /** @description Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field. */
-            uri?: string | null;
-            /**
-             * @description Override the provider's vision (image input) capability.
-             *     `None` (default) uses the provider family's built-in default. Several
-             *     families (llama.cpp, the generic OpenAI-compatible endpoint, etc.)
-             *     assume vision-capable because they can serve multimodal models. Set
-             *     `vision = false` for a text-only model served by such a family (e.g. a
-             *     text LLM behind llama.cpp) so image messages are routed to a configured
-             *     `[multimodal] vision_model_provider` instead of being sent to a model
-             *     that rejects them. `Some(true)` forces vision on.
-             */
-            vision?: boolean | null;
-            /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
-            wire_api?: components["schemas"]["WireApi"] | null;
-        };
         /** @description Named model_provider profile definition. */
         GeminiModelProviderConfig: {
             /** @description Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly. */
@@ -8782,8 +8247,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -8957,8 +8422,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -9119,8 +8584,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -9654,8 +9119,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -10082,8 +9547,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -10240,8 +9705,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -10398,8 +9863,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -10664,8 +10129,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -10841,166 +10306,6 @@ export interface components {
              */
             timeout_secs: number;
         };
-        /** @description Named model_provider profile definition. */
-        KiloCliModelProviderConfig: {
-            /** @description Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly. */
-            api_key?: string | null;
-            /** @description Path to the `kilo` CLI binary. Falls back to `kilo` (PATH lookup). */
-            binary_path?: string | null;
-            /**
-             * @description Arbitrary key/value pairs forwarded verbatim as a top-level
-             *     `chat_template_kwargs` object in the request body of OpenAI-compatible
-             *     providers. Consumed by chat-template-aware backends such as vLLM,
-             *     SGLang, and llama.cpp to pass model-family template variables that
-             *     control behaviour not exposed by other fields. Must be a JSON object
-             *     (TOML inline table); non-object values are ignored with a warning.
-             *     Example (Qwen3 thinking suppression):
-             *       `chat_template_kwargs = { enable_thinking = false }`
-             */
-            chat_template_kwargs?: unknown;
-            /**
-             * Format: uint
-             * @description Context window size (max input tokens) for this model.
-             *     Auto-populated on setup from provider's /models endpoint if available.
-             *     Override manually for custom endpoints or when auto-detection fails.
-             */
-            context_window?: number | null;
-            /** @description Extra HTTP headers sent with every request. Niche: used for auth bridges, corporate proxies, or custom gateways that demand a tracing header. Most users never touch this; edit `config.toml` directly if you need it. */
-            extra_headers?: {
-                [key: string]: string;
-            };
-            /**
-             * @description Ordered list of other provider aliases to try when every model on this
-             *     alias has failed. Each entry is a dotted `<type>.<alias>` reference into
-             *     `providers.models` and resolves with its own credentials, endpoint, and
-             *     model. A fallback never inherits this alias's key. The walk is
-             *     depth-first: this alias's models are exhausted first, then each fallback
-             *     alias is descended in turn (applying its own `fallback_models` and
-             *     `fallback`). Empty means no provider-level fallback.
-             */
-            fallback?: components["schemas"]["ModelProviderRef"][];
-            /**
-             * @description Ordered alternate models to try on THIS provider before falling over to
-             *     the `fallback` aliases. Same endpoint, key, and headers as the primary
-             *     `model`. Only the model identifier changes. Use this when a provider
-             *     serves a backup model (e.g. a smaller or older variant) that should be
-             *     tried before leaving the provider entirely. Empty means only `model` is
-             *     tried.
-             */
-            fallback_models?: string[];
-            /**
-             * @description Provider implementation to instantiate for this profile. Use this
-             *     when a canonical typed slot should run through a compatible
-             *     implementation, e.g. `[providers.models.openai.proxy] kind =
-             *     "openai-compatible"`.
-             */
-            kind?: string | null;
-            /**
-             * @description Pull live token prices for this provider's models from its own
-             *     OpenAI-compatible `/models` listing (the gateway is the source of truth
-             *     for its prices), filling cost-tracking rates for models the operator
-             *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
-             *     catalog. Configured rates always win; live prices only fill gaps. A
-             *     background task refreshes the price snapshot hourly; the cost-recording
-             *     path reads the cached snapshot and never blocks on the network. Default
-             *     `false`: off means no fetching and behavior identical to a build
-             *     without the feature.
-             */
-            live_pricing?: boolean;
-            /**
-             * Format: uint32
-             * @description Hard cap on response length in tokens. Most models enforce sensible built-in limits already; leave unset unless you specifically need to clip long outputs for cost or latency reasons.
-             */
-            max_tokens?: number | null;
-            /** @description ModelProvider-specific quirk: fold the system prompt into the first user message instead of sending a separate system role. Only needed for models that reject (or mishandle) a standalone system role, e.g. certain older Mistral variants. */
-            merge_system_into_user?: boolean;
-            /** @description Model identifier to send with each request: the ID string from the model_provider's catalog (e.g. `gpt-4o`, `claude-sonnet-4-5`, `llama-3.3-70b`). Must match a model the model_provider actually serves on this account. */
-            model?: string | null;
-            /**
-             * @description Override the provider's default for native tool calling.
-             *     `None` (default) honors the provider's built-in choice. `Some(true)`
-             *     forces native tool calls on, `Some(false)` forces text-fallback.
-             *     Currently consulted only by the Groq factory, which defaults to
-             *     text-fallback because llama-family Groq models reject native tool
-             *     calls with HTTP 400. Setting `native_tools = true` re-enables native
-             *     tool calling for Groq models that support it.
-             */
-            native_tools?: boolean | null;
-            /**
-             * @description Per-model pricing for cost tracking, USD per 1M tokens.
-             *
-             *     Free-form key/value map. Keys are user-defined model identifiers; an
-             *     optional `.input` / `.output` suffix encodes pricing dimension when
-             *     the operator wants to split rates. A bare key without a suffix is
-             *     used as a flat per-token rate when neither dimension is specified.
-             *     Default is empty: cost tracking falls back to "unknown" rates and
-             *     only token usage is recorded.
-             *
-             *     Example: `pricing = { opus = 15.0, sonnet = 3.0 }`
-             *     Or split: `pricing = { "opus.input" = 15.0, "opus.output" = 75.0 }`
-             */
-            pricing?: {
-                [key: string]: number;
-            };
-            /**
-             * @description Extra JSON parameters to include in API requests.
-             *     Merged at the top level of the request body, allowing provider-specific
-             *     features (routing, transforms, etc.) without code changes.
-             *     Example: `provider_extra = { model_provider = { only = ["Anthropic"] } }`
-             */
-            provider_extra?: unknown;
-            /**
-             * @description Whether stored assistant reasoning should be replayed on outbound
-             *     assistant history messages. `Some(false)` strips `reasoning_content`
-             *     and `reasoning` before sending. `None` (default) honours the provider's
-             *     built-in default (true for most compat providers, false for Groq).
-             */
-            replay_assistant_reasoning?: boolean | null;
-            /** @description When true, the client pulls credentials from ZeroClaw's stored `openai-codex` auth profile instead of the `api_key` field above. Import an existing Codex CLI login with `zeroclaw auth login --model-provider openai-codex --import ~/.codex/auth.json`, or run `zeroclaw auth login --model-provider openai-codex`. Turn on only for the OpenAI Codex model_provider; leave off for standard API-key model_providers. */
-            requires_openai_auth?: boolean;
-            /**
-             * Format: double
-             * @description Sampling temperature passed to the model. Lower values (0.0–0.3) give
-             *     deterministic, near-verbatim output, which fits code, routing, summarization.
-             *     Higher values (0.7–1.2) give more varied output, which fits open-ended chat.
-             */
-            temperature?: number | null;
-            /**
-             * @description Enable or disable chain-of-thought thinking for models that support it
-             *     (e.g. Qwen3, GLM-4). `true` turns thinking on, `false` turns it off.
-             *     `None` (default) lets the model decide. Forwarded as `enable_thinking`
-             *     in the request body; mirrors the Ollama provider's `think` field.
-             */
-            think?: boolean | null;
-            /**
-             * Format: uint64
-             * @description HTTP request timeout in seconds. Bump this for slow local model_providers (Ollama on CPU, big local models) or high-latency networks; leave unset otherwise.
-             */
-            timeout_secs?: number | null;
-            /**
-             * @description Path to a PEM-encoded CA certificate for TLS connections to this provider.
-             *     Must be an absolute path; shell expansion (e.g. `~`) is not performed.
-             *     Leave unset to use the system's default trust store.
-             */
-            tls_ca_cert_path?: string | null;
-            /** @description Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field. */
-            uri?: string | null;
-            /**
-             * @description Override the provider's vision (image input) capability.
-             *     `None` (default) uses the provider family's built-in default. Several
-             *     families (llama.cpp, the generic OpenAI-compatible endpoint, etc.)
-             *     assume vision-capable because they can serve multimodal models. Set
-             *     `vision = false` for a text-only model served by such a family (e.g. a
-             *     text LLM behind llama.cpp) so image messages are routed to a configured
-             *     `[multimodal] vision_model_provider` instead of being sent to a model
-             *     that rejects them. `Some(true)` forces vision on.
-             */
-            vision?: boolean | null;
-            /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
-            wire_api?: components["schemas"]["WireApi"] | null;
-        };
         /**
          * @description Kilo AI Gateway endpoint. Single canonical endpoint at kilo.ai.
          * @enum {string}
@@ -11065,8 +10370,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -11270,8 +10575,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -11482,8 +10787,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -11921,8 +11226,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -12079,8 +11384,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -12237,8 +11542,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -12505,8 +11810,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -13354,8 +12659,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -13526,8 +12831,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -13681,16 +12986,10 @@ export interface components {
             avian?: {
                 [key: string]: components["schemas"]["ModelCostRates"];
             };
-            azure?: {
-                [key: string]: components["schemas"]["ModelCostRates"];
-            };
             baichuan?: {
                 [key: string]: components["schemas"]["ModelCostRates"];
             };
             baseten?: {
-                [key: string]: components["schemas"]["ModelCostRates"];
-            };
-            bedrock?: {
                 [key: string]: components["schemas"]["ModelCostRates"];
             };
             cerebras?: {
@@ -13732,9 +13031,6 @@ export interface components {
             gemini?: {
                 [key: string]: components["schemas"]["ModelCostRates"];
             };
-            gemini_cli?: {
-                [key: string]: components["schemas"]["ModelCostRates"];
-            };
             github_models?: {
                 [key: string]: components["schemas"]["ModelCostRates"];
             };
@@ -13757,9 +13053,6 @@ export interface components {
                 [key: string]: components["schemas"]["ModelCostRates"];
             };
             kilo?: {
-                [key: string]: components["schemas"]["ModelCostRates"];
-            };
-            kilocli?: {
                 [key: string]: components["schemas"]["ModelCostRates"];
             };
             lambda_ai?: {
@@ -13852,9 +13145,6 @@ export interface components {
             synthetic?: {
                 [key: string]: components["schemas"]["ModelCostRates"];
             };
-            telnyx?: {
-                [key: string]: components["schemas"]["ModelCostRates"];
-            };
             together?: {
                 [key: string]: components["schemas"]["ModelCostRates"];
             };
@@ -13912,17 +13202,11 @@ export interface components {
             avian?: {
                 [key: string]: components["schemas"]["AvianModelProviderConfig"];
             };
-            azure?: {
-                [key: string]: components["schemas"]["AzureModelProviderConfig"];
-            };
             baichuan?: {
                 [key: string]: components["schemas"]["BaichuanModelProviderConfig"];
             };
             baseten?: {
                 [key: string]: components["schemas"]["BasetenModelProviderConfig"];
-            };
-            bedrock?: {
-                [key: string]: components["schemas"]["BedrockModelProviderConfig"];
             };
             cerebras?: {
                 [key: string]: components["schemas"]["CerebrasModelProviderConfig"];
@@ -13963,9 +13247,6 @@ export interface components {
             gemini?: {
                 [key: string]: components["schemas"]["GeminiModelProviderConfig"];
             };
-            gemini_cli?: {
-                [key: string]: components["schemas"]["GeminiCliModelProviderConfig"];
-            };
             github_models?: {
                 [key: string]: components["schemas"]["GithubModelsModelProviderConfig"];
             };
@@ -13989,9 +13270,6 @@ export interface components {
             };
             kilo?: {
                 [key: string]: components["schemas"]["KiloModelProviderConfig"];
-            };
-            kilocli?: {
-                [key: string]: components["schemas"]["KiloCliModelProviderConfig"];
             };
             lambda_ai?: {
                 [key: string]: components["schemas"]["LambdaAiModelProviderConfig"];
@@ -14082,9 +13360,6 @@ export interface components {
             };
             synthetic?: {
                 [key: string]: components["schemas"]["SyntheticModelProviderConfig"];
-            };
-            telnyx?: {
-                [key: string]: components["schemas"]["TelnyxModelProviderConfig"];
             };
             together?: {
                 [key: string]: components["schemas"]["TogetherModelProviderConfig"];
@@ -14231,8 +13506,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -14389,8 +13664,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -14617,8 +13892,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -14775,8 +14050,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -15179,8 +14454,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -15337,8 +14612,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -15495,8 +14770,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -15817,8 +15092,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -16033,8 +15308,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -16336,8 +15611,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -16529,8 +15804,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -16687,8 +15962,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -16937,8 +16212,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -17303,8 +16578,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -17951,8 +17226,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -18137,8 +17412,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -18315,8 +17590,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -19004,8 +18279,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -19350,8 +18625,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -19523,8 +18798,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -20163,8 +19438,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -20405,8 +19680,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -20620,164 +19895,6 @@ export interface components {
              */
             stream_mode: components["schemas"]["StreamMode"];
         };
-        /** @description Named model_provider profile definition. */
-        TelnyxModelProviderConfig: {
-            /** @description Secret API token for this model_provider. Grab it from the model_provider's dashboard (OpenAI platform, Anthropic console, OpenRouter keys page, etc.). Stored via the OS keyring when possible; never commit it to config.toml directly. */
-            api_key?: string | null;
-            /**
-             * @description Arbitrary key/value pairs forwarded verbatim as a top-level
-             *     `chat_template_kwargs` object in the request body of OpenAI-compatible
-             *     providers. Consumed by chat-template-aware backends such as vLLM,
-             *     SGLang, and llama.cpp to pass model-family template variables that
-             *     control behaviour not exposed by other fields. Must be a JSON object
-             *     (TOML inline table); non-object values are ignored with a warning.
-             *     Example (Qwen3 thinking suppression):
-             *       `chat_template_kwargs = { enable_thinking = false }`
-             */
-            chat_template_kwargs?: unknown;
-            /**
-             * Format: uint
-             * @description Context window size (max input tokens) for this model.
-             *     Auto-populated on setup from provider's /models endpoint if available.
-             *     Override manually for custom endpoints or when auto-detection fails.
-             */
-            context_window?: number | null;
-            /** @description Extra HTTP headers sent with every request. Niche: used for auth bridges, corporate proxies, or custom gateways that demand a tracing header. Most users never touch this; edit `config.toml` directly if you need it. */
-            extra_headers?: {
-                [key: string]: string;
-            };
-            /**
-             * @description Ordered list of other provider aliases to try when every model on this
-             *     alias has failed. Each entry is a dotted `<type>.<alias>` reference into
-             *     `providers.models` and resolves with its own credentials, endpoint, and
-             *     model. A fallback never inherits this alias's key. The walk is
-             *     depth-first: this alias's models are exhausted first, then each fallback
-             *     alias is descended in turn (applying its own `fallback_models` and
-             *     `fallback`). Empty means no provider-level fallback.
-             */
-            fallback?: components["schemas"]["ModelProviderRef"][];
-            /**
-             * @description Ordered alternate models to try on THIS provider before falling over to
-             *     the `fallback` aliases. Same endpoint, key, and headers as the primary
-             *     `model`. Only the model identifier changes. Use this when a provider
-             *     serves a backup model (e.g. a smaller or older variant) that should be
-             *     tried before leaving the provider entirely. Empty means only `model` is
-             *     tried.
-             */
-            fallback_models?: string[];
-            /**
-             * @description Provider implementation to instantiate for this profile. Use this
-             *     when a canonical typed slot should run through a compatible
-             *     implementation, e.g. `[providers.models.openai.proxy] kind =
-             *     "openai-compatible"`.
-             */
-            kind?: string | null;
-            /**
-             * @description Pull live token prices for this provider's models from its own
-             *     OpenAI-compatible `/models` listing (the gateway is the source of truth
-             *     for its prices), filling cost-tracking rates for models the operator
-             *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
-             *     catalog. Configured rates always win; live prices only fill gaps. A
-             *     background task refreshes the price snapshot hourly; the cost-recording
-             *     path reads the cached snapshot and never blocks on the network. Default
-             *     `false`: off means no fetching and behavior identical to a build
-             *     without the feature.
-             */
-            live_pricing?: boolean;
-            /**
-             * Format: uint32
-             * @description Hard cap on response length in tokens. Most models enforce sensible built-in limits already; leave unset unless you specifically need to clip long outputs for cost or latency reasons.
-             */
-            max_tokens?: number | null;
-            /** @description ModelProvider-specific quirk: fold the system prompt into the first user message instead of sending a separate system role. Only needed for models that reject (or mishandle) a standalone system role, e.g. certain older Mistral variants. */
-            merge_system_into_user?: boolean;
-            /** @description Model identifier to send with each request: the ID string from the model_provider's catalog (e.g. `gpt-4o`, `claude-sonnet-4-5`, `llama-3.3-70b`). Must match a model the model_provider actually serves on this account. */
-            model?: string | null;
-            /**
-             * @description Override the provider's default for native tool calling.
-             *     `None` (default) honors the provider's built-in choice. `Some(true)`
-             *     forces native tool calls on, `Some(false)` forces text-fallback.
-             *     Currently consulted only by the Groq factory, which defaults to
-             *     text-fallback because llama-family Groq models reject native tool
-             *     calls with HTTP 400. Setting `native_tools = true` re-enables native
-             *     tool calling for Groq models that support it.
-             */
-            native_tools?: boolean | null;
-            /**
-             * @description Per-model pricing for cost tracking, USD per 1M tokens.
-             *
-             *     Free-form key/value map. Keys are user-defined model identifiers; an
-             *     optional `.input` / `.output` suffix encodes pricing dimension when
-             *     the operator wants to split rates. A bare key without a suffix is
-             *     used as a flat per-token rate when neither dimension is specified.
-             *     Default is empty: cost tracking falls back to "unknown" rates and
-             *     only token usage is recorded.
-             *
-             *     Example: `pricing = { opus = 15.0, sonnet = 3.0 }`
-             *     Or split: `pricing = { "opus.input" = 15.0, "opus.output" = 75.0 }`
-             */
-            pricing?: {
-                [key: string]: number;
-            };
-            /**
-             * @description Extra JSON parameters to include in API requests.
-             *     Merged at the top level of the request body, allowing provider-specific
-             *     features (routing, transforms, etc.) without code changes.
-             *     Example: `provider_extra = { model_provider = { only = ["Anthropic"] } }`
-             */
-            provider_extra?: unknown;
-            /**
-             * @description Whether stored assistant reasoning should be replayed on outbound
-             *     assistant history messages. `Some(false)` strips `reasoning_content`
-             *     and `reasoning` before sending. `None` (default) honours the provider's
-             *     built-in default (true for most compat providers, false for Groq).
-             */
-            replay_assistant_reasoning?: boolean | null;
-            /** @description When true, the client pulls credentials from ZeroClaw's stored `openai-codex` auth profile instead of the `api_key` field above. Import an existing Codex CLI login with `zeroclaw auth login --model-provider openai-codex --import ~/.codex/auth.json`, or run `zeroclaw auth login --model-provider openai-codex`. Turn on only for the OpenAI Codex model_provider; leave off for standard API-key model_providers. */
-            requires_openai_auth?: boolean;
-            /**
-             * Format: double
-             * @description Sampling temperature passed to the model. Lower values (0.0–0.3) give
-             *     deterministic, near-verbatim output, which fits code, routing, summarization.
-             *     Higher values (0.7–1.2) give more varied output, which fits open-ended chat.
-             */
-            temperature?: number | null;
-            /**
-             * @description Enable or disable chain-of-thought thinking for models that support it
-             *     (e.g. Qwen3, GLM-4). `true` turns thinking on, `false` turns it off.
-             *     `None` (default) lets the model decide. Forwarded as `enable_thinking`
-             *     in the request body; mirrors the Ollama provider's `think` field.
-             */
-            think?: boolean | null;
-            /**
-             * Format: uint64
-             * @description HTTP request timeout in seconds. Bump this for slow local model_providers (Ollama on CPU, big local models) or high-latency networks; leave unset otherwise.
-             */
-            timeout_secs?: number | null;
-            /**
-             * @description Path to a PEM-encoded CA certificate for TLS connections to this provider.
-             *     Must be an absolute path; shell expansion (e.g. `~`) is not performed.
-             *     Leave unset to use the system's default trust store.
-             */
-            tls_ca_cert_path?: string | null;
-            /** @description Endpoint URI the client hits. Override the family's default endpoint when pointing at a self-hosted gateway (LiteLLM, vLLM, Ollama), a custom proxy, or any non-standard URL. Leave unset to use the family's default URI from its `ModelEndpoint` impl. Set this to the FULL endpoint URL; there is no separate path-suffix field. */
-            uri?: string | null;
-            /**
-             * @description Override the provider's vision (image input) capability.
-             *     `None` (default) uses the provider family's built-in default. Several
-             *     families (llama.cpp, the generic OpenAI-compatible endpoint, etc.)
-             *     assume vision-capable because they can serve multimodal models. Set
-             *     `vision = false` for a text-only model served by such a family (e.g. a
-             *     text LLM behind llama.cpp) so image messages are routed to a configured
-             *     `[multimodal] vision_model_provider` instead of being sent to a model
-             *     that rejects them. `Some(true)` forces vision on.
-             */
-            vision?: boolean | null;
-            /** @description Wire protocol flavor: `responses` for OpenAI's Responses API (`POST /v1/responses`), `chat_completions` for the legacy chat wire and most OpenAI-compatible gateways. New OpenAI provider slots default to `responses`; other families default to chat-completions (or ignore the field). Only override if you're forcing an unusual combination. */
-            wire_api?: components["schemas"]["WireApi"] | null;
-        };
         /**
          * @description Text browser tool configuration (`[text_browser]` section).
          *
@@ -20929,8 +20046,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -21575,8 +20692,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -21774,8 +20891,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -21932,8 +21049,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -22146,8 +21263,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -22677,8 +21794,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -22835,8 +21952,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default
@@ -22997,8 +22114,8 @@ export interface components {
              *     OpenAI-compatible `/models` listing (the gateway is the source of truth
              *     for its prices), filling cost-tracking rates for models the operator
              *     has NOT priced under `[cost.rates]` / `pricing`. Models the gateway does
-             *     not price (or providers with no HTTP `/models` listing at all, such as
-             *     a subprocess gateway like `kilocli`) fall back to the public models.dev
+             *     not price (or providers with no HTTP `/models` listing at all) fall back
+             *     to the public models.dev
              *     catalog. Configured rates always win; live prices only fill gaps. A
              *     background task refreshes the price snapshot hourly; the cost-recording
              *     path reads the cached snapshot and never blocks on the network. Default

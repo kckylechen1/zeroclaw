@@ -1227,7 +1227,7 @@ mod tests {
         let mut cfg = zeroclaw_config::schema::Config::default();
         let cases = [
             ("providers.models", "atomic_chat"),
-            ("providers.models", "gemini_cli"),
+            ("providers.models", "github_models"),
             ("providers.transcription", "local_whisper"),
         ];
 
@@ -1242,8 +1242,8 @@ mod tests {
             "created Atomic Chat alias should land in the atomic_chat provider map",
         );
         assert!(
-            cfg.providers.models.gemini_cli.contains_key("default"),
-            "created Gemini CLI alias should land in the gemini_cli provider map",
+            cfg.providers.models.github_models.contains_key("default"),
+            "created GitHub Models alias should land in the github_models provider map",
         );
         assert!(
             cfg.providers

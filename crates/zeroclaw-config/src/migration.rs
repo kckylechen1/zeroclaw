@@ -61,6 +61,7 @@ pub fn detect_version(value: &toml::Value) -> Result<u32> {
 
 pub fn migrate_file(input: &str) -> Result<Option<String>> {
     let value: toml::Value = toml::from_str(input).context("failed to parse config TOML")?;
+    crate::providers::reject_retired_model_provider_config(&value)?;
     let from = detect_version(&value)?;
     if from == CURRENT_SCHEMA_VERSION {
         return Ok(None);
@@ -343,6 +344,7 @@ pub fn migrate_to_current_salvaged(input: &str) -> ResilientLoad {
 /// the final typed deserialize. Shared by the strict and resilient entries.
 fn migrate_value(input: &str) -> Result<toml::Value> {
     let value: toml::Value = toml::from_str(input).context("failed to parse config TOML")?;
+    crate::providers::reject_retired_model_provider_config(&value)?;
     let from = detect_version(&value)?;
     if from == CURRENT_SCHEMA_VERSION {
         Ok(value)
@@ -801,6 +803,7 @@ pub fn ensure_disk_at_current_version(path: &Path) -> Result<()> {
     };
     let value: toml::Value =
         toml::from_str(&raw).context("failed to parse config TOML for version check")?;
+    crate::providers::reject_retired_model_provider_config(&value)?;
     let from = detect_version(&value)?;
     if from == CURRENT_SCHEMA_VERSION {
         return Ok(());
@@ -1539,6 +1542,130 @@ enabled = "not-a-bool"
             !backup.exists(),
             "no `.backup` should be created on the no-op path; got {}",
             backup.display()
+        );
+    }
+}
+
+#[cfg(test)]
+mod retired_model_provider_tests {
+    use super::*;
+    use crate::providers::{ModelProviders, RETIRED_MODEL_PROVIDER_NAMES};
+
+    #[test]
+    fn retired_families_reject_v1_v2_v3_without_echoing_credentials() {
+        for family in RETIRED_MODEL_PROVIDER_NAMES {
+            let configs = [
+                format!("default_provider = {family:?}\napi_key = \"private-test-key\"\n"),
+                format!(
+                    "schema_version = 2\n[providers.models.{family}]\napi_key = \"private-test-key\"\n"
+                ),
+                format!(
+                    "schema_version = 3\n[providers.models.{family}.private_alias]\napi_key = \"private-test-key\"\n"
+                ),
+                format!(
+                    "schema_version = 2\n[agents.owner]\nprovider = {family:?}\napi_key = \"private-test-key\"\n"
+                ),
+                format!(
+                    "schema_version = 3\n[agents.owner]\nclassifier_provider = \"{family}.private_alias\"\n"
+                ),
+                format!(
+                    "schema_version = 3\n[providers.models.openai.home]\nfallback = [\"{family}.private_alias\"]\n"
+                ),
+            ];
+            for raw in configs {
+                for result in [
+                    migrate_to_current(&raw).map(|_| ()),
+                    migrate_file(&raw).map(|_| ()),
+                ] {
+                    let error = result
+                        .expect_err("retired config must require explicit migration")
+                        .to_string();
+                    assert!(error.contains("is retired"), "{family}: {error}");
+                    assert!(!error.contains("private-test-key"));
+                    assert!(!error.contains("private_alias"));
+                }
+                // The repair-only resilient API cannot authorize serving a
+                // default provider after losing the operator's configuration.
+                let salvaged = migrate_to_current_salvaged(&raw);
+                assert_eq!(salvaged.dropped_security, vec![WHOLE_CONFIG_SENTINEL]);
+                assert!(
+                    salvaged
+                        .config
+                        .providers
+                        .models
+                        .iter_entries()
+                        .next()
+                        .is_none()
+                );
+            }
+            let raw = format!("[{family}.private_alias]\napi_key = \"private-test-key\"\n");
+            let error = toml::from_str::<ModelProviders>(&raw)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("is retired"), "{family}: {error}");
+            assert!(!error.contains("private-test-key"));
+            let json =
+                serde_json::json!({(*family): {"private_alias": {"api_key": "private-test-key"}}});
+            assert!(
+                serde_json::from_value::<ModelProviders>(json)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("is retired")
+            );
+            let json = serde_json::json!(format!("{family}.private_alias"));
+            assert!(
+                serde_json::from_value::<crate::providers::ModelProviderRef>(json)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("is retired")
+            );
+        }
+    }
+
+    #[test]
+    fn retained_provider_configuration_keeps_auth_and_shared_alias_fields() {
+        let raw = r#"
+schema_version = 3
+[providers.models.anthropic.bedrock]
+api_key = "private-anthropic-key"
+[providers.models.openai.azure]
+model = "gpt-4o"
+[providers.models.openrouter.telnyx]
+api_key = "private-openrouter-key"
+[providers.models.gemini.gemini_cli]
+auth_mode = "o_auth"
+oauth_project = "retained-project"
+oauth_client_id = "private-client-id"
+oauth_client_secret = "private-client-secret"
+[providers.models.xai.kilocli]
+model = "grok"
+[providers.models.kilo.kilo_cli]
+model = "anthropic/claude-sonnet-4-6"
+[providers.models.custom.compatible]
+uri = "https://api.example.invalid/v1"
+"#;
+        let config = migrate_to_current(raw).unwrap();
+        assert_eq!(config.providers.models.iter_entries().count(), 7);
+        assert_eq!(
+            config.providers.models.anthropic["bedrock"]
+                .base
+                .api_key
+                .as_deref(),
+            Some("private-anthropic-key")
+        );
+        let gemini = &config.providers.models.gemini["gemini_cli"];
+        assert_eq!(gemini.auth_mode, Some(crate::schema::AuthMode::OAuth));
+        assert_eq!(gemini.oauth_project.as_deref(), Some("retained-project"));
+        assert_eq!(
+            gemini.oauth_client_secret.as_deref(),
+            Some("private-client-secret")
+        );
+        let serialized = toml::to_string(&config).unwrap();
+        let reloaded = migrate_to_current(&serialized).unwrap();
+        assert_eq!(reloaded.providers.models.iter_entries().count(), 7);
+        assert_eq!(
+            reloaded.providers.models.gemini["gemini_cli"].oauth_client_secret,
+            gemini.oauth_client_secret
         );
     }
 }

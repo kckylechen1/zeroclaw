@@ -113,8 +113,7 @@ Behavior:
   models.dev fallback below. No second copy of the endpoint URL or credentials:
   they are read from the provider's existing config.
 - **models.dev fallback.** A model the gateway doesn't price (or a provider
-  with no HTTP `/models` listing at all, such as a subprocess gateway like
-  `kilocli`) falls back to the public [models.dev](https://models.dev)
+  with no HTTP `/models` listing at all) falls back to the public [models.dev](https://models.dev)
   catalog (`api.json`), keyed by the family's models.dev name (see
   `catalog_source_for` in `crates/zeroclaw-providers/src/catalog.rs`). The
   fallback catalog is fetched fresh on each refresh cycle, so both sources
